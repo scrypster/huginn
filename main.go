@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"errors"
 	"sync"
@@ -194,6 +195,36 @@ func main() {
 	case "skill":
 			if err := cmdSkill(flag.Args()[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "skill: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "upgrade":
+			if err := cmdUpgrade(flag.Args()[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "status":
+			if err := cmdStatus(); err != nil {
+				fmt.Fprintf(os.Stderr, "status: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "stop":
+			if err := cmdStop(); err != nil {
+				fmt.Fprintf(os.Stderr, "stop: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "open":
+			if err := cmdOpen(); err != nil {
+				fmt.Fprintf(os.Stderr, "open: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "restart":
+			if err := cmdRestart(); err != nil {
+				fmt.Fprintf(os.Stderr, "restart: %v\n", err)
 				os.Exit(1)
 			}
 			return
@@ -1196,6 +1227,112 @@ func cmdInit() error {
 	fmt.Printf("  2. Open your browser:  http://127.0.0.1:%d\n\n", port)
 	fmt.Printf("From the web UI you can add an API key (Anthropic, OpenAI, etc.),\n")
 	fmt.Printf("configure a local model via Ollama, and create your first agent.\n\n")
+	return nil
+}
+
+// cmdStatus reports whether the huginn server is running.
+func cmdStatus() error {
+	huginnHome, err := huginnDir()
+	if err != nil {
+		return err
+	}
+	cfg, _ := config.Load()
+	port := 8421
+	if cfg != nil && cfg.WebUI.Port != 0 {
+		port = cfg.WebUI.Port
+	}
+	webURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	pidPath := filepath.Join(huginnHome, "serve.pid")
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		fmt.Println("huginn: not running")
+		return nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		fmt.Println("huginn: not running (stale pid file)")
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+		fmt.Println("huginn: not running (stale pid file)")
+		return nil
+	}
+	fmt.Printf("huginn: running\n")
+	fmt.Printf("  PID:    %d\n", pid)
+	fmt.Printf("  Web UI: %s\n", webURL)
+	fmt.Printf("  Logs:   %s\n", filepath.Join(huginnHome, "logs", "huginn.log"))
+	return nil
+}
+
+// cmdStop sends SIGTERM to the running huginn server and waits for it to exit.
+func cmdStop() error {
+	huginnHome, err := huginnDir()
+	if err != nil {
+		return err
+	}
+	pidPath := filepath.Join(huginnHome, "serve.pid")
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		fmt.Println("huginn: not running")
+		return nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		fmt.Println("huginn: not running (stale pid file)")
+		_ = os.Remove(pidPath)
+		return nil
+	}
+	proc, findErr := os.FindProcess(pid)
+	if findErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+		fmt.Println("huginn: not running (stale pid file)")
+		_ = os.Remove(pidPath)
+		return nil
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("send SIGTERM to pid %d: %w", pid, err)
+	}
+	fmt.Printf("huginn: stopping (pid %d)...\n", pid)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if proc.Signal(syscall.Signal(0)) != nil {
+			fmt.Println("huginn: stopped")
+			return nil
+		}
+	}
+	return fmt.Errorf("huginn: server (pid %d) did not stop within 10s", pid)
+}
+
+// cmdOpen opens the huginn web UI in the default browser.
+func cmdOpen() error {
+	cfg, _ := config.Load()
+	port := 8421
+	if cfg != nil && cfg.WebUI.Port != 0 {
+		port = cfg.WebUI.Port
+	}
+	webURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	fmt.Printf("Opening %s\n", webURL)
+	return traypkg.OpenURL(webURL)
+}
+
+// cmdRestart stops the running server (if any) then starts a new one.
+func cmdRestart() error {
+	// Stop gracefully (ignore "not running" — we still want to start).
+	_ = cmdStop()
+
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find executable: %w", err)
+	}
+	cmd := exec.Command(self, "serve")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start server: %w", err)
+	}
+	fmt.Printf("huginn: restarting (pid %d)\n", cmd.Process.Pid)
 	return nil
 }
 

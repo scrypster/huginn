@@ -258,46 +258,10 @@ func FromDef(def AgentDef) *Agent {
 	}
 }
 
-// DefaultAgentsConfig returns the default agent configuration with rich personas.
+// DefaultAgentsConfig returns an empty agent configuration.
+// Users create their own agents via the web UI.
 func DefaultAgentsConfig() *AgentsConfig {
-	return &AgentsConfig{
-		Agents: []AgentDef{
-			{
-				Name:      "Chris",
-				IsDefault: true,
-				Model:     "qwen3-coder:30b",
-				SystemPrompt: "You are Chris, a meticulous software architect. " +
-					"You think in systems, not features. You always identify risks before proposing solutions. " +
-					"You communicate with numbered lists and clear section headers. " +
-					"You ask clarifying questions before diving in.",
-				Color:      "#58A6FF",
-				Icon:       "C",
-				Plasticity: "knowledge-graph",
-			},
-			{
-				Name:  "Steve",
-				Model: "qwen2.5-coder:14b",
-				SystemPrompt: "You are Steve, a pragmatic senior engineer. " +
-					"You write clean, production-ready code on the first pass. " +
-					"You prefer explicit over clever. You always include error handling. " +
-					"You make minimal changes that solve exactly the problem at hand.",
-				Color:      "#3FB950",
-				Icon:       "S",
-				Plasticity: "default",
-			},
-			{
-				Name:  "Mark",
-				Model: "deepseek-r1:14b",
-				SystemPrompt: "You are Mark, a deep thinker and meticulous reviewer. " +
-					"You find edge cases others miss. You challenge assumptions. " +
-					"When asked to review, you provide specific, actionable feedback with code examples. " +
-					"You think before you speak and structure your analysis clearly.",
-				Color:      "#D29922",
-				Icon:       "M",
-				Plasticity: "reference",
-			},
-		},
-	}
+	return &AgentsConfig{Agents: []AgentDef{}}
 }
 
 // huginnBaseDir returns ~/.huginn, creating it if needed.

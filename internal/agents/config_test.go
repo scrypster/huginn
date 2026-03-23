@@ -16,18 +16,12 @@ func TestLoadAgents_MissingFile_ReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(cfg.Agents) == 0 {
-		t.Error("expected default agents")
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
 	}
-	// Defaults must have the three named personas
-	names := map[string]bool{}
-	for _, a := range cfg.Agents {
-		names[a.Name] = true
-	}
-	for _, name := range []string{"Chris", "Steve", "Mark"} {
-		if !names[name] {
-			t.Errorf("default agents missing agent %q", name)
-		}
+	// Blank canvas: no agents seeded by default.
+	if len(cfg.Agents) != 0 {
+		t.Errorf("expected empty agents on first run, got %d", len(cfg.Agents))
 	}
 }
 
@@ -121,34 +115,10 @@ func TestSaveAgents_CreatesDirectory(t *testing.T) {
 	}
 }
 
-func TestDefaultAgents_HavePersonas(t *testing.T) {
+func TestDefaultAgents_IsEmpty(t *testing.T) {
 	cfg := agents.DefaultAgentsConfig()
-	for _, def := range cfg.Agents {
-		if def.SystemPrompt == "" {
-			t.Errorf("agent %q has empty system prompt", def.Name)
-		}
-		if def.Color == "" {
-			t.Errorf("agent %q has no color", def.Name)
-		}
-		if def.Icon == "" {
-			t.Errorf("agent %q has no icon", def.Name)
-		}
-	}
-}
-
-func TestDefaultAgents_PlasticityPresets(t *testing.T) {
-	want := map[string]string{
-		"Chris": "knowledge-graph",
-		"Steve": "default",
-		"Mark":  "reference",
-	}
-	cfg := agents.DefaultAgentsConfig()
-	for _, def := range cfg.Agents {
-		if expected, ok := want[def.Name]; ok {
-			if def.Plasticity != expected {
-				t.Errorf("agent %q: Plasticity = %q, want %q", def.Name, def.Plasticity, expected)
-			}
-		}
+	if len(cfg.Agents) != 0 {
+		t.Errorf("DefaultAgentsConfig should return empty slice, got %d agents", len(cfg.Agents))
 	}
 }
 
