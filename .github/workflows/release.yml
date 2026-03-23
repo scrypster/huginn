@@ -51,6 +51,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build web assets
         run: cd web && pnpm install && pnpm build
@@ -101,6 +103,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build web assets
         run: cd web && pnpm install && pnpm build

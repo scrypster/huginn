@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build web assets
         run: cd web && pnpm install && pnpm build
@@ -59,6 +60,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build web assets
         run: cd web && pnpm install && pnpm build
