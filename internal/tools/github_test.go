@@ -168,10 +168,11 @@ func TestGHPRListTool_Integration(t *testing.T) {
 	result := tool.Execute(context.Background(), map[string]any{"state": "open", "limit": float64(5)})
 	// Even if there are no PRs the result should be valid JSON array.
 	if result.IsError {
-		// gh may error if not authenticated or no remotes; tolerate these in CI.
+		// gh may error if not authenticated, no remotes, or GH_TOKEN not set (CI).
 		if strings.Contains(result.Error, "authentication") ||
 			strings.Contains(result.Error, "not logged") ||
-			strings.Contains(result.Error, "no git remotes") {
+			strings.Contains(result.Error, "no git remotes") ||
+			strings.Contains(result.Error, "GH_TOKEN") {
 			t.Skip("gh not usable in this repo context")
 		}
 		t.Errorf("unexpected error: %s", result.Error)
@@ -187,7 +188,8 @@ func TestGHIssueListTool_Integration(t *testing.T) {
 	if result.IsError {
 		if strings.Contains(result.Error, "authentication") ||
 			strings.Contains(result.Error, "not logged") ||
-			strings.Contains(result.Error, "no git remotes") {
+			strings.Contains(result.Error, "no git remotes") ||
+			strings.Contains(result.Error, "GH_TOKEN") {
 			t.Skip("gh not usable in this repo context")
 		}
 		t.Errorf("unexpected error: %s", result.Error)

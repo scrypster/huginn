@@ -695,8 +695,8 @@ func TestHandlePullModel_Iter3(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	// Should return 200 or 500 (pull may fail in test env)
-	if resp.StatusCode != 200 && resp.StatusCode != 500 {
+	// Should return 200, 500 (catalog load failure), or 502 (Ollama not running in CI)
+	if resp.StatusCode != 200 && resp.StatusCode != 500 && resp.StatusCode != 502 {
 		t.Fatalf("unexpected status %d", resp.StatusCode)
 	}
 }

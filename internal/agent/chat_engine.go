@@ -274,10 +274,23 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 // sess must be the session whose history was just updated (not necessarily the default session).
 func (o *Orchestrator) compactHistory(ctx context.Context, sess *Session) {
 	o.mu.RLock()
-	modelName := o.defaultModelName()
+	// Read fields directly — do NOT call defaultModelName() here; it also acquires
+	// o.mu.RLock and will deadlock if a writer is pending (recursive read-lock).
+	agReg := o.agentReg
+	dm := o.defaultModel
 	comp := o.compactor
 	fallbackCompactBackend := o.backend
 	o.mu.RUnlock()
+
+	// Mirror defaultModelName() logic without holding the lock.
+	modelName := dm
+	if agReg != nil {
+		if ag := agReg.DefaultAgent(); ag != nil {
+			if id := ag.GetModelID(); id != "" {
+				modelName = id
+			}
+		}
+	}
 
 	if comp == nil {
 		return
