@@ -28,10 +28,8 @@ func TestLoadAgentsFrom_EmptyFile(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("LoadAgentsFrom(empty file): expected non-nil config")
 	}
-	// Defaults should be returned.
-	if len(cfg.Agents) == 0 {
-		t.Error("LoadAgentsFrom(empty file): expected default agents, got none")
-	}
+	// Empty config is valid — blank canvas, no seeded agents.
+	_ = cfg
 }
 
 // TestBuildRegistry_EmptyAgentsSlice verifies that BuildRegistry with an empty

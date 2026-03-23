@@ -52,8 +52,9 @@ func TestLoadAgents_MissingFileReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAgents: %v", err)
 	}
-	if len(loaded.Agents) == 0 {
-		t.Error("expected default agents when file missing")
+	// Blank canvas: no agents seeded by default.
+	if loaded == nil {
+		t.Error("expected non-nil config when file missing")
 	}
 }
 

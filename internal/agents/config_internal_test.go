@@ -172,8 +172,8 @@ func TestLoadAgentsFromBase_AllFilesCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadAgentsFromBase: %v", err)
 	}
-	// Defaults should be returned.
-	if len(cfg.Agents) == 0 {
-		t.Error("expected default agents when all files corrupt")
+	// Corrupt files → empty config is fine (blank canvas).
+	if cfg == nil {
+		t.Error("expected non-nil config when all files corrupt")
 	}
 }

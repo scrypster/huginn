@@ -51,9 +51,9 @@ func TestLoadAgents_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAgentsFrom empty: %v", err)
 	}
-	// Defaults are returned when file is missing.
-	if len(cfg.Agents) == 0 {
-		t.Errorf("expected default agents when file missing")
+	// Blank canvas: empty config is valid when no file exists.
+	if cfg == nil {
+		t.Errorf("expected non-nil config when file missing")
 	}
 }
 
