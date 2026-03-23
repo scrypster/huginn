@@ -32,8 +32,14 @@ test.describe('WebSocket reconnect backoff', () => {
 
   test('status dot reflects connection state', async ({ page }) => {
     let wsHandle: { close: () => void } | null = null
+    let rejectReconnects = false
 
     await page.routeWebSocket('**/ws**', ws => {
+      if (rejectReconnects) {
+        // Close all subsequent reconnect attempts so the dot stays non-green
+        ws.close()
+        return
+      }
       wsHandle = ws
     })
 
@@ -43,7 +49,8 @@ test.describe('WebSocket reconnect backoff', () => {
     const dot = page.locator('[data-testid="ws-status-dot"]')
     await expect(dot).toHaveClass(/bg-huginn-green/, { timeout: 5000 })
 
-    // Close the connection
+    // Block reconnects, then close the connection
+    rejectReconnects = true
     wsHandle?.close()
 
     // Dot should lose green class (disconnected)

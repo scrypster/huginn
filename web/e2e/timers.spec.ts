@@ -39,7 +39,7 @@ test.describe('WS degradation banner — debounce timing', () => {
     await page.waitForSelector('nav', { timeout: 5000 })
 
     // Advance fake clock by exactly 4 seconds to trigger the debounce
-    await page.clock.tick(4000)
+    await page.clock.runFor(4000)
 
     const banner = page.locator('[data-testid="ws-degraded-banner"]')
     await expect(banner).toBeVisible({ timeout: 3000 })
@@ -54,7 +54,7 @@ test.describe('WS degradation banner — debounce timing', () => {
     await page.waitForSelector('nav', { timeout: 5000 })
 
     // Advance past the debounce window
-    await page.clock.tick(5000)
+    await page.clock.runFor(5000)
 
     const banner = page.locator('[data-testid="ws-degraded-banner"]')
     await expect(banner).not.toBeVisible()
@@ -67,7 +67,7 @@ test.describe('WS degradation banner — debounce timing', () => {
     await page.goto('/#/')
     await page.waitForSelector('nav', { timeout: 5000 })
 
-    await page.clock.tick(4000)
+    await page.clock.runFor(4000)
 
     const banner = page.locator('[data-testid="ws-degraded-banner"]')
     await expect(banner).toBeVisible({ timeout: 3000 })
@@ -84,7 +84,7 @@ test.describe('WS degradation banner — debounce timing', () => {
     await page.waitForSelector('nav', { timeout: 5000 })
 
     // Just under the debounce threshold
-    await page.clock.tick(3900)
+    await page.clock.runFor(3900)
 
     const banner = page.locator('[data-testid="ws-degraded-banner"]')
     await expect(banner).not.toBeVisible()

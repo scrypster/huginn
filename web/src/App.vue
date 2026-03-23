@@ -283,6 +283,12 @@
                     <span v-if="sp.leadAgent && isAgentActive(sp.leadAgent)"
                       class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-huginn-green border border-huginn-sidebar animate-pulse" />
                   </div>
+                  <!-- Unseen count badge for channels -->
+                  <span v-if="sp.unseenCount > 0"
+                    :data-testid="`channel-unseen-${sp.id}`"
+                    class="flex-shrink-0 min-w-[16px] h-4 px-1 rounded-full bg-huginn-blue text-white text-[9px] font-bold flex items-center justify-center leading-none">
+                    {{ sp.unseenCount > 9 ? '9+' : sp.unseenCount }}
+                  </span>
                   <div class="flex-1 min-w-0">
                     <!-- Inline rename input -->
                     <input v-if="renamingSpaceId === sp.id"
