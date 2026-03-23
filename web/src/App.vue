@@ -941,7 +941,7 @@ const appError   = ref('')
 const wsRef       = shallowRef<HuginnWS | null>(null)
 provide('ws', wsRef)
 
-const wsConnected = computed(() => wsRef.value?.connected ?? false)
+const wsConnected = computed(() => wsRef.value?.connected.value ?? false)
 const wsConnectionState = computed(() => wsRef.value?.connectionState.value ?? 'connecting')
 
 // Show a banner after 4 s of non-connected state to avoid flicker on brief blips.

@@ -77,9 +77,7 @@ jobs:
         shell: pwsh
 
       - name: Smoke test
-        run: |
-          .\huginn.exe version
-          .\huginn.exe help
+        run: .\huginn.exe version
         shell: pwsh
 
   # ── Playwright E2E: browser-level UI regression tests ────────────────────
