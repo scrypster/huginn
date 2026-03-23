@@ -40,6 +40,60 @@ describe('useApi — token management', () => {
   })
 })
 
+describe('useApi — apiFetch empty-token auto-init', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    setToken('')
+  })
+
+  it('auto-fetches token from /api/v1/token when token is empty', async () => {
+    setToken('')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      // First call: /api/v1/token (auto-init)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'auto-token' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      // Second call: actual API request succeeds
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok', version: '1.0' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    await api.health()
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/token')
+    expect(getToken()).toBe('auto-token')
+    const [, opts] = fetchSpy.mock.calls[1]
+    expect((opts?.headers as Record<string, string>)['Authorization']).toBe('Bearer auto-token')
+  })
+
+  it('proceeds with empty Bearer when auto-fetch fails (still recovers via 401 retry)', async () => {
+    setToken('')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      // Auto-init fetch throws
+      .mockRejectedValueOnce(new Error('network error'))
+      // Actual request 401s
+      .mockResolvedValueOnce(new Response('', { status: 401 }))
+      // 401 retry: fetchToken succeeds
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'recovered-token' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      // 401 retry: actual request succeeds
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok', version: '1.0' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await api.health()
+    expect(result).toMatchObject({ status: 'ok' })
+    expect(getToken()).toBe('recovered-token')
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+  })
+
+  it('does NOT re-fetch token when token is already set', async () => {
+    setToken('already-set')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok', version: '1.0' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    await api.health()
+
+    // Only 1 fetch — no /api/v1/token call
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/health')
+  })
+})
+
 describe('useApi — apiFetch (via api.*)', () => {
   beforeEach(() => {
     setToken('test-token')
