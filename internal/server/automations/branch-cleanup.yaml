@@ -1,0 +1,17 @@
+name: "Branch Cleanup"
+description: "Identify merged branches older than 7 days"
+enabled: false
+trigger:
+  mode: schedule
+  cron: "0 9 * * 5"
+agent: "Chris"
+prompt: |
+  List remote branches that:
+  1. Have already been merged into main
+  2. Were last committed more than 7 days ago
+  For each, show: branch name, last author, age, and merged PR number if available.
+  Suggest which are safe to delete.
+cost:
+  max_tokens: 2048
+notification:
+  severity: info

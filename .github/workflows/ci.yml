@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  go:
+    name: Go build & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Build web assets
+        run: cd web && pnpm install && pnpm build
+
+      - name: Build server (with embedded frontend)
+        run: go build -tags embed_frontend -o huginn .
+
+      - name: Run Go tests
+        run: go test -race -timeout 120s ./...
+
+  windows:
+    name: Windows build & smoke test
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Build web assets
+        run: cd web && pnpm install && pnpm build
+        shell: pwsh
+
+      - name: Build server
+        run: go build -tags embed_frontend -o huginn.exe .
+        shell: pwsh
+
+      - name: Smoke test
+        run: .\huginn.exe help
+        shell: pwsh

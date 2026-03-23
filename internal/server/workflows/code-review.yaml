@@ -1,0 +1,23 @@
+name: "Code Review"
+description: "Review recent code changes and suggest improvements"
+enabled: false
+schedule: "0 10 * * 1-5"
+notification:
+  on_failure: true
+  severity: info
+steps:
+  - name: "Code Review"
+    agent: "default"
+    prompt: |
+      Review recent code changes and suggest improvements.
+      Include:
+      1. Review commits from the last 24 hours (git log --since=yesterday --oneline)
+      2. Identify any potential bugs, code smell, or style violations
+      3. Suggest concrete improvements for the most impactful changes
+      4. Flag any security-sensitive changes that need closer review
+      Be specific — reference file names and line numbers where possible.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full review.
+    position: 0
+    on_failure: stop

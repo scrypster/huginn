@@ -1,0 +1,22 @@
+name: "Daily Standup"
+description: "Summarize active threads and sessions for the daily standup"
+enabled: false
+schedule: "0 9 * * 1-5"
+notification:
+  on_failure: true
+  severity: info
+steps:
+  - name: "Daily Standup"
+    agent: "default"
+    prompt: |
+      Summarize active threads and sessions.
+      Include:
+      1. Active agent sessions and their current status
+      2. Threads with unread or recent activity
+      3. Any pending tasks or outstanding items
+      Keep the summary concise and actionable — readable in under 60 seconds.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full summary.
+    position: 0
+    on_failure: stop

@@ -1,0 +1,136 @@
+{
+  "catalog_version": "2026-03-19",
+  "providers": {
+    "anthropic": {
+      "claude-opus-4-6": {
+        "display_name": "Claude Opus 4.6",
+        "aliases": ["opus", "opus-4", "claude-opus"],
+        "context_window": 200000,
+        "max_output_tokens": 32768,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "claude-sonnet-4-6": {
+        "display_name": "Claude Sonnet 4.6",
+        "aliases": ["sonnet", "sonnet-4", "claude-sonnet"],
+        "context_window": 200000,
+        "max_output_tokens": 65536,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "claude-haiku-4-5-20251001": {
+        "display_name": "Claude Haiku 4.5",
+        "aliases": ["haiku", "haiku-4", "claude-haiku"],
+        "context_window": 200000,
+        "max_output_tokens": 8096,
+        "supports_tools": true,
+        "tier": "medium"
+      },
+      "claude-haiku-4-5": {
+        "display_name": "Claude Haiku 4.5 (deprecated)",
+        "deprecated": true,
+        "replaced_by": "claude-haiku-4-5-20251001",
+        "context_window": 200000,
+        "max_output_tokens": 8096,
+        "supports_tools": true,
+        "tier": "medium"
+      },
+      "claude-opus-4-5": {
+        "display_name": "Claude Opus 4.5",
+        "deprecated": true,
+        "replaced_by": "claude-opus-4-6",
+        "context_window": 200000,
+        "max_output_tokens": 32768,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "claude-sonnet-4-5": {
+        "display_name": "Claude Sonnet 4.5",
+        "deprecated": true,
+        "replaced_by": "claude-sonnet-4-6",
+        "context_window": 200000,
+        "max_output_tokens": 65536,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "claude-3-5-sonnet-20241022": {
+        "display_name": "Claude 3.5 Sonnet",
+        "deprecated": true,
+        "replaced_by": "claude-sonnet-4-6",
+        "context_window": 200000,
+        "max_output_tokens": 8096,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "claude-3-5-haiku-20241022": {
+        "display_name": "Claude 3.5 Haiku",
+        "deprecated": true,
+        "replaced_by": "claude-haiku-4-5-20251001",
+        "context_window": 200000,
+        "max_output_tokens": 8096,
+        "supports_tools": true,
+        "tier": "medium"
+      }
+    },
+    "openai": {
+      "gpt-4o": {
+        "display_name": "GPT-4o",
+        "aliases": ["gpt4o", "4o"],
+        "context_window": 128000,
+        "max_output_tokens": 16384,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "gpt-4o-mini": {
+        "display_name": "GPT-4o Mini",
+        "aliases": ["4o-mini", "gpt4o-mini"],
+        "context_window": 128000,
+        "max_output_tokens": 16384,
+        "supports_tools": true,
+        "tier": "medium"
+      },
+      "o1": {
+        "display_name": "OpenAI o1",
+        "aliases": ["o1"],
+        "context_window": 200000,
+        "max_output_tokens": 32768,
+        "supports_tools": false,
+        "tier": "high"
+      },
+      "o3": {
+        "display_name": "OpenAI o3",
+        "aliases": ["o3"],
+        "context_window": 200000,
+        "max_output_tokens": 100000,
+        "supports_tools": false,
+        "tier": "high"
+      },
+      "o3-mini": {
+        "display_name": "OpenAI o3-mini",
+        "aliases": ["o3-mini"],
+        "context_window": 200000,
+        "max_output_tokens": 65536,
+        "supports_tools": false,
+        "tier": "medium"
+      },
+      "gpt-4-turbo": {
+        "display_name": "GPT-4 Turbo",
+        "deprecated": true,
+        "replaced_by": "gpt-4o",
+        "context_window": 128000,
+        "max_output_tokens": 4096,
+        "supports_tools": true,
+        "tier": "high"
+      },
+      "gpt-3.5-turbo": {
+        "display_name": "GPT-3.5 Turbo",
+        "deprecated": true,
+        "replaced_by": "gpt-4o-mini",
+        "context_window": 16385,
+        "max_output_tokens": 4096,
+        "supports_tools": true,
+        "tier": "low"
+      }
+    }
+  }
+}

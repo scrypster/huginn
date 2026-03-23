@@ -1,0 +1,21 @@
+name: "Branch Cleanup"
+description: "Identify merged branches that are safe to delete"
+enabled: false
+schedule: "0 11 * * 5"
+notification:
+  on_failure: true
+  severity: info
+steps:
+  - name: "Branch Cleanup"
+    agent: "Chris"
+    prompt: |
+      Identify branches in this repository that have been merged and are safe to delete.
+      Run: git branch -r --merged main
+      Exclude: main, master, develop, release/*, hotfix/*
+      For each candidate branch: list branch name, last commit author, last commit date.
+      Suggest the git command to delete each.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full report.
+    position: 0
+    on_failure: stop

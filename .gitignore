@@ -1,0 +1,47 @@
+# compiled binary
+huginn
+huginn-local
+
+# test binaries
+*.test
+
+# build artifacts
+dist/
+
+# editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# env / secrets
+.env
+*.env
+
+# coverage output files
+*.out
+node_modules/
+
+# Claude Code worktrees and session data
+.claude/
+
+# Superpowers brainstorm sessions
+.superpowers/
+
+# Internal planning scratchpad (never publish)
+docs/plans/
+
+# Compiled binaries
+bin/
+huginn.exe
+mockcloud
+
+# Test results and coverage reports
+test-results/
+web/test-results/
+web/playwright-report/
+web/coverage/

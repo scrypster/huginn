@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-huginn-bg text-huginn-text font-mono m-0;
+}
+
+#app {
+  @apply w-full h-full;
+}
+
+/* Markdown rendered content */
+.md-content { @apply text-huginn-text; }
+.md-content p { @apply mb-3 last:mb-0; }
+.md-content h1,.md-content h2,.md-content h3,.md-content h4 {
+  @apply font-semibold text-huginn-text mt-4 mb-2 first:mt-0;
+}
+.md-content h1 { @apply text-lg; }
+.md-content h2 { @apply text-base; }
+.md-content h3,.md-content h4 { @apply text-sm; }
+.md-content ul { @apply list-disc pl-5 mb-3 space-y-0.5; }
+.md-content ol { @apply list-decimal pl-5 mb-3 space-y-0.5; }
+.md-content li { @apply text-sm; }
+.md-content code {
+  @apply text-huginn-blue bg-huginn-surface px-1 py-0.5 rounded text-xs font-mono;
+}
+.md-content pre { @apply mb-3; }
+.md-content pre code { @apply bg-transparent p-0 text-xs leading-relaxed; }
+.md-content blockquote {
+  @apply border-l-2 border-huginn-border pl-3 text-huginn-muted italic mb-3;
+}
+.md-content a { @apply text-huginn-blue underline underline-offset-2; }
+.md-content hr { @apply border-huginn-border my-3; }
+.md-content strong { @apply font-semibold text-huginn-text; }
+.md-content table { @apply w-full text-sm mb-3 border-collapse; }
+.md-content th { @apply border border-huginn-border px-2 py-1 text-left font-semibold; }
+.md-content td { @apply border border-huginn-border px-2 py-1; }
+
+/* Code block with header + copy button */
+.code-block {
+  @apply rounded-xl border border-huginn-border overflow-hidden mb-3;
+  background: #0d1117;
+}
+.code-header {
+  @apply flex items-center justify-between px-3 py-1.5 border-b border-huginn-border;
+  background: rgba(22,27,34,0.9);
+}
+.code-lang {
+  @apply text-[10px] text-huginn-muted font-mono uppercase tracking-wider;
+}
+.code-copy {
+  @apply text-[10px] text-huginn-muted hover:text-huginn-blue transition-colors cursor-pointer;
+  background: none;
+  border: none;
+  padding: 0;
+}
+.code-block pre {
+  @apply m-0 p-4 overflow-x-auto text-xs leading-relaxed;
+}
+.code-block pre code {
+  @apply font-mono;
+}
+
+/* Agent mention chips — rendered inside v-html markdown content */
+.agent-mention {
+  display: inline;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 2px;
+  position: relative;
+  transition: opacity 0.1s, text-decoration-color 0.1s;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  text-decoration-color: transparent;
+}
+.agent-mention:hover {
+  opacity: 0.85;
+  text-decoration-color: currentColor;
+}
+/* CSS-only tooltip via data-tooltip attribute */
+.agent-mention[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: #1c2128;
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  color: #c9d1d9;
+  font-size: 11px;
+  font-weight: 400;
+  padding: 4px 8px;
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 50;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.agent-mention[data-tooltip]:hover::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: rgba(88, 166, 255, 0.2);
+  pointer-events: none;
+  z-index: 51;
+}
+
+/* highlight.js token colors (GitHub dark palette) */
+.hljs { color: #e6edf3; }
+.hljs-comment,.hljs-quote { color: #8b949e; font-style: italic; }
+.hljs-keyword,.hljs-selector-tag,.hljs-literal { color: #ff7b72; }
+.hljs-string,.hljs-title,.hljs-section,.hljs-attribute,.hljs-template-string { color: #a5d6ff; }
+.hljs-number,.hljs-literal,.hljs-variable,.hljs-template-variable { color: #79c0ff; }
+.hljs-tag,.hljs-name,.hljs-selector-id,.hljs-selector-class { color: #7ee787; }
+.hljs-type,.hljs-class,.hljs-builtin-name { color: #ffa657; }
+.hljs-function,.hljs-title.function_ { color: #d2a8ff; }
+.hljs-params { color: #e6edf3; }
+.hljs-attr,.hljs-symbol,.hljs-bullet { color: #79c0ff; }
+.hljs-built_in { color: #ffa657; }
+.hljs-deletion { color: #ffa198; background: rgba(255,106,113,0.15); }
+.hljs-addition { color: #7ee787; background: rgba(63,185,80,0.15); }
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-huginn-bg;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-huginn-border rounded;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-huginn-muted;
+}
+
+/* Credential form field — shared by all provider form components */
+.field {
+  @apply w-full bg-huginn-bg border border-huginn-border rounded-lg px-3 py-1.5 text-xs text-huginn-text
+         placeholder-huginn-muted/50 focus:outline-none focus:border-huginn-blue/50 transition-colors;
+}
+select.field {
+  @apply appearance-none;
+}

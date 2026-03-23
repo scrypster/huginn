@@ -1,0 +1,41 @@
+{
+  "huginn_manifest_version": 1,
+  "models": {
+    "qwen2.5-coder:7b": {
+      "description": "Qwen 2.5 Coder 7B — recommended for most machines",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "sha256": "",
+      "size_bytes": 4370000000,
+      "min_ram_gb": 8,
+      "recommended_ram_gb": 16,
+      "context_length": 32768,
+      "chat_template": "chatml",
+      "tags": ["recommended", "coding"]
+    },
+    "qwen2.5-coder:3b": {
+      "description": "Qwen 2.5 Coder 3B — lightweight, fast responses",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+      "filename": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+      "sha256": "",
+      "size_bytes": 1870000000,
+      "min_ram_gb": 4,
+      "recommended_ram_gb": 8,
+      "context_length": 32768,
+      "chat_template": "chatml",
+      "tags": ["coding", "lightweight"]
+    },
+    "qwen2.5-coder:14b": {
+      "description": "Qwen 2.5 Coder 14B — highest quality, needs 32 GB RAM",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+      "filename": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+      "sha256": "",
+      "size_bytes": 8700000000,
+      "min_ram_gb": 20,
+      "recommended_ram_gb": 32,
+      "context_length": 32768,
+      "chat_template": "chatml",
+      "tags": ["coding", "high-quality"]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+[
+  {
+    "name": "Coder",
+    "model": "claude-sonnet-4-6",
+    "icon": "C",
+    "color": "#58a6ff",
+    "is_default": true,
+    "system_prompt": "",
+    "memory_enabled": false,
+    "vault_name": "",
+    "toolbelt": []
+  },
+  {
+    "name": "GitAgent",
+    "model": "claude-sonnet-4-6",
+    "icon": "G",
+    "color": "#3fb950",
+    "is_default": false,
+    "system_prompt": "",
+    "memory_enabled": false,
+    "vault_name": "",
+    "toolbelt": [
+      {
+        "connection_id": "conn-gh-1",
+        "provider": "github_cli",
+        "profile": "",
+        "approval_gate": false
+      }
+    ]
+  }
+]

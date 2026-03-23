@@ -1,0 +1,340 @@
+// internal/scheduler/scheduler.go
+package scheduler
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/robfig/cron/v3"
+	"github.com/scrypster/huginn/internal/logger"
+)
+
+// ErrWorkflowAlreadyRunning is returned by TriggerWorkflow when the workflow
+// is currently executing. The HTTP handler maps this to 409 Conflict.
+var ErrWorkflowAlreadyRunning = errors.New("workflow already running")
+
+// errUserCancelled is used as the cause when CancelWorkflow is called explicitly
+// by a user request. The workflow runner checks context.Cause against this sentinel
+// to distinguish user-initiated cancellation from server shutdown or timeout.
+var errUserCancelled = errors.New("workflow cancelled by user")
+
+// ErrConcurrencyLimitReached is returned by TriggerWorkflow (manual runs) when
+// the global semaphore is full. The HTTP handler maps this to 503 Service
+// Unavailable with a Retry-After header.
+var ErrConcurrencyLimitReached = errors.New("scheduler: concurrency limit reached; try again later")
+
+// maxConcurrentWorkflows caps the number of workflows that may execute in
+// parallel. The scheduler uses a semaphore channel of this size.
+const maxConcurrentWorkflows = 10
+
+// Scheduler manages cron-based workflow schedules.
+type Scheduler struct {
+	cron             *cron.Cron
+	mu               sync.Mutex
+	workflowRunner   WorkflowRunner                   // nil if not configured
+	workflowRunning  map[string]bool                  // workflow IDs currently executing
+	workflowEntries  map[string]cron.EntryID          // workflow ID → cron entry ID
+	workflowCancels  map[string]context.CancelCauseFunc // workflow ID → cancel-cause func for running goroutine
+	sem              chan struct{}                     // global concurrency semaphore
+	broadcastFn      WorkflowBroadcastFunc            // may be nil; emits WS events for skipped/lifecycle events
+}
+
+// New creates a Scheduler.
+// Uses SecondOptional parser so both 5-field ("0 8 * * 1-5") and 6-field
+// ("*/5 * * * * *") cron expressions are accepted without error.
+func New() *Scheduler {
+	parser := cron.NewParser(
+		cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
+	)
+	return &Scheduler{
+		cron:            cron.New(cron.WithParser(parser)),
+		workflowRunning: make(map[string]bool),
+		workflowEntries: make(map[string]cron.EntryID),
+		workflowCancels: make(map[string]context.CancelCauseFunc),
+		sem:             make(chan struct{}, maxConcurrentWorkflows),
+	}
+}
+
+// cronParser is the shared parser for cron expressions. Mirrors the parser
+// used by New() so ValidateCronSchedule accepts the same syntax.
+var cronParser = cron.NewParser(
+	cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
+)
+
+// defaultWorkflowTimeout is the cap applied to all workflow runs when
+// Workflow.TimeoutMinutes is 0 (not configured).
+const defaultWorkflowTimeout = 30 * time.Minute
+
+// maxWorkflowTimeoutMinutes is the server-enforced ceiling for TimeoutMinutes.
+// Submitted values above this are clamped rather than rejected so that older
+// clients that don't know about the field still work correctly.
+const maxWorkflowTimeoutMinutes = 1440 // 24 hours
+
+// ValidateWorkflowTimeout clamps timeout_minutes to [0, maxWorkflowTimeoutMinutes].
+// 0 is preserved as "use default" and is not an error. Safe to call from
+// HTTP handlers in other packages before persisting a workflow.
+func ValidateWorkflowTimeout(minutes int) int {
+	if minutes < 0 {
+		return 0
+	}
+	if minutes > maxWorkflowTimeoutMinutes {
+		return maxWorkflowTimeoutMinutes
+	}
+	return minutes
+}
+
+// workflowTimeout returns the effective run timeout for w.
+// Falls back to defaultWorkflowTimeout when TimeoutMinutes is 0.
+func workflowTimeout(w *Workflow) time.Duration {
+	if w.TimeoutMinutes > 0 {
+		return time.Duration(w.TimeoutMinutes) * time.Minute
+	}
+	return defaultWorkflowTimeout
+}
+
+// ValidateCronSchedule returns a non-nil error when schedule cannot be parsed
+// by the Huginn cron parser. Use this in input validation before persisting a
+// workflow so users get a clear error at save time rather than at run time.
+func ValidateCronSchedule(schedule string) error {
+	if schedule == "" {
+		return nil // empty schedule = disabled workflow; not an error
+	}
+	if _, err := cronParser.Parse(schedule); err != nil {
+		return fmt.Errorf("invalid cron schedule %q: %w", schedule, err)
+	}
+	return nil
+}
+
+// Start begins the cron loop. Non-blocking.
+func (s *Scheduler) Start() {
+	s.cron.Start()
+}
+
+// Stop halts the cron loop, waiting for running jobs to finish.
+func (s *Scheduler) Stop(ctx context.Context) {
+	stopCtx := s.cron.Stop()
+	select {
+	case <-stopCtx.Done():
+	case <-ctx.Done():
+	}
+}
+
+// SetWorkflowRunner configures the runner used when workflows fire.
+func (s *Scheduler) SetWorkflowRunner(wr WorkflowRunner) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workflowRunner = wr
+}
+
+// SetBroadcastFunc wires the WS broadcast function used to emit workflow
+// lifecycle events (e.g. workflow_skipped when the semaphore is full).
+// Nil is valid and disables broadcasting.
+func (s *Scheduler) SetBroadcastFunc(fn WorkflowBroadcastFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.broadcastFn = fn
+}
+
+// RegisterWorkflow adds or replaces a workflow's cron schedule.
+// Disabled workflows are skipped. Existing entries for the same ID are removed first.
+func (s *Scheduler) RegisterWorkflow(w *Workflow) error {
+	if !w.Enabled {
+		return nil
+	}
+	if w.Schedule == "" {
+		return fmt.Errorf("scheduler: workflow %q has empty schedule", w.ID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.workflowRunner == nil {
+		return fmt.Errorf("scheduler: workflow runner not configured")
+	}
+	if id, ok := s.workflowEntries[w.ID]; ok {
+		s.cron.Remove(id)
+		delete(s.workflowEntries, w.ID)
+	}
+	ww := w
+	wr := s.workflowRunner
+	sem := s.sem
+	entryID, err := s.cron.AddFunc(w.Schedule, func() {
+		s.mu.Lock()
+		if s.workflowRunning[ww.ID] {
+			s.mu.Unlock()
+			return
+		}
+		s.workflowRunning[ww.ID] = true
+		broadcast := s.broadcastFn
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			delete(s.workflowRunning, ww.ID)
+			delete(s.workflowCancels, ww.ID)
+			s.mu.Unlock()
+		}()
+		// Acquire global concurrency semaphore (non-blocking: skip if full).
+		// For scheduled (cron-triggered) runs, log a warning and emit a
+		// workflow_skipped WS event so operators can observe the drop.
+		select {
+		case sem <- struct{}{}:
+		default:
+			logger.Warn("scheduler: concurrency limit reached, skipping scheduled workflow run",
+				"workflow_id", ww.ID)
+			if broadcast != nil {
+				broadcast("workflow_skipped", map[string]any{
+					"workflow_id": ww.ID,
+					"reason":      "concurrency limit",
+				})
+			}
+			return
+		}
+		defer func() { <-sem }()
+		// Two-layer context: outer carries the cancel cause; inner adds timeout.
+		// CancelWorkflow stores causeCancel so it can tag cancellations with
+		// errUserCancelled. The runner checks context.Cause to distinguish
+		// user-cancel from timeout/shutdown.
+		baseCtx, causeCancel := context.WithCancelCause(context.Background())
+		ctx, timeoutCancel := context.WithTimeout(baseCtx, workflowTimeout(ww))
+		defer timeoutCancel()
+		defer causeCancel(nil) // satisfy resource-release requirement
+		// Store causeCancel so CancelWorkflow can interrupt this run.
+		// Deferred cleanup above removes it when the goroutine exits.
+		s.mu.Lock()
+		s.workflowCancels[ww.ID] = causeCancel
+		s.mu.Unlock()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("scheduler: panic in workflow runner",
+						"workflow_id", ww.ID, "panic", r)
+				}
+			}()
+			if err := wr(ctx, ww); err != nil {
+				logger.Error("scheduler: workflow run failed",
+					"workflow_id", ww.ID, "err", err)
+			}
+		}()
+	})
+	if err != nil {
+		return fmt.Errorf("scheduler: register workflow %q cron %q: %w", w.ID, w.Schedule, err)
+	}
+	s.workflowEntries[w.ID] = entryID
+	return nil
+}
+
+// RemoveWorkflow deregisters a workflow by ID. No-op if not registered.
+func (s *Scheduler) RemoveWorkflow(workflowID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id, ok := s.workflowEntries[workflowID]; ok {
+		s.cron.Remove(id)
+		delete(s.workflowEntries, workflowID)
+	}
+}
+
+// LoadWorkflows reads all workflows from dir and registers enabled ones.
+func (s *Scheduler) LoadWorkflows(dir string) error {
+	workflows, err := LoadWorkflows(dir)
+	if err != nil {
+		return err
+	}
+	for _, w := range workflows {
+		if err := s.RegisterWorkflow(w); err != nil {
+			logger.Warn("scheduler: skipping workflow with invalid schedule", "workflow_id", w.ID, "err", err)
+			continue // skip bad schedules, don't fail all
+		}
+	}
+	return nil
+}
+
+// TriggerWorkflow fires a workflow immediately (bypass cron) in a background goroutine.
+// Returns synchronously with one of:
+//   - nil: workflow has been launched in the background
+//   - ErrWorkflowAlreadyRunning: workflow is currently executing
+//   - ErrConcurrencyLimitReached: global semaphore is full; caller should respond with 503
+//   - error: runner not configured or other early-validation failure
+//
+// The runner's result is logged but not surfaced to the caller because the
+// HTTP handler responds immediately (fire-and-forget).
+func (s *Scheduler) TriggerWorkflow(ctx context.Context, w *Workflow) error {
+	s.mu.Lock()
+	wr := s.workflowRunner
+	if wr == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("scheduler: workflow runner not configured")
+	}
+	if s.workflowRunning[w.ID] {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrWorkflowAlreadyRunning, w.ID)
+	}
+	sem := s.sem
+	s.mu.Unlock()
+
+	// Try to acquire the global concurrency semaphore synchronously so the
+	// HTTP handler can return 503 immediately instead of silently dropping the run.
+	select {
+	case sem <- struct{}{}:
+	default:
+		logger.Warn("scheduler: concurrency limit reached, rejecting manual workflow trigger",
+			"workflow_id", w.ID)
+		return ErrConcurrencyLimitReached
+	}
+
+	// Mark the workflow as running only after acquiring the semaphore.
+	s.mu.Lock()
+	s.workflowRunning[w.ID] = true
+	s.mu.Unlock()
+
+	// Launch asynchronously so the HTTP handler can return immediately.
+	// We must not use the HTTP request context here because it is cancelled
+	// as soon as the handler responds — this is a fire-and-forget goroutine.
+	go func() {
+		defer func() { <-sem }()
+		defer func() {
+			s.mu.Lock()
+			delete(s.workflowRunning, w.ID)
+			delete(s.workflowCancels, w.ID)
+			s.mu.Unlock()
+		}()
+		// Two-layer context: outer carries the cancel cause; inner adds timeout.
+		baseCtx, causeCancel := context.WithCancelCause(context.Background())
+		runCtx, timeoutCancel := context.WithTimeout(baseCtx, workflowTimeout(w))
+		defer timeoutCancel()
+		defer causeCancel(nil) // satisfy resource-release requirement
+		// Store causeCancel so CancelWorkflow can tag the cause as errUserCancelled.
+		s.mu.Lock()
+		s.workflowCancels[w.ID] = causeCancel
+		s.mu.Unlock()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("scheduler: panic in triggered workflow runner",
+						"workflow_id", w.ID, "panic", r)
+				}
+			}()
+			if err := wr(runCtx, w); err != nil {
+				logger.Error("scheduler: triggered workflow run failed",
+					"workflow_id", w.ID, "err", err)
+			}
+		}()
+	}()
+	return nil
+}
+
+// CancelWorkflow interrupts a running workflow by cancelling its context.
+// Returns true if the workflow was running and its cancel was called,
+// false if the workflow is not currently executing.
+// The deferred cleanup inside the goroutine removes the cancel func and marks
+// the workflow as not running — callers do not need to do this themselves.
+func (s *Scheduler) CancelWorkflow(id string) bool {
+	s.mu.Lock()
+	cancel, ok := s.workflowCancels[id]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel(errUserCancelled)
+	return true
+}

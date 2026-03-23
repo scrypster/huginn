@@ -1,0 +1,116 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/scrypster/huginn/internal/search
+cpu: Apple M4 Max
+BenchmarkBM25Search5000-16     	    2958	    386113 ns/op	   82555 B/op	       6 allocs/op
+BenchmarkBM25Search5000-16     	    3079	    390390 ns/op	   82552 B/op	       6 allocs/op
+BenchmarkBM25Search5000-16     	    3092	    386271 ns/op	   82552 B/op	       6 allocs/op
+BenchmarkBM25Search5000-16     	    3028	    415118 ns/op	   82553 B/op	       6 allocs/op
+BenchmarkBM25Search5000-16     	    2680	    404134 ns/op	   82552 B/op	       6 allocs/op
+BenchmarkBM25Search5000-16     	    3076	    388756 ns/op	   82552 B/op	       6 allocs/op
+BenchmarkBM25Search10000-16    	    1525	    810310 ns/op	  164472 B/op	       6 allocs/op
+BenchmarkBM25Search10000-16    	    1538	    818077 ns/op	  164472 B/op	       6 allocs/op
+BenchmarkBM25Search10000-16    	    1479	    816420 ns/op	  164472 B/op	       6 allocs/op
+BenchmarkBM25Search10000-16    	    1489	    805256 ns/op	  164472 B/op	       6 allocs/op
+BenchmarkBM25Search10000-16    	    1524	    804607 ns/op	  164472 B/op	       6 allocs/op
+BenchmarkBM25Search10000-16    	    1461	    781201 ns/op	  164472 B/op	       6 allocs/op
+BenchmarkBM25Index1000-16      	    1582	    705872 ns/op	 1168731 B/op	    8025 allocs/op
+BenchmarkBM25Index1000-16      	    1693	    705360 ns/op	 1168731 B/op	    8025 allocs/op
+BenchmarkBM25Index1000-16      	    1723	    709782 ns/op	 1168730 B/op	    8025 allocs/op
+BenchmarkBM25Index1000-16      	    1401	    715530 ns/op	 1168730 B/op	    8025 allocs/op
+BenchmarkBM25Index1000-16      	    1676	    715940 ns/op	 1168730 B/op	    8025 allocs/op
+BenchmarkBM25Index1000-16      	    1688	    716144 ns/op	 1168730 B/op	    8025 allocs/op
+BenchmarkBM25Search1000-16     	   15198	     79884 ns/op	   17016 B/op	       6 allocs/op
+BenchmarkBM25Search1000-16     	   15418	     78047 ns/op	   17016 B/op	       6 allocs/op
+BenchmarkBM25Search1000-16     	   15346	     79183 ns/op	   17016 B/op	       6 allocs/op
+BenchmarkBM25Search1000-16     	   15264	     77950 ns/op	   17016 B/op	       6 allocs/op
+BenchmarkBM25Search1000-16     	   15469	     78788 ns/op	   17016 B/op	       6 allocs/op
+BenchmarkBM25Search1000-16     	   15265	     80172 ns/op	   17016 B/op	       6 allocs/op
+PASS
+ok  	github.com/scrypster/huginn/internal/search	35.835s
+PASS
+ok  	github.com/scrypster/huginn/internal/search/hnsw	0.134s
+goos: darwin
+goarch: arm64
+pkg: github.com/scrypster/huginn/internal/session
+cpu: Apple M4 Max
+BenchmarkSQLiteStoreSave-16             	    5043	    493639 ns/op	    2771 B/op	      52 allocs/op
+BenchmarkSQLiteStoreSave-16             	    6168	    579822 ns/op	    2732 B/op	      52 allocs/op
+BenchmarkSQLiteStoreSave-16             	    7514	    676687 ns/op	    2729 B/op	      52 allocs/op
+BenchmarkSQLiteStoreSave-16             	    5684	    543195 ns/op	    2730 B/op	      52 allocs/op
+BenchmarkSQLiteStoreSave-16             	    6150	    581404 ns/op	    2728 B/op	      52 allocs/op
+BenchmarkSQLiteStoreSave-16             	    5924	    571182 ns/op	    2731 B/op	      52 allocs/op
+BenchmarkSQLiteStoreLoad-16             	  104197	     11623 ns/op	    2328 B/op	      64 allocs/op
+BenchmarkSQLiteStoreLoad-16             	  105086	     11269 ns/op	    2328 B/op	      64 allocs/op
+BenchmarkSQLiteStoreLoad-16             	  105120	     11260 ns/op	    2328 B/op	      64 allocs/op
+BenchmarkSQLiteStoreLoad-16             	  106759	     11194 ns/op	    2328 B/op	      64 allocs/op
+BenchmarkSQLiteStoreLoad-16             	  105847	     11489 ns/op	    2328 B/op	      64 allocs/op
+BenchmarkSQLiteStoreLoad-16             	  103569	     11497 ns/op	    2328 B/op	      64 allocs/op
+BenchmarkSQLiteStoreAppendMessage-16    	   25950	     46715 ns/op	    1097 B/op	      20 allocs/op
+BenchmarkSQLiteStoreAppendMessage-16    	   25470	     46438 ns/op	    1097 B/op	      20 allocs/op
+BenchmarkSQLiteStoreAppendMessage-16    	   25923	     46426 ns/op	    1097 B/op	      20 allocs/op
+BenchmarkSQLiteStoreAppendMessage-16    	   25917	     46484 ns/op	    1097 B/op	      20 allocs/op
+BenchmarkSQLiteStoreAppendMessage-16    	   25533	     47992 ns/op	    1097 B/op	      20 allocs/op
+BenchmarkSQLiteStoreAppendMessage-16    	   25642	     46703 ns/op	    1097 B/op	      20 allocs/op
+BenchmarkSQLiteStoreTailMessages-16     	   17769	     67851 ns/op	   20672 B/op	     411 allocs/op
+BenchmarkSQLiteStoreTailMessages-16     	   17583	     68251 ns/op	   20672 B/op	     411 allocs/op
+BenchmarkSQLiteStoreTailMessages-16     	   17256	     67978 ns/op	   20672 B/op	     411 allocs/op
+BenchmarkSQLiteStoreTailMessages-16     	   17816	     67454 ns/op	   20672 B/op	     411 allocs/op
+BenchmarkSQLiteStoreTailMessages-16     	   17407	     68285 ns/op	   20672 B/op	     411 allocs/op
+BenchmarkSQLiteStoreTailMessages-16     	   17272	     68888 ns/op	   20672 B/op	     411 allocs/op
+PASS
+ok  	github.com/scrypster/huginn/internal/session	51.832s
+goos: darwin
+goarch: arm64
+pkg: github.com/scrypster/huginn/internal/swarm
+cpu: Apple M4 Max
+BenchmarkSwarmRun10Tasks-16    	   50013	     21575 ns/op	   46582 B/op	      85 allocs/op
+BenchmarkSwarmRun10Tasks-16    	   57016	     21103 ns/op	   46581 B/op	      85 allocs/op
+BenchmarkSwarmRun10Tasks-16    	   55594	     21151 ns/op	   46582 B/op	      85 allocs/op
+BenchmarkSwarmRun10Tasks-16    	   58496	     20754 ns/op	   46583 B/op	      85 allocs/op
+BenchmarkSwarmRun10Tasks-16    	   57646	     21390 ns/op	   46583 B/op	      85 allocs/op
+BenchmarkSwarmRun10Tasks-16    	   58220	     21211 ns/op	   46582 B/op	      85 allocs/op
+BenchmarkSwarmRun50Tasks-16    	   10000	    114018 ns/op	   66785 B/op	     370 allocs/op
+BenchmarkSwarmRun50Tasks-16    	   10000	    115842 ns/op	   66787 B/op	     370 allocs/op
+BenchmarkSwarmRun50Tasks-16    	   10000	    112851 ns/op	   66787 B/op	     370 allocs/op
+BenchmarkSwarmRun50Tasks-16    	   10000	    111741 ns/op	   66786 B/op	     370 allocs/op
+BenchmarkSwarmRun50Tasks-16    	   10000	    112454 ns/op	   66780 B/op	     370 allocs/op
+BenchmarkSwarmRun50Tasks-16    	   10000	    111587 ns/op	   66777 B/op	     370 allocs/op
+PASS
+ok  	github.com/scrypster/huginn/internal/swarm	15.438s
+goos: darwin
+goarch: arm64
+pkg: github.com/scrypster/huginn/internal/mcp
+cpu: Apple M4 Max
+BenchmarkMCPClientListTools-16    	       3	     20945 ns/op
+BenchmarkMCPClientListTools-16    	       3	     20361 ns/op
+BenchmarkMCPClientListTools-16    	       3	     22542 ns/op
+BenchmarkMCPClientCallTool-16     	       3	      5625 ns/op
+BenchmarkMCPClientCallTool-16     	       3	      4458 ns/op
+BenchmarkMCPClientCallTool-16     	       3	      5653 ns/op
+PASS
+ok  	github.com/scrypster/huginn/internal/mcp	0.224s
+goos: darwin
+goarch: arm64
+pkg: github.com/scrypster/huginn/internal/agents
+cpu: Apple M4 Max
+BenchmarkAgentConfigLoad-16     	       3	     90875 ns/op
+BenchmarkAgentConfigLoad-16     	       3	     87903 ns/op
+BenchmarkAgentConfigLoad-16     	       3	     81792 ns/op
+BenchmarkBuildMemoryBlock-16    	       3	      1778 ns/op
+BenchmarkBuildMemoryBlock-16    	       3	      2028 ns/op
+BenchmarkBuildMemoryBlock-16    	       3	      1222 ns/op
+PASS
+ok  	github.com/scrypster/huginn/internal/agents	0.246s
+goos: darwin
+goarch: arm64
+pkg: github.com/scrypster/huginn/internal/relay
+cpu: Apple M4 Max
+BenchmarkOutboxEnqueue-16    	       3	  13184931 ns/op
+BenchmarkOutboxEnqueue-16    	       3	  13291389 ns/op
+BenchmarkOutboxEnqueue-16    	       3	  13285028 ns/op
+BenchmarkOutboxDrain-16      	       3	  13345111 ns/op
+BenchmarkOutboxDrain-16      	       3	  13290597 ns/op
+BenchmarkOutboxDrain-16      	       3	  13312500 ns/op
+PASS
+ok  	github.com/scrypster/huginn/internal/relay	2.572s

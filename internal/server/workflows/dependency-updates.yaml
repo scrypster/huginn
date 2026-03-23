@@ -1,0 +1,20 @@
+name: "Dependency Updates"
+description: "Scan for outdated dependencies and summarise available updates"
+enabled: false
+schedule: "0 10 * * 1"
+notification:
+  on_failure: true
+  severity: info
+steps:
+  - name: "Dependency Updates"
+    agent: "Chris"
+    prompt: |
+      Scan this project for outdated dependencies.
+      Check package.json, go.mod, requirements.txt, or Gemfile as appropriate.
+      List: package name, current version, latest version, update urgency (patch/minor/major).
+      Group by urgency. Highlight any packages with known security advisories.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full report.
+    position: 0
+    on_failure: stop

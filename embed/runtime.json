@@ -1,0 +1,30 @@
+{
+  "huginn_runtime_version": 1,
+  "llama_server_version": "b8192",
+  "binaries": {
+    "darwin-arm64": {
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b8192/llama-b8192-bin-macos-arm64.tar.gz",
+      "sha256": "",
+      "extract_path": "llama-b8192/llama-server",
+      "archive_type": "tar.gz"
+    },
+    "darwin-amd64": {
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b8192/llama-b8192-bin-macos-x64.tar.gz",
+      "sha256": "",
+      "extract_path": "llama-b8192/llama-server",
+      "archive_type": "tar.gz"
+    },
+    "linux-amd64": {
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b8192/llama-b8192-bin-ubuntu-x64.tar.gz",
+      "sha256": "",
+      "extract_path": "llama-b8192/llama-server",
+      "archive_type": "tar.gz"
+    },
+    "windows-amd64": {
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b8192/llama-b8192-bin-win-cpu-x64.zip",
+      "sha256": "",
+      "extract_path": "llama-server.exe",
+      "archive_type": "zip"
+    }
+  }
+}

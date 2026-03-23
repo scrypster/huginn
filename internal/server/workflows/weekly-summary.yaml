@@ -1,0 +1,25 @@
+name: "Weekly Summary"
+description: "Generate a weekly activity summary across threads, sessions, and projects"
+enabled: false
+schedule: "0 17 * * 5"
+notification:
+  on_success: true
+  on_failure: true
+  severity: info
+steps:
+  - name: "Weekly Summary"
+    agent: "default"
+    prompt: |
+      Generate a weekly activity summary.
+      Include:
+      1. Key accomplishments and completed tasks this week
+      2. Active threads and ongoing agent sessions
+      3. Commits and code changes merged this week (git log --since="7 days ago" --oneline)
+      4. Open items and blockers carried into next week
+      5. Metrics: sessions started, messages exchanged, workflows run
+      Format as a structured report suitable for sharing with the team.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full report.
+    position: 0
+    on_failure: stop

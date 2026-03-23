@@ -1,0 +1,15 @@
+name: "Stale PR Check"
+description: "Flag PRs open more than 5 days without recent activity"
+enabled: false
+trigger:
+  mode: schedule
+  cron: "0 9 * * 1"
+agent: "Mark"
+prompt: |
+  List all open PRs older than 5 days with no recent activity.
+  For each one, state the title, author, age, and a one-line recommendation.
+  If none exist, say so briefly.
+cost:
+  max_tokens: 2048
+notification:
+  severity: warning

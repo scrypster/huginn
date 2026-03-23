@@ -1,0 +1,22 @@
+name: "Morning Standup"
+description: "Summarise yesterday's commits and today's open PRs"
+enabled: false
+schedule: "0 8 * * 1-5"
+notification:
+  on_failure: true
+  severity: info
+steps:
+  - name: "Morning Standup"
+    agent: "Chris"
+    prompt: |
+      Review this repository and produce a morning standup summary.
+      Include:
+      1. What was merged yesterday (git log --since=yesterday --oneline)
+      2. Open PRs needing review (gh pr list --state open)
+      3. Any failing CI on the main branch (gh run list --status failure --limit 5)
+      Keep it to bullet points, readable in 60 seconds.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full analysis.
+    position: 0
+    on_failure: stop

@@ -1,0 +1,20 @@
+name: "Stale PR Check"
+description: "Flag pull requests that have been open without activity for over 7 days"
+enabled: false
+schedule: "0 9 * * 1-5"
+notification:
+  on_failure: true
+  severity: warning
+steps:
+  - name: "Stale PR Check"
+    agent: "Chris"
+    prompt: |
+      Check for stale pull requests in this repository.
+      Run: gh pr list --state open --json number,title,updatedAt,author
+      Flag any PRs with no activity in the last 7 days.
+      For each stale PR, list: number, title, author, days since last update.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full report.
+    position: 0
+    on_failure: stop

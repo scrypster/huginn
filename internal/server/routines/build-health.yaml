@@ -1,0 +1,15 @@
+name: "Build Health"
+description: "Check CI run status for the main branch every 4 hours"
+enabled: false
+trigger:
+  mode: schedule
+  cron: "0 */4 * * *"
+agent: "Mark"
+prompt: |
+  Check the CI health of the main branch.
+  Report: last 3 workflow runs (status, duration, triggering commit).
+  If any are failing, identify the failing step and suggest a fix.
+cost:
+  max_tokens: 2048
+notification:
+  severity: warning

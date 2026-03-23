@@ -1,0 +1,16 @@
+name: "Dependency Updates"
+description: "Check for outdated package dependencies"
+enabled: false
+trigger:
+  mode: schedule
+  cron: "0 10 * * 1"
+agent: "Steve"
+prompt: |
+  Check for outdated dependencies in this repository.
+  List packages with available updates, grouped by: patch, minor, major.
+  Flag any with known security advisories.
+  Keep it concise — no more than 20 packages.
+cost:
+  max_tokens: 3072
+notification:
+  severity: info

@@ -1,0 +1,24 @@
+name: "Health Check"
+description: "Check system health and report any anomalies"
+enabled: false
+schedule: "0 */6 * * *"
+notification:
+  on_failure: true
+  severity: warning
+steps:
+  - name: "Health Check"
+    agent: "default"
+    prompt: |
+      Check system health and report any anomalies.
+      Include:
+      1. Agent service status — are all configured agents reachable?
+      2. Database integrity — any errors in recent logs?
+      3. MCP server connectivity — are all configured MCP servers responding?
+      4. Scheduler status — are scheduled workflows running on time?
+      5. Disk and memory usage if accessible
+      Flag any anomalies clearly. Use GREEN/YELLOW/RED status indicators per component.
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full health report.
+    position: 0
+    on_failure: stop

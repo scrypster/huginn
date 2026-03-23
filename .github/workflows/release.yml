@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            cc: ""
+
+          - runner: macos-14
+            goos: darwin
+            goarch: amd64
+            cc: "clang -arch x86_64"
+
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cc: ""
+
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            cc: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && pnpm install && pnpm build
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          CC: ${{ matrix.cc }}
+        run: |
+          go build \
+            -tags embed_frontend \
+            -ldflags "-X main.version=${GITHUB_REF_NAME}" \
+            -o huginn-${{ matrix.goos }}-${{ matrix.goarch }} \
+            .
+
+      - name: Package archive
+        run: |
+          cp huginn-${{ matrix.goos }}-${{ matrix.goarch }} huginn
+          tar czf huginn_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz huginn
+          rm huginn
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: huginn-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            huginn-${{ matrix.goos }}-${{ matrix.goarch }}
+            huginn_*_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+
+  build-windows:
+    name: Build windows/amd64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && pnpm install && pnpm build
+        shell: pwsh
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -tags embed_frontend -ldflags "-X main.version=$env:GITHUB_REF_NAME" -o huginn-windows-amd64.exe .
+        shell: pwsh
+
+      - name: Package archive
+        run: |
+          Copy-Item huginn-windows-amd64.exe huginn.exe
+          Compress-Archive -Path huginn.exe -DestinationPath "huginn_$($env:GITHUB_REF_NAME)_windows_amd64.zip"
+          Remove-Item huginn.exe
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: huginn-windows-amd64
+          path: |
+            huginn-windows-amd64.exe
+            huginn_*_windows_amd64.zip
+
+  release:
+    name: Create GitHub Release
+    needs: [build, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${{ github.repository }}" \
+              --title "huginn ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            huginn-darwin-arm64 \
+            huginn-darwin-amd64 \
+            huginn-linux-amd64 \
+            huginn-linux-arm64 \
+            huginn-windows-amd64.exe \
+            huginn_${GITHUB_REF_NAME}_darwin_arm64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_darwin_amd64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_linux_amd64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_linux_arm64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_windows_amd64.zip
+
+  update-formula:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: scrypster/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - name: Download release binaries and compute SHA256s
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          BASE="https://github.com/scrypster/huginn/releases/download/${VERSION}"
+          for platform in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
+            curl -fsSL "${BASE}/huginn-${platform}" -o "huginn-${platform}"
+            sha256sum "huginn-${platform}" | cut -d' ' -f1 > "sha256-${platform}.txt"
+            echo "${platform}: $(cat sha256-${platform}.txt)"
+          done
+
+      - name: Patch formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARM64_SHA=$(cat sha256-darwin-arm64.txt)
+          AMD64_MAC_SHA=$(cat sha256-darwin-amd64.txt)
+          AMD64_LIN_SHA=$(cat sha256-linux-amd64.txt)
+          ARM64_LIN_SHA=$(cat sha256-linux-arm64.txt)
+
+          FORMULA="homebrew-tap/Formula/huginn.rb"
+
+          sed -i 's|version "[^"]*"|version "'"${VERSION}"'"|' "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # darwin-arm64|sha256 "'"${ARM64_SHA}"'"  # darwin-arm64|' "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # darwin-amd64|sha256 "'"${AMD64_MAC_SHA}"'"  # darwin-amd64|' "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # linux-amd64|sha256 "'"${AMD64_LIN_SHA}"'"  # linux-amd64|'  "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # linux-arm64|sha256 "'"${ARM64_LIN_SHA}"'"  # linux-arm64|'  "${FORMULA}"
+
+      - name: Commit and push
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/huginn.rb
+          git diff --cached --quiet || git commit -m "chore: update huginn to ${GITHUB_REF_NAME}"
+          git push

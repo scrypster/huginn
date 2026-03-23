@@ -1,0 +1,20 @@
+name: "Build Health Check"
+description: "Check CI status for the main branch and surface any failures"
+enabled: false
+schedule: "0 */4 * * *"
+notification:
+  on_failure: true
+  severity: warning
+steps:
+  - name: "Build Health Check"
+    agent: "Chris"
+    prompt: |
+      Check the CI/CD health of this repository's main branch.
+      Run: gh run list --branch main --status failure --limit 10
+      For each failing run: list the workflow name, run ID, failure reason if available.
+      Also check: gh run list --branch main --status in_progress --limit 5
+
+      Respond with a JSON block first on its own line: {"summary": "<one line, max 120 chars>"}
+      Then your full report.
+    position: 0
+    on_failure: stop

@@ -1,0 +1,104 @@
+# Huginn installer for Windows
+# Usage: irm https://huginn.sh/install.ps1 | iex
+#   or:  powershell -ExecutionPolicy Bypass -File install.ps1
+
+$ErrorActionPreference = "Stop"
+$repo = "scrypster/huginn"
+$installDir = "$env:LOCALAPPDATA\huginn"
+
+# When piped through iex, exit closes the PowerShell session and the window
+# disappears before the user can read the error.  This helper prints the error
+# and waits for a keypress so the message is always visible.
+function Abort($msg) {
+    Write-Host ""
+    Write-Host "  Error: $msg" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
+
+Write-Host ""
+Write-Host "  Installing Huginn..." -ForegroundColor Cyan
+Write-Host ""
+
+# Detect architecture
+$arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else {
+    Abort "Huginn requires a 64-bit Windows system."
+}
+
+# Query GitHub API for the latest release
+try {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "huginn-installer" }
+} catch {
+    Abort "Could not reach GitHub API. Check your internet connection.`n  $_"
+}
+
+$assetName = "huginn_$($release.tag_name)_windows_${arch}.zip"
+$asset = $release.assets | Where-Object { $_.name -eq $assetName }
+
+if (-not $asset) {
+    $available = ($release.assets | ForEach-Object { $_.name }) -join "`n    "
+    Abort "Could not find $assetName in release $($release.tag_name).`n  Available assets:`n    $available"
+}
+
+$downloadUrl = $asset.browser_download_url
+$zipPath = "$env:TEMP\huginn.zip"
+
+Write-Host "  Version:  $($release.tag_name)"
+Write-Host "  Asset:    $assetName"
+Write-Host ""
+
+# Download
+Write-Host "  Downloading..." -NoNewline
+try {
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+    Write-Host " done" -ForegroundColor Green
+} catch {
+    Write-Host " failed" -ForegroundColor Red
+    Abort "Download failed: $_"
+}
+
+# Extract
+Write-Host "  Extracting..." -NoNewline
+if (Test-Path $installDir) {
+    Remove-Item "$installDir\huginn.exe" -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+Remove-Item $zipPath -ErrorAction SilentlyContinue
+Write-Host " done" -ForegroundColor Green
+
+# Verify binary
+$binary = "$installDir\huginn.exe"
+if (-not (Test-Path $binary)) {
+    $contents = (Get-ChildItem $installDir | ForEach-Object { $_.Name }) -join "`n    "
+    Abort "huginn.exe not found after extraction.`n  Contents of ${installDir}:`n    $contents"
+}
+
+# Add to PATH if not already there
+$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+if ($userPath -notlike "*$installDir*") {
+    Write-Host "  Adding to PATH..." -NoNewline
+    [Environment]::SetEnvironmentVariable("PATH", "$userPath;$installDir", "User")
+    $env:PATH += ";$installDir"
+    Write-Host " done" -ForegroundColor Green
+} else {
+    Write-Host "  Already in PATH"
+}
+
+# Print version
+Write-Host ""
+try {
+    $ver = & $binary version 2>&1
+    Write-Host "  Installed: huginn $ver" -ForegroundColor Green
+} catch {
+    Write-Host "  Installed: huginn.exe at $installDir" -ForegroundColor Green
+}
+
+Write-Host ""
+Write-Host "  Get started:" -ForegroundColor Cyan
+Write-Host "    huginn init"
+Write-Host ""
+Write-Host "  Open a new terminal if 'huginn' is not recognized." -ForegroundColor DarkGray
+Write-Host ""

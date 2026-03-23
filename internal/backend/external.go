@@ -1,0 +1,350 @@
+package backend
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/scrypster/huginn/internal/modelconfig"
+)
+
+// ExternalBackend calls any OpenAI-compatible /v1/chat/completions endpoint.
+// It is safe for concurrent use.
+type ExternalBackend struct {
+	endpoint    string       // base URL, e.g. "http://localhost:11434"
+	client      *http.Client
+	model       string       // configured model name
+	keyResolver KeyResolver  // optional; resolves API key sent as Bearer token
+}
+
+// NewExternalBackend creates an ExternalBackend pointing at endpoint.
+func NewExternalBackend(endpoint string) *ExternalBackend {
+	return &ExternalBackend{
+		endpoint: strings.TrimRight(endpoint, "/"),
+		client:   &http.Client{Timeout: 0, Transport: streamingTransport()},
+	}
+}
+
+// NewExternalBackendWithAPIKey creates an ExternalBackend that sends a Bearer token.
+func NewExternalBackendWithAPIKey(endpoint string, resolver KeyResolver) *ExternalBackend {
+	b := NewExternalBackend(endpoint)
+	b.keyResolver = resolver
+	return b
+}
+
+// SetModel sets the model identifier used by ContextWindow.
+// It must be called before any concurrent use of this backend begins.
+// The model name is used by ContextWindow() to look up the context window size
+// from the modelconfig package.
+func (b *ExternalBackend) SetModel(m string) {
+	b.model = m
+}
+
+// ContextWindow returns the known context window for the configured model.
+// Delegates to modelconfig.ContextWindowForModel for the lookup.
+func (b *ExternalBackend) ContextWindow() int {
+	return modelconfig.ContextWindowForModel(b.model)
+}
+
+// ChatCompletion sends a chat request and returns the response.
+// If req.OnToken is set, tokens are streamed; otherwise response is collected.
+// If req.OnEvent is set, streaming events are emitted; OnToken is called for backward compat if also set.
+func (b *ExternalBackend) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	body, err := b.buildRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		b.endpoint+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	if b.keyResolver != nil {
+		apiKey, err := b.keyResolver()
+		if err != nil {
+			return nil, fmt.Errorf("chat completion: resolve api key: %w", err)
+		}
+		if apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	}
+
+	resp, err := b.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("chat completion: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &RateLimitError{Body: string(bytes.TrimSpace(body))}
+		}
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && len(body) > 0 {
+			return nil, fmt.Errorf("chat completion: HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+		}
+		return nil, fmt.Errorf("chat completion: HTTP %d", resp.StatusCode)
+	}
+
+	return b.parseSSE(resp, req)
+}
+
+// Health checks that the endpoint is reachable.
+func (b *ExternalBackend) Health(ctx context.Context) error {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.endpoint+"/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("health check: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("health check: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Shutdown is a no-op for ExternalBackend (we don't own the server process).
+func (b *ExternalBackend) Shutdown(_ context.Context) error { return nil }
+
+// compile-time interface check
+var _ Backend = (*ExternalBackend)(nil)
+
+// --- private helpers ---
+
+// openAIRequest is the JSON body for /v1/chat/completions.
+type openAIRequest struct {
+	Model    string          `json:"model"`
+	Messages []openAIMessage `json:"messages"`
+	Tools    []Tool          `json:"tools,omitempty"`
+	Stream   bool            `json:"stream"`
+}
+
+type openAIContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+}
+
+type openAIMessage struct {
+	Role       string           `json:"role"`
+	Content    any              `json:"content,omitempty"` // can be string or []openAIContentPart
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	Name       string           `json:"name,omitempty"` // for role=tool
+}
+
+type openAIToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function openAIToolCallFunction `json:"function"`
+}
+
+type openAIToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // raw JSON string
+}
+
+func (b *ExternalBackend) buildRequest(req ChatRequest) ([]byte, error) {
+	msgs := make([]openAIMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		om := openAIMessage{Role: m.Role}
+		// Set content: either Parts array or plain string
+		if len(m.Parts) > 0 {
+			parts := make([]openAIContentPart, len(m.Parts))
+			for i, p := range m.Parts {
+				parts[i] = openAIContentPart{Type: p.Type, Text: p.Text, ImageURL: p.ImageURL}
+			}
+			om.Content = parts
+		} else {
+			om.Content = m.Content
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				argBytes, err := json.Marshal(tc.Function.Arguments)
+				if err != nil {
+					return nil, fmt.Errorf("marshal tool arguments: %w", err)
+				}
+				om.ToolCalls = append(om.ToolCalls, openAIToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: openAIToolCallFunction{
+						Name:      tc.Function.Name,
+						Arguments: string(argBytes),
+					},
+				})
+			}
+			om.Content = "" // content and tool_calls are mutually exclusive
+		}
+		if m.Role == "tool" {
+			om.ToolCallID = m.ToolCallID
+			om.Name = m.ToolName
+		}
+		msgs = append(msgs, om)
+	}
+	r := openAIRequest{
+		Model:    req.Model,
+		Messages: msgs,
+		Tools:    req.Tools,
+		Stream:   true,
+	}
+	return json.Marshal(r)
+}
+
+// sseToolCall is the per-chunk tool call fragment in the SSE stream.
+// It has a string Arguments (raw JSON fragment) and an Index for multi-tool ordering.
+type sseToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"` // incremental JSON fragment
+	} `json:"function"`
+}
+
+// sseChunk is the SSE streaming response shape.
+type sseChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content   string        `json:"content"`
+			ToolCalls []sseToolCall `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage,omitempty"`
+}
+
+func (b *ExternalBackend) parseSSE(resp *http.Response, req ChatRequest) (*ChatResponse, error) {
+	result := &ChatResponse{}
+	// accumulate tool call fragments indexed by wire index field
+	tcFragments := map[int]*ToolCall{}
+	// accumulate raw argument JSON fragments per tool call index
+	argsBuilders := map[int]*strings.Builder{}
+
+	sawDone := false
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			sawDone = true
+			break
+		}
+
+		var chunk sseChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // skip malformed chunks
+		}
+
+		// Token usage (when present in the chunk) — extract BEFORE checking choices
+		// OpenAI sends a final chunk with empty choices but populated usage
+		if chunk.Usage != nil {
+			result.PromptTokens = chunk.Usage.PromptTokens
+			result.CompletionTokens = chunk.Usage.CompletionTokens
+		}
+
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		choice := chunk.Choices[0]
+
+		// Text token
+		if choice.Delta.Content != "" {
+			result.Content += choice.Delta.Content
+			// Emit StreamEvent if OnEvent is set
+			if req.OnEvent != nil {
+				req.OnEvent(StreamEvent{Type: StreamText, Content: choice.Delta.Content})
+			}
+			// Call OnToken for backward compat (always, regardless of OnEvent)
+			if req.OnToken != nil {
+				req.OnToken(choice.Delta.Content)
+			}
+		}
+
+		// Tool call fragments — use tc.Index (wire index) not range index i
+		for _, tc := range choice.Delta.ToolCalls {
+			idx := tc.Index
+			if existing, ok := tcFragments[idx]; ok {
+				if tc.Function.Name != "" {
+					existing.Function.Name += tc.Function.Name
+				}
+			} else {
+				tcFragments[idx] = &ToolCall{
+					ID:       tc.ID,
+					Function: ToolCallFunction{Name: tc.Function.Name},
+				}
+			}
+			// Accumulate argument fragments
+			if tc.Function.Arguments != "" {
+				if _, ok := argsBuilders[idx]; !ok {
+					argsBuilders[idx] = &strings.Builder{}
+				}
+				argsBuilders[idx].WriteString(tc.Function.Arguments)
+			}
+		}
+
+		// Finish reason
+		if choice.FinishReason != nil {
+			result.DoneReason = *choice.FinishReason
+		}
+	}
+
+	// Emit StreamDone event after stream completes
+	if req.OnEvent != nil {
+		req.OnEvent(StreamEvent{Type: StreamDone})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading SSE stream: %w", err)
+	}
+
+	// Fix 2: detect premature EOF — no [DONE] and no data received
+	if !sawDone && result.Content == "" && len(tcFragments) == 0 {
+		return nil, fmt.Errorf("SSE stream ended without data")
+	}
+
+	// Flatten accumulated tool calls in wire-index order, parsing arguments
+	indices := make([]int, 0, len(tcFragments))
+	for idx := range tcFragments {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+
+	for _, idx := range indices {
+		tc := tcFragments[idx]
+		if ab, ok := argsBuilders[idx]; ok {
+			raw := ab.String()
+			if raw != "" {
+				var args map[string]any
+				if err := json.Unmarshal([]byte(raw), &args); err != nil {
+					return nil, fmt.Errorf("parse tool %q arguments: %w", tc.Function.Name, err)
+				}
+				tc.Function.Arguments = args
+			}
+		}
+		result.ToolCalls = append(result.ToolCalls, *tc)
+	}
+
+	return result, nil
+}
