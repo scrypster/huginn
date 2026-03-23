@@ -1940,7 +1940,6 @@ async function loadAgent(name: string) {
       toolbelt: (data as any).toolbelt || [],
       skills: (data as any).skills || [],
       local_tools: (data as any).local_tools ?? [],
-      version: (data as any).version ?? 0,
     }
     original.value = JSON.stringify(form.value)
     dirty.value = false

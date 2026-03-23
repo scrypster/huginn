@@ -745,7 +745,7 @@ import { useThreads } from './composables/useThreads'
 
 const route = useRoute()
 const router = useRouter()
-const { sessions, loading: sessionsLoading, fetchSessions, createSession, deleteSession, renameSession, formatSessionLabel, getMessages } = useSessions()
+const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages } = useSessions()
 const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } = useNotifications()
 const { isAgentActive } = useThreads()
 
@@ -847,12 +847,6 @@ watch(() => route.path, (path) => {
   }
 })
 
-// Unseen sessions bubble to top; rest maintain recency order
-const sortedSessions = computed(() => {
-  const unseen = sessions.value.filter(s => unseenSessionIds.value.includes(s.id))
-  const seen   = sessions.value.filter(s => !unseenSessionIds.value.includes(s.id))
-  return [...unseen, ...seen]
-})
 
 watch(activeSection, (s) => {
   if (s === 'agents') loadAgents()
@@ -882,43 +876,6 @@ async function handleNewItem() {
   }
 }
 
-function openSession(id: string) {
-  router.push(`/chat/${id}`)
-}
-
-async function removeSession(id: string) {
-  clearUnseen(id)
-  await deleteSession(id)
-  if (activeSessionId.value === id) {
-    const remaining = sessions.value.filter(s => s.id !== id)
-    router.push(remaining.length && remaining[0] ? `/chat/${remaining[0].id}` : '/chat')
-  }
-}
-
-// ── Session rename ────────────────────────────────────────────────────
-const renamingSessionId = ref('')
-const renameInputValue  = ref('')
-
-function startRename(session: { id: string; title?: string }) {
-  renamingSessionId.value = session.id
-  renameInputValue.value  = formatSessionLabel(session as Parameters<typeof formatSessionLabel>[0])
-}
-
-async function commitRename(id: string) {
-  const title = renameInputValue.value.trim()
-  renamingSessionId.value = ''
-  if (title) await renameSession(id, title)
-}
-
-async function clearAllSessions() {
-  if (!window.confirm('Delete all sessions? This cannot be undone.')) return
-  const ids = sessions.value.map(s => s.id)
-  for (const id of ids) {
-    clearUnseen(id)
-    await deleteSession(id)
-  }
-  router.push('/chat')
-}
 
 // ── Space management ──────────────────────────────────────────────────
 const spaceMenuId      = ref<string | null>(null)
@@ -1136,14 +1093,6 @@ function selectSpace(id: string) {
   router.push(`/space/${id}`)
 }
 
-const displayedSessions = computed(() => {
-  // When sidebarSearch has results from the FTS endpoint, show them instead of
-  // the client-side sorted list. Results are already ordered by relevance.
-  if (sidebarSearch.value.trim() && sessionSearchResults.value.length) {
-    return sessionSearchResults.value
-  }
-  return sortedSessions.value
-})
 
 function toggleProfilePopover() {
   profilePopoverOpen.value = !profilePopoverOpen.value
