@@ -183,8 +183,10 @@ test.describe('AgentsView — fresh install (no agents)', () => {
     await expect(saveBtn).toBeVisible({ timeout: 3000 })
     await saveBtn.click()
 
+    // Save sends PUT to /api/v1/agents/FirstAgent and shows confirmation.
+    // Page stays on /agents/new (no redirect after save — user can keep editing).
     expect(saveRequestMade).toBe(true)
-    await expect(page).toHaveURL(/#\/agents\/FirstAgent/, { timeout: 3000 })
+    await expect(page.locator('text=Saved successfully')).toBeVisible({ timeout: 3000 })
   })
 })
 
