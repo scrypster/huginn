@@ -175,11 +175,14 @@ jobs:
           path: homebrew-tap
 
       - name: Download release binaries and compute SHA256s
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
-          BASE="https://github.com/scrypster/huginn/releases/download/${VERSION}"
           for platform in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
-            curl -fsSL "${BASE}/huginn-${platform}" -o "huginn-${platform}"
+            gh release download "${GITHUB_REF_NAME}" \
+              --repo "${{ github.repository }}" \
+              --pattern "huginn-${platform}" \
+              --output "huginn-${platform}"
             sha256sum "huginn-${platform}" | cut -d' ' -f1 > "sha256-${platform}.txt"
             echo "${platform}: $(cat sha256-${platform}.txt)"
           done
