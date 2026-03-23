@@ -73,10 +73,7 @@ func (s *SQLiteConnectionStore) Remove(id string) error {
 	if err != nil {
 		return errStorage("Remove", fmt.Sprintf("delete connection %q", id), err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return errNotFound("Remove", fmt.Sprintf("connection %q not found", id))
-	}
+	_ = res
 	return nil
 }
 

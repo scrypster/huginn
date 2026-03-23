@@ -113,17 +113,20 @@ func NewGate(skipAll bool, promptFunc func(PermissionRequest) Decision) *Gate {
 // can also call it safely.
 func (g *Gate) startSweep() {
 	g.sweepOnce.Do(func() {
+		// Capture once so the goroutine never races against test code that
+		// mutates the package-level promptFuncTimeout variable.
+		timeout := promptFuncTimeout
 		go func() {
-			// Sweep interval: every promptFuncTimeout*2 so stale entries are
-			// removed within promptFuncTimeout*3 of registration (worst case).
-			ticker := time.NewTicker(promptFuncTimeout * 2)
+			// Sweep interval: every timeout*2 so stale entries are
+			// removed within timeout*3 of registration (worst case).
+			ticker := time.NewTicker(timeout * 2)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-g.sweepDone:
 					return
 				case <-ticker.C:
-					g.sweepRelayChans()
+					g.sweepRelayChans(timeout)
 				}
 			}
 		}()
@@ -131,10 +134,10 @@ func (g *Gate) startSweep() {
 }
 
 // sweepRelayChans removes relay entries whose registration time is older than
-// promptFuncTimeout*3. Each evicted channel receives false (deny) so that any
+// timeout*3. Each evicted channel receives false (deny) so that any
 // goroutine blocking on it is unblocked. Caller must NOT hold g.mu.
-func (g *Gate) sweepRelayChans() {
-	threshold := promptFuncTimeout * 3
+func (g *Gate) sweepRelayChans(timeout time.Duration) {
+	threshold := timeout * 3
 	now := time.Now()
 
 	g.mu.Lock()

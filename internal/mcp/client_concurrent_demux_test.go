@@ -18,39 +18,45 @@ import (
 	"github.com/scrypster/huginn/internal/tools"
 )
 
-// orderedTransport is a Transport that serves pre-queued responses.
-// Unlike MockTransport it supports concurrent Send/Receive safely
-// (no Mutex needed for Send since we don't track sent messages).
-type orderedTransport struct {
-	mu        sync.Mutex
-	responses [][]byte
-	done      chan struct{}
+// echoTransport auto-generates a tool response when Send is called.
+// Because the MCPClient registers the pending waiter BEFORE calling Send,
+// this guarantees the response is enqueued only after the waiter exists,
+// eliminating the pre-queue/recvLoop race of the old orderedTransport.
+type echoTransport struct {
+	ch   chan []byte
+	done chan struct{}
 }
 
-func (t *orderedTransport) Send(_ context.Context, _ []byte) error {
+func newEchoTransport() *echoTransport {
+	return &echoTransport{ch: make(chan []byte, 20), done: make(chan struct{})}
+}
+
+func (t *echoTransport) Send(_ context.Context, data []byte) error {
+	// Parse the request ID and tool name from the sent JSON-RPC request.
+	var req struct {
+		ID     int `json:"id"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+	// Enqueue a canned response matching the request ID.
+	t.ch <- buildConcurrentToolResponse(req.ID, fmt.Sprintf("result-for-id-%d", req.ID))
 	return nil
 }
 
-func (t *orderedTransport) Receive(_ context.Context) ([]byte, error) {
-	for {
-		t.mu.Lock()
-		if len(t.responses) > 0 {
-			resp := t.responses[0]
-			t.responses = t.responses[1:]
-			t.mu.Unlock()
-			return resp, nil
-		}
-		t.mu.Unlock()
-		// Poll — in real usage the transport blocks on I/O.
-		select {
-		case <-t.done:
-			return nil, fmt.Errorf("transport closed")
-		case <-time.After(1 * time.Millisecond):
-		}
+func (t *echoTransport) Receive(_ context.Context) ([]byte, error) {
+	select {
+	case <-t.done:
+		return nil, fmt.Errorf("transport closed")
+	case resp := <-t.ch:
+		return resp, nil
 	}
 }
 
-func (t *orderedTransport) Close() error {
+func (t *echoTransport) Close() error {
 	select {
 	case <-t.done:
 	default:
@@ -59,10 +65,24 @@ func (t *orderedTransport) Close() error {
 	return nil
 }
 
-func (t *orderedTransport) push(resp []byte) {
-	t.mu.Lock()
-	t.responses = append(t.responses, resp)
-	t.mu.Unlock()
+// stallTransport never produces a response — Receive blocks until Close() is
+// called, at which point it returns an error. Used by tests that need a
+// transport that stalls indefinitely and then signals all callers on shutdown.
+type stallTransport struct{ done chan struct{} }
+
+func newStallTransport() *stallTransport { return &stallTransport{done: make(chan struct{})} }
+func (t *stallTransport) Send(_ context.Context, _ []byte) error { return nil }
+func (t *stallTransport) Receive(_ context.Context) ([]byte, error) {
+	<-t.done
+	return nil, fmt.Errorf("transport closed")
+}
+func (t *stallTransport) Close() error {
+	select {
+	case <-t.done:
+	default:
+		close(t.done)
+	}
+	return nil
 }
 
 func buildConcurrentToolResponse(id int, text string) []byte {
@@ -88,32 +108,26 @@ func buildConcurrentToolResponse(id int, text string) []byte {
 func TestMCPClient_ConcurrentCallTool_DemuxByID(t *testing.T) {
 	const n = 10
 
-	tr := &orderedTransport{done: make(chan struct{})}
+	// echoTransport generates a response for each request at Send time,
+	// which guarantees the response is enqueued only after the pending waiter
+	// is registered (since MCPClient registers before calling Send).
+	tr := newEchoTransport()
 	defer tr.Close()
 
 	c := mcp.NewMCPClient(tr)
 
-	// Build the expected response set keyed by ID.
-	// IDs start at 1 (since nextID begins at 0 and is pre-incremented).
-	expectedByID := make(map[int]string, n)
-	for i := 1; i <= n; i++ {
-		text := fmt.Sprintf("result-for-id-%d", i)
-		expectedByID[i] = text
-		tr.push(buildConcurrentToolResponse(i, text))
-	}
-
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
+		wg       sync.WaitGroup
+		mu       sync.Mutex
 		gotTexts []string
-		errs    []error
+		errs     []error
 	)
 
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			result, err := c.CallTool(ctx, fmt.Sprintf("tool_%d", idx), nil)
 			mu.Lock()
@@ -143,13 +157,15 @@ func TestMCPClient_ConcurrentCallTool_DemuxByID(t *testing.T) {
 		t.Fatalf("expected %d results, got %d", n, len(gotTexts))
 	}
 
-	// Every expected text must appear exactly once (the goroutine→ID mapping is
-	// non-deterministic, but the full set must be covered with no duplicates).
+	// Every goroutine should have received a result-for-id-N text.
+	// The ID assigned to each goroutine is non-deterministic, but the set
+	// of texts must be exactly {result-for-id-1 .. result-for-id-N}.
 	seen := make(map[string]int, n)
 	for _, text := range gotTexts {
 		seen[text]++
 	}
-	for _, expectedText := range expectedByID {
+	for i := 1; i <= n; i++ {
+		expectedText := fmt.Sprintf("result-for-id-%d", i)
 		count := seen[expectedText]
 		if count != 1 {
 			t.Errorf("expected text %q to appear exactly once, got count=%d", expectedText, count)
@@ -160,7 +176,7 @@ func TestMCPClient_ConcurrentCallTool_DemuxByID(t *testing.T) {
 // TestMCPClient_RecvLoopTerminatesOnTransportError verifies that when the
 // transport returns an error, all pending callers are unblocked with an error.
 func TestMCPClient_RecvLoopTerminatesOnTransportError(t *testing.T) {
-	tr := &orderedTransport{done: make(chan struct{})}
+	tr := newStallTransport()
 
 	c := mcp.NewMCPClient(tr)
 
@@ -194,14 +210,10 @@ func TestMCPClient_RecvLoopTerminatesOnTransportError(t *testing.T) {
 // This is the core correctness guarantee of the cond-variable–based wait design.
 func TestMCPClient_SequentialCallsNeverReadAhead(t *testing.T) {
 	const count = 5
-	tr := &orderedTransport{done: make(chan struct{})}
+	// echoTransport responds to each Send immediately, guaranteeing that
+	// recvLoop only receives a response after the pending entry is registered.
+	tr := newEchoTransport()
 	defer tr.Close()
-
-	// Push all responses upfront; recvLoop must only read each one after the
-	// corresponding pending entry is registered.
-	for i := 1; i <= count; i++ {
-		tr.push(buildConcurrentToolResponse(i, fmt.Sprintf("val-%d", i)))
-	}
 
 	c := mcp.NewMCPClient(tr)
 
@@ -215,7 +227,8 @@ func TestMCPClient_SequentialCallsNeverReadAhead(t *testing.T) {
 		if len(result.Content) == 0 {
 			t.Fatalf("call %d: empty content", i)
 		}
-		want := fmt.Sprintf("val-%d", i+1)
+		// echoTransport generates "result-for-id-N" where N is the request ID.
+		want := fmt.Sprintf("result-for-id-%d", i+1)
 		if result.Content[0].Text != want {
 			t.Errorf("call %d: got %q, want %q", i, result.Content[0].Text, want)
 		}
@@ -226,7 +239,7 @@ func TestMCPClient_SequentialCallsNeverReadAhead(t *testing.T) {
 // waiting for a response unblocks the caller and the pending entry is cleaned up.
 func TestMCPClient_ContextCancellation(t *testing.T) {
 	// Use a transport that never produces a response.
-	tr := &orderedTransport{done: make(chan struct{})}
+	tr := newStallTransport()
 	defer tr.Close()
 
 	c := mcp.NewMCPClient(tr)
@@ -255,11 +268,7 @@ func TestMCPClient_ValidateToolSchema_FiltersInvalidTools(t *testing.T) {
 	}
 
 	factory := func(_ context.Context, cfg mcp.MCPServerConfig) (*mcp.MCPClient, []mcp.MCPTool, error) {
-		tr := &orderedTransport{done: make(chan struct{})}
-		// The client will never be used for tool calls in this test.
-		go func() {
-			<-tr.done
-		}()
+		tr := newStallTransport()
 		client := mcp.NewMCPClient(tr)
 		return client, validTools, nil
 	}

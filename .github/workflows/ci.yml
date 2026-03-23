@@ -63,5 +63,5 @@ jobs:
         shell: pwsh
 
       - name: Smoke test
-        run: .\huginn.exe help
+        run: .\huginn.exe version
         shell: pwsh

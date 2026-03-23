@@ -388,9 +388,11 @@ func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, re
 	activityCh := make(chan struct{}, 1)
 
 	// Watchdog: cancel streamCtx (and therefore close resp.Body) if no activity
-	// is observed within streamStallTimeout.
+	// is observed within streamStallTimeout. Capture the timeout once so the
+	// goroutine never races against test code mutating the global.
+	stallTimeout := streamStallTimeout
 	go func() {
-		timer := time.NewTimer(streamStallTimeout)
+		timer := time.NewTimer(stallTimeout)
 		defer timer.Stop()
 		for {
 			select {
@@ -404,11 +406,11 @@ func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, re
 					default:
 					}
 				}
-				timer.Reset(streamStallTimeout)
+				timer.Reset(stallTimeout)
 			case <-timer.C:
-				// No activity for streamStallTimeout — abort the stream.
+				// No activity for stallTimeout — abort the stream.
 				slog.Warn("anthropic: SSE stream idle timeout, aborting",
-					"timeout", streamStallTimeout)
+					"timeout", stallTimeout)
 				resp.Body.Close()
 				streamCancel()
 				return
@@ -478,7 +480,7 @@ func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, re
 		// If the stream was aborted due to an idle timeout, return a more
 		// descriptive error rather than the raw I/O error from the closed body.
 		if streamCtx.Err() != nil {
-			return nil, fmt.Errorf("SSE stream aborted: idle timeout after %s", streamStallTimeout)
+			return nil, fmt.Errorf("SSE stream aborted: idle timeout after %s", stallTimeout)
 		}
 		return nil, fmt.Errorf("reading SSE stream: %w", err)
 	}
@@ -486,7 +488,7 @@ func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, re
 	// If the scanner finished cleanly but the stream context was cancelled due
 	// to the idle watchdog, surface that as an error.
 	if streamCtx.Err() != nil {
-		return nil, fmt.Errorf("SSE stream aborted: idle timeout after %s", streamStallTimeout)
+		return nil, fmt.Errorf("SSE stream aborted: idle timeout after %s", stallTimeout)
 	}
 
 	return result, nil
