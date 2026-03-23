@@ -101,7 +101,12 @@ func openTerminalWindows() error {
 	return exec.Command("cmd.exe", "/C", "start", "cmd").Start()
 }
 
-// openURL opens a URL in the system's default browser.
+// OpenURL opens a URL in the system's default browser.
+func OpenURL(url string) error {
+	return openURLFn(url)
+}
+
+// openURL is the internal alias used within the tray package.
 func openURL(url string) error {
 	return openURLFn(url)
 }

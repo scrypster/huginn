@@ -427,9 +427,9 @@ func main() {
 		}
 
 		// If runtime or models aren't ready, skip managed backend and start anyway.
-		// Users can run 'huginn init' to set up local models when ready.
+		// Users can configure a local model via the web UI (huginn serve).
 		if needsOnboarding(mgr, managedStore) {
-			fmt.Fprintln(os.Stderr, "huginn: local model not set up — run 'huginn init' to configure. Starting without local model.")
+			fmt.Fprintln(os.Stderr, "huginn: local model not set up — configure via the web UI. Starting without local model.")
 			b = backend.NewExternalBackend(cfg.Backend.Endpoint)
 			break
 		}
@@ -447,7 +447,7 @@ func main() {
 			break
 		}
 		if modelPath == "" {
-			fmt.Fprintln(os.Stderr, "huginn: no models installed — run 'huginn init'. Starting without local model.")
+			fmt.Fprintln(os.Stderr, "huginn: no models installed — install via the web UI. Starting without local model.")
 			b = backend.NewExternalBackend(cfg.Backend.Endpoint)
 			break
 		}
@@ -1181,32 +1181,21 @@ func systemRAMGB() int {
 	return 16
 }
 
-// cmdInit runs the interactive local model setup wizard.
+// cmdInit prints setup guidance and directs users to the web UI.
+// The old Ollama-only wizard has been replaced: provider setup (Anthropic,
+// OpenAI, Ollama, etc.) and agent creation are handled through the web UI.
 func cmdInit() error {
-	huginnHome, err := huginnDir()
-	if err != nil {
-		return err
+	cfg, _ := config.Load()
+	port := 8421
+	if cfg != nil && cfg.WebUI.Port != 0 {
+		port = cfg.WebUI.Port
 	}
-	mgr, err := runtime.NewManager(huginnHome)
-	if err != nil {
-		return err
-	}
-	store, err := modelslib.NewStore(huginnHome)
-	if err != nil {
-		return err
-	}
-	onboard := tui.NewOnboarding(mgr, store, systemRAMGB())
-	p := tea.NewProgram(onboard, tea.WithAltScreen())
-	finalModel, runErr := p.Run()
-	if runErr != nil {
-		return fmt.Errorf("onboarding: %w", runErr)
-	}
-	om := finalModel.(*tui.OnboardingModel)
-	if !om.IsDone() {
-		fmt.Fprintln(os.Stderr, "Setup cancelled.")
-		return nil
-	}
-	fmt.Fprintf(os.Stdout, "Local model ready: %s\n", om.SelectedModel())
+	fmt.Printf("\nWelcome to Huginn!\n\n")
+	fmt.Printf("Setup is done through the web UI. To get started:\n\n")
+	fmt.Printf("  1. Start the server:   huginn serve\n")
+	fmt.Printf("  2. Open your browser:  http://127.0.0.1:%d\n\n", port)
+	fmt.Printf("From the web UI you can add an API key (Anthropic, OpenAI, etc.),\n")
+	fmt.Printf("configure a local model via Ollama, and create your first agent.\n\n")
 	return nil
 }
 
@@ -2920,10 +2909,22 @@ func cmdServe(cfg *config.Config, noTray, foreground, daemon bool) {
 		}
 		_ = cmd.Process.Release()
 		logFile.Close() // child has the fd; parent can close its copy
+		webURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.WebUI.Port)
 		fmt.Printf("Huginn server starting...\n")
-		fmt.Printf("  Web UI:  http://127.0.0.1:%d\n", cfg.WebUI.Port)
+		fmt.Printf("  Web UI:  %s\n", webURL)
 		fmt.Printf("  Logs:    %s\n", logPath)
 		fmt.Printf("  Token:   %s\n", filepath.Join(huginnHome, "server.token"))
+
+		// On first run (no agents configured), open the browser automatically
+		// so users land directly in the web UI to complete setup.
+		agentCfg, agentErr := agentslib.LoadAgents()
+		isFirstRun := agentErr != nil || agentCfg == nil || len(agentCfg.Agents) == 0
+		if isFirstRun {
+			fmt.Printf("\n  Opening browser for first-time setup...\n")
+			// Give the daemon a moment to bind before the browser hits it.
+			time.Sleep(1500 * time.Millisecond)
+			_ = traypkg.OpenURL(webURL)
+		}
 		return
 	}
 
