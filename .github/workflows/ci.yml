@@ -128,3 +128,23 @@ jobs:
 
       - name: Run shellcheck
         run: shellcheck install.sh
+
+  # ── Auto-forward main ─────────────────────────────────────────────────────
+  # When all checks pass on develop, fast-forward main to match.
+  promote-main:
+    name: Promote develop → main
+    runs-on: ubuntu-latest
+    needs: [go, windows, playwright-e2e, shellcheck]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fast-forward main to develop
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git push origin HEAD:main
