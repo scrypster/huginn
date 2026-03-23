@@ -20,21 +20,25 @@ jobs:
             goos: darwin
             goarch: arm64
             cc: ""
+            cgo: "1"
 
           - runner: macos-14
             goos: darwin
             goarch: amd64
             cc: "clang -arch x86_64"
+            cgo: "1"
 
           - runner: ubuntu-latest
             goos: linux
             goarch: amd64
             cc: ""
+            cgo: "0"
 
           - runner: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             cc: ""
+            cgo: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +61,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ matrix.cgo }}
           CC: ${{ matrix.cc }}
         run: |
           go build \
