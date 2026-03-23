@@ -155,6 +155,16 @@ export async function fetchToken(): Promise<string> {
 }
 
 export async function apiFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
+  // Auto-fetch token on first use if App.vue hasn't initialized it yet.
+  // Vue 3 fires child onMounted() before parent onMounted(), so views that
+  // make API calls on mount can race ahead of initApp()/setToken().
+  if (!token.value) {
+    try {
+      const tok = await fetchToken()
+      setToken(tok)
+    } catch { /* proceed; 401 retry below will recover */ }
+  }
+
   const res = await fetch(path, {
     ...opts,
     headers: {

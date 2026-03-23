@@ -2061,9 +2061,7 @@ async function deleteAgent() {
 }
 
 function createNew() {
-  // Navigate to /agents/new — handled by same view but with preset form
-  form.value = { name: '', model: '', system_prompt: '', color: '#58a6ff', icon: '', memory_type: 'none', memory_enabled: false, context_notes_enabled: false, vault_name: '', memory_mode: 'conversational', vault_description: '', toolbelt: [], skills: [], local_tools: [] }
-  dirty.value = true
+  router.push('/agents/new')
 }
 
 watch(() => props.agentName, (name) => {

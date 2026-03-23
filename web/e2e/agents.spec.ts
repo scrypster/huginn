@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { setupApiMocks } from './helpers/mock-api'
-import { blockWS } from './helpers/mock-ws'
+import { blockWS, setupConnectedWS } from './helpers/mock-ws'
 
 /**
  * Navigate to the agents section.
@@ -80,16 +80,21 @@ test.describe('AgentsView — Toolbelt', () => {
     await expect(addBtn).toBeVisible()
   })
 
-  test('new agent button is present in empty state', async ({ page }) => {
+  test('new agent button navigates to /agents/new and shows editor form', async ({ page }) => {
     await gotoAgents(page)
 
     // With no agent selected the empty-state panel renders new-agent-btn
     const newBtn = page.locator('[data-testid="new-agent-btn"]')
     await expect(newBtn).toBeVisible()
 
-    // Clicking should not throw or navigate away — agent list stays visible
     await newBtn.click()
-    await expect(page.locator('[data-testid="agent-list"]')).toBeVisible()
+
+    // Must navigate to /agents/new — not stay on /agents
+    await expect(page).toHaveURL(/#\/agents\/new/, { timeout: 3000 })
+
+    // The agent name input must be visible (editor opened)
+    const nameInput = page.locator('input[placeholder="Agent name"]')
+    await expect(nameInput).toBeVisible({ timeout: 3000 })
   })
 
   test('save button is present on agent editor', async ({ page }) => {
@@ -105,5 +110,113 @@ test.describe('AgentsView — Toolbelt', () => {
 
     const saveBtn = page.locator('[data-testid="save-agent-btn-sticky"]')
     await expect(saveBtn).toBeVisible()
+  })
+})
+
+// ── Fresh-install: no agents configured ──────────────────────────────────────
+
+test.describe('AgentsView — fresh install (no agents)', () => {
+  test.beforeEach(async ({ page }) => {
+    await blockWS(page)
+    await setupApiMocks(page)
+
+    // Override agents list to empty — simulates brand-new install.
+    await page.route('**/api/v1/agents', route => {
+      if (route.request().method() === 'GET') return route.fulfill({ json: [] })
+      return route.continue()
+    })
+    await page.route('**/api/v1/agents/active', route => {
+      if (route.request().method() === 'GET') return route.fulfill({ status: 404, json: { error: 'no active agent' } })
+      return route.continue()
+    })
+  })
+
+  test('sidebar shows blank-canvas empty state with no phantom agents', async ({ page }) => {
+    await page.goto('/#/')
+    await page.waitForSelector('nav', { timeout: 5000 })
+    await page.click('button:has-text("Agents")')
+    await page.waitForSelector('[data-testid="agent-list"]', { timeout: 5000 })
+
+    const list = page.locator('[data-testid="agent-list"]')
+    await expect(list).toContainText('No agents configured')
+    await expect(list.locator('[data-testid="agent-item"]')).toHaveCount(0)
+  })
+
+  test('New agent button navigates to editor on fresh install', async ({ page }) => {
+    await page.goto('/#/')
+    await page.waitForSelector('nav', { timeout: 5000 })
+    await page.click('button:has-text("Agents")')
+    await page.waitForSelector('[data-testid="new-agent-btn"]', { timeout: 5000 })
+
+    await page.click('[data-testid="new-agent-btn"]')
+
+    await expect(page).toHaveURL(/#\/agents\/new/, { timeout: 3000 })
+    await expect(page.locator('input[placeholder="Agent name"]')).toBeVisible({ timeout: 3000 })
+  })
+
+  test('can create and save first agent on fresh install', async ({ page }) => {
+    let saveRequestMade = false
+
+    await page.route('**/api/v1/agents/FirstAgent', route => {
+      if (route.request().method() === 'PUT') {
+        saveRequestMade = true
+        return route.fulfill({ json: { name: 'FirstAgent', model: '', icon: 'F', color: '#58a6ff', is_default: false, memory_enabled: false, vault_name: '', toolbelt: [] } })
+      }
+      return route.continue()
+    })
+    // After save, list returns the new agent.
+    let agentCreated = false
+    await page.route('**/api/v1/agents', route => {
+      if (route.request().method() === 'GET') {
+        return route.fulfill({ json: agentCreated ? [{ name: 'FirstAgent', model: '', icon: 'F', color: '#58a6ff', is_default: false, memory_enabled: false, vault_name: '', toolbelt: [] }] : [] })
+      }
+      return route.continue()
+    })
+
+    await page.goto('/#/agents/new')
+    await page.waitForSelector('input[placeholder="Agent name"]', { timeout: 5000 })
+
+    await page.fill('input[placeholder="Agent name"]', 'FirstAgent')
+    agentCreated = true
+
+    const saveBtn = page.locator('[data-testid="save-agent-btn-sticky"]')
+    await expect(saveBtn).toBeVisible({ timeout: 3000 })
+    await saveBtn.click()
+
+    // Save sends PUT to /api/v1/agents/FirstAgent and shows confirmation.
+    // Page stays on /agents/new (no redirect after save — user can keep editing).
+    expect(saveRequestMade).toBe(true)
+    await expect(page.locator('text=Saved successfully')).toBeVisible({ timeout: 3000 })
+  })
+})
+
+// ── Token initialization race guard ──────────────────────────────────────────
+
+test.describe('AgentsView — token auto-init race', () => {
+  test('page loads without 401 errors when token endpoint is slow', async ({ page }) => {
+    // Simulate the Vue 3 race: child onMounted fires before parent initApp() completes.
+    // The token endpoint takes 400ms to respond — longer than typical component mount.
+    let firstCall = true
+    await page.route('**/api/v1/token', async route => {
+      if (firstCall) {
+        firstCall = false
+        await new Promise(r => setTimeout(r, 400))
+      }
+      return route.fulfill({ json: { token: 'slow-token' } })
+    })
+
+    await page.route('**/api/v1/**', route => route.fulfill({ status: 200, json: {} }))
+    await page.route('**/api/v1/agents', route => route.fulfill({ json: [] }))
+    await page.route('**/api/v1/agents/active', route => route.fulfill({ status: 404, json: {} }))
+    await blockWS(page)
+
+    await page.goto('/#/agents')
+
+    const agentList = page.locator('[data-testid="agent-list"]')
+    await expect(agentList).toBeVisible({ timeout: 8000 })
+
+    // No auth error should surface to the user.
+    await expect(page.locator('text=401')).toHaveCount(0)
+    await expect(page.locator('text=Unauthorized')).toHaveCount(0)
   })
 })
