@@ -5,14 +5,19 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
-	"image/jpeg"
 	_ "image/gif"
-	_ "image/png"
+	"image/jpeg"
+	"image/png"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// ImageOptions controls encoding behaviour in ResizeIfNeededWithOpts.
+type ImageOptions struct {
+	JPEGQuality int // 0 means use default (85)
+}
 
 const (
 	DefaultMaxSizeKB    = 20480 // 20 MB
@@ -112,8 +117,15 @@ func ReadImageAsDataURI(path string, maxSizeKB int) (string, error) {
 
 // ResizeIfNeeded downscales the image if either dimension exceeds maxDim.
 // Returns the original data unchanged if resize fails or is not needed.
-// Only processes JPEG/PNG/GIF (webp is returned as-is after decode failure).
+// ResizeIfNeeded resizes data to fit within maxDim using default encoding options.
+// PNG images are re-encoded as PNG (preserving alpha); all others become JPEG.
 func ResizeIfNeeded(data []byte, maxDim int) []byte {
+	return ResizeIfNeededWithOpts(data, maxDim, ImageOptions{})
+}
+
+// ResizeIfNeededWithOpts resizes data to fit within maxDim using the given options.
+// PNG images are re-encoded as PNG (preserving alpha); all others become JPEG.
+func ResizeIfNeededWithOpts(data []byte, maxDim int, opts ImageOptions) []byte {
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return data // can't decode, return original
@@ -138,14 +150,19 @@ func ResizeIfNeeded(data []byte, maxDim int) []byte {
 
 	resized := resizeNearest(img, newW, newH)
 
+	quality := opts.JPEGQuality
+	if quality <= 0 {
+		quality = 85
+	}
+
 	var buf bytes.Buffer
 	switch format {
 	case "png":
-		if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 85}); err != nil {
+		if err := png.Encode(&buf, resized); err != nil {
 			return data
 		}
 	default: // jpeg, gif, and others — encode as JPEG
-		if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 85}); err != nil {
+		if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: quality}); err != nil {
 			return data
 		}
 	}
