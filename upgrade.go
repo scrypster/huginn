@@ -234,6 +234,11 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 		return err
 	}
 
+	// Back up the current binary before replacing it, so we can restore on failure.
+	hDir, _ := u.HuginnDirFn()
+	backupPath := filepath.Join(hDir, "huginn.backup")
+	_ = copyFile(exePath, backupPath) // best-effort; ignore error if exePath doesn't exist yet
+
 	// Atomic install — rename with cross-device fallback.
 	if err := upgradeStep("Installing...", func() error {
 		return atomicReplace(tmpPath, exePath)
@@ -241,6 +246,15 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 		return err
 	}
 	tmpCleanup = "" // binary is installed; don't delete it
+
+	// Verify the installed binary starts correctly; restore backup on failure.
+	if err := verifyHuginnBinary(exePath, latest); err != nil {
+		if backupPath != "" {
+			_ = atomicReplace(backupPath, exePath)
+		}
+		return fmt.Errorf("installed binary failed verification, restored backup: %w", err)
+	}
+	_ = os.Remove(backupPath) // clean up backup on success
 
 	// macOS: re-sign the new binary so the next launch doesn't need to re-exec.
 	if goos == "darwin" {
@@ -491,6 +505,32 @@ func verifyHuginnBinary(path, expectedTag string) error {
 			strings.TrimSpace(string(out)), want)
 	}
 	return nil
+}
+
+// copyFile copies src to dst, creating dst if necessary.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.CreateTemp(filepath.Dir(dst), ".huginn-backup-*")
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(out.Name())
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(out.Name())
+		return err
+	}
+	return os.Rename(out.Name(), dst)
 }
 
 // upgradeStep prints a labeled step, runs f(), and prints ✓ or ✗.
