@@ -268,6 +268,39 @@ func main() {
 			Command: *commandFlag,
 			JSON:    *jsonFlag,
 		}
+		// When --print is also set, wire the agent runner so the headless pipeline
+		// runs the prompt and includes the output in the result (fixes mutual exclusion bug).
+		if *printFlag != "" {
+			hcfg.Prompt = *printFlag
+			hcfg.Agent = *agentFlag
+			endpoint := cfg.Backend.Endpoint
+			if *endpointFlag != "" {
+				endpoint = *endpointFlag
+			}
+			if endpoint == "" {
+				endpoint = "http://localhost:11434"
+			}
+			hlBackend := backend.NewExternalBackend(endpoint)
+			hlModels := modelconfig.DefaultModels()
+			hlOrch, orchErr := agent.NewOrchestrator(hlBackend, hlModels, nil, nil, nil, nil)
+			if orchErr != nil {
+				fatalf("headless: orchestrator init: %v", orchErr)
+			}
+			hcfg.AgentRun = func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
+				var buf strings.Builder
+				var toolsCalled []string
+				chatErr := hlOrch.Chat(ctx, prompt, func(token string) {
+					buf.WriteString(token)
+				}, func(ev backend.StreamEvent) {
+					if ev.Type == backend.StreamToolCall {
+						if name, ok := ev.Payload["tool"].(string); ok && name != "" {
+							toolsCalled = append(toolsCalled, name)
+						}
+					}
+				})
+				return buf.String(), toolsCalled, 0, chatErr
+			}
+		}
 		result, err := headless.Run(hcfg)
 		if err != nil {
 			fatalf("headless: %v", err)
@@ -280,6 +313,9 @@ func main() {
 				result.Mode, result.Root, result.FilesScanned, result.FilesSkipped, len(result.TopFindings))
 			for _, f := range result.TopFindings {
 				fmt.Printf("  [%s] %s (score=%.1f)\n", f.Severity, f.Title, f.Score)
+			}
+			if result.AgentOutput != "" {
+				fmt.Println(result.AgentOutput)
 			}
 		}
 		return
