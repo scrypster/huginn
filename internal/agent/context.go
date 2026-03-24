@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -202,6 +203,19 @@ func (cb *ContextBuilder) BuildCtx(ctx context.Context, query string, modelName 
 	// Record stats.
 	if cb.stats != nil {
 		cb.stats.Record("agent.context_bytes", float64(len(result)), fmt.Sprintf("model:%s", modelName))
+	}
+
+	// Warn if the assembled context is approaching the model's token limit.
+	if cb.registry != nil {
+		if cw := cb.registry.ModelContextWindow(modelName); cw > 0 {
+			estimated := len(result) / 4 // rough: 1 token ≈ 4 bytes
+			if estimated > int(float64(cw)*0.85) {
+				slog.Warn("agent: context approaching model limit",
+					"model", modelName,
+					"estimated_tokens", estimated,
+					"context_window", cw)
+			}
+		}
 	}
 
 	return result

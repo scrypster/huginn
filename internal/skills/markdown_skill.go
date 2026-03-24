@@ -3,6 +3,7 @@ package skills
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -16,6 +17,7 @@ type MarkdownFrontmatter struct {
 	Author      string `yaml:"author,omitempty"`
 	Source      string `yaml:"source,omitempty"`
 	Description string `yaml:"description,omitempty"`
+	ToolsDir    string `yaml:"tools_dir,omitempty"`
 	Huginn      struct {
 		Priority int `yaml:"priority"`
 	} `yaml:"huginn,omitempty"`
@@ -26,6 +28,7 @@ type MarkdownSkill struct {
 	fm     MarkdownFrontmatter
 	prompt string
 	rules  string
+	dir    string // directory containing the SKILL.md file (for tools_dir resolution)
 }
 
 // LoadMarkdownSkill reads a SKILL.md file from disk and parses it.
@@ -35,7 +38,12 @@ func LoadMarkdownSkill(path string) (*MarkdownSkill, error) {
 		return nil, fmt.Errorf("skills: LoadMarkdownSkill %q: %w", path, err)
 	}
 
-	return ParseMarkdownSkillBytes(data)
+	s, err := ParseMarkdownSkillBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	s.dir = filepath.Dir(path)
+	return s, nil
 }
 
 // ParseMarkdownSkillBytes parses SKILL.md content from bytes.
@@ -143,7 +151,23 @@ func (s *MarkdownSkill) RuleContent() string {
 	return s.rules
 }
 
-// Tools returns nil (Phase 1: SKILL.md is knowledge-only, no tools).
+// Tools returns tools declared via the tools_dir frontmatter field.
+// If tools_dir is empty the skill is knowledge-only and nil is returned.
 func (s *MarkdownSkill) Tools() []tools.Tool {
-	return nil
+	if s.fm.ToolsDir == "" {
+		return nil
+	}
+	toolsDir := s.fm.ToolsDir
+	if !filepath.IsAbs(toolsDir) && s.dir != "" {
+		toolsDir = filepath.Join(s.dir, toolsDir)
+	}
+	promptTools, err := LoadToolsFromDir(toolsDir)
+	if err != nil || len(promptTools) == 0 {
+		return nil
+	}
+	result := make([]tools.Tool, len(promptTools))
+	for i, pt := range promptTools {
+		result[i] = pt
+	}
+	return result
 }

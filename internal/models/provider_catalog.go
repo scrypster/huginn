@@ -268,13 +268,29 @@ func TryRefreshProviderCatalog(cdnURL string, maxAge time.Duration) {
 		}
 
 		logger.Info("provider catalog: checking for updates", "url", cdnURL)
-		ctx := &http.Client{Timeout: 10 * time.Second}
-		resp, err := ctx.Get(cdnURL)
+		// Load a previously saved ETag to enable conditional GET (304 Not Modified).
+		etagPath := path + ".etag"
+		etag, _ := os.ReadFile(etagPath)
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest(http.MethodGet, cdnURL, nil)
+		if err != nil {
+			logger.Warn("provider catalog: CDN request build failed", "err", err)
+			return
+		}
+		if len(etag) > 0 {
+			req.Header.Set("If-None-Match", strings.TrimSpace(string(etag)))
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			logger.Warn("provider catalog: CDN fetch failed", "url", cdnURL, "err", err)
 			return
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotModified {
+			logger.Info("provider catalog: up to date (304 Not Modified)")
+			return
+		}
 		if resp.StatusCode != http.StatusOK {
 			logger.Warn("provider catalog: CDN returned non-200", "status", resp.StatusCode)
 			return
@@ -307,6 +323,10 @@ func TryRefreshProviderCatalog(cdnURL string, maxAge time.Duration) {
 		if err := atomicWriteFile(path, buf, 0644); err != nil {
 			logger.Warn("provider catalog: failed to save CDN catalog", "err", err)
 			return
+		}
+		// Persist the ETag so the next startup can send If-None-Match.
+		if newETag := resp.Header.Get("Etag"); newETag != "" {
+			_ = atomicWriteFile(etagPath, []byte(newETag), 0644)
 		}
 
 		// Apply to the live singleton.
