@@ -61,6 +61,7 @@ import (
 	"github.com/scrypster/huginn/internal/threadmgr"
 	"github.com/scrypster/huginn/internal/session"
 	agentsession "github.com/scrypster/huginn/internal/agent/session"
+	"github.com/scrypster/huginn/internal/artifact"
 	"github.com/scrypster/huginn/internal/tools"
 	traypkg "github.com/scrypster/huginn/internal/tray"
 	"github.com/scrypster/huginn/internal/tui"
@@ -376,6 +377,15 @@ func main() {
 		}
 	}
 	// sqlDB is used below for connection and memory stores (Phase 1+).
+
+	// Initialize artifact store if SQLite is available.
+	var artifactStore artifact.Store
+	if sqlDB != nil {
+		artifactsDir := filepath.Join(huginnHome, "artifacts")
+		if err := os.MkdirAll(artifactsDir, 0o700); err == nil {
+			artifactStore = artifact.NewStore(sqlDB.Write(), artifactsDir)
+		}
+	}
 
 	var memStore agentslib.MemoryStoreIface
 	if sqlDB != nil && store != nil {
@@ -703,6 +713,11 @@ func main() {
 			for _, t := range s.Tools() {
 				toolReg.Register(t)
 			}
+		}
+
+		// Register artifact tool (persists agent-produced documents, patches, data).
+		if artifactStore != nil {
+			toolReg.Register(tools.NewArtifactTool(artifactStore))
 		}
 
 		// Register LSP tools (graceful if no LSP configured)

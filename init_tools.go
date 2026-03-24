@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/huginn/internal/agent"
 	agentslib "github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/artifact"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
 	conntools "github.com/scrypster/huginn/internal/connections/tools"
@@ -21,7 +23,6 @@ import (
 	"github.com/scrypster/huginn/internal/symbol/lsp"
 	"github.com/scrypster/huginn/internal/tools"
 	"github.com/scrypster/huginn/internal/tui"
-	"sync/atomic"
 )
 
 // toolsResult holds the initialized tool registry, permission gate, and related state.
@@ -46,6 +47,7 @@ func initTools(
 	agentReg *agentslib.AgentRegistry,
 	orch *agent.Orchestrator,
 	dangerouslySkipPermissions bool,
+	artifactStore artifact.Store,
 ) toolsResult {
 	res := toolsResult{}
 
@@ -79,6 +81,11 @@ func initTools(
 		for _, t := range s.Tools() {
 			toolReg.Register(t)
 		}
+	}
+
+	// --- Artifact tool ---
+	if artifactStore != nil {
+		toolReg.Register(tools.NewArtifactTool(artifactStore))
 	}
 
 	// --- LSP tools ---
