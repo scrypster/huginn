@@ -8,14 +8,7 @@ import (
 	"github.com/scrypster/huginn/internal/search/hnsw"
 )
 
-const defaultRRFK = 60
-
-// HybridSearchConfig controls tunable parameters for hybrid search.
-type HybridSearchConfig struct {
-	// RRFK is the rank constant used in reciprocal rank fusion (default 60).
-	// Higher values reduce the impact of top-ranked results.
-	RRFK int
-}
+const rrfK = 60
 
 // HybridSearcher combines BM25 (keyword) and semantic (vector) search using reciprocal rank fusion.
 type HybridSearcher struct {
@@ -23,26 +16,15 @@ type HybridSearcher struct {
 	hnswIdx  *hnsw.Index
 	embedder Embedder
 	chunks   map[uint64]Chunk
-	rrfK     int
 }
 
 // NewHybridSearcher creates a hybrid searcher combining keyword and semantic approaches.
 func NewHybridSearcher(bm25 *BM25Searcher, hnswIdx *hnsw.Index, embedder Embedder) *HybridSearcher {
-	return NewHybridSearcherWithConfig(bm25, hnswIdx, embedder, HybridSearchConfig{})
-}
-
-// NewHybridSearcherWithConfig creates a hybrid searcher with custom configuration.
-func NewHybridSearcherWithConfig(bm25 *BM25Searcher, hnswIdx *hnsw.Index, embedder Embedder, cfg HybridSearchConfig) *HybridSearcher {
-	k := cfg.RRFK
-	if k <= 0 {
-		k = defaultRRFK
-	}
 	return &HybridSearcher{
 		bm25:     bm25,
 		hnswIdx:  hnswIdx,
 		embedder: embedder,
 		chunks:   make(map[uint64]Chunk),
-		rrfK:     k,
 	}
 }
 
@@ -96,7 +78,7 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, n int) ([]Chu
 
 	// Apply RRF to BM25 results
 	for rank, chunk := range bm25Results {
-		scores[chunk.ID] += 1.0 / float64(h.rrfK+rank+1)
+		scores[chunk.ID] += 1.0 / float64(rrfK+rank+1)
 	}
 
 	// Get semantic results if embedder and HNSW are available
@@ -108,7 +90,7 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, n int) ([]Chu
 			hnswIDs, _ := h.hnswIdx.Search(vec, n*2)
 			// Apply RRF to semantic results
 			for rank, id := range hnswIDs {
-				scores[id] += 1.0 / float64(h.rrfK+rank+1)
+				scores[id] += 1.0 / float64(rrfK+rank+1)
 			}
 		}
 	}
