@@ -1,6 +1,7 @@
 package headless
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -15,11 +16,24 @@ import (
 	"github.com/scrypster/huginn/internal/storage"
 )
 
+// AgentRunFunc is the signature for the optional agent execution callback.
+// main.go injects this when --print is also set, keeping internal/headless
+// free of agent/backend imports.
+// Returns (output, toolNames, tokenCount, err).
+type AgentRunFunc func(ctx context.Context, agentName, prompt, sessionID string) (output string, toolsCalled []string, tokensUsed int, err error)
+
 // HeadlessConfig holds configuration for a headless run.
 type HeadlessConfig struct {
 	CWD     string
 	Command string
 	JSON    bool
+	// Agent execution (optional). When Prompt is non-empty and AgentRun is set,
+	// the runner executes the prompt via the provided agent and populates
+	// RunResult.AgentOutput, ToolsCalled, and TokensUsed.
+	Prompt    string
+	Agent     string        // agent name; uses default if empty
+	SessionID string        // optional session ID for multi-turn
+	AgentRun  AgentRunFunc  // injected by main.go; nil means no agent execution
 }
 
 // FindingSummary is a trimmed representation of a radar Finding for JSON output.
@@ -45,9 +59,13 @@ type RunResult struct {
 	TopFindings     []FindingSummary `json:"topFindings"`
 	BannersEmitted  int              `json:"bannersEmitted"`
 	Errors          []string         `json:"errors,omitempty"`
+	// Agent output fields (populated when HeadlessConfig.Prompt != "").
+	AgentOutput string   `json:"agentOutput,omitempty"`
+	ToolsCalled []string `json:"toolsCalled,omitempty"`
+	TokensUsed  int      `json:"tokensUsed,omitempty"`
 }
 
-// Run executes the headless pipeline: detect → index → radar → return results.
+// Run executes the headless pipeline: detect → index → radar → (optional) agent prompt.
 func Run(cfg HeadlessConfig) (*RunResult, error) {
 	result := &RunResult{}
 
@@ -111,6 +129,18 @@ func Run(cfg HeadlessConfig) (*RunResult, error) {
 			result.BFSNodesVisited = radarResult.bfsNodes
 			result.TopFindings = radarResult.findings
 			result.BannersEmitted = radarResult.banners
+		}
+	}
+
+	// 5. Agent prompt execution (optional; injected by main.go via AgentRun).
+	if cfg.Prompt != "" && cfg.AgentRun != nil {
+		output, toolsCalled, tokens, agentErr := cfg.AgentRun(context.Background(), cfg.Agent, cfg.Prompt, cfg.SessionID)
+		if agentErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("agent: %v", agentErr))
+		} else {
+			result.AgentOutput = output
+			result.ToolsCalled = toolsCalled
+			result.TokensUsed = tokens
 		}
 	}
 
