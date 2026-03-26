@@ -599,12 +599,15 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if sessionID == "" {
 			sessionID = s.orch.SessionID()
 		}
+		// Echo run_id back so the client can correlate done/error events to the
+		// specific run that triggered them and avoid stale-event mis-fires.
+		runID := msg.RunID
 		userMsg := msg.Content
 		// Snapshot mentionDelegate under the lock so the goroutine doesn't race.
 		s.mu.Lock()
 		mentionDelegate := s.mentionDelegate
 		s.mu.Unlock()
-		go func() {
+		go func(runID string) {
 			onToken := func(token string) {
 				c.send <- WSMessage{Type: "token", Content: token, SessionID: sessionID}
 			}
@@ -621,10 +624,10 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			}
 			if err != nil {
 				logger.Error("chat completion", "session_id", sessionID, "err", err)
-				c.send <- WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID}
+				c.send <- WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID, RunID: runID}
 				return
 			}
-			c.send <- WSMessage{Type: "done", SessionID: sessionID}
+			c.send <- WSMessage{Type: "done", SessionID: sessionID, RunID: runID}
 
 			// Parse @AgentName mentions and spawn threads for any matched agents.
 			// This is the fallback delegation path for models that don't support tools.
@@ -638,7 +641,7 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 					s.emitSpaceActivity(sess.SpaceID())
 				}
 			}
-		}()
+		}(runID)
 	case "ping":
 		c.send <- WSMessage{Type: "pong"}
 
