@@ -8,12 +8,14 @@ const mockApiStats = vi.fn()
 const mockApiCost = vi.fn()
 const mockApiHealth = vi.fn()
 const mockApiSessionsList = vi.fn()
+const mockApiStatsHistory = vi.fn()
 
 vi.mock('../../composables/useApi', () => ({
   api: {
     stats: (...args: unknown[]) => mockApiStats(...args),
     cost: (...args: unknown[]) => mockApiCost(...args),
     health: (...args: unknown[]) => mockApiHealth(...args),
+    statsHistory: (...args: unknown[]) => mockApiStatsHistory(...args),
     sessions: {
       list: (...args: unknown[]) => mockApiSessionsList(...args),
     },
@@ -50,6 +52,7 @@ beforeEach(() => {
   mockApiCost.mockReset().mockResolvedValue(sampleCost)
   mockApiHealth.mockReset().mockResolvedValue(sampleHealth)
   mockApiSessionsList.mockReset().mockResolvedValue(sampleSessions)
+  mockApiStatsHistory.mockReset().mockResolvedValue([])
 })
 
 afterEach(() => {

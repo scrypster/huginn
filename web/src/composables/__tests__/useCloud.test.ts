@@ -16,6 +16,8 @@ function ok(body: unknown) {
 
 async function freshCloud() {
   vi.resetModules()
+  const apiMod = await import('../useApi')
+  apiMod.setToken('test-token')
   const mod = await import('../useCloud')
   return mod.useCloud()
 }

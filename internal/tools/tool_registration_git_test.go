@@ -609,32 +609,34 @@ func TestIntArg_WrongType(t *testing.T) {
 	}
 }
 
+// noGHReg is a sentinel gh path used in Execute tests to prevent any real gh CLI execution.
+// On GitHub Actions gh is authenticated; never fall through to the real binary in unit tests.
+const noGHReg = "/nonexistent/gh-test-sentinel"
+
 func TestGHPRListTool_Execute_LimitAsInt(t *testing.T) {
-	// Cover the int case in limit parsing. Will fail if gh is unavailable but covers branch.
-	tool := &GHPRListTool{}
-	// Pass limit as int (not float64).
+	// Cover the int case in limit parsing.
+	tool := &GHPRListTool{ghBase: ghBase{GHPath: noGHReg}}
 	_ = tool.Execute(context.Background(), map[string]any{"limit": 5})
-	// No assertion on error — we just need coverage.
 }
 
 func TestGHIssueListTool_Execute_LimitAsInt(t *testing.T) {
-	tool := &GHIssueListTool{}
+	tool := &GHIssueListTool{ghBase: ghBase{GHPath: noGHReg}}
 	_ = tool.Execute(context.Background(), map[string]any{"limit": 10})
 }
 
 func TestGHIssueListTool_Execute_LimitAsFloat(t *testing.T) {
-	tool := &GHIssueListTool{}
+	tool := &GHIssueListTool{ghBase: ghBase{GHPath: noGHReg}}
 	_ = tool.Execute(context.Background(), map[string]any{"limit": float64(10)})
 }
 
 func TestGHIssueListTool_Execute_WithLabel(t *testing.T) {
-	tool := &GHIssueListTool{}
+	tool := &GHIssueListTool{ghBase: ghBase{GHPath: noGHReg}}
 	_ = tool.Execute(context.Background(), map[string]any{"label": "bug"})
 }
 
 func TestGHPRCreateTool_Execute_WithDraftAndBase(t *testing.T) {
 	// Covers the draft and base branches.
-	tool := &GHPRCreateTool{}
+	tool := &GHPRCreateTool{ghBase: ghBase{GHPath: noGHReg}}
 	_ = tool.Execute(context.Background(), map[string]any{
 		"title": "My PR",
 		"body":  "Body text",
@@ -644,7 +646,7 @@ func TestGHPRCreateTool_Execute_WithDraftAndBase(t *testing.T) {
 }
 
 func TestGHIssueCreateTool_Execute_WithLabelAndAssignee(t *testing.T) {
-	tool := &GHIssueCreateTool{}
+	tool := &GHIssueCreateTool{ghBase: ghBase{GHPath: noGHReg}}
 	_ = tool.Execute(context.Background(), map[string]any{
 		"title":    "My Issue",
 		"body":     "Body text",

@@ -1,218 +1,208 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { ref } from 'vue'
 import SwarmStatus from '../SwarmStatus.vue'
-import type { SwarmState } from '../SwarmStatus.vue'
+import type { SwarmState, SwarmAgent } from '../../composables/useSwarmStatus'
+
+// Mock useSwarmStatus so we can control swarmState in tests
+const mockSwarmState = ref<SwarmState | null>(null)
+
+vi.mock('../../composables/useSwarmStatus', () => ({
+  useSwarmStatus: () => ({
+    swarmState: mockSwarmState,
+    isSwarmActive: ref(false),
+    clearSwarm: vi.fn(),
+  }),
+}))
+
+function makeAgent(overrides: Partial<SwarmAgent> = {}): SwarmAgent {
+  return {
+    id: 'agent-1',
+    name: 'Tom',
+    status: 'running',
+    output: '',
+    ...overrides,
+  }
+}
 
 function makeSwarm(overrides: Partial<SwarmState> = {}): SwarmState {
   return {
-    id: 'swarm-1',
-    name: 'auth system rebuild',
-    agents: [
-      { name: 'Tom', progress: 60, status: 'running', activeTools: 'bash, read_file' },
-      { name: 'Sarah', progress: 100, status: 'done' },
-      { name: 'DevOps', progress: 0, status: 'waiting', waitingOn: 'Tom' },
-    ],
-    completed: false,
+    sessionId: 'sess-1',
+    agents: [makeAgent()],
+    complete: false,
+    cancelled: false,
+    droppedEvents: 0,
     ...overrides,
   }
 }
 
 describe('SwarmStatus', () => {
+  beforeEach(() => {
+    mockSwarmState.value = null
+  })
 
-  // ── In-progress rendering ─────────────────────────────────────────────
+  it('renders nothing when swarmState is null', () => {
+    mockSwarmState.value = null
+    const wrapper = mount(SwarmStatus)
+    expect(wrapper.find('.swarm-status').exists()).toBe(false)
+  })
+
+  // ── In-progress rendering ──────────────────────────────────────────
 
   describe('in-progress swarm', () => {
-    it('renders the swarm name', () => {
-      const wrapper = mount(SwarmStatus, { props: { swarm: makeSwarm() } })
-      expect(wrapper.html()).toContain('auth system rebuild')
+    it('renders "Swarm running" for in-progress swarms', () => {
+      mockSwarmState.value = makeSwarm()
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('Swarm running')
     })
 
     it('renders all agent names', () => {
-      const wrapper = mount(SwarmStatus, { props: { swarm: makeSwarm() } })
-      expect(wrapper.html()).toContain('Tom')
-      expect(wrapper.html()).toContain('Sarah')
-      expect(wrapper.html()).toContain('DevOps')
-    })
-
-    it('renders progress bars using block chars', () => {
-      const wrapper = mount(SwarmStatus, { props: { swarm: makeSwarm() } })
-      const html = wrapper.html()
-      // Tom at 60% => 3 filled, 2 empty out of 5 chars
-      expect(html).toContain('█')
-      expect(html).toContain('░')
-    })
-
-    it('shows done checkmark for completed agents', () => {
-      const wrapper = mount(SwarmStatus, { props: { swarm: makeSwarm() } })
-      expect(wrapper.html()).toContain('done ✓')
-    })
-
-    it('shows waiting-on for waiting agents', () => {
-      const wrapper = mount(SwarmStatus, { props: { swarm: makeSwarm() } })
-      expect(wrapper.html()).toContain('waiting on Tom')
-    })
-
-    it('shows active tools for running agents', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            agents: [
-              { name: 'Tom', progress: 50, status: 'running', activeTools: 'bash, read_file' },
-            ],
-          }),
-        },
+      mockSwarmState.value = makeSwarm({
+        agents: [
+          makeAgent({ id: '1', name: 'Tom', status: 'running' }),
+          makeAgent({ id: '2', name: 'Sarah', status: 'done' }),
+          makeAgent({ id: '3', name: 'DevOps', status: 'waiting' }),
+        ],
       })
-      expect(wrapper.html()).toContain('bash, read_file')
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('Tom')
+      expect(wrapper.text()).toContain('Sarah')
+      expect(wrapper.text()).toContain('DevOps')
     })
 
-    it('shows "Swarm: name" prefix for in-progress', () => {
-      const wrapper = mount(SwarmStatus, { props: { swarm: makeSwarm() } })
-      expect(wrapper.html()).toContain('Swarm:')
-      expect(wrapper.html()).not.toContain('Swarm complete:')
+    it('shows running indicator ◉ for running agents', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [makeAgent({ id: '1', name: 'Tom', status: 'running' })],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.html()).toContain('◉')
+    })
+
+    it('shows checkmark ✓ for done agents with success', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [makeAgent({ id: '1', name: 'Tom', status: 'done', success: true })],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.html()).toContain('✓')
+    })
+
+    it('shows error icon ✗ for failed agents', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [makeAgent({ id: '1', name: 'Tom', status: 'error' })],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.html()).toContain('✗')
+    })
+
+    it('shows agent output text', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [makeAgent({ id: '1', name: 'Tom', status: 'running', output: 'Building code...' })],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('Building code...')
+    })
+
+    it('shows agent error text', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [makeAgent({ id: '1', name: 'Tom', status: 'error', error: 'timeout exceeded' })],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('timeout exceeded')
+    })
+
+    it('shows agent count in header', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [
+          makeAgent({ id: '1', name: 'Tom' }),
+          makeAgent({ id: '2', name: 'Sarah', status: 'done' }),
+          makeAgent({ id: '3', name: 'DevOps', status: 'waiting' }),
+        ],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('3 agents')
+    })
+
+    it('renders with empty agents array', () => {
+      mockSwarmState.value = makeSwarm({ agents: [] })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.find('.swarm-status').exists()).toBe(true)
     })
   })
 
-  // ── Completed rendering ───────────────────────────────────────────────
+  // ── Completed rendering ────────────────────────────────────────────
 
   describe('completed swarm', () => {
-    it('renders "Swarm complete:" for completed swarms', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            completed: true,
-            agentCount: 3,
-            durationMs: 252000,
-            artifactCount: 3,
-          }),
-        },
-      })
-      expect(wrapper.html()).toContain('Swarm complete:')
+    it('renders "Swarm complete" for completed swarms', () => {
+      mockSwarmState.value = makeSwarm({ complete: true })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('Swarm complete')
     })
 
-    it('shows agent count in completion line', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            completed: true,
-            agentCount: 3,
-            durationMs: 60000,
-            artifactCount: 2,
-          }),
-        },
-      })
-      expect(wrapper.html()).toContain('3 agents')
+    it('does not render "Swarm running" when complete', () => {
+      mockSwarmState.value = makeSwarm({ complete: true })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).not.toContain('Swarm running')
     })
 
-    it('shows duration in completion line', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            completed: true,
-            agentCount: 2,
-            durationMs: 252000, // 4m 12s
-            artifactCount: 0,
-          }),
-        },
-      })
-      expect(wrapper.html()).toContain('4m 12s')
-    })
-
-    it('shows artifact count in completion line', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            completed: true,
-            agentCount: 1,
-            durationMs: 10000,
-            artifactCount: 5,
-          }),
-        },
-      })
-      expect(wrapper.html()).toContain('5 artifacts')
-    })
-
-    it('does not render agent progress bars when completed', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            completed: true,
-            agentCount: 2,
-            durationMs: 5000,
-            artifactCount: 1,
-          }),
-        },
-      })
-      // The in-progress agents div should not be rendered
-      expect(wrapper.find('.swarm-agent').exists()).toBe(false)
+    it('shows (cancelled) when swarm is cancelled', () => {
+      mockSwarmState.value = makeSwarm({ complete: true, cancelled: true })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('cancelled')
     })
   })
 
-  // ── Progress bar computation ──────────────────────────────────────────
+  // ── Dropped events warning ─────────────────────────────────────────
 
-  describe('progress bar rendering', () => {
-    it('full progress (100%) shows all filled chars', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            agents: [{ name: 'Agent', progress: 100, status: 'done' }],
-          }),
-        },
-      })
-      // 5 filled blocks
-      expect(wrapper.html()).toContain('█████')
+  describe('dropped events warning', () => {
+    it('shows warning when droppedEvents > 0', () => {
+      mockSwarmState.value = makeSwarm({ droppedEvents: 5 })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('5 event(s) dropped')
     })
 
-    it('zero progress (0%) shows all empty chars', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({
-            agents: [{ name: 'Agent', progress: 0, status: 'waiting' }],
-          }),
-        },
-      })
-      expect(wrapper.html()).toContain('░░░░░')
+    it('does not show warning when droppedEvents = 0', () => {
+      mockSwarmState.value = makeSwarm({ droppedEvents: 0 })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.html()).not.toContain('dropped')
     })
   })
 
-  // ── Updates when swarm_status event arrives ───────────────────────────
+  // ── Agent list class ───────────────────────────────────────────────
+
+  describe('agent list rendering', () => {
+    it('renders each agent with .swarm-agent class', () => {
+      mockSwarmState.value = makeSwarm({
+        agents: [
+          makeAgent({ id: '1', name: 'Agent1' }),
+          makeAgent({ id: '2', name: 'Agent2', status: 'done' }),
+        ],
+      })
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.findAll('.swarm-agent')).toHaveLength(2)
+    })
+  })
+
+  // ── Reactive updates ───────────────────────────────────────────────
 
   describe('reactive updates', () => {
-    it('re-renders when swarm prop updates', async () => {
-      const swarm = makeSwarm()
-      const wrapper = mount(SwarmStatus, { props: { swarm } })
-      expect(wrapper.html()).toContain('Swarm:')
+    it('re-renders when swarmState changes from running to complete', async () => {
+      mockSwarmState.value = makeSwarm()
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.text()).toContain('Swarm running')
 
-      await wrapper.setProps({
-        swarm: {
-          ...swarm,
-          completed: true,
-          agentCount: 3,
-          durationMs: 30000,
-          artifactCount: 1,
-        },
-      })
-
-      expect(wrapper.html()).toContain('Swarm complete:')
-    })
-  })
-
-  // ── Edge cases ────────────────────────────────────────────────────────
-
-  describe('edge cases', () => {
-    it('renders with empty agents array', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: { swarm: makeSwarm({ agents: [] }) },
-      })
-      expect(wrapper.html()).toContain('auth system rebuild')
+      mockSwarmState.value = makeSwarm({ complete: true })
+      await wrapper.vm.$nextTick()
+      expect(wrapper.text()).toContain('Swarm complete')
     })
 
-    it('renders with undefined durationMs', () => {
-      const wrapper = mount(SwarmStatus, {
-        props: {
-          swarm: makeSwarm({ completed: true, agentCount: 1, durationMs: undefined, artifactCount: 0 }),
-        },
-      })
-      expect(wrapper.html()).toContain('0s')
+    it('hides when swarmState is set to null', async () => {
+      mockSwarmState.value = makeSwarm()
+      const wrapper = mount(SwarmStatus)
+      expect(wrapper.find('.swarm-status').exists()).toBe(true)
+
+      mockSwarmState.value = null
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('.swarm-status').exists()).toBe(false)
     })
   })
 })
