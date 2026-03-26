@@ -14,16 +14,20 @@ const mockGetMessages = vi.fn((id: string) => {
 const mockFormatSessionLabel = vi.fn((s: any) => s?.title || s?.id?.slice(0, 8) || '')
 const mockRenameSession = vi.fn()
 
-vi.mock('../../composables/useSessions', () => ({
-  useSessions: () => ({
-    sessions: mockSessions,
-    getMessages: mockGetMessages,
-    fetchMessages: vi.fn().mockResolvedValue(undefined),
-    formatSessionLabel: mockFormatSessionLabel,
-    renameSession: mockRenameSession,
-    queueIfHydrating: (_sessionId: string, _handler: () => void) => false,
-  }),
-}))
+vi.mock('../../composables/useSessions', () => {
+  const { ref } = require('vue')
+  return {
+    hydrationQueueOverflowed: ref(false),
+    useSessions: () => ({
+      sessions: mockSessions,
+      getMessages: mockGetMessages,
+      fetchMessages: vi.fn().mockResolvedValue(undefined),
+      formatSessionLabel: mockFormatSessionLabel,
+      renameSession: mockRenameSession,
+      queueIfHydrating: (_sessionId: string, _handler: () => void) => false,
+    }),
+  }
+})
 
 const mockGetSessionThreads = vi.fn().mockReturnValue([])
 const mockGetActiveThreadCount = vi.fn().mockReturnValue(0)

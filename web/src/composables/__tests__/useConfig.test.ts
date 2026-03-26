@@ -46,6 +46,8 @@ const baseConfig = {
 
 async function freshUseConfig() {
   vi.resetModules()
+  const apiMod = await import('../useApi')
+  apiMod.setToken('test-token')
   const mod = await import('../useConfig')
   return mod.useConfig
 }

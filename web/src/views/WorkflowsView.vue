@@ -1036,10 +1036,17 @@ async function cancelRun() {
   }
 }
 
-async function confirmDelete() {
+const pendingDelete = ref<{ id: string; name: string } | null>(null)
+
+function confirmDelete() {
   if (!selectedWorkflow.value) return
-  if (!confirm(`Delete "${selectedWorkflow.value.name}"? This cannot be undone.`)) return
-  await deleteWorkflow(selectedWorkflow.value.id)
+  pendingDelete.value = selectedWorkflow.value
+}
+
+async function doDeleteWorkflow() {
+  if (!pendingDelete.value) return
+  await deleteWorkflow(pendingDelete.value.id)
+  pendingDelete.value = null
   closeWorkflow()
 }
 

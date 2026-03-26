@@ -15,6 +15,8 @@ const sampleAgents = [
 // Reset module cache between tests so agents singleton is fresh
 async function freshUseAgents() {
   vi.resetModules()
+  const apiMod = await import('../useApi')
+  apiMod.setToken('test-token')
   const mod = await import('../useAgents')
   return mod.useAgents
 }

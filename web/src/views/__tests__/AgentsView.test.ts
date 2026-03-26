@@ -1365,9 +1365,15 @@ describe('AgentsView', () => {
       skills: [],
       local_tools: [],
     })
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: 'Agent in use' }), { status: 409 })
-    )
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      if ((init as RequestInit)?.method === 'DELETE') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'Agent in use' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        ))
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    })
 
     // Use mount (not shallowMount) so Teleport content is accessible
     const w = mount(AgentsView, {

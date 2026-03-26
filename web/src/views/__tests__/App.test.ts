@@ -127,6 +127,7 @@ vi.mock('../../composables/useHuginnWS', () => {
   const { ref } = require('vue')
   const wsInstance = {
     connected: ref(true),
+    connectionState: ref('connected'),
     messages: ref([]),
     on: vi.fn(),
     off: vi.fn(),
@@ -329,7 +330,7 @@ describe('App', () => {
   // ── Session list rendering ────────────────────────────────────────────────
 
   describe('sessions sidebar', () => {
-    it('renders sessions in the sidebar when chat section is active', async () => {
+    it('renders the Channels section in the sidebar when chat section is active', async () => {
       mockSessions.value = [
         { id: 'sess-1', title: 'First session', agent_id: 'default', state: 'idle', created_at: '', updated_at: '' },
         { id: 'sess-2', title: 'Second session', agent_id: 'default', state: 'idle', created_at: '', updated_at: '' },
@@ -339,9 +340,11 @@ describe('App', () => {
       const w = mountApp()
       await flushPromises()
 
+      // Session list is rendered in ChatView (RouterView, stubbed here).
+      // App.vue sidebar shows Channels/DMs sections when chat section is active.
       const html = w.html()
-      expect(html).toContain('First session')
-      expect(html).toContain('Second session')
+      expect(html).toContain('Channels')
+      expect(html).toContain('Direct Messages')
     })
 
     it('shows clear-all trash button only when sessions exist', async () => {

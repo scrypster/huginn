@@ -10,7 +10,7 @@ class MockWebSocket {
   readyState = MockWebSocket.CONNECTING
   url: string
   onopen: (() => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((ev: { code: number; reason: string; wasClean: boolean }) => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
   sentMessages: string[] = []
@@ -28,7 +28,7 @@ class MockWebSocket {
   close() {
     this.closed = true
     this.readyState = MockWebSocket.CLOSED
-    this.onclose?.()
+    this.onclose?.({ code: 1000, reason: '', wasClean: true })
   }
 
   // Test helpers
@@ -41,9 +41,9 @@ class MockWebSocket {
     this.onmessage?.({ data: JSON.stringify(data) })
   }
 
-  simulateClose() {
+  simulateClose(code = 1006) {
     this.readyState = MockWebSocket.CLOSED
-    this.onclose?.()
+    this.onclose?.({ code, reason: '', wasClean: false })
   }
 
   static instances: MockWebSocket[] = []
