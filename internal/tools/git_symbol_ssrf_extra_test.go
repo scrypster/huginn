@@ -423,31 +423,34 @@ func TestGitStashTool_UnknownAction(t *testing.T) {
 // ============================================================
 
 func TestGHPRListTool_Execute_StateFilter(t *testing.T) {
-	tool := &GHPRListTool{}
+	tool := &GHPRListTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{"state": "closed"})
 }
 
 func TestGHPRListTool_Execute_LimitAsFloat64(t *testing.T) {
-	tool := &GHPRListTool{}
+	tool := &GHPRListTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{"limit": float64(10)})
 }
 
 // TestGHPRViewTool_Execute_WithNumber exercises the runGH path (valid number arg).
 func TestGHPRViewTool_Execute_WithNumber(t *testing.T) {
-	tool := &GHPRViewTool{}
-	// gh may return an error if not in a GitHub repo, but the code is exercised.
+	tool := &GHPRViewTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{"number": float64(1)})
 }
 
+// noGH is a sentinel path used in tests to prevent any real gh CLI execution.
+// On GitHub Actions gh is authenticated, so we must never fall through to the real binary.
+const noGH = "/nonexistent/gh-test-sentinel"
+
 // TestGHPRDiffTool_Execute_WithNumber exercises the runGH path (valid number arg).
 func TestGHPRDiffTool_Execute_WithNumber(t *testing.T) {
-	tool := &GHPRDiffTool{}
+	tool := &GHPRDiffTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{"number": float64(1)})
 }
 
 // TestGHPRCreateTool_Execute_WithTitle exercises the runGH path.
 func TestGHPRCreateTool_Execute_WithTitle(t *testing.T) {
-	tool := &GHPRCreateTool{}
+	tool := &GHPRCreateTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{
 		"title": "Test PR",
 		"body":  "Test body",
@@ -456,19 +459,19 @@ func TestGHPRCreateTool_Execute_WithTitle(t *testing.T) {
 
 // TestGHIssueListTool_Execute_WithLabelAndState exercises the label+state branches.
 func TestGHIssueListTool_Execute_WithLabelAndState(t *testing.T) {
-	tool := &GHIssueListTool{}
+	tool := &GHIssueListTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{"label": "bug", "state": "open"})
 }
 
 // TestGHIssueViewTool_Execute_WithNumber exercises the runGH path.
 func TestGHIssueViewTool_Execute_WithNumber(t *testing.T) {
-	tool := &GHIssueViewTool{}
+	tool := &GHIssueViewTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{"number": float64(1)})
 }
 
 // TestGHIssueCreateTool_Execute_WithTitle exercises the runGH path.
 func TestGHIssueCreateTool_Execute_WithTitle(t *testing.T) {
-	tool := &GHIssueCreateTool{}
+	tool := &GHIssueCreateTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{
 		"title": "Test Issue",
 		"body":  "Some body",
@@ -477,7 +480,7 @@ func TestGHIssueCreateTool_Execute_WithTitle(t *testing.T) {
 
 // TestGHIssueCreateTool_Execute_WithLabelAndAssignee exercises extra branches.
 func TestGHIssueCreateTool_Execute_WithOptionalFields(t *testing.T) {
-	tool := &GHIssueCreateTool{}
+	tool := &GHIssueCreateTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{
 		"title":    "Issue with extras",
 		"body":     "Body",
@@ -488,7 +491,7 @@ func TestGHIssueCreateTool_Execute_WithOptionalFields(t *testing.T) {
 
 // TestGHPRCreateTool_Execute_DraftAndBase exercises draft+base code path.
 func TestGHPRCreateTool_Execute_DraftAndBase(t *testing.T) {
-	tool := &GHPRCreateTool{}
+	tool := &GHPRCreateTool{ghBase: ghBase{GHPath: noGH}}
 	_ = tool.Execute(context.Background(), map[string]any{
 		"title": "Draft PR",
 		"body":  "Body",
@@ -886,14 +889,13 @@ func TestGHIssueCreateTool_MissingTitle_Boost95(t *testing.T) {
 // ============================================================
 
 func TestGHPRCreateTool_WithDraftAndBase(t *testing.T) {
-	tool := &GHPRCreateTool{}
+	tool := &GHPRCreateTool{ghBase: ghBase{GHPath: noGH}}
 	result := tool.Execute(context.Background(), map[string]any{
 		"title": "Test PR",
 		"body":  "body",
 		"draft": true,
 		"base":  "main",
 	})
-	// gh is likely not authenticated in tests, so expect an error — but no panic.
 	_ = result
 }
 
@@ -902,14 +904,13 @@ func TestGHPRCreateTool_WithDraftAndBase(t *testing.T) {
 // ============================================================
 
 func TestGHIssueCreateTool_WithLabelAndAssignee(t *testing.T) {
-	tool := &GHIssueCreateTool{}
+	tool := &GHIssueCreateTool{ghBase: ghBase{GHPath: noGH}}
 	result := tool.Execute(context.Background(), map[string]any{
 		"title":    "Test Issue",
 		"body":     "test body",
 		"label":    "bug",
 		"assignee": "alice",
 	})
-	// gh likely fails in tests — just ensure no panic.
 	_ = result
 }
 
@@ -1229,10 +1230,9 @@ func TestGitStager_StageFile_OutsideRepo(t *testing.T) {
 // ============================================================
 
 func TestGHPRDiffTool_Execute_ErrorPath(t *testing.T) {
-	tool := &GHPRDiffTool{}
+	tool := &GHPRDiffTool{ghBase: ghBase{GHPath: noGH}}
 	result := tool.Execute(context.Background(), map[string]any{"number": float64(1)})
-	// gh is not available in tests, so this should fail.
-	_ = result // Don't assert IsError since gh may not be available.
+	_ = result
 }
 
 // ============================================================
