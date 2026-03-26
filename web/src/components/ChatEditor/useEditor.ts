@@ -127,16 +127,19 @@ export function useEditor(options: {
         Placeholder.configure({
           placeholder: options.placeholder ?? 'Message huginn...',
         }),
-        Link.configure({
-          openOnClick: false,
-          HTMLAttributes: { class: 'link' },
-        }),
+        // Markdown must come before Link so that when tiptap-markdown registers its
+        // own internal link extension (also named 'link'), the explicit Link.configure
+        // below wins the deduplication and preserves openOnClick: false + CSS class.
         Markdown.configure({
           html: false,
           tightLists: true,
           bulletListMarker: '-',
           transformPastedText: true,
           transformCopiedText: true,
+        }),
+        Link.configure({
+          openOnClick: false,
+          HTMLAttributes: { class: 'link' },
         }),
         createMentionExtension(),
       ],
