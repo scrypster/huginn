@@ -307,6 +307,60 @@ func initSemanticSearch(ctx context.Context, cfg config.Config, idx *repo.Index,
 	}
 }
 
+// selectBackend picks the appropriate backend and resolves model configuration
+// for non-interactive modes (--print, headless agent). It performs a blocking
+// health probe with a 3-second timeout for local/external backends so failures
+// are reported immediately rather than hanging on the first API call.
+//
+// Cloud providers (anthropic, openai, openrouter) bypass the health probe since
+// their availability is validated implicitly on the first API call.
+func selectBackend(ctx context.Context, cfg *config.Config, endpointOverride, modelOverride string) (backend.Backend, *modelconfig.Models, error) {
+	var b backend.Backend
+
+	switch cfg.Backend.Provider {
+	case "anthropic", "openai", "openrouter":
+		var err error
+		b, err = backend.NewFromConfig(cfg.Backend.Provider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
+		if err != nil {
+			return nil, nil, fmt.Errorf("backend (%s): %w", cfg.Backend.Provider, err)
+		}
+	default:
+		// "managed" requires a running process — not suitable for non-interactive modes.
+		// Fall through to ExternalBackend with the configured endpoint.
+		endpoint := cfg.Backend.Endpoint
+		if endpointOverride != "" {
+			endpoint = endpointOverride
+		}
+		if endpoint == "" {
+			endpoint = "http://localhost:11434"
+		}
+		b = backend.NewExternalBackend(endpoint)
+		// Blocking probe: fail fast so the user gets a clear error instead of a hang.
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if err := b.Health(probeCtx); err != nil {
+			return nil, nil, fmt.Errorf("backend not reachable at %s: %w", endpoint, err)
+		}
+	}
+
+	// Mirror the model resolution logic from initBackend.
+	defaultModel := cfg.DefaultModel
+	if modelOverride != "" {
+		defaultModel = modelOverride
+	}
+	if defaultModel == "" {
+		defaultModel = "qwen2.5-coder:14b"
+	}
+	models := &modelconfig.Models{
+		Reasoner: cfg.ReasonerModel,
+	}
+	if models.Reasoner == "" {
+		models.Reasoner = defaultModel
+	}
+
+	return b, models, nil
+}
+
 // joinStrings joins a slice of strings with a separator.
 // Avoids importing "strings" only for this use.
 func joinStrings(parts []string, sep string) string {

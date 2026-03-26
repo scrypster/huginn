@@ -130,10 +130,10 @@ test.describe('WorkflowsView', () => {
       }
     })
 
-    // Register dialog handler BEFORE clicking so it fires on the confirm() call
-    page.once('dialog', dialog => dialog.accept())
-
     await page.click('[data-testid="delete-workflow-btn"]')
+
+    // Inline confirmation UI: click the Confirm button that appears
+    await page.click('button:has-text("Confirm")')
 
     await expect.poll(() => deleteCalled, { timeout: 5000 }).toBe(true)
   })

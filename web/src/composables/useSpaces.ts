@@ -35,6 +35,7 @@ const spaces = ref<Space[]>([])
 const activeSpaceId = ref<string | null>(localStorage.getItem(ACTIVE_SPACE_KEY))
 const loading = ref(false)
 const error = ref<string | null>(null)
+const spaceSessionsMap = ref<Record<string, unknown[]>>({})
 
 // wireSpaceWS registers WS listeners for real-time space lifecycle events.
 // Call once from App.vue initApp() after creating the WS connection.
@@ -239,11 +240,23 @@ export function useSpaces() {
     }
   }
 
+  async function fetchSpaceSessions(spaceId: string): Promise<unknown[]> {
+    try {
+      const result = await api.spaces.sessions(spaceId)
+      const sessions = Array.isArray(result) ? result : []
+      spaceSessionsMap.value[spaceId] = sessions
+      return sessions
+    } catch {
+      return []
+    }
+  }
+
   function clearSpaces() {
     spaces.value = []
     activeSpaceId.value = null
     localStorage.removeItem(ACTIVE_SPACE_KEY)
     error.value = null
+    spaceSessionsMap.value = {}
   }
 
   return {
@@ -261,6 +274,8 @@ export function useSpaces() {
     updateSpace,
     deleteSpace,
     markRead,
+    fetchSpaceSessions,
+    spaceSessionsMap,
     clearSpaces,
   }
 }

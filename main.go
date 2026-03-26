@@ -323,17 +323,10 @@ func main() {
 
 	// 2c. --print / -p: non-interactive single-turn mode
 	if *printFlag != "" {
-		// Minimal init: no TUI, no Pebble, just backend
-		endpoint := cfg.Backend.Endpoint
-		if *endpointFlag != "" {
-			endpoint = *endpointFlag
+		printBackend, printModels, err := selectBackend(context.Background(), cfg, *endpointFlag, *modelFlag)
+		if err != nil {
+			fatalf("backend: %v", err)
 		}
-		if endpoint == "" {
-			endpoint = "http://localhost:11434"
-		}
-		printModels := modelconfig.DefaultModels()
-		_ = printModels // used by NewOrchestrator
-		printBackend := backend.NewExternalBackend(endpoint)
 		printOrch, err := agent.NewOrchestrator(printBackend, printModels, nil, nil, nil, nil)
 		if err != nil {
 			fatalf("failed to create orchestrator: %v", err)

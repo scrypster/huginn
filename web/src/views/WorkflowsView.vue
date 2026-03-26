@@ -128,7 +128,12 @@
             History
           </button>
 
-          <button v-if="selectedWorkflow" @click="confirmDelete"
+          <template v-if="pendingDelete">
+            <span class="text-xs text-huginn-muted">Delete "{{ pendingDelete.name }}"?</span>
+            <button @click="doDeleteWorkflow" class="text-xs text-red-400 hover:text-red-300 transition-colors">Confirm</button>
+            <button @click="pendingDelete = null" class="text-xs text-huginn-muted hover:text-huginn-text transition-colors">Cancel</button>
+          </template>
+          <button v-else-if="selectedWorkflow" @click="confirmDelete"
             data-testid="delete-workflow-btn"
             class="p-1.5 text-huginn-muted hover:text-red-400 transition-colors rounded">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1036,10 +1041,17 @@ async function cancelRun() {
   }
 }
 
-async function confirmDelete() {
+const pendingDelete = ref<{ id: string; name: string } | null>(null)
+
+function confirmDelete() {
   if (!selectedWorkflow.value) return
-  if (!confirm(`Delete "${selectedWorkflow.value.name}"? This cannot be undone.`)) return
-  await deleteWorkflow(selectedWorkflow.value.id)
+  pendingDelete.value = selectedWorkflow.value
+}
+
+async function doDeleteWorkflow() {
+  if (!pendingDelete.value) return
+  await deleteWorkflow(pendingDelete.value.id)
+  pendingDelete.value = null
   closeWorkflow()
 }
 

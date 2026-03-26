@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { useSpaces, wireSpaceWS } from '../useSpaces'
+import { setToken } from '../useApi'
 import type { HuginnWS, WSMessage } from '../useHuginnWS'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -40,12 +41,14 @@ const sampleDM = {
 }
 
 beforeEach(() => {
+  setToken('test-token')
   // Reset shared state between tests
   const { clearSpaces } = useSpaces()
   clearSpaces()
 })
 
 afterEach(() => {
+  setToken('')
   vi.restoreAllMocks()
 })
 
