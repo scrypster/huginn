@@ -998,6 +998,27 @@ const expandedMsgCalls  = ref<Set<string>>(new Set())
 const streaming         = ref(false)
 const currentRunId      = ref('')   // matches run_id echoed by server; guards against stale done events
 const notifyStreaming    = ref(false)
+
+// ── Streaming watchdog ────────────────────────────────────────────────────────
+// If no token/done/error arrives within 60s of starting a run, reset streaming
+// so the user is not permanently locked out of sending. Handles server crashes,
+// network partitions, and any other scenario where done/error never arrives.
+const STREAMING_WATCHDOG_MS = 60_000
+let streamingWatchdog: ReturnType<typeof setTimeout> | null = null
+function startStreamingWatchdog() {
+  if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
+  streamingWatchdog = setTimeout(() => {
+    if (streaming.value) {
+      console.warn('[chat] streaming watchdog: no activity for 60s — resetting streaming state')
+      streaming.value = false
+      activeToolCalls.value = []
+    }
+    streamingWatchdog = null
+  }, STREAMING_WATCHDOG_MS)
+}
+function clearStreamingWatchdog() {
+  if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
+}
 const messagesEl        = ref<HTMLElement>()
 const pendingPermission = ref<WSMessage | null>(null)
 const runtimeState      = ref('')
@@ -1347,7 +1368,7 @@ function syncSessionAgent() {
 // ── Chat editor ───────────────────────────────────────────────────────
 const chatEditorRef = ref<{ focus: () => void } | null>(null)
 
-function handleEditorSend(markdown: string) {
+async function handleEditorSend(markdown: string) {
   const ws = wsRef.value
   if (!ws || streaming.value) return
 
@@ -1355,12 +1376,23 @@ function handleEditorSend(markdown: string) {
   if (props.spaceId) {
     const tl = currentSpaceTimeline.value
     if (!tl) return
-    const targetSessionId = tl.getState().activeSessionId
-    if (!targetSessionId) return // no session linked to this space yet
+    let targetSessionId = tl.getState().activeSessionId
+
+    // No session linked to this space yet — auto-create one on first send.
+    if (!targetSessionId) {
+      try {
+        const newSession = await api.sessions.create(props.spaceId)
+        targetSessionId = newSession.session_id
+        tl.getState().activeSessionId = targetSessionId
+      } catch {
+        return
+      }
+    }
 
     const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     currentRunId.value = runId
     streaming.value = true
+    startStreamingWatchdog()
 
     // Optimistic user message into the space timeline.
     tl.getState().messages.push({
@@ -1390,6 +1422,7 @@ function handleEditorSend(markdown: string) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   currentRunId.value = runId
   streaming.value = true
+  startStreamingWatchdog()
   pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown })
@@ -1454,6 +1487,7 @@ watch(wsRef, (ws) => {
     // switches (props.sessionId can change between WS registration and delivery).
     const sid = msg.session_id || props.sessionId
     if (!sid || sid !== props.sessionId) return // ignore tokens for other sessions
+    startStreamingWatchdog() // reset watchdog on each token to detect true inactivity
     const apply = () => {
       // Flush buffered prefetch tool results now that the assistant message exists.
       flushPendingToolResults(sid)
@@ -1511,6 +1545,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       console.debug('[done] ignoring stale done, run_id=', msg.run_id, 'expected=', currentRunId.value)
       return
     }
+    clearStreamingWatchdog()
     streaming.value = false
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
@@ -1543,6 +1578,7 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
     if (msg.run_id && msg.run_id !== currentRunId.value) return
+    clearStreamingWatchdog()
     streaming.value = false
     activeToolCalls.value = []
     if (props.sessionId) {
@@ -1755,6 +1791,7 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
 // Clean up all WS event handlers when component unmounts to prevent
 // duplicate handlers accumulating across route changes.
 onUnmounted(() => {
+  clearStreamingWatchdog()
   if (intersectionObs) { intersectionObs.disconnect(); intersectionObs = null }
   wsCleanupFns.forEach(fn => fn())
   wsCleanupFns.length = 0
@@ -1763,6 +1800,7 @@ onUnmounted(() => {
 
 // Reset state and sync agent when switching sessions
 watch(() => props.sessionId, async () => {
+  clearStreamingWatchdog()
   streaming.value = false
   currentRunId.value = ''  // prevent late done from old session matching new session's run
   notifyStreaming.value = false
