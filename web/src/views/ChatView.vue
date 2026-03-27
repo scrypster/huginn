@@ -1384,6 +1384,7 @@ async function handleEditorSend(markdown: string) {
         const newSession = await api.sessions.create(props.spaceId)
         targetSessionId = newSession.session_id
         tl.getState().activeSessionId = targetSessionId
+        tl.getState().sessionToSpaceMap.set(targetSessionId, props.spaceId)
       } catch {
         return
       }

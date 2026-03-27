@@ -57,6 +57,7 @@ vi.mock('../../composables/useSpaces', () => ({
 
 const mockApiAgentsList = vi.fn().mockResolvedValue([])
 const mockApiRuntimeStatus = vi.fn().mockResolvedValue({ state: 'idle' })
+const mockApiSessionsCreate = vi.fn()
 
 vi.mock('../../composables/useApi', () => ({
   api: {
@@ -66,8 +67,41 @@ vi.mock('../../composables/useApi', () => ({
     runtime: {
       status: () => mockApiRuntimeStatus(),
     },
+    sessions: {
+      create: (...args: unknown[]) => mockApiSessionsCreate(...args),
+    },
   },
   getToken: vi.fn().mockReturnValue('test-token'),
+}))
+
+// ── useSpaceTimeline mock ─────────────────────────────────────────────
+// Provides a controllable timeline with a real Map for sessionToSpaceMap
+// so .set() / .has() calls work correctly in production code.
+const makeSpaceState = () => ({
+  messages: [] as any[],
+  sessionToSpaceMap: new Map<string, string>(),
+  activeSessionId: null as string | null,
+  cursor: null as string | null,
+  hasMore: false,
+  loadingInitial: false,
+  loadingMore: false,
+  error: null as string | null,
+})
+
+let mockSpaceState = makeSpaceState()
+const mockSpaceHydrate = vi.fn().mockResolvedValue(undefined)
+const mockSpaceTimeline = {
+  getState: () => mockSpaceState,
+  hydrate: mockSpaceHydrate,
+  loadMore: vi.fn().mockResolvedValue(null),
+  retryHydrate: vi.fn(),
+}
+const mockUseSpaceTimeline = vi.fn(() => mockSpaceTimeline)
+
+vi.mock('../../composables/useSpaceTimeline', () => ({
+  useSpaceTimeline: (...args: unknown[]) => mockUseSpaceTimeline(...args),
+  clearSpaceTimeline: vi.fn(),
+  wireSpaceTimelineWS: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -1585,5 +1619,123 @@ describe('ChatView — Phase 2D loading skeleton', () => {
     const hasSkeleton = html.includes('animate-pulse')
     const hasEmptyState = html.includes('Send your first message')
     expect(hasSkeleton && hasEmptyState).toBe(false)
+  })
+})
+
+// ── Space mode ─────────────────────────────────────────────────────────
+describe('ChatView — space mode', () => {
+  const SPACE_ID = 'test-space-1'
+  const NEW_SESSION_ID = 'new-session-abc'
+
+  function mountSpaceChatView(wsOverride?: ReturnType<typeof createMockWs> | null) {
+    return mountChatView({ sessionId: undefined, spaceId: SPACE_ID }, wsOverride)
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // Reset space state to a clean slate for each test
+    mockSpaceState = makeSpaceState()
+    mockSpaceHydrate.mockResolvedValue(undefined)
+    mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
+  })
+
+  it('first send: auto-creates session and registers it in sessionToSpaceMap', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises() // let immediate watch + hydrate resolve
+
+    // No session exists yet
+    expect(mockSpaceState.activeSessionId).toBeNull()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello space')
+    await flushPromises()
+
+    // Session was created with the correct spaceId
+    expect(mockApiSessionsCreate).toHaveBeenCalledWith(SPACE_ID)
+
+    // The new session is registered in the routing map — this is the regression test for the bug
+    expect(mockSpaceState.sessionToSpaceMap.has(NEW_SESSION_ID)).toBe(true)
+    expect(mockSpaceState.sessionToSpaceMap.get(NEW_SESSION_ID)).toBe(SPACE_ID)
+  })
+
+  it('first send: sends chat WS message with the auto-created session_id', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello space')
+    await flushPromises()
+
+    expect(mockWs.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'chat',
+        content: 'Hello space',
+        session_id: NEW_SESSION_ID,
+      })
+    )
+  })
+
+  it('first send: pushes optimistic user message into space timeline messages', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'My first question')
+    await flushPromises()
+
+    const userMsgs = mockSpaceState.messages.filter((m: any) => m.role === 'user')
+    expect(userMsgs).toHaveLength(1)
+    expect(userMsgs[0].content).toBe('My first question')
+    expect(userMsgs[0].session_id).toBe(NEW_SESSION_ID)
+  })
+
+  it('existing session: reuses activeSessionId without calling api.sessions.create', async () => {
+    const EXISTING_SESSION = 'existing-session-xyz'
+    mockSpaceState.activeSessionId = EXISTING_SESSION
+    mockSpaceState.sessionToSpaceMap.set(EXISTING_SESSION, SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Follow-up question')
+    await flushPromises()
+
+    // Should NOT have created a new session
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+
+    // Should have sent with the existing session_id
+    expect(mockWs.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'chat',
+        session_id: EXISTING_SESSION,
+      })
+    )
+  })
+
+  it('blocks a second send while the first is still streaming', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+
+    // First send — sets streaming = true
+    await chatEditor.vm.$emit('send', 'First message')
+    await flushPromises()
+
+    const chatSendsAfterFirst = mockWs.sentMessages.filter((m: any) => m.type === 'chat').length
+
+    // Second send while streaming
+    await chatEditor.vm.$emit('send', 'Second message')
+    await flushPromises()
+
+    const chatSendsAfterSecond = mockWs.sentMessages.filter((m: any) => m.type === 'chat').length
+
+    expect(chatSendsAfterSecond).toBe(chatSendsAfterFirst)
   })
 })
