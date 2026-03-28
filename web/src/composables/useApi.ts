@@ -79,6 +79,10 @@ export interface BuiltinStatus {
 export interface BuiltinCatalogEntry {
   name: string
   description: string
+  provider: string
+  provider_url: string
+  host: string
+  host_url: string
   filename: string
   size_bytes: number
   min_ram_gb: number
@@ -87,6 +91,18 @@ export interface BuiltinCatalogEntry {
   tags: string[]
   source: string
   installed: boolean
+}
+
+export interface ProviderModel {
+  id: string
+  name: string
+  description?: string
+  context_length?: number
+  pricing_prompt?: number      // USD per million tokens
+  pricing_completion?: number  // USD per million tokens
+  provider?: string            // sub-provider (OpenRouter only)
+  created_at?: string
+  tags?: string[]
 }
 
 export interface BuiltinInstalledModel {
@@ -506,10 +522,15 @@ export const api = {
       apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/monday', { method: 'POST', body: JSON.stringify(payload) }),
   },
 
+  providers: {
+    models: (provider: string) =>
+      apiFetch<ProviderModel[]>(`/api/v1/providers/${encodeURIComponent(provider)}/models`),
+  },
+
   builtin: {
     status: () => apiFetch<BuiltinStatus>('/api/v1/builtin/status'),
 
-    catalog: () => apiFetch<BuiltinCatalogEntry[]>('/api/v1/builtin/catalog'),
+    catalog: (refresh = false) => apiFetch<BuiltinCatalogEntry[]>(`/api/v1/builtin/catalog${refresh ? '?refresh=1' : ''}`),
 
     installedModels: () => apiFetch<BuiltinInstalledModel[]>('/api/v1/builtin/models'),
 
