@@ -261,58 +261,6 @@ func TestHandleDeleteSession_NotFoundReturns404(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// handleGetActiveAgent
-// ---------------------------------------------------------------------------
-
-// TestHandleGetActiveAgent_ReturnsName verifies that handleGetActiveAgent
-// returns the configured active agent name.
-func TestHandleGetActiveAgent_ReturnsName(t *testing.T) {
-	srv, ts := newTestServer(t)
-	srv.cfg.ActiveAgent = "huginn"
-
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/agents/active", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var body map[string]string
-	json.NewDecoder(resp.Body).Decode(&body)
-	if body["name"] != "huginn" {
-		t.Errorf("expected name=huginn, got %q", body["name"])
-	}
-}
-
-// TestHandleGetActiveAgent_EmptyWhenNotSet verifies that when no active agent
-// is configured the response contains an empty string for "name".
-func TestHandleGetActiveAgent_EmptyWhenNotSet(t *testing.T) {
-	srv, ts := newTestServer(t)
-	srv.cfg.ActiveAgent = ""
-
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/agents/active", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var body map[string]string
-	json.NewDecoder(resp.Body).Decode(&body)
-	if name, ok := body["name"]; !ok {
-		t.Error("expected 'name' key in response")
-	} else if name != "" {
-		t.Errorf("expected empty name, got %q", name)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // handleUpdateConfig
 // ---------------------------------------------------------------------------
 

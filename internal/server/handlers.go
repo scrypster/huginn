@@ -320,7 +320,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// Vault name collision check: reject if the incoming VaultName is already
 	// claimed by a different agent. We skip the agent currently being updated
 	// (identified by the URL name) to allow non-changing saves.
-	if err := agents.CheckVaultNameCollision(incoming, name, s.cfg.ActiveAgent, existingCfg.Agents); err != nil {
+	if err := agents.CheckVaultNameCollision(incoming, name, "", existingCfg.Agents); err != nil {
 		jsonError(w, 422, err.Error())
 		return
 	}
@@ -362,44 +362,6 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"saved": incoming.Name})
 }
 
-func (s *Server) handleGetActiveAgent(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]string{"name": s.cfg.ActiveAgent})
-}
-
-func (s *Server) handleSetActiveAgent(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonError(w, 400, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.Name == "" {
-		jsonError(w, 400, "name is required")
-		return
-	}
-	agentsCfg, err := agents.LoadAgents()
-	if err != nil {
-		agentsCfg = agents.DefaultAgentsConfig()
-	}
-	found := false
-	for _, a := range agentsCfg.Agents {
-		if a.Name == body.Name {
-			found = true
-			break
-		}
-	}
-	if !found {
-		jsonError(w, 404, "agent not found: "+body.Name)
-		return
-	}
-	s.cfg.ActiveAgent = body.Name
-	if err := s.cfg.Save(); err != nil {
-		jsonError(w, 500, "save config: "+err.Error())
-		return
-	}
-	jsonOK(w, map[string]string{"active_agent": s.cfg.ActiveAgent})
-}
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// Return the configured models from the config
@@ -585,14 +547,6 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	if err := agents.DeleteAgentDefault(name); err != nil {
 		jsonError(w, 404, err.Error())
 		return
-	}
-	// Clear ActiveAgent if it pointed to the deleted agent.
-	if strings.EqualFold(s.cfg.ActiveAgent, name) {
-		s.cfg.ActiveAgent = ""
-		if err := s.cfg.Save(); err != nil {
-			slog.Warn("handleDeleteAgent: failed to persist config after clearing ActiveAgent",
-				"agent", name, "err", err)
-		}
 	}
 	// Broadcast so all connected frontends remove the deleted agent.
 	s.BroadcastWS(WSMessage{

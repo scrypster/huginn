@@ -85,39 +85,6 @@ func TestHandleUpdateAgent_InvalidJSON(t *testing.T) {
 	}
 }
 
-// ─── handleSetActiveAgent — empty name ────────────────────────────────────────
-
-func TestHandleSetActiveAgent_EmptyName(t *testing.T) {
-	_, ts := newTestServer(t)
-	body := `{"name": ""}`
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/active", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Fatalf("expected 400 for empty name, got %d", resp.StatusCode)
-	}
-}
-
-func TestHandleSetActiveAgent_InvalidJSON(t *testing.T) {
-	_, ts := newTestServer(t)
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/active", strings.NewReader("{bad}"))
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Fatalf("expected 400 for invalid JSON, got %d", resp.StatusCode)
-	}
-}
-
 // ─── handleListAvailableModels — Ollama not reachable ─────────────────────────
 
 func TestHandleListAvailableModels_OllamaUnreachable(t *testing.T) {

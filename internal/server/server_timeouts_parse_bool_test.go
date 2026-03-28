@@ -575,40 +575,6 @@ func TestHandleUpdateAgent_ValidJSON(t *testing.T) {
 	}
 }
 
-// --- handleSetActiveAgent ---
-
-func TestHandleSetActiveAgent_BadJSON(t *testing.T) {
-	_, ts := newTestServer(t)
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/active",
-		bytes.NewBufferString("not-json"))
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Fatalf("expected 400 for bad JSON, got %d", resp.StatusCode)
-	}
-}
-
-func TestHandleSetActiveAgent_EmptyName_Iter3(t *testing.T) {
-	_, ts := newTestServer(t)
-	body := bytes.NewBufferString(`{"name":""}`)
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/active", body)
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Fatalf("expected 400 for empty name, got %d", resp.StatusCode)
-	}
-}
-
 // --- handleWSMessage delegation_preview_ack ---
 
 func TestWSMessage_DelegationPreviewAck_NilGate(t *testing.T) {

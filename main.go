@@ -1987,18 +1987,9 @@ func cmdAgentsList() error {
 		fmt.Println("No agents configured.")
 		return nil
 	}
-	cfg, _ := config.Load()
-	activeAgent := ""
-	if cfg != nil {
-		activeAgent = cfg.ActiveAgent
-	}
-	fmt.Printf("%-20s %-30s %-10s\n", "NAME", "MODEL", "STATUS")
+	fmt.Printf("%-20s %-30s\n", "NAME", "MODEL")
 	for _, a := range agentCfg.Agents {
-		marker := ""
-		if strings.EqualFold(a.Name, activeAgent) {
-			marker = "* active"
-		}
-		fmt.Printf("%-20s %-30s %-10s\n", a.Name, a.Model, marker)
+		fmt.Printf("%-20s %-30s\n", a.Name, a.Model)
 	}
 	return nil
 }
@@ -2074,15 +2065,7 @@ func cmdAgentsUse(args []string) error {
 		return fmt.Errorf("agent %q not found", name)
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	cfg.ActiveAgent = canonicalName
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("save config: %w", err)
-	}
-	fmt.Printf("Active agent set to %q.\n", canonicalName)
+	fmt.Printf("Agent %q selected (note: global default agent is no longer supported; use session-level agent selection).\n", canonicalName)
 	return nil
 }
 
@@ -2108,18 +2091,7 @@ func cmdAgentsShow(args []string) error {
 		return fmt.Errorf("agent %q not found", name)
 	}
 
-	cfg, _ := config.Load()
-	isActive := false
-	if cfg != nil {
-		isActive = strings.EqualFold(found.Name, cfg.ActiveAgent)
-	}
-
-	displayName := found.Name
-	if isActive {
-		displayName += " (active)"
-	}
-
-	fmt.Printf("Name:          %s\n", displayName)
+	fmt.Printf("Name:          %s\n", found.Name)
 	fmt.Printf("Model:         %s\n", found.Model)
 	fmt.Printf("Color:         %s\n", found.Color)
 	fmt.Printf("Icon:          %s\n", found.Icon)

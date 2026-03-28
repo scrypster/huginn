@@ -88,7 +88,6 @@ func (s *Server) handleSessionActiveState(w http.ResponseWriter, r *http.Request
 // ActiveStateResponse represents the current active session and thread state.
 type ActiveStateResponse struct {
 	ActiveSessionID string    `json:"active_session_id,omitempty"`
-	ActiveAgentID   string    `json:"active_agent_id,omitempty"`
 	LastActivityAt  time.Time `json:"last_activity_at"`
 	ThreadsRunning  int       `json:"threads_running"`
 }
@@ -98,18 +97,7 @@ type ActiveStateResponse struct {
 func (s *Server) handleActiveState(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	activeSessionID := s.cfg.ActiveSessionID
-	activeAgent := s.cfg.ActiveAgent
 	s.mu.Unlock()
-
-	// Resolve the agent name from the registry using the stored agent name.
-	var activeAgentID string
-	if activeAgent != "" {
-		if reg := s.orch.GetAgentRegistry(); reg != nil {
-			if ag, ok := reg.ByName(activeAgent); ok {
-				activeAgentID = ag.Name
-			}
-		}
-	}
 
 	// Sum running threads across all sessions via thread manager.
 	var threadsRunning int
@@ -119,7 +107,6 @@ func (s *Server) handleActiveState(w http.ResponseWriter, r *http.Request) {
 
 	response := ActiveStateResponse{
 		ActiveSessionID: activeSessionID,
-		ActiveAgentID:   activeAgentID,
 		LastActivityAt:  time.Now().UTC(),
 		ThreadsRunning:  threadsRunning,
 	}
@@ -127,7 +114,7 @@ func (s *Server) handleActiveState(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, response)
 }
 
-// handleRestoreActiveState allows clients to restore the active session/agent state
+// handleRestoreActiveState allows clients to restore the active session state
 // during recovery from network disconnects.
 func (s *Server) handleRestoreActiveState(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -147,7 +134,7 @@ func (s *Server) handleRestoreActiveState(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Validate agent exists if provided
+	// Validate agent exists if provided (agent_id field is accepted but ignored for storage)
 	if body.AgentID != "" {
 		reg := s.orch.GetAgentRegistry()
 		if reg == nil {
@@ -160,9 +147,8 @@ func (s *Server) handleRestoreActiveState(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Persist active session/agent to config under the server mutex.
+	// Persist active session to config under the server mutex.
 	s.mu.Lock()
-	s.cfg.ActiveAgent = body.AgentID
 	s.cfg.ActiveSessionID = body.SessionID
 	saveErr := s.cfg.Save()
 	s.mu.Unlock()
@@ -173,7 +159,6 @@ func (s *Server) handleRestoreActiveState(w http.ResponseWriter, r *http.Request
 
 	response := ActiveStateResponse{
 		ActiveSessionID: body.SessionID,
-		ActiveAgentID:   body.AgentID,
 		LastActivityAt:  time.Now().UTC(),
 		ThreadsRunning:  0,
 	}
