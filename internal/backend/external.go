@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -14,6 +16,39 @@ import (
 
 	"github.com/scrypster/huginn/internal/modelconfig"
 )
+
+// externalStreamStallTimeout is the maximum time the SSE scanner may be idle
+// (no non-empty line received) before the stream is aborted. Declared as a var
+// so tests in this package can lower the value to exercise the timeout path.
+var externalStreamStallTimeout = 60 * time.Second
+
+// externalModelLoadStatusDelay is the time to wait for a response header before
+// emitting a StreamStatus event to the client. Local model servers (e.g. Ollama)
+// load the model before sending the first header; 10 s is unobtrusive for
+// warm-cache loads (typically < 3 s) while providing early feedback for cold
+// loads. Declared as a var so tests can lower the value.
+var externalModelLoadStatusDelay = 10 * time.Second
+
+// externalStreamingTransport returns an *http.Transport configured for
+// external/local LLM endpoints (OpenAI-compatible, e.g. Ollama).
+//
+// It uses a longer ResponseHeaderTimeout (120 s) than the Anthropic transport
+// because local model servers may spend 30–120+ seconds loading the model
+// before sending the first response header.
+//
+// This function is self-contained and does not share state with
+// streamingTransport(); every call returns a fresh *http.Transport.
+func externalStreamingTransport() *http.Transport {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 120 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+}
 
 // ExternalBackend calls any OpenAI-compatible /v1/chat/completions endpoint.
 // It is safe for concurrent use.
@@ -28,7 +63,7 @@ type ExternalBackend struct {
 func NewExternalBackend(endpoint string) *ExternalBackend {
 	return &ExternalBackend{
 		endpoint: strings.TrimRight(endpoint, "/"),
-		client:   &http.Client{Timeout: 0, Transport: streamingTransport()},
+		client:   &http.Client{Timeout: 0, Transport: externalStreamingTransport()},
 	}
 }
 
@@ -79,7 +114,20 @@ func (b *ExternalBackend) ChatCompletion(ctx context.Context, req ChatRequest) (
 		}
 	}
 
+	// Measure how long the server takes to send the first response header.
+	// If it exceeds externalModelLoadStatusDelay (e.g. Ollama loading a model cold),
+	// emit a StreamStatus event synchronously before parsing begins so the client
+	// sees "Loading model…" immediately before the first token — never after.
+	// Firing after client.Do (not via a goroutine) guarantees correct ordering
+	// with no goroutine-scheduling race.
+	headerStart := time.Now()
 	resp, err := b.client.Do(httpReq)
+	if err == nil && req.OnEvent != nil && time.Since(headerStart) >= externalModelLoadStatusDelay {
+		req.OnEvent(StreamEvent{
+			Type:    StreamStatus,
+			Content: "Loading model, please wait...",
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("chat completion: %w", err)
 	}
@@ -96,7 +144,7 @@ func (b *ExternalBackend) ChatCompletion(ctx context.Context, req ChatRequest) (
 		return nil, fmt.Errorf("chat completion: HTTP %d", resp.StatusCode)
 	}
 
-	return b.parseSSE(resp, req)
+	return b.parseSSE(ctx, resp, req)
 }
 
 // Health checks that the endpoint is reachable.
@@ -231,7 +279,43 @@ type sseChunk struct {
 	} `json:"usage,omitempty"`
 }
 
-func (b *ExternalBackend) parseSSE(resp *http.Response, req ChatRequest) (*ChatResponse, error) {
+func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req ChatRequest) (*ChatResponse, error) {
+	// streamCtx is cancelled either by the parent ctx or by the idle-timeout
+	// watchdog goroutine when no SSE data arrives within externalStreamStallTimeout.
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
+	// activityCh is signalled on every non-empty SSE data line so the watchdog
+	// can reset its idle timer.
+	activityCh := make(chan struct{}, 1)
+
+	// Watchdog: abort the stream if no activity is seen within externalStreamStallTimeout.
+	// Captures the timeout once to avoid races against test code mutating the global.
+	stallTimeout := externalStreamStallTimeout
+	go func() {
+		timer := time.NewTimer(stallTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-streamCtx.Done():
+				return
+			case <-activityCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(stallTimeout)
+			case <-timer.C:
+				slog.Warn("external: SSE stream idle timeout, aborting", "timeout", stallTimeout)
+				resp.Body.Close()
+				streamCancel()
+				return
+			}
+		}
+	}()
+
 	result := &ChatResponse{}
 	// accumulate tool call fragments indexed by wire index field
 	tcFragments := map[int]*ToolCall{}
@@ -247,6 +331,16 @@ func (b *ExternalBackend) parseSSE(resp *http.Response, req ChatRequest) (*ChatR
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
+		if data == "" {
+			continue
+		}
+
+		// Signal activity so the watchdog resets its idle timer.
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+
 		if data == "[DONE]" {
 			sawDone = true
 			break

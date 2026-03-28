@@ -1138,7 +1138,9 @@ function adaptSpaceMessages(msgs: SpaceMessage[]) {
     content: m.content,
     agent: m.agent || undefined,
     createdAt: m.ts,
-    streaming: false,
+    // stream- prefix means the message is in-flight (status placeholder or live
+    // token stream). Show the blinking cursor so the user knows content is arriving.
+    streaming: m.id.startsWith('stream-'),
     toolCalls: [] as import('../composables/useSessions').ToolCallRecord[],
   }))
 }
