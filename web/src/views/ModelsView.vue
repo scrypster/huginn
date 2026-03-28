@@ -379,6 +379,54 @@
       </div>
     </div>
   </div>
+  <!-- ── Delete Confirmation Modal ─────────────────────────────────── -->
+  <Teleport to="body">
+    <Transition name="modal-fade">
+      <div v-if="deleteConfirm"
+        class="fixed inset-0 z-[200] flex items-center justify-center p-4"
+        @mousedown.self="deleteConfirm = null">
+        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+        <div class="relative w-full max-w-sm bg-[#13151a] border border-white/[0.07] rounded-2xl overflow-hidden"
+          style="box-shadow:0 25px 60px rgba(0,0,0,0.55)">
+          <!-- Red accent line -->
+          <div class="h-px" style="background:linear-gradient(90deg,transparent,rgba(248,81,73,0.5),transparent)" />
+          <!-- Header -->
+          <div class="flex items-center gap-3.5 px-5 pt-4 pb-3.5 border-b border-white/[0.06]">
+            <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+              style="background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.2)">
+              <svg class="w-4 h-4" style="color:rgba(248,81,73,0.85)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+              </svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-semibold" style="color:rgba(255,255,255,0.92)">Delete model?</p>
+              <p class="text-[11px] mt-0.5 font-mono truncate" style="color:rgba(255,255,255,0.45)">{{ deleteConfirm?.name }}</p>
+            </div>
+          </div>
+          <!-- Body -->
+          <div class="px-5 py-4">
+            <p class="text-xs leading-relaxed" style="color:rgba(255,255,255,0.5)">
+              This will permanently remove the model
+              {{ deleteConfirm?.type === 'ollama' ? 'from Ollama' : 'from disk' }}.
+              You can reinstall it later by pulling it again.
+            </p>
+          </div>
+          <!-- Actions -->
+          <div class="flex justify-end gap-2 px-5 pb-4">
+            <button @click="deleteConfirm = null"
+              class="px-4 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">
+              Cancel
+            </button>
+            <button @click="confirmDeleteModel"
+              class="px-4 py-1.5 text-xs font-medium text-white rounded-lg transition-all"
+              style="background:rgba(248,81,73,0.8)" @mouseenter="e => (e.currentTarget as HTMLElement).style.background='rgba(248,81,73,1)'" @mouseleave="e => (e.currentTarget as HTMLElement).style.background='rgba(248,81,73,0.8)'">
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -428,6 +476,7 @@ const pullMsg = ref('')
 const pullError = ref(false)
 const deletingModels = ref<Set<string>>(new Set())
 const deleteError = ref<string | null>(null)
+const deleteConfirm = ref<{ name: string; type: 'ollama' | 'builtin' } | null>(null)
 
 // Built-in (llama.cpp) state
 const builtinStatus = ref<BuiltinStatus | null>(null)
@@ -521,20 +570,9 @@ function startPullModel(name: string) {
   )
 }
 
-async function deleteBuiltinModel(name: string) {
+function deleteBuiltinModel(name: string) {
   if (deletingBuiltin.value.has(name)) return
-  if (!window.confirm(`Remove model "${name}"? The model file will be deleted from disk.`)) return
-  deletingBuiltin.value = new Set([...deletingBuiltin.value, name])
-  try {
-    await api.builtin.delete(name)
-    await loadBuiltinData()
-  } catch {
-    // silently ignore — may already be gone
-  } finally {
-    const next = new Set(deletingBuiltin.value)
-    next.delete(name)
-    deletingBuiltin.value = next
-  }
+  deleteConfirm.value = { name, type: 'builtin' }
 }
 
 async function activateBuiltin(model: string) {
@@ -622,18 +660,38 @@ async function pullModel(name: string) {
 
 async function deleteOllamaModel(name: string) {
   if (deletingModels.value.has(name)) return
-  if (!window.confirm(`Remove model "${name}" from Ollama? This frees disk space but you'll need to pull it again to use it.`)) return
+  deleteConfirm.value = { name, type: 'ollama' }
+}
+
+async function confirmDeleteModel() {
+  if (!deleteConfirm.value) return
+  const { name, type } = deleteConfirm.value
+  deleteConfirm.value = null
   deleteError.value = null
-  deletingModels.value = new Set([...deletingModels.value, name])
-  try {
-    await (api as unknown as { models: { delete(n: string): Promise<{ deleted: boolean }> } }).models.delete(name)
-    await loadAvailableModels()
-  } catch (e) {
-    deleteError.value = e instanceof Error ? e.message : 'Delete failed'
-  } finally {
-    const next = new Set(deletingModels.value)
-    next.delete(name)
-    deletingModels.value = next
+  if (type === 'ollama') {
+    deletingModels.value = new Set([...deletingModels.value, name])
+    try {
+      await (api as unknown as { models: { delete(n: string): Promise<{ deleted: boolean }> } }).models.delete(name)
+      await loadAvailableModels()
+    } catch (e) {
+      deleteError.value = e instanceof Error ? e.message : 'Delete failed'
+    } finally {
+      const next = new Set(deletingModels.value)
+      next.delete(name)
+      deletingModels.value = next
+    }
+  } else {
+    deletingBuiltin.value = new Set([...deletingBuiltin.value, name])
+    try {
+      await api.builtin.delete(name)
+      await loadBuiltinData()
+    } catch {
+      // silently ignore — may already be gone
+    } finally {
+      const next = new Set(deletingBuiltin.value)
+      next.delete(name)
+      deletingBuiltin.value = next
+    }
   }
 }
 
@@ -701,3 +759,9 @@ onMounted(async () => {
   }
 })
 </script>
+
+<style scoped>
+.modal-fade-enter-active, .modal-fade-leave-active { transition: opacity 0.15s ease, transform 0.15s ease; }
+.modal-fade-enter-from, .modal-fade-leave-to { opacity: 0; }
+.modal-fade-enter-from .relative, .modal-fade-leave-to .relative { transform: scale(0.96) translateY(6px); }
+</style>
