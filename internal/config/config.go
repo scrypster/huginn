@@ -113,7 +113,6 @@ type Config struct {
 	WebUI        WebUIConfig        `json:"web_ui"`
 	Integrations IntegrationsConfig `json:"integrations"`
 	Cloud        CloudConfig        `json:"cloud"`
-	ActiveAgent       string        `json:"active_agent,omitempty"`
 	ActiveSessionID   string        `json:"active_session_id,omitempty"`
 	SchedulerEnabled  bool          `json:"scheduler_enabled"` // default true; set false to pause all routines
 	Version           int           `json:"version,omitempty"`
@@ -262,10 +261,12 @@ func migrateV6toV7(cfg *Config) {
 	// BraveAPIKey defaults to empty string. No action needed.
 }
 
-// migrateV8toV9 adds ActiveAgent field.
-// ActiveAgent is optional; default is empty string (no active agent selected).
-func migrateV8toV9(cfg *Config) {
-	// ActiveAgent defaults to empty string. No action needed.
+// migrateV8toV9 removes the active_agent field.
+// The field has been dropped from the Config struct; the SaveTo() call that
+// follows all migrations rewrites the file using json.Marshal(cfg), which
+// excludes the removed field, completing the active cleanup on first launch.
+func migrateV8toV9(_ *Config) {
+	// No struct mutation needed: active_agent field removed from Config struct.
 }
 
 // migrateV9toV10 adds SchedulerEnabled field (default true).

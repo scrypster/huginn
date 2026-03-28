@@ -94,6 +94,12 @@ func (sm *ShellManager) Start(hub Hub, cols, rows uint16) {
 	sm.cmd = cmd
 	sm.mu.Unlock()
 
+	// Disable PTY echo immediately — the browser client echoes keystrokes
+	// locally via LocalEchoAddon and does not expect the PTY to echo them back.
+	// Doing this here (server-side) avoids the race where the browser's
+	// shell_echo_off message arrives after the user has already started typing.
+	sm.SetEcho(false)
+
 	_ = hub.Send("", Message{
 		Type: MsgShellReady,
 		Payload: map[string]any{

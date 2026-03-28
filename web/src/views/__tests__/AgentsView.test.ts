@@ -25,8 +25,6 @@ vi.mock('../../composables/useSkills', () => ({
 
 const mockApiAgentsGet = vi.fn().mockResolvedValue({})
 const mockApiAgentsUpdate = vi.fn().mockResolvedValue({})
-const mockApiAgentsGetActive = vi.fn().mockResolvedValue({ name: '' })
-const mockApiAgentsSetActive = vi.fn().mockResolvedValue({ active_agent: '' })
 const mockApiModelsList = vi.fn().mockResolvedValue([])
 const mockApiModelsAvailable = vi.fn().mockResolvedValue({ models: [] })
 const mockApiConnectionsList = vi.fn().mockResolvedValue([])
@@ -41,8 +39,6 @@ vi.mock('../../composables/useApi', () => ({
       list: vi.fn().mockResolvedValue([]),
       get: (...args: unknown[]) => mockApiAgentsGet(...args),
       update: (...args: unknown[]) => mockApiAgentsUpdate(...args),
-      getActive: () => mockApiAgentsGetActive(),
-      setActive: (...args: unknown[]) => mockApiAgentsSetActive(...args),
     },
     connections: { list: () => mockApiConnectionsList() },
     models: {
@@ -1161,58 +1157,6 @@ describe('AgentsView', () => {
 
     // Model name should display in the header
     expect(w.text()).toContain('claude-sonnet-4-6')
-  })
-
-  // ── setActive calls API ──────────────────────────────────────────
-  it('setActive button calls api.agents.setActive', async () => {
-    mockApiAgentsGet.mockResolvedValueOnce({
-      name: 'SetActiveTest',
-      model: 'gpt-4',
-      system_prompt: '',
-      color: '#58a6ff',
-      icon: 'S',
-      memory_type: 'none',
-      toolbelt: [],
-      skills: [],
-      local_tools: [],
-    })
-    mockApiAgentsGetActive.mockResolvedValueOnce({ name: 'OtherAgent' })
-    mockApiAgentsSetActive.mockResolvedValueOnce({ active_agent: 'SetActiveTest' })
-    const w = mountAgent({ agentName: 'SetActiveTest' })
-    await flushPromises()
-
-    const setDefaultBtn = w.findAll('button').find(b => b.text().includes('Set as default'))
-    expect(setDefaultBtn).toBeDefined()
-    await setDefaultBtn!.trigger('click')
-    await flushPromises()
-
-    expect(mockApiAgentsSetActive).toHaveBeenCalledWith('SetActiveTest')
-    expect(w.text()).toContain('Default agent')
-  })
-
-  // ── setActive error handling ─────────────────────────────────────
-  it('setActive shows error message on failure', async () => {
-    mockApiAgentsGet.mockResolvedValueOnce({
-      name: 'SetActiveFail',
-      model: 'gpt-4',
-      system_prompt: '',
-      color: '#58a6ff',
-      icon: 'S',
-      memory_type: 'none',
-      toolbelt: [],
-      skills: [],
-      local_tools: [],
-    })
-    mockApiAgentsGetActive.mockResolvedValueOnce({ name: '' })
-    mockApiAgentsSetActive.mockRejectedValueOnce(new Error('Permission denied'))
-    const w = mountAgent({ agentName: 'SetActiveFail' })
-    await flushPromises()
-
-    const setDefaultBtn = w.findAll('button').find(b => b.text().includes('Set as default'))
-    await setDefaultBtn!.trigger('click')
-    await flushPromises()
-
-    expect(w.text()).toContain('Permission denied')
   })
 
   // ── loadAvailableModels error ────────────────────────────────────

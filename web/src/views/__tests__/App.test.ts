@@ -147,8 +147,6 @@ vi.mock('../../composables/useApi', () => ({
   api: {
     agents: {
       list: vi.fn().mockResolvedValue([]),
-      getActive: vi.fn().mockResolvedValue({ name: 'default' }),
-      setActive: vi.fn().mockResolvedValue({}),
     },
     spaces: {
       list: vi.fn().mockResolvedValue([]),
