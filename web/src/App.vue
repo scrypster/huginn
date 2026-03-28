@@ -879,6 +879,8 @@ async function handleNewItem() {
   if (activeSection.value === 'chat') {
     const session = await createSession()
     router.push(`/chat/${session.id}`)
+  } else if (activeSection.value === 'agents') {
+    router.push('/agents/new')
   }
 }
 
