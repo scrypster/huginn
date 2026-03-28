@@ -16,6 +16,10 @@ var curatedJSON []byte
 // ModelEntry is a single model in the manifest.
 type ModelEntry struct {
 	Description      string   `json:"description"`
+	Provider         string   `json:"provider"`
+	ProviderURL      string   `json:"provider_url"`
+	Host             string   `json:"host"`
+	HostURL          string   `json:"host_url"`
 	URL              string   `json:"url"`
 	Filename         string   `json:"filename"`
 	SHA256           string   `json:"sha256"`
@@ -25,7 +29,7 @@ type ModelEntry struct {
 	ContextLength    int      `json:"context_length"`
 	ChatTemplate     string   `json:"chat_template"`
 	Tags             []string `json:"tags"`
-	Source           string   `json:"-"` // "curated" or "user" — set at load time
+	Source           string   `json:"-"` // "curated", "remote", or "user" — set at load time
 }
 
 type manifestFile struct {

@@ -853,6 +853,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/builtin/models/pull",   api(s.handleBuiltinPullModel))
 	mux.HandleFunc("POST /api/v1/builtin/activate",      api(s.handleBuiltinActivate))
 	mux.HandleFunc("DELETE /api/v1/builtin/models/{name}", api(s.handleBuiltinDeleteModel))
+	mux.HandleFunc("GET /api/v1/providers/{provider}/models", api(s.handleProviderModels))
 	mux.HandleFunc("GET /api/v1/stats", api(s.handleStats))
 	mux.HandleFunc("GET /api/v1/stats/history", api(s.handleStatsHistory))
 	mux.HandleFunc("GET /api/v1/metrics/prometheus", s.handlePrometheusMetrics)
