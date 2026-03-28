@@ -58,6 +58,40 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   // Clean up any previous listeners.
   _wsCleanup?.()
 
+  // loadingSessionIds tracks sessions that currently show a model-load status
+  // placeholder ("Loading model, please wait..."). Local to this wire call so
+  // it resets on reconnect and never leaks stale state into TimelineState.
+  const loadingSessionIds = new Set<string>()
+
+  const onStatus = (msg: WSMessage): void => {
+    const sessionId = msg.session_id
+    if (!sessionId) return
+    for (const [, st] of stateMap.entries()) {
+      if (!st.sessionToSpaceMap.has(sessionId)) continue
+      // Find an existing streaming placeholder — a prior *persisted* assistant
+      // message does NOT count (different id prefix).
+      const streamPlaceholder = [...st.messages].reverse().find(
+        (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
+      )
+      if (streamPlaceholder) {
+        streamPlaceholder.content = msg.content ?? ''
+      } else {
+        st.messages.push({
+          id: `stream-${sessionId}-${Date.now()}`,
+          session_id: sessionId,
+          seq: -1,
+          ts: new Date().toISOString(),
+          role: 'assistant',
+          content: msg.content ?? '',
+          agent: '',
+        })
+      }
+      // Unconditional: any path that creates/updates a placeholder marks loading.
+      loadingSessionIds.add(sessionId)
+      break
+    }
+  }
+
   const onToken = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
@@ -69,7 +103,15 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
           (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant',
         )
         if (existing) {
-          existing.content += msg.content
+          if (loadingSessionIds.has(sessionId)) {
+            // Replace the status placeholder content with the first real token.
+            // cancelStatus() fires in Go before this message arrives, so the
+            // status goroutine cannot fire after this point.
+            existing.content = msg.content ?? ''
+            loadingSessionIds.delete(sessionId)
+          } else {
+            existing.content += msg.content
+          }
         } else {
           // Start a new streaming message placeholder.
           st.messages.push({
@@ -138,11 +180,13 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     }
   }
 
+  ws.on('status', onStatus)
   ws.on('token', onToken)
   ws.on('done', onDone)
   ws.on('chat', onChat)
 
   _wsCleanup = () => {
+    ws.off('status', onStatus)
     ws.off('token', onToken)
     ws.off('done', onDone)
     ws.off('chat', onChat)

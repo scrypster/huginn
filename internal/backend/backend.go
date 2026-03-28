@@ -105,6 +105,8 @@ const (
 	StreamWarning    StreamEventType = "warning"     // non-fatal warnings surfaced to the user
 	StreamToolCall   StreamEventType = "tool_call"   // tool invocation started
 	StreamToolResult StreamEventType = "tool_result" // tool invocation completed
+	StreamStatus     StreamEventType = "status"      // transient status message (not persisted); used to
+	// surface slow model-loading state to the client (e.g. Ollama cold start)
 )
 
 // StreamEvent is a single event emitted during streaming.

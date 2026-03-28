@@ -14,6 +14,7 @@ const (
 	MsgPermissionResp MessageType = "permission_response"
 	MsgDone           MessageType = "done"
 	MsgWarning        MessageType = "warning" // satellite → cloud: non-fatal warning during session
+	MsgStatus         MessageType = "status"  // satellite → cloud: transient status (e.g. "Loading model…")
 
 	// Phase 2 — Satellite → HuginnCloud push events
 	// Emitted after every local session turn completes (WS chat, headless routine,

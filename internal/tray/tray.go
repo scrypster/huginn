@@ -84,14 +84,14 @@ func updateTrayIcon() {
 
 	switch {
 	case satOnline:
-		systray.SetIcon(iconCloud)
+		setTrayIcon(iconCloud)
 	case owned:
-		systray.SetIcon(iconRunning)
+		setTrayIcon(iconRunning)
 	default:
 		if runtime.GOOS == "darwin" {
 			systray.SetTemplateIcon(iconDefault, iconDefault)
 		} else {
-			systray.SetIcon(iconDefault)
+			setTrayIcon(iconDefault)
 		}
 	}
 }
@@ -100,7 +100,7 @@ func onReady() {
 	if runtime.GOOS == "darwin" {
 		systray.SetTemplateIcon(iconDefault, iconDefault)
 	} else {
-		systray.SetIcon(iconDefault)
+		setTrayIcon(iconDefault)
 	}
 	systray.SetTitle("")
 	systray.SetTooltip("Huginn — starting…")
