@@ -65,6 +65,25 @@ func TestExternalBackend_Transport_HasConnectionTimeouts(t *testing.T) {
 	}
 }
 
+// TestExternalBackend_Transport_ResponseHeaderTimeout_SufficientForModelLoad
+// asserts that ExternalBackend uses a ResponseHeaderTimeout large enough to
+// accommodate local model servers (e.g. Ollama) that load the model before
+// sending the first response header. 30 s is too short for large models;
+// the minimum acceptable value is 120 s.
+func TestExternalBackend_Transport_ResponseHeaderTimeout_SufficientForModelLoad(t *testing.T) {
+	b := NewExternalBackend("http://localhost:11434")
+	tr, ok := b.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected b.client.Transport to be *http.Transport, got %T", b.client.Transport)
+	}
+	const minTimeout = 120 * time.Second
+	if tr.ResponseHeaderTimeout < minTimeout {
+		t.Errorf("ExternalBackend ResponseHeaderTimeout = %v, want >= %v"+
+			" (local model servers need time to load before sending the first header)",
+			tr.ResponseHeaderTimeout, minTimeout)
+	}
+}
+
 // TestAnthropicBackend_ResponseHeaderTimeout_TriggersOnStalledServer verifies
 // that a server which accepts TCP but never sends response headers causes
 // ChatCompletion to return an error rather than hang.

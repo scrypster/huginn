@@ -5,7 +5,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // AcquireLock attempts to claim the lockfile at path by writing the current
@@ -33,12 +32,5 @@ func ReleaseLock(path string) {
 	_ = os.Remove(path)
 }
 
-// processIsLive returns true if the process with the given PID is running.
-// Uses signal 0: checks existence without sending a signal.
-func processIsLive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
-}
+// processIsLive is implemented in lockfile_unix.go (non-Windows) and
+// lockfile_windows.go (Windows) using platform-appropriate process checks.
