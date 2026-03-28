@@ -552,7 +552,7 @@ export const api = {
             const { done, value } = await reader.read()
             if (done) break
             buf += decoder.decode(value, { stream: true })
-            const parts = buf.split('\n\n')
+            const parts = buf.split(/\r?\n\r?\n/)
             buf = parts.pop() ?? ''
             for (const part of parts) {
               const line = part.trim()
@@ -601,7 +601,7 @@ export const api = {
             const { done, value } = await reader.read()
             if (done) break
             buf += decoder.decode(value, { stream: true })
-            const parts = buf.split('\n\n')
+            const parts = buf.split(/\r?\n\r?\n/)
             buf = parts.pop() ?? ''
             for (const part of parts) {
               const line = part.trim()
