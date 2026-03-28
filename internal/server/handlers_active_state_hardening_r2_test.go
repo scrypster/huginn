@@ -220,15 +220,18 @@ func TestHandleActiveState_r2_ResponseShape(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, key := range []string{"active_session_id", "active_agent_id", "last_activity_at", "threads_running"} {
+	for _, key := range []string{"active_session_id", "last_activity_at", "threads_running"} {
 		if _, ok := raw[key]; !ok {
-			// active_session_id and active_agent_id are omitempty — allow them to be absent
-			// only when the value is empty.
-			if key == "active_session_id" || key == "active_agent_id" {
+			// active_session_id is omitempty — allow it to be absent when the value is empty.
+			if key == "active_session_id" {
 				continue
 			}
 			t.Errorf("response missing key %q", key)
 		}
+	}
+	// active_agent_id has been removed from the response.
+	if _, ok := raw["active_agent_id"]; ok {
+		t.Error("response must not contain removed key active_agent_id")
 	}
 }
 

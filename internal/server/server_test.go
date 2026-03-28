@@ -309,44 +309,6 @@ func TestServerListAgents(t *testing.T) {
 	}
 }
 
-func TestServerGetActiveAgent_Empty(t *testing.T) {
-	_, ts := newTestServer(t)
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/agents/active", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var body map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if name, ok := body["name"]; !ok {
-		t.Fatal("expected 'name' key in response")
-	} else if name != "" {
-		t.Errorf("expected empty name (no active agent set), got %q", name)
-	}
-}
-
-func TestServerSetActiveAgent_NotFound(t *testing.T) {
-	_, ts := newTestServer(t)
-	body := `{"name": "nonexistent-agent-xyz"}`
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/active", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404, got %d", resp.StatusCode)
-	}
-}
 
 func TestServerStartStop(t *testing.T) {
 	sessDir := t.TempDir()

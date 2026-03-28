@@ -185,11 +185,12 @@ func TestMigrateV6toV7_CalledAndNoOp(t *testing.T) {
 
 func TestMigrateV8toV9_CalledExplicitly(t *testing.T) {
 	cfg := Default()
-	cfg.ActiveAgent = "my-agent"
-	// Calling the migration on a config that already has ActiveAgent set: should be no-op.
+	// migrateV8toV9 is a no-op at the struct level (active_agent field was removed).
+	// Calling it must not panic or mutate any other field.
+	before := cfg.Version
 	migrateV8toV9(cfg)
-	if cfg.ActiveAgent != "my-agent" {
-		t.Errorf("expected ActiveAgent='my-agent' (unchanged), got %q", cfg.ActiveAgent)
+	if cfg.Version != before {
+		t.Errorf("migrateV8toV9 unexpectedly mutated Version: got %d, want %d", cfg.Version, before)
 	}
 }
 

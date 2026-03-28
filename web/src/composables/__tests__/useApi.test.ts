@@ -202,18 +202,6 @@ describe('useApi — apiFetch (via api.*)', () => {
     expect(JSON.parse(opts?.body as string)).toEqual(cfg)
   })
 
-  it('api.agents.setActive sends PUT with name body', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      ok({ active_agent: 'coder' })
-    )
-
-    await api.agents.setActive('coder')
-    const [url, opts] = fetchSpy.mock.calls[0]
-    expect(url).toBe('/api/v1/agents/active')
-    expect(opts?.method).toBe('PUT')
-    expect(JSON.parse(opts?.body as string)).toEqual({ name: 'coder' })
-  })
-
   // 401 retry where fetchToken itself throws
   it('throws original 401 error when fetchToken throws during retry', async () => {
     vi.spyOn(globalThis, 'fetch')
@@ -370,12 +358,6 @@ describe('useApi — apiFetch (via api.*)', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({}))
     await api.agents.get('Coder')
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/agents/Coder')
-  })
-
-  it('api.agents.getActive calls correct endpoint', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ name: 'Coder' }))
-    await api.agents.getActive()
-    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/agents/active')
   })
 
   it('api.threads.list calls correct endpoint with sessionId', async () => {

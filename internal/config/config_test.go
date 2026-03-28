@@ -635,21 +635,14 @@ func TestValidate_InvalidBind(t *testing.T) {
 	}
 }
 
-// TestDefault_ActiveAgentEmpty verifies that Default() leaves ActiveAgent empty.
-func TestDefault_ActiveAgentEmpty(t *testing.T) {
-	cfg := Default()
-	if cfg.ActiveAgent != "" {
-		t.Errorf("expected ActiveAgent to be empty by default, got %q", cfg.ActiveAgent)
-	}
-}
-
-// TestMigrateV8toV9_ActiveAgentEmpty verifies that loading a v8 config produces
-// Version=9 and an empty ActiveAgent after migration.
-func TestMigrateV8toV9_ActiveAgentEmpty(t *testing.T) {
+// TestMigrateV8toV9_KeyRemoved verifies that loading a v8 config that had
+// active_agent set produces currentConfigVersion and no active_agent key in the
+// written-back JSON (the field was removed in v9).
+func TestMigrateV8toV9_KeyRemoved(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	raw := `{"version": 8}`
+	raw := `{"version": 8, "active_agent": "some-agent"}`
 	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -661,8 +654,12 @@ func TestMigrateV8toV9_ActiveAgentEmpty(t *testing.T) {
 	if cfg.Version != currentConfigVersion {
 		t.Errorf("expected Version=%d after migration, got %d", currentConfigVersion, cfg.Version)
 	}
-	if cfg.ActiveAgent != "" {
-		t.Errorf("expected ActiveAgent to be empty after migration, got %q", cfg.ActiveAgent)
+	// Verify the key is absent from the written-back JSON.
+	data, _ := os.ReadFile(path)
+	var raw2 map[string]any
+	_ = json.Unmarshal(data, &raw2)
+	if _, ok := raw2["active_agent"]; ok {
+		t.Error("expected active_agent key to be absent from migrated config JSON")
 	}
 }
 

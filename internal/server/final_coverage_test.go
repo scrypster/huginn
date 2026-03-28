@@ -124,25 +124,6 @@ func TestHandleUpdateAgent_ViaHTTP(t *testing.T) {
 	}
 }
 
-// ─── handleSetActiveAgent — via HTTP ──────────────────────────────────────────
-
-func TestHandleSetActiveAgent_ViaHTTP(t *testing.T) {
-	_, ts := newTestServer(t)
-	body := `{"name":"test-agent"}`
-	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/agents/active", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	// May succeed or fail depending on agent config
-	if resp.StatusCode < 200 || resp.StatusCode >= 600 {
-		t.Fatalf("unexpected status %d", resp.StatusCode)
-	}
-}
-
 // ─── handlePullModel — via HTTP ───────────────────────────────────────────────
 
 func TestHandlePullModel_ViaHTTP(t *testing.T) {
