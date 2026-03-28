@@ -297,10 +297,16 @@ func NewDispatcher(cfg DispatcherConfig) func(context.Context, Message) {
 						}
 					},
 					func(ev backend.StreamEvent) {
-						if ev.Type == backend.StreamWarning {
+						switch ev.Type {
+						case backend.StreamWarning:
 							sendOrEnqueue(hub, Message{
 								Type:    MsgWarning,
 								Payload: map[string]any{"session_id": sessionID, "text": ev.Content},
+							})
+						case backend.StreamStatus:
+							sendOrEnqueue(hub, Message{
+								Type:    MsgStatus,
+								Payload: map[string]any{"session_id": sessionID, "content": ev.Content},
 							})
 						}
 					},
