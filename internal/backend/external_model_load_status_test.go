@@ -14,7 +14,7 @@ import (
 // externalModelLoadStatusDelay to send response headers (e.g. Ollama loading
 // a model cold).
 func TestExternalBackend_StatusEvent_EmittedOnSlowHeaders(t *testing.T) {
-	t.Parallel()
+	// Not parallel: mutates package-level externalModelLoadStatusDelay.
 
 	// Set delay to 20 ms. The server stalls 100 ms before sending headers.
 	// After client.Do returns (100 ms elapsed), time.Since(headerStart) = 100 ms
@@ -94,7 +94,7 @@ func TestExternalBackend_StatusEvent_EmittedOnSlowHeaders(t *testing.T) {
 // externalModelLoadStatusDelay (the common case for warm-cached models and
 // remote OpenAI-compatible endpoints).
 func TestExternalBackend_StatusEvent_NotEmittedOnFastHeaders(t *testing.T) {
-	t.Parallel()
+	// Not parallel: mutates package-level externalModelLoadStatusDelay.
 
 	// Set a very long delay so the goroutine never fires within the test.
 	orig := externalModelLoadStatusDelay
