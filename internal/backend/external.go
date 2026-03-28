@@ -22,6 +22,13 @@ import (
 // so tests in this package can lower the value to exercise the timeout path.
 var externalStreamStallTimeout = 60 * time.Second
 
+// externalModelLoadStatusDelay is the time to wait for a response header before
+// emitting a StreamStatus event to the client. Local model servers (e.g. Ollama)
+// load the model before sending the first header; 10 s is unobtrusive for
+// warm-cache loads (typically < 3 s) while providing early feedback for cold
+// loads. Declared as a var so tests can lower the value.
+var externalModelLoadStatusDelay = 10 * time.Second
+
 // externalStreamingTransport returns an *http.Transport configured for
 // external/local LLM endpoints (OpenAI-compatible, e.g. Ollama).
 //
@@ -107,7 +114,20 @@ func (b *ExternalBackend) ChatCompletion(ctx context.Context, req ChatRequest) (
 		}
 	}
 
+	// Measure how long the server takes to send the first response header.
+	// If it exceeds externalModelLoadStatusDelay (e.g. Ollama loading a model cold),
+	// emit a StreamStatus event synchronously before parsing begins so the client
+	// sees "Loading model…" immediately before the first token — never after.
+	// Firing after client.Do (not via a goroutine) guarantees correct ordering
+	// with no goroutine-scheduling race.
+	headerStart := time.Now()
 	resp, err := b.client.Do(httpReq)
+	if err == nil && req.OnEvent != nil && time.Since(headerStart) >= externalModelLoadStatusDelay {
+		req.OnEvent(StreamEvent{
+			Type:    StreamStatus,
+			Content: "Loading model, please wait...",
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("chat completion: %w", err)
 	}
