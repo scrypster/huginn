@@ -202,6 +202,31 @@
               </svg>
             </button>
           </template>
+          <!-- Agents: search bar + new button -->
+          <template v-else-if="activeSection === 'agents'">
+            <svg class="w-3 h-3 text-huginn-muted/40 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input
+              v-model="agentSearch"
+              placeholder="Search…"
+              class="flex-1 bg-transparent text-xs text-huginn-text placeholder-huginn-muted/35 outline-none min-w-0"
+            />
+            <button v-if="agentSearch" @click="agentSearch = ''"
+              class="w-4 h-4 flex items-center justify-center text-huginn-muted/40 hover:text-huginn-muted transition-colors flex-shrink-0">
+              <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+            <button @click="handleNewItem"
+              class="w-6 h-6 rounded flex items-center justify-center text-huginn-muted hover:text-huginn-blue hover:bg-huginn-bg transition-all duration-150 flex-shrink-0"
+              title="New">
+              <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+          </template>
           <!-- Other sections: title + new button -->
           <template v-else>
             <span class="flex-1 text-[11px] font-semibold text-huginn-muted uppercase tracking-widest select-none">
@@ -541,8 +566,10 @@
           <div v-else-if="agents.length === 0" class="flex flex-col items-center justify-center py-10 px-4 text-center gap-2">
             <p class="text-huginn-muted text-xs">No agents configured</p>
           </div>
+          <p v-else-if="agentSearch && !agents.some(a => String(a.name).toLowerCase().includes(agentSearch.toLowerCase()))"
+            class="text-[11px] text-huginn-muted/35 italic pl-4 py-2">No matches</p>
           <button
-            v-for="agent in agents"
+            v-for="agent in agents.filter(a => !agentSearch || String(a.name).toLowerCase().includes(agentSearch.toLowerCase()))"
             :key="String(agent.name)"
             data-testid="agent-item"
             @click="router.push('/agents/' + agent.name)"
@@ -854,10 +881,11 @@ watch(() => route.path, (path) => {
 })
 
 
-watch(activeSection, (s) => {
+watch(activeSection, (s, prev) => {
   if (s === 'agents') loadAgents()
   if (s === 'automation') loadAutomation()
   if (s === 'chat') fetchSpaces()
+  if (prev === 'agents') agentSearch.value = ''
 })
 
 // ── Automation lists (workflows) ─────────────────────────────────────
@@ -1033,6 +1061,7 @@ const showCreateChannelModal = ref(false)
 const channelSectionOpen = ref(true)
 const dmSectionOpen = ref(true)
 const sidebarSearch = ref('')
+const agentSearch = ref('')
 
 // ── Sidebar FTS session search (debounced, AbortController-guarded) ───
 // When sidebarSearch is non-empty we hit the server FTS endpoint instead of
