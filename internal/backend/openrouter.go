@@ -116,7 +116,7 @@ func (b *OpenRouterBackend) ChatCompletion(ctx context.Context, req ChatRequest)
 	}
 
 	// Parse SSE response using ExternalBackend's parseSSE method
-	return b.ExternalBackend.parseSSE(resp, req)
+	return b.ExternalBackend.parseSSE(ctx, resp, req)
 }
 
 // ContextWindow returns the context window for the model.
