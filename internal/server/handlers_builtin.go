@@ -38,6 +38,10 @@ type builtinStatusResponse struct {
 type builtinCatalogEntry struct {
 	Name             string   `json:"name"`
 	Description      string   `json:"description"`
+	Provider         string   `json:"provider"`
+	ProviderURL      string   `json:"provider_url"`
+	Host             string   `json:"host"`
+	HostURL          string   `json:"host_url"`
 	Filename         string   `json:"filename"`
 	SizeBytes        int64    `json:"size_bytes"`
 	MinRAMGB         int      `json:"min_ram_gb"`
@@ -128,7 +132,15 @@ func (s *Server) handleBuiltinListModels(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleBuiltinCatalog(w http.ResponseWriter, r *http.Request) {
-	catalog, err := models.LoadMerged()
+	refresh := r.URL.Query().Get("refresh") == "1"
+	cachePath := models.DefaultCatalogCachePath()
+	var catalog map[string]models.ModelEntry
+	var err error
+	if refresh {
+		catalog, err = models.RefreshCatalog(cachePath)
+	} else {
+		catalog, err = models.LoadCatalog(cachePath)
+	}
 	if err != nil {
 		jsonError(w, 500, "load model catalog: "+err.Error())
 		return
@@ -143,6 +155,10 @@ func (s *Server) handleBuiltinCatalog(w http.ResponseWriter, r *http.Request) {
 		result = append(result, builtinCatalogEntry{
 			Name:             name,
 			Description:      entry.Description,
+			Provider:         entry.Provider,
+			ProviderURL:      entry.ProviderURL,
+			Host:             entry.Host,
+			HostURL:          entry.HostURL,
 			Filename:         entry.Filename,
 			SizeBytes:        entry.SizeBytes,
 			MinRAMGB:         entry.MinRAMGB,
@@ -168,7 +184,7 @@ func (s *Server) handleBuiltinPullModel(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, 400, "name is required")
 		return
 	}
-	catalog, err := models.LoadMerged()
+	catalog, err := models.LoadCatalog(models.DefaultCatalogCachePath())
 	if err != nil {
 		jsonError(w, 500, "load model catalog: "+err.Error())
 		return

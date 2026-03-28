@@ -57,9 +57,8 @@
             <path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" />
           </g>
           <g v-else-if="item.icon === 'models'">
-            <path d="M12 2L2 7l10 5 10-5-10-5z" />
-            <path d="M2 17l10 5 10-5" />
-            <path d="M2 12l10 5 10-5" />
+            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+            <path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>
           </g>
           <g v-else-if="item.icon === 'connections'">
             <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
@@ -69,7 +68,7 @@
             <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
           </g>
           <g v-else-if="item.icon === 'skills'">
-            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+            <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-3.408 0l-1.569-1.568c-.23-.23-.556-.338-.878-.29-.332.054-.611.261-.767.5a2.5 2.5 0 1 1-3.162-3.162c.239-.156.446-.435.5-.767.048-.322-.06-.648-.29-.878L4.28 13.16a2.404 2.404 0 0 1 0-3.408l1.61-1.61a.979.979 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.61-1.61a2.404 2.404 0 0 1 3.408 0l1.568 1.568c.23.23.556.338.878.29.332-.054.611-.261.767-.5a2.5 2.5 0 1 1 3.162 3.162c-.239.156-.446.435-.5.767z"/>
           </g>
           <g v-else-if="item.icon === 'settings'">
             <circle cx="12" cy="12" r="3" />
@@ -775,7 +774,7 @@ const navItems = [
   { section: 'models',     label: 'Models',     path: '/models',     icon: 'models'     },
   { section: 'automation', label: 'Automation', path: '/workflows',  icon: 'automation' },
   { section: 'connections',label: 'Connections',path: '/connections', icon: 'connections'},
-  { section: 'skills',     label: 'Skills',     path: '/skills',     icon: 'skills'     },
+  { section: 'skills',     label: 'Skills',     path: '/skills/browse', icon: 'skills'     },
   { section: 'stats',      label: 'Stats',      path: '/stats',      icon: 'stats'      },
   { section: 'settings',   label: 'Settings',   path: '/settings',   icon: 'settings'   },
   { section: 'logs',       label: 'Logs',       path: '/logs',       icon: 'logs'       },
