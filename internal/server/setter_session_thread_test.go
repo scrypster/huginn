@@ -97,41 +97,6 @@ func TestHandleUpdateAgent_IncomingNameEmpty_UsePathName(t *testing.T) {
 	}
 }
 
-// ─── handleSetActiveAgent found path ─────────────────────────────────────────
-
-// TestHandleSetActiveAgent_Found exercises the save-config path when an agent is found.
-func TestHandleSetActiveAgent_Found(t *testing.T) {
-	_, ts := newTestServer(t)
-
-	// First get list so we know what agents exist
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/agents", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var agents []map[string]any
-	json.NewDecoder(resp.Body).Decode(&agents)
-	if len(agents) == 0 {
-		t.Skip("no agents configured")
-	}
-	name, _ := agents[0]["name"].(string)
-
-	body := `{"name":"` + name + `"}`
-	req2, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/active", strings.NewReader(body))
-	req2.Header.Set("Authorization", "Bearer "+testToken)
-	req2.Header.Set("Content-Type", "application/json")
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp2.Body.Close()
-	// 200 = saved, 500 = couldn't save config (no config dir) — both exercise the path
-	if resp2.StatusCode != 200 && resp2.StatusCode != 500 {
-		t.Fatalf("unexpected status %d", resp2.StatusCode)
-	}
-}
 
 // ─── handleListAvailableModels with fake Ollama server ───────────────────────
 

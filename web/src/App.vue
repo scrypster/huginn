@@ -580,27 +580,12 @@
           >
             <div v-if="route.params.agentName === agent.name"
               class="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-huginn-blue rounded-r" />
-            <!-- Active agent indicator dot -->
-            <div
-              class="w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors"
-              :class="activeAgentName === String(agent.name) ? 'bg-green-400' : 'bg-transparent'"
-            />
             <!-- Agent color dot -->
             <div class="w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0"
               :style="{ background: (agent.color as string) || '#58a6ff' }">
               {{ (agent.icon as string) || (agent.name as string)?.[0]?.toUpperCase() }}
             </div>
             <span class="text-xs flex-1 truncate">{{ agent.name }}</span>
-            <!-- Default badge / Set default button -->
-            <span
-              v-if="activeAgentName === String(agent.name)"
-              class="text-[10px] px-1.5 py-0.5 rounded border border-green-400/40 text-green-400 flex-shrink-0"
-            >default</span>
-            <button
-              v-else
-              @click.stop="setActiveAgent(String(agent.name))"
-              class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted hover:border-blue-400/40 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-all duration-150 flex-shrink-0"
-            >set default</button>
           </button>
         </div>
 
@@ -820,23 +805,9 @@ const skillsNavItems = [
 
 // ── Agents list (for sidebar panel) ─────────────────────────────────
 const { agents, loading: agentsLoading, fetchAgents } = useAgents()
-const activeAgentName = ref('')
 
 async function loadAgents() {
   await fetchAgents()
-  try {
-    const active = await api.agents.getActive()
-    activeAgentName.value = active.name || ''
-  } catch { /* ignore */ }
-}
-
-async function setActiveAgent(name: string) {
-  try {
-    await api.agents.setActive(name)
-    activeAgentName.value = name
-  } catch (e) {
-    console.error('Failed to set active agent', e)
-  }
 }
 
 // ── Chat unseen tracking ─────────────────────────────────────────────

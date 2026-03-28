@@ -836,8 +836,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(50<<10, s.handleSendMessage))))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/chat/stream", api(s.handleChatStream))
 	mux.HandleFunc("GET /api/v1/agents", api(s.handleListAgents))
-	mux.HandleFunc("GET /api/v1/agents/active", api(s.handleGetActiveAgent))
-	mux.HandleFunc("PUT /api/v1/agents/active", api(s.handleSetActiveAgent))
 	mux.HandleFunc("GET /api/v1/agents/{name}", api(s.handleGetAgent))
 	mux.HandleFunc("PUT /api/v1/agents/{name}", api(withMaxBody(1<<20, s.handleUpdateAgent)))
 	mux.HandleFunc("DELETE /api/v1/agents/{name}", api(s.handleDeleteAgent))

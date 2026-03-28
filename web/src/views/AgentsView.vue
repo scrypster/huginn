@@ -251,18 +251,6 @@
 
           <!-- Bottom actions -->
           <div class="px-5 py-4 border-t border-huginn-border space-y-2 flex-shrink-0">
-            <button
-              v-if="!isActive && agentName && agentName !== 'new'"
-              @click="setActive"
-              class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-huginn-muted border border-huginn-border hover:border-huginn-blue/40 hover:text-huginn-blue transition-all duration-150">
-              <svg class="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-              Set as default
-            </button>
-            <div v-if="isActive"
-              class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-huginn-green/40 text-huginn-green text-xs font-medium">
-              <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              Default agent
-            </div>
             <button @click="confirmDelete"
               class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-huginn-muted border border-huginn-border hover:border-huginn-red/40 hover:text-huginn-red transition-all duration-150">
               <svg class="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
@@ -1315,7 +1303,6 @@ const showDeleteConfirm = ref(false)
 const availableModels = ref<OllamaModel[]>([])
 const modelsLoading = ref(false)
 const modelsError = ref('')
-const isActive = ref(false)
 
 // Model picker modal
 const showModelPicker = ref(false)
@@ -1949,30 +1936,6 @@ async function loadAgent(name: string) {
   }
 }
 
-async function loadActiveState() {
-  if (!props.agentName || props.agentName === 'new') {
-    isActive.value = false
-    return
-  }
-  try {
-    const active = await api.agents.getActive()
-    isActive.value = active.name === props.agentName
-  } catch {
-    isActive.value = false
-  }
-}
-
-async function setActive() {
-  if (!form.value.name) return
-  try {
-    await api.agents.setActive(form.value.name)
-    isActive.value = true
-  } catch (e: unknown) {
-    saveMsg.value = e instanceof Error ? e.message : 'Failed to set active agent'
-    saveError.value = true
-  }
-}
-
 async function loadAvailableModels() {
   modelsLoading.value = true
   modelsError.value = ''
@@ -2072,7 +2035,6 @@ function createNew() {
 
 watch(() => props.agentName, (name) => {
   showDeleteConfirm.value = false
-  loadActiveState()
   if (name && name !== 'new') {
     loadAgent(name)
     startVaultHealthPolling()

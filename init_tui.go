@@ -88,18 +88,12 @@ func initTUI(
 		}
 	}
 
-	// Set the primary agent: prefer cfg.ActiveAgent, fall back to first alphabetical agent.
+	// Set the primary agent: use first alphabetical agent.
 	{
-		primaryName := cfg.ActiveAgent
-		if primaryName == "" {
-			names := agentReg.Names()
-			if len(names) > 0 {
-				sort.Strings(names)
-				primaryName = names[0]
-			}
-		}
-		if primaryName != "" {
-			tuiApp.SetPrimaryAgent(primaryName)
+		names := agentReg.Names()
+		if len(names) > 0 {
+			sort.Strings(names)
+			tuiApp.SetPrimaryAgent(names[0])
 		}
 	}
 	tuiApp.SetSkillRegistry(skillReg)

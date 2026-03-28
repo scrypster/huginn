@@ -234,12 +234,6 @@ export const api = {
     get: (name: string) => apiFetch<Agent>(`/api/v1/agents/${name}`),
     update: (name: string, data: unknown) =>
       apiFetch(`/api/v1/agents/${name}`, { method: 'PUT', body: JSON.stringify(data) }),
-    getActive: () => apiFetch<{ name: string }>('/api/v1/agents/active'),
-    setActive: (name: string) =>
-      apiFetch<{ active_agent: string }>('/api/v1/agents/active', {
-        method: 'PUT',
-        body: JSON.stringify({ name }),
-      }),
     testVault: (agentName: string, vaultName?: string) =>
       apiFetch<{ status: string; vault: string; tools_count?: number; warning?: string }>(`/api/v1/agents/${encodeURIComponent(agentName)}/vault/test`, {
         method: 'POST',

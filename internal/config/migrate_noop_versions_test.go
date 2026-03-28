@@ -33,13 +33,13 @@ func TestMigrateV6toV7_DirectCall(t *testing.T) {
 }
 
 // TestMigrateV8toV9_DirectCall verifies that migrateV8toV9 is a no-op that
-// does not panic or modify any existing field.
+// does not panic or modify any existing field (active_agent field was removed).
 func TestMigrateV8toV9_DirectCall(t *testing.T) {
 	cfg := Default()
-	cfg.ActiveAgent = "some-agent"
+	before := cfg.ReasonerModel
 	migrateV8toV9(cfg)
-	if cfg.ActiveAgent != "some-agent" {
-		t.Errorf("migrateV8toV9: should not modify ActiveAgent, got %q", cfg.ActiveAgent)
+	if cfg.ReasonerModel != before {
+		t.Errorf("migrateV8toV9: should not modify ReasonerModel, got %q", cfg.ReasonerModel)
 	}
 }
 

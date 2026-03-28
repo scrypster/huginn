@@ -381,32 +381,6 @@ func TestHandleLogs_DefaultN(t *testing.T) {
 	}
 }
 
-// ─── handleSetActiveAgent — empty name ──────────────────────────────────────
-
-// TestHandleSetActiveAgent_EmptyName covers the empty name guard (lines 168-170).
-func TestHandleSetActiveAgent_EmptyName_B95(t *testing.T) {
-	srv, _ := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/agents/active", strings.NewReader(`{"name":""}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleSetActiveAgent(w, req)
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-}
-
-// TestHandleSetActiveAgent_InvalidJSON covers the JSON decode error (lines 164-166).
-func TestHandleSetActiveAgent_InvalidJSON_B95(t *testing.T) {
-	srv, _ := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/agents/active", strings.NewReader("{bad"))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleSetActiveAgent(w, req)
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-}
-
 // ─── handleGetAgent — found case ─────────────────────────────────────────────
 
 // TestHandleGetAgent_Found covers the agent-found path (lines 112-116).
@@ -2075,22 +2049,6 @@ func TestHandleSendMessage_ChatError(t *testing.T) {
 	}
 }
 
-// ─── handleSetActiveAgent — agent not found (line 173-175) ──────────────────
-
-// TestHandleSetActiveAgent_AgentNotFound_B95Extra verifies 404 when the agent
-// name is not in the agent config (complements the existing empty-name test).
-func TestHandleSetActiveAgent_AgentNotFound_B95Extra(t *testing.T) {
-	srv, _ := newTestServer(t)
-	body := `{"name":"__agent_that_doesnt_exist_9999__"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/active", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleSetActiveAgent(w, req)
-	if w.Code != 404 {
-		t.Fatalf("expected 404, got %d (body: %s)", w.Code, w.Body.String())
-	}
-}
-
 // ─── handleUpdateSession — empty id path (lines 57-60) ───────────────────────
 
 // TestHandleUpdateSession_EmptyID covers lines 57-60 when PathValue("id") is empty.
@@ -2521,31 +2479,6 @@ func TestHandleBuiltinActivate_InstalledError_B95(t *testing.T) {
 }
 
 // ─── handleSetActiveAgent — cfg.Save() error path (handlers.go:188-191) ──────
-
-// TestHandleSetActiveAgent_SaveConfigError_B95 covers handlers.go:188-191
-// by setting HOME to a non-writable path so cfg.Save() fails.
-func TestHandleSetActiveAgent_SaveConfigError_B95(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	// Point HOME at /dev/null so MkdirAll fails when cfg.Save() tries to create ~/.huginn/.
-	t.Setenv("HOME", "/dev/null")
-
-	// "BaselineAlpha" exists in the test baseline agents, so the agent-found check passes.
-	body := `{"name":"BaselineAlpha"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/active", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleSetActiveAgent(w, req)
-
-	// Should return 500 because cfg.Save() fails (cannot create /dev/null/.huginn).
-	if w.Code != 500 && w.Code != 200 {
-		t.Fatalf("expected 500 or 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-	// If we got 500, the path is covered.
-	if w.Code != 500 {
-		t.Logf("note: cfg.Save() did not fail (possibly running as root or HOME override not effective); got %d", w.Code)
-	}
-}
 
 // ─── handleUpdateConfig — cfg.Save() error path (handlers.go:427-430) ────────
 
