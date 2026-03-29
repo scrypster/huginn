@@ -16,6 +16,7 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
+	catalogpkg "github.com/scrypster/huginn/internal/connections/catalog"
 	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/relay"
@@ -60,11 +61,12 @@ type Server struct {
 	// provider key changes into the running cache without requiring a restart.
 	backendCache *backend.BackendCache
 
-	connMgr       *connections.Manager
-	connStore     connections.StoreInterface
-	connProviders map[connections.Provider]connections.IntegrationProvider
-	oauthLimiter  *flowRateLimiter
-	authLimiter   *authFailLimiter // per-server IP-based auth-failure rate limiter
+	connMgr        *connections.Manager
+	connStore      connections.StoreInterface
+	connProviders  map[connections.Provider]connections.IntegrationProvider
+	oauthLimiter   *flowRateLimiter
+	authLimiter    *authFailLimiter // per-server IP-based auth-failure rate limiter
+	credValidators *catalogpkg.Registry
 
 	// Per-endpoint HTTP rate limiters (per-IP sliding window).
 	sessionCreateLimiter *endpointRateLimiter
@@ -265,17 +267,18 @@ func New(
 		pm[p.Name()] = p
 	}
 	s := &Server{
-		cfg:           cfg,
-		orch:          orch,
-		store:         store,
-		token:         token,
-		huginnDir:     huginnDir,
-		wsHub:         newWSHub(),
-		connMgr:       connMgr,
-		connStore:     connStore,
-		connProviders: pm,
-		oauthLimiter:  newFlowRateLimiter(),
-		authLimiter:   newAuthFailLimiter(),
+		cfg:            cfg,
+		orch:           orch,
+		store:          store,
+		token:          token,
+		huginnDir:      huginnDir,
+		wsHub:          newWSHub(),
+		connMgr:        connMgr,
+		connStore:      connStore,
+		connProviders:  pm,
+		oauthLimiter:   newFlowRateLimiter(),
+		authLimiter:    newAuthFailLimiter(),
+		credValidators: buildCredentialValidatorRegistry(),
 		relayKeys:     make(map[string]string),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
@@ -946,9 +949,18 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/connections/oauth/relay", api(s.handleOAuthRelayFromCloud))
 	mux.HandleFunc("DELETE /api/v1/connections/{id}", api(s.handleDeleteConnection))
 
+	// Connection catalog — provider metadata for the frontend (authenticated)
+	mux.HandleFunc("GET /api/v1/connections/catalog", api(s.handleGetConnectionsCatalog))
+
 	// Credentials API — save + test for API-key providers (authenticated)
 	// All credential endpoints are capped at 100 KB.
 	credBody := func(h http.HandlerFunc) http.HandlerFunc { return api(withMaxBody(100<<10, h)) }
+
+	// Generic catalog-driven handlers.  Explicit per-provider routes below take
+	// precedence over these wildcards when both are registered (Go 1.22 specificity).
+	mux.HandleFunc("POST /api/v1/credentials/{provider}",      credBody(s.handleSaveCredential))
+	mux.HandleFunc("POST /api/v1/credentials/{provider}/test", credBody(s.handleTestCredential))
+
 	mux.HandleFunc("POST /api/v1/credentials/datadog",      credBody(s.handleSaveDatadogCredentials))
 	mux.HandleFunc("POST /api/v1/credentials/datadog/test", credBody(s.handleTestDatadogCredentials))
 	mux.HandleFunc("POST /api/v1/credentials/splunk",       credBody(s.handleSaveSplunkCredentials))
