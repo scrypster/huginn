@@ -403,6 +403,35 @@ describe('wireSpaceTimelineWS', () => {
     expect(streaming!.toolCalls![1].name).toBe('write_file')
   })
 
+  it('tool_result: attaches to done- placeholder when it arrives after done renames the stream-', async () => {
+    // Race: done fires and renames stream- → done- before tool_result arrives.
+    // The result must still be attached (not silently dropped).
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    mockGetMessages.mockReturnValue(new Promise(() => {})) // never resolves
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Using tool...' })
+    await nextTick()
+    ws.emit('done', { type: 'done', session_id: SESSION_ID }) // renames stream- → done-
+    await nextTick()
+
+    // tool_result arrives after done renamed the placeholder
+    ws.emit('tool_result', {
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-late', tool: 'search', args: {}, result: 'late result' },
+    })
+    await nextTick()
+
+    const doneMsg = state.messages.find(m => m.id.startsWith('done-'))
+    expect(doneMsg).toBeDefined()
+    expect(doneMsg!.toolCalls).toHaveLength(1)
+    expect(doneMsg!.toolCalls![0]).toMatchObject({ id: 'tc-late', result: 'late result' })
+  })
+
   it('re-calling wireSpaceTimelineWS cleans up tool_result listener', async () => {
     const ws = createMockWs()
 

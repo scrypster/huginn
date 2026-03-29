@@ -204,8 +204,11 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       const p = msg.payload as Record<string, unknown> | undefined
       if (!p) break
+      // Accept both stream- (result arrived before done) and done- (result
+      // arrived after onDone renamed the placeholder — the late-result race).
       const streamMsg = [...st.messages].reverse().find(
-        m => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
+        m => m.session_id === sessionId && m.role === 'assistant' &&
+          (m.id.startsWith('stream-') || m.id.startsWith('done-')),
       )
       if (streamMsg) {
         if (!streamMsg.toolCalls) streamMsg.toolCalls = []
