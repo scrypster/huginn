@@ -528,7 +528,11 @@ func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 	// Normalize streaming text and thought events to "token" so that the
 	// frontend can use a single type to identify token stream messages.
 	msgType := string(ev.Type)
-	if ev.Type == backend.StreamText || ev.Type == backend.StreamThought {
+	// StreamThought (extended thinking) is normalised to "token" so the frontend
+	// renders it inline. StreamText is NOT normalised here — the onToken callback
+	// already emits a "token" WS message for each text chunk; normalising StreamText
+	// to "token" as well causes every word to appear twice (word-doubling bug, #30).
+	if ev.Type == backend.StreamThought {
 		msgType = "token"
 	}
 	return WSMessage{

@@ -412,9 +412,51 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Cloud provider models — included when a provider with an API key is configured
+	// so the agent model picker shows Anthropic/OpenAI/OpenRouter models alongside
+	// local Ollama models (issue #30).
+	var cloudModels []any
+	if s.cfg.Backend.Provider != "" && s.cfg.Backend.Provider != "ollama" {
+		provider := s.cfg.Backend.Provider
+		apiKey := s.cfg.Backend.ResolvedAPIKey()
+		if apiKey != "" {
+			endpoint := s.cfg.Backend.Endpoint
+			var fetched []providerModel
+			var fetchErr error
+			switch provider {
+			case "anthropic":
+				if endpoint == "" {
+					endpoint = "https://api.anthropic.com"
+				}
+				fetched, fetchErr = fetchAnthropicModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			case "openai":
+				if endpoint == "" {
+					endpoint = "https://api.openai.com/v1"
+				}
+				fetched, fetchErr = fetchOpenAIModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			case "openrouter":
+				if endpoint == "" {
+					endpoint = "https://openrouter.ai/api/v1"
+				}
+				fetched, fetchErr = fetchOpenRouterModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			}
+			if fetchErr != nil {
+				if cached, cacheErr := readProviderModelsCache(provider); cacheErr == nil {
+					fetched = cached
+				}
+			} else if fetched != nil {
+				writeProviderModelsCache(provider, fetched)
+			}
+			for _, m := range fetched {
+				cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": provider})
+			}
+		}
+	}
+
 	out := map[string]any{
-		"models":        ollamaModels,
-		"builtin_models": builtinModels,
+		"models":          ollamaModels,
+		"builtin_models":  builtinModels,
+		"provider_models": cloudModels,
 	}
 	if ollamaErr != "" {
 		out["error"] = ollamaErr

@@ -854,7 +854,7 @@
           <div class="flex items-center justify-between px-4 pt-4 pb-3 border-b border-huginn-border/40">
             <div>
               <p class="text-sm font-semibold text-huginn-text">Select model</p>
-              <p class="text-[10px] text-huginn-muted/60 mt-0.5">{{ availableModels.length }} local models available</p>
+              <p class="text-[10px] text-huginn-muted/60 mt-0.5">{{ availableModels.length }} models available</p>
             </div>
             <button @click="showModelPicker = false"
               class="w-6 h-6 flex items-center justify-center rounded-lg text-huginn-muted hover:text-huginn-text hover:bg-huginn-surface transition-colors">
@@ -1940,13 +1940,14 @@ async function loadAvailableModels() {
   modelsLoading.value = true
   modelsError.value = ''
   try {
-    const data = await api.models.available() as { models?: OllamaModel[]; builtin_models?: OllamaModel[]; error?: string }
+    const data = await api.models.available() as { models?: OllamaModel[]; builtin_models?: OllamaModel[]; provider_models?: OllamaModel[]; error?: string }
     if (data.error && !data.models?.length && !data.builtin_models?.length) {
       modelsError.value = 'Ollama not reachable'
     }
     const ollamaModels = (data.models ?? []) as OllamaModel[]
     const builtinModels = ((data.builtin_models ?? []) as OllamaModel[]).map(m => ({ ...m, source: 'built-in' }))
-    availableModels.value = [...ollamaModels, ...builtinModels]
+    const providerModels = (data.provider_models ?? []) as OllamaModel[]
+    availableModels.value = [...providerModels, ...ollamaModels, ...builtinModels]
   } catch {
     modelsError.value = 'Ollama not reachable'
     availableModels.value = []
