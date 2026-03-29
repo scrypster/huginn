@@ -287,16 +287,16 @@ describe('useApi — apiFetch (via api.*)', () => {
     expect(opts?.method).toBe('POST')
   })
 
-  // credentials (representative pair)
-  it('api.credentials.datadogTest POSTs to /api/v1/credentials/datadog/test', async () => {
+  // credentials — generic catalog endpoints
+  it('api.credentials.testGeneric POSTs to /api/v1/credentials/{provider}/test', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ ok: true }))
-    await api.credentials.datadogTest({ url: 'u', api_key: 'k', app_key: 'a' })
+    await api.credentials.testGeneric('datadog', { api_key: 'k', app_key: 'a' })
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/credentials/datadog/test')
   })
 
-  it('api.credentials.datadogSave POSTs to /api/v1/credentials/datadog', async () => {
+  it('api.credentials.saveGeneric POSTs to /api/v1/credentials/{provider}', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ id: 'c1', provider: 'datadog', account_label: 'prod' }))
-    await api.credentials.datadogSave({ url: 'u', api_key: 'k', app_key: 'a' })
+    await api.credentials.saveGeneric('datadog', { api_key: 'k', app_key: 'a' })
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/credentials/datadog')
   })
 
@@ -488,27 +488,15 @@ describe('useApi — apiFetch (via api.*)', () => {
 
   // ── credential providers (table-driven) ─────────────────────────────────────
 
+  // Bespoke providers (OAuth / non-API-key auth not in catalog).
   const credentialProviders: Array<{ key: string; slug: string }> = [
-    { key: 'slackBot',    slug: 'slack_bot' },
-    { key: 'jiraSA',      slug: 'jira_sa' },
-    { key: 'linear',      slug: 'linear' },
-    { key: 'gitlab',      slug: 'gitlab' },
-    { key: 'discord',     slug: 'discord' },
-    { key: 'vercel',      slug: 'vercel' },
-    { key: 'stripe',      slug: 'stripe' },
-    { key: 'pagerduty',   slug: 'pagerduty' },
-    { key: 'newrelic',    slug: 'newrelic' },
-    { key: 'elastic',     slug: 'elastic' },
-    { key: 'grafana',     slug: 'grafana' },
-    { key: 'crowdstrike', slug: 'crowdstrike' },
-    { key: 'terraform',   slug: 'terraform' },
-    { key: 'servicenow',  slug: 'servicenow' },
-    { key: 'notion',      slug: 'notion' },
-    { key: 'airtable',    slug: 'airtable' },
-    { key: 'hubspot',     slug: 'hubspot' },
-    { key: 'zendesk',     slug: 'zendesk' },
-    { key: 'asana',       slug: 'asana' },
-    { key: 'monday',      slug: 'monday' },
+    { key: 'slackBot', slug: 'slack_bot' },
+    { key: 'jiraSA',   slug: 'jira_sa' },
+    { key: 'linear',   slug: 'linear' },
+    { key: 'gitlab',   slug: 'gitlab' },
+    { key: 'discord',  slug: 'discord' },
+    { key: 'vercel',   slug: 'vercel' },
+    { key: 'stripe',   slug: 'stripe' },
   ]
 
   credentialProviders.forEach(({ key, slug }) => {
