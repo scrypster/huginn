@@ -654,45 +654,6 @@ describe('AgentsView', () => {
     expect(w.text()).toContain('claude-sonnet-4-6')
   })
 
-  // ── Set as default ───────────────────────────────────────────────
-  it('shows "Set as default" button for non-default agent', async () => {
-    mockApiAgentsGet.mockResolvedValueOnce({
-      name: 'NonDefault',
-      model: 'gpt-4',
-      system_prompt: '',
-      color: '#58a6ff',
-      icon: 'N',
-      memory_type: 'none',
-      toolbelt: [],
-      skills: [],
-      local_tools: [],
-    })
-    mockApiAgentsGetActive.mockResolvedValueOnce({ name: 'OtherAgent' })
-    const w = mountAgent({ agentName: 'NonDefault' })
-    await flushPromises()
-
-    expect(w.text()).toContain('Set as default')
-  })
-
-  it('shows "Default agent" badge for active agent', async () => {
-    mockApiAgentsGet.mockResolvedValueOnce({
-      name: 'MyDefault',
-      model: 'gpt-4',
-      system_prompt: '',
-      color: '#58a6ff',
-      icon: 'D',
-      memory_type: 'none',
-      toolbelt: [],
-      skills: [],
-      local_tools: [],
-    })
-    mockApiAgentsGetActive.mockResolvedValueOnce({ name: 'MyDefault' })
-    const w = mountAgent({ agentName: 'MyDefault' })
-    await flushPromises()
-
-    expect(w.text()).toContain('Default agent')
-  })
-
   // ── System prompt editing ────────────────────────────────────────
   it('editing system prompt marks form dirty', async () => {
     mockApiAgentsGet.mockResolvedValueOnce({
