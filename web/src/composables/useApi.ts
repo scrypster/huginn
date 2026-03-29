@@ -306,6 +306,9 @@ export const api = {
   connections: {
     list: () => apiFetch<Connection[]>('/api/v1/connections'),
     providers: () => apiFetch<Provider[]>('/api/v1/providers'),
+    // catalog returns the credential provider catalog as a generic array;
+    // useCredentialCatalog.ts owns the typed CredentialCatalogEntry interface.
+    catalog: () => apiFetch<Record<string, unknown>[]>('/api/v1/connections/catalog'),
     start: (provider: string) =>
       apiFetch<{ auth_url: string }>('/api/v1/connections/start', {
         method: 'POST',
@@ -520,6 +523,13 @@ export const api = {
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/monday/test', { method: 'POST', body: JSON.stringify(payload) }),
     mondaySave: (payload: Record<string, string>) =>
       apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/monday', { method: 'POST', body: JSON.stringify(payload) }),
+
+    // Generic catalog-driven endpoints — used by GenericCredentialForm for all
+    // catalog providers (datadog, splunk, pagerduty, …, monday).
+    testGeneric: (provider: string, payload: Record<string, string>) =>
+      apiFetch<{ ok: boolean; error?: string }>(`/api/v1/credentials/${provider}/test`, { method: 'POST', body: JSON.stringify(payload) }),
+    saveGeneric: (provider: string, payload: Record<string, string>) =>
+      apiFetch<{ id: string; provider: string; account_label: string }>(`/api/v1/credentials/${provider}`, { method: 'POST', body: JSON.stringify(payload) }),
   },
 
   providers: {
