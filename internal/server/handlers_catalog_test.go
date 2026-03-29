@@ -377,3 +377,84 @@ func TestRegistryRegister_Panics_OnNilValidator(t *testing.T) {
 	}()
 	r.Register("test", nil)
 }
+
+// ── Required-field equivalence tests ──────────────────────────────────────────
+// These table-driven tests verify that the generic catalog handler enforces the
+// same required-field constraints that the now-deleted per-provider handlers
+// did.  One sub-test per required field per provider.
+
+func TestCatalogEndpoint_MissingRequiredFields(t *testing.T) {
+	type missingFieldCase struct {
+		provider   string
+		missingKey string
+		payload    string // valid JSON that omits exactly one required field
+	}
+
+	cases := []missingFieldCase{
+		// Datadog — api_key and app_key required; url optional (has default).
+		{provider: "datadog", missingKey: "api_key", payload: `{"app_key":"a"}`},
+		{provider: "datadog", missingKey: "app_key", payload: `{"api_key":"k"}`},
+		// Splunk
+		{provider: "splunk", missingKey: "url",   payload: `{"token":"t"}`},
+		{provider: "splunk", missingKey: "token", payload: `{"url":"https://splunk.example.com:8089"}`},
+		// PagerDuty
+		{provider: "pagerduty", missingKey: "api_token", payload: `{}`},
+		// New Relic — api_key required; account_id optional.
+		{provider: "newrelic", missingKey: "api_key", payload: `{}`},
+		// Elastic
+		{provider: "elastic", missingKey: "url",     payload: `{"api_key":"k"}`},
+		{provider: "elastic", missingKey: "api_key", payload: `{"url":"https://example.elastic.com"}`},
+		// Grafana
+		{provider: "grafana", missingKey: "url",   payload: `{"token":"t"}`},
+		{provider: "grafana", missingKey: "token", payload: `{"url":"https://grafana.example.com"}`},
+		// CrowdStrike
+		{provider: "crowdstrike", missingKey: "client_id",     payload: `{"client_secret":"s"}`},
+		{provider: "crowdstrike", missingKey: "client_secret", payload: `{"client_id":"i"}`},
+		// Terraform Cloud
+		{provider: "terraform", missingKey: "token", payload: `{}`},
+		// ServiceNow
+		{provider: "servicenow", missingKey: "instance_url", payload: `{"username":"u","password":"p"}`},
+		{provider: "servicenow", missingKey: "username",     payload: `{"instance_url":"https://dev.service-now.com","password":"p"}`},
+		{provider: "servicenow", missingKey: "password",     payload: `{"instance_url":"https://dev.service-now.com","username":"u"}`},
+		// Notion
+		{provider: "notion", missingKey: "token", payload: `{}`},
+		// Airtable
+		{provider: "airtable", missingKey: "api_key", payload: `{}`},
+		// HubSpot
+		{provider: "hubspot", missingKey: "token", payload: `{}`},
+		// Zendesk
+		{provider: "zendesk", missingKey: "subdomain", payload: `{"email":"a@b.com","token":"t"}`},
+		{provider: "zendesk", missingKey: "email",     payload: `{"subdomain":"co","token":"t"}`},
+		{provider: "zendesk", missingKey: "token",     payload: `{"subdomain":"co","email":"a@b.com"}`},
+		// Asana
+		{provider: "asana", missingKey: "token", payload: `{}`},
+		// Monday.com
+		{provider: "monday", missingKey: "token", payload: `{}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.provider+"_missing_"+tc.missingKey, func(t *testing.T) {
+			srv := testServer(t)
+			// Override with a passing validator so only the required-field check
+			// can produce a 400 — we are not testing network connectivity here.
+			srv.credValidators.Register(tc.provider, catalog.ValidatorFunc(
+				func(_ context.Context, _ map[string]string) error { return nil },
+			))
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/credentials/"+tc.provider,
+				strings.NewReader(tc.payload))
+			r.SetPathValue("provider", tc.provider)
+
+			srv.handleSaveCredential(w, r)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 when %q is missing for %q; body: %s",
+					w.Code, tc.missingKey, tc.provider, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "required") {
+				t.Errorf("response should mention 'required', got: %s", w.Body.String())
+			}
+		})
+	}
+}
