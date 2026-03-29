@@ -13,6 +13,7 @@ const mockApiSystemGithubSwitch = vi.fn().mockResolvedValue({ active: 'user1' })
 const mockApiMuninnStatus = vi.fn().mockResolvedValue({ connected: false })
 const mockApiMuninnVaults = vi.fn().mockResolvedValue({ vaults: [] })
 const mockApiMuninnCreateVault = vi.fn().mockResolvedValue({})
+const mockFetchCredentialCatalog = vi.fn().mockResolvedValue([])
 
 vi.mock('../../composables/useApi', () => ({
   api: {
@@ -96,6 +97,12 @@ vi.mock('../../composables/useConnectionsCatalog', () => {
   }
 })
 
+vi.mock('../../composables/useCredentialCatalog', () => ({
+  fetchCredentialCatalog: (...args: unknown[]) => mockFetchCredentialCatalog(...args),
+  getCredentialCatalogEntry: vi.fn().mockResolvedValue(null),
+  _resetCredentialCatalogCache: vi.fn(),
+}))
+
 vi.mock('vue-router', () => ({
   useRoute: () => ({ query: {}, params: {} }),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
@@ -132,6 +139,7 @@ beforeEach(() => {
   mockApiConnectionsStart.mockReset().mockResolvedValue({ auth_url: 'https://auth.example.com' })
   mockApiConnectionsSetDefault.mockReset().mockResolvedValue({})
   mockApiSystemGithubSwitch.mockReset().mockResolvedValue({ active: 'user1' })
+  mockFetchCredentialCatalog.mockReset().mockResolvedValue([])
   vi.spyOn(window, 'open').mockImplementation(() => null)
 })
 
@@ -450,5 +458,113 @@ describe('ConnectionsView', () => {
     // After the new flow starts, waitingFor should be 'slack' (not 'github')
     expect(vm.waitingFor).toBe('slack')
     vm.cancelWait()
+  })
+
+  // ── Server catalog integration ────────────────────────────────────────────────
+
+  it('merges server catalog entries into filteredCatalog', async () => {
+    mockFetchCredentialCatalog.mockResolvedValue([
+      {
+        id: 'datadog',
+        name: 'Datadog',
+        description: 'Metrics, logs, monitors',
+        category: 'observability',
+        icon: 'DD',
+        icon_color: '#632ca6',
+        default_label: 'Datadog',
+        multi_account: false,
+        fields: [],
+        validation: { available: true },
+      },
+    ])
+    const w = mountView()
+    await flushPromises()
+    const vm = w.vm as any
+    expect(vm.filteredCatalog.some((c: { id: string }) => c.id === 'datadog')).toBe(true)
+  })
+
+  it('server catalog entry has correct type, iconColor, and hydrated state', async () => {
+    mockFetchCredentialCatalog.mockResolvedValue([
+      {
+        id: 'datadog',
+        name: 'Datadog',
+        description: 'Metrics, logs, monitors',
+        category: 'observability',
+        icon: 'DD',
+        icon_color: '#632ca6',
+        default_label: 'Datadog',
+        multi_account: false,
+        fields: [],
+        validation: { available: true },
+      },
+    ])
+    const w = mountView()
+    await flushPromises()
+    const vm = w.vm as any
+    const dd = vm.filteredCatalog.find((c: { id: string }) => c.id === 'datadog')
+    expect(dd).toBeDefined()
+    expect(dd.type).toBe('credentials')
+    expect(dd.iconColor).toBe('#632ca6')
+    expect(dd.state).toBeDefined()
+    expect(dd.state.connected).toBe(false)
+  })
+
+  it('server catalog entry appears in connectedItems when a matching credential connection exists', async () => {
+    mockFetchCredentialCatalog.mockResolvedValue([
+      {
+        id: 'datadog',
+        name: 'Datadog',
+        description: 'Metrics, logs, monitors',
+        category: 'observability',
+        icon: 'DD',
+        icon_color: '#632ca6',
+        default_label: 'Datadog',
+        multi_account: false,
+        fields: [],
+        validation: { available: true },
+      },
+    ])
+    mockApiConnectionsList.mockResolvedValue([
+      { id: 'cred-1', provider: 'datadog', account_label: 'prod', account_id: 'cred-1' },
+    ])
+    const w = mountView()
+    await flushPromises()
+    const vm = w.vm as any
+    const ids = vm.connectedItems.map((c: { id: string }) => c.id)
+    expect(ids).toContain('datadog')
+  })
+
+  it('catalog fetch failure does not set error banner', async () => {
+    mockFetchCredentialCatalog.mockRejectedValue(new Error('Catalog unavailable'))
+    const w = mountView()
+    await flushPromises()
+    const vm = w.vm as any
+    expect(vm.error).toBeFalsy()
+  })
+
+  it('static CATALOG entries remain in filteredCatalog alongside server entries', async () => {
+    mockFetchCredentialCatalog.mockResolvedValue([
+      {
+        id: 'datadog',
+        name: 'Datadog',
+        description: 'Metrics, logs, monitors',
+        category: 'observability',
+        icon: 'DD',
+        icon_color: '#632ca6',
+        default_label: 'Datadog',
+        multi_account: false,
+        fields: [],
+        validation: { available: true },
+      },
+    ])
+    const w = mountView()
+    await flushPromises()
+    const vm = w.vm as any
+    const ids = vm.filteredCatalog.map((c: { id: string }) => c.id)
+    // Static entries (from mocked CATALOG: slack, github, aws) + server entry (datadog)
+    expect(ids).toContain('slack')
+    expect(ids).toContain('github')
+    expect(ids).toContain('datadog')
+    expect(vm.filteredCatalog.length).toBe(4)
   })
 })

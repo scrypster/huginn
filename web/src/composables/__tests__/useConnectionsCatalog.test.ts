@@ -12,7 +12,12 @@ const oauthEntry: CatalogEntry = CATALOG.find(e => e.id === 'github')!        //
 const multiOAuthEntry: CatalogEntry = CATALOG.find(e => e.id === 'google')!   // oauth, multiAccount:true
 const systemEntry: CatalogEntry = CATALOG.find(e => e.id === 'github_cli')!   // system
 const awsEntry: CatalogEntry = CATALOG.find(e => e.id === 'aws')!             // system (no github_cli mapping)
-const credEntry: CatalogEntry = CATALOG.find(e => e.id === 'datadog')!        // credentials
+// datadog is a server-catalog provider (not in static CATALOG) — define inline for hydration tests
+const credEntry: CatalogEntry = {
+  id: 'datadog', name: 'Datadog', description: 'Metrics, logs',
+  category: 'observability', icon: 'DD', iconColor: '#632ca6',
+  type: 'credentials', multiAccount: false,
+}
 const comingSoonEntry: CatalogEntry = CATALOG.find(e => e.id === 'teams')!    // coming_soon
 
 // ─────────────────────────────────────────────────────────────────────────────

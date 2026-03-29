@@ -220,9 +220,11 @@ import {
   hydrateOAuth,
   hydrateSystem,
   hydrateCredentials,
+  type CatalogEntry,
   type CatalogConnection,
   type ConnectionCategory,
 } from '../composables/useConnectionsCatalog'
+import { fetchCredentialCatalog, type CredentialCatalogEntry } from '../composables/useCredentialCatalog'
 import CategoryNav from '../components/connections/CategoryNav.vue'
 import ConnectionCard from '../components/connections/ConnectionCard.vue'
 import CredentialModal from '../components/connections/CredentialModal.vue'
@@ -247,10 +249,11 @@ const pendingDisconnect  = ref<string | null>(null)
 const activeModal = ref<CredentialProvider | null>(null)
 
 // Raw API data
-const oauthConnections = ref<Connection[]>([])
-const systemTools      = ref<SystemToolStatus[]>([])
-const muninnConnected  = ref(false)
-const muninnIdentity   = ref('')
+const oauthConnections     = ref<Connection[]>([])
+const systemTools          = ref<SystemToolStatus[]>([])
+const muninnConnected      = ref(false)
+const muninnIdentity       = ref('')
+const serverCatalogEntries = ref<CredentialCatalogEntry[]>([])
 
 // WS inject for token refresh events
 const wsRef = inject<Ref<HuginnWS | null>>('ws')
@@ -281,8 +284,8 @@ let snapshotBefore = new Set<string>()
 
 // ── Computed ──────────────────────────────────────────────────────────────────
 
-const hydratedCatalog = computed<CatalogConnection[]>(() =>
-  CATALOG.map(entry => {
+const hydratedCatalog = computed<CatalogConnection[]>(() => {
+  const staticEntries: CatalogConnection[] = CATALOG.map(entry => {
     if (entry.type === 'coming_soon') {
       return { ...entry, state: null }
     }
@@ -300,7 +303,23 @@ const hydratedCatalog = computed<CatalogConnection[]>(() =>
     }
     return { ...entry, state: null }
   })
-)
+
+  const serverEntries: CatalogConnection[] = serverCatalogEntries.value.map(e => {
+    const entry: CatalogEntry = {
+      id:           e.id,
+      name:         e.name,
+      description:  e.description,
+      category:     e.category as ConnectionCategory,
+      icon:         e.icon,
+      iconColor:    e.icon_color,
+      type:         'credentials',
+      multiAccount: e.multi_account,
+    }
+    return { ...entry, state: hydrateCredentials(entry, oauthConnections.value) }
+  })
+
+  return [...staticEntries, ...serverEntries]
+})
 
 const connectedCount = computed(() =>
   hydratedCatalog.value.filter(c => c.state?.connected).length
@@ -363,6 +382,11 @@ onMounted(async () => {
   }
   await refresh()
   await loadMuninnStatus()
+
+  // Fetch server-side credential catalog (best-effort: errors are silent).
+  fetchCredentialCatalog()
+    .then(entries => { serverCatalogEntries.value = entries })
+    .catch(() => { /* catalog unavailable — static entries still work */ })
 
   // Listen for token refresh WS events.
   const ws = wsRef?.value
