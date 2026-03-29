@@ -250,6 +250,37 @@ describe('wireSpaceTimelineWS', () => {
     expect(mockGetMessages).not.toHaveBeenCalled()
   })
 
+  it('done: synchronously renames stream- placeholder before async fetch so next turn tokens create a new bubble', async () => {
+    // Regression: when done fires, the stream- placeholder stays until the async fetch
+    // resolves. If turn-2 tokens arrive during that window, onToken finds the old
+    // placeholder and appends instead of creating a new bubble.
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    // Never-resolving promise simulates slow/pending fetch (the race window).
+    mockGetMessages.mockReturnValue(new Promise(() => {}))
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Turn 1: emit tokens then done
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'first' })
+    await nextTick()
+    ws.emit('done', { type: 'done', session_id: SESSION_ID })
+    await nextTick()
+
+    // Turn 2: tokens arrive while fetch is still pending
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'second' })
+    await nextTick()
+
+    const assistantMsgs = state.messages.filter(m => m.role === 'assistant')
+    // Must have TWO separate assistant messages, not one concatenated message
+    expect(assistantMsgs).toHaveLength(2)
+    expect(assistantMsgs[0].content).toBe('first')
+    expect(assistantMsgs[1].content).toBe('second')
+    expect(assistantMsgs[1].id).toMatch(/^stream-/)
+  })
+
   it('done: replaces streaming placeholder with the persisted message after refresh', async () => {
     const { state } = setupSpace()
     state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)

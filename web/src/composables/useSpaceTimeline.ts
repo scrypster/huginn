@@ -138,20 +138,35 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       // Update activeSessionId for the space that owns this session.
       st.activeSessionId = sessionId
-      // Refresh the last message from the server to get the stable id.
-      // We fire-and-forget; if it fails the streaming content is still visible.
+      // Synchronously rename the stream- placeholder to done- before starting
+      // the async fetch. This closes the race window where turn-2 tokens arrive
+      // before the fetch resolves and onToken finds the old placeholder, causing
+      // the second response to be appended to the first message bubble.
+      const streamIdx = st.messages.findIndex(
+        e => e.session_id === sessionId && e.id.startsWith('stream-')
+      )
+      if (streamIdx >= 0) {
+        const placeholder = st.messages[streamIdx]
+        if (placeholder) placeholder.id = placeholder.id.replace('stream-', 'done-')
+      }
+      // Refresh the last message from the server to get the stable DB id.
+      // We fire-and-forget; if it fails the done- placeholder content is still visible.
       api.sessions.getMessages(sessionId, { limit: 5 }).then(fresh => {
         const freshMsgs = (Array.isArray(fresh) ? fresh : []) as SpaceMessage[]
         for (const m of freshMsgs) {
           if (!st.messages.some(e => e.id === m.id)) {
-            // Replace the streaming placeholder or append.
-            const streamIdx = st.messages.findIndex(
-              e => e.session_id === sessionId && e.id.startsWith('stream-')
-            )
-            if (streamIdx >= 0) {
-              st.messages.splice(streamIdx, 1, m)
-            } else {
-              st.messages.push(m)
+            // Only replace the done- placeholder with assistant messages — user
+            // messages are already present as optimistic entries and swapping the
+            // done- slot with a user message would corrupt the display order.
+            if (m.role === 'assistant') {
+              const doneIdx = st.messages.findIndex(
+                e => e.session_id === sessionId && e.id.startsWith('done-')
+              )
+              if (doneIdx >= 0) {
+                st.messages.splice(doneIdx, 1, m)
+              } else {
+                st.messages.push(m)
+              }
             }
           }
         }
