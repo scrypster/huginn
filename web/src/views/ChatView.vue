@@ -805,6 +805,7 @@ const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 
 // const router  = useRouter()
 const wsRef   = inject<Ref<HuginnWS | null>>('ws')!
+const markSpaceSeen = inject<(spaceId: string) => void>('markSpaceSeen')
 
 // ── Space timeline mode ────────────────────────────────────────────────────────
 // currentSpaceTimeline holds the active space timeline instance.
@@ -829,6 +830,9 @@ watch(() => props.spaceId, async (newId) => {
   const tl = useSpaceTimeline(newId)
   currentSpaceTimeline.value = tl
   await tl.hydrate()
+  // Clear stale unseen-badge entries for this space after hydration so
+  // sessionToSpaceMap is populated and getSessionSpaceId returns correct results.
+  markSpaceSeen?.(newId)
   await scrollToBottom()
 
   // Set up IntersectionObserver on the top sentinel for infinite scroll.
@@ -1141,7 +1145,7 @@ function adaptSpaceMessages(msgs: SpaceMessage[]) {
     // stream- prefix means the message is in-flight (status placeholder or live
     // token stream). Show the blinking cursor so the user knows content is arriving.
     streaming: m.id.startsWith('stream-'),
-    toolCalls: [] as import('../composables/useSessions').ToolCallRecord[],
+    toolCalls: (m.toolCalls ?? []) as import('../composables/useSessions').ToolCallRecord[],
   }))
 }
 

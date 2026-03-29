@@ -197,16 +197,42 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     }
   }
 
+  const onToolResult = (msg: WSMessage): void => {
+    const sessionId = msg.session_id
+    if (!sessionId) return
+    for (const [, st] of stateMap.entries()) {
+      if (!st.sessionToSpaceMap.has(sessionId)) continue
+      const p = msg.payload as Record<string, unknown> | undefined
+      if (!p) break
+      const streamMsg = [...st.messages].reverse().find(
+        m => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
+      )
+      if (streamMsg) {
+        if (!streamMsg.toolCalls) streamMsg.toolCalls = []
+        streamMsg.toolCalls.push({
+          id: (p.id as string) ?? '',
+          name: (p.tool as string) ?? '',
+          args: (p.args as Record<string, unknown>) ?? {},
+          result: (p.result as string) ?? '',
+          done: true,
+        })
+      }
+      break
+    }
+  }
+
   ws.on('status', onStatus)
   ws.on('token', onToken)
   ws.on('done', onDone)
   ws.on('chat', onChat)
+  ws.on('tool_result', onToolResult)
 
   _wsCleanup = () => {
     ws.off('status', onStatus)
     ws.off('token', onToken)
     ws.off('done', onDone)
     ws.off('chat', onChat)
+    ws.off('tool_result', onToolResult)
   }
   return _wsCleanup
 }

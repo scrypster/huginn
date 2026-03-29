@@ -121,6 +121,8 @@ export interface SpaceMessage {
   role: 'user' | 'assistant'
   content: string
   agent: string
+  // Populated from WS tool_result events during streaming; not persisted server-side.
+  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done: boolean }[]
 }
 
 export interface SystemToolStatus {
@@ -364,12 +366,12 @@ export const api = {
 
   muninn: {
     status: () => apiFetch<{ connected: boolean; endpoint?: string; username?: string }>('/api/v1/muninn/status'),
-    test: (payload: { endpoint: string; username: string; password: string }) =>
+    test: (payload: Record<string, string>) =>
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/muninn/test', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    connect: (payload: { endpoint: string; username: string; password: string }) =>
+    connect: (payload: Record<string, string>) =>
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/muninn/connect', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -383,37 +385,7 @@ export const api = {
   },
 
   credentials: {
-    // Bespoke providers (OAuth / non-API-key auth handled outside the catalog).
-    slackBotTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/slack_bot/test', { method: 'POST', body: JSON.stringify(payload) }),
-    slackBotSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/slack_bot', { method: 'POST', body: JSON.stringify(payload) }),
-    jiraSATest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/jira_sa/test', { method: 'POST', body: JSON.stringify(payload) }),
-    jiraSASave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/jira_sa', { method: 'POST', body: JSON.stringify(payload) }),
-    linearTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/linear/test', { method: 'POST', body: JSON.stringify(payload) }),
-    linearSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/linear', { method: 'POST', body: JSON.stringify(payload) }),
-    gitlabTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/gitlab/test', { method: 'POST', body: JSON.stringify(payload) }),
-    gitlabSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/gitlab', { method: 'POST', body: JSON.stringify(payload) }),
-    discordTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/discord/test', { method: 'POST', body: JSON.stringify(payload) }),
-    discordSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/discord', { method: 'POST', body: JSON.stringify(payload) }),
-    vercelTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/vercel/test', { method: 'POST', body: JSON.stringify(payload) }),
-    vercelSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/vercel', { method: 'POST', body: JSON.stringify(payload) }),
-    stripeTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/stripe/test', { method: 'POST', body: JSON.stringify(payload) }),
-    stripeSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/stripe', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Generic catalog-driven endpoints — used by CredentialModal for all 15 catalog providers.
+    // Generic catalog-driven endpoints — used by CredentialModal for all credential/database providers.
     testGeneric: (provider: string, payload: Record<string, string>) =>
       apiFetch<{ ok: boolean; error?: string }>(`/api/v1/credentials/${provider}/test`, { method: 'POST', body: JSON.stringify(payload) }),
     saveGeneric: (provider: string, payload: Record<string, string>) =>

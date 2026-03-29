@@ -835,6 +835,14 @@ function clearUnseen(id: string) {
   saveUnseenToStorage(unseenSessionIds.value)
 }
 
+// markSpaceSeen removes all unseen session IDs that belong to spaceId.
+// Called after hydration so sessionToSpaceMap is populated.
+function markSpaceSeen(spaceId: string) {
+  unseenSessionIds.value = unseenSessionIds.value.filter(id => getSessionSpaceId(id) !== spaceId)
+  saveUnseenToStorage(unseenSessionIds.value)
+}
+provide('markSpaceSeen', markSpaceSeen)
+
 // Clear a session's unseen state when the user navigates into it
 watch(activeSessionId, (id) => { if (id) clearUnseen(id) })
 

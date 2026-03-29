@@ -334,6 +334,87 @@ describe('wireSpaceTimelineWS', () => {
     expect(countAfterSecond).toBe(countAfterFirst)
   })
 
+  // ── Tool result handling ──────────────────────────────────────────
+
+  it('tool_result: attaches tool call result to the active streaming message', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Start streaming — creates a stream- placeholder
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Searching...' })
+    await nextTick()
+
+    ws.emit('tool_result', {
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-1', tool: 'search', args: { q: 'test' }, result: 'found 5 items' },
+    })
+    await nextTick()
+
+    const streaming = state.messages.find(m => m.id.startsWith('stream-'))
+    expect(streaming).toBeDefined()
+    expect(streaming!.toolCalls).toHaveLength(1)
+    expect(streaming!.toolCalls![0]).toMatchObject({
+      id: 'tc-1',
+      name: 'search',
+      args: { q: 'test' },
+      result: 'found 5 items',
+      done: true,
+    })
+  })
+
+  it('tool_result: ignored when session is NOT in sessionToSpaceMap', async () => {
+    const { state } = setupSpace()
+    // Deliberately do NOT add session to map
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('tool_result', {
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-1', tool: 'search', args: {}, result: 'data' },
+    })
+    await nextTick()
+
+    expect(state.messages).toHaveLength(0)
+  })
+
+  it('tool_result: multiple tool results accumulate on the same streaming message', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Working...' })
+    await nextTick()
+
+    ws.emit('tool_result', { type: 'tool_result', session_id: SESSION_ID, payload: { id: 'tc-1', tool: 'read_file', args: {}, result: 'file content' } })
+    ws.emit('tool_result', { type: 'tool_result', session_id: SESSION_ID, payload: { id: 'tc-2', tool: 'write_file', args: {}, result: 'ok' } })
+    await nextTick()
+
+    const streaming = state.messages.find(m => m.id.startsWith('stream-'))
+    expect(streaming!.toolCalls).toHaveLength(2)
+    expect(streaming!.toolCalls![0].name).toBe('read_file')
+    expect(streaming!.toolCalls![1].name).toBe('write_file')
+  })
+
+  it('re-calling wireSpaceTimelineWS cleans up tool_result listener', async () => {
+    const ws = createMockWs()
+
+    wireSpaceTimelineWS(ws as any)
+    const countAfterFirst = ws.handlerCount('tool_result')
+
+    wireSpaceTimelineWS(ws as any)
+    const countAfterSecond = ws.handlerCount('tool_result')
+
+    expect(countAfterSecond).toBe(countAfterFirst)
+  })
+
   // ── clearSpaceTimeline ────────────────────────────────────────────
 
   it('clearSpaceTimeline removes cached state so next hydrate starts fresh', async () => {
