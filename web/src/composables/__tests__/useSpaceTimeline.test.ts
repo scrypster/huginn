@@ -20,6 +20,7 @@ import {
   wireSpaceTimelineWS,
   useSpaceTimeline,
   clearSpaceTimeline,
+  getSessionSpaceId,
 } from '../useSpaceTimeline'
 
 // ── Mock WS factory ───────────────────────────────────────────────────
@@ -68,13 +69,14 @@ describe('wireSpaceTimelineWS', () => {
 
   // ── Token routing ─────────────────────────────────────────────────
 
-  it('appends token content to the existing assistant message when session is in map', async () => {
+  it('appends token content to an active stream- placeholder when session is in map', async () => {
     const { state } = setupSpace()
     state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    // Use a stream- id (active placeholder) — tokens must append here.
     state.messages.push({
-      id: 'msg-1',
+      id: `stream-${SESSION_ID}-12345`,
       session_id: SESSION_ID,
-      seq: 1,
+      seq: -1,
       ts: new Date().toISOString(),
       role: 'assistant',
       content: 'Hello ',
@@ -88,6 +90,39 @@ describe('wireSpaceTimelineWS', () => {
     await nextTick()
 
     expect(state.messages[0].content).toBe('Hello world')
+    expect(state.messages).toHaveLength(1)
+  })
+
+  it('tokens for second turn create new streaming placeholder when only persisted messages exist', async () => {
+    // After the first response's "done" event, the stream- placeholder is replaced by a
+    // real persisted message (real DB id, no stream- prefix). When the second response
+    // starts streaming, tokens must create a NEW placeholder instead of appending to the
+    // first response's persisted message (the multi-turn message-appending bug).
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    // Simulate a persisted assistant message (first turn complete, placeholder replaced)
+    state.messages.push({
+      id: 'db-msg-persisted-1',
+      session_id: SESSION_ID,
+      seq: 1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'First response complete',
+      agent: 'bot',
+    })
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Second turn starts — first token arrives
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Second' })
+    await nextTick()
+
+    // Must create a new stream- placeholder, NOT append to the persisted message
+    expect(state.messages).toHaveLength(2)
+    expect(state.messages[0].content).toBe('First response complete') // unchanged
+    expect(state.messages[1].id).toMatch(/^stream-/)
+    expect(state.messages[1].content).toBe('Second')
   })
 
   it('creates a streaming placeholder when no prior assistant message exists in the session', async () => {
@@ -283,5 +318,42 @@ describe('wireSpaceTimelineWS', () => {
     const freshState = useSpaceTimeline(SPACE_ID).getState()
     expect(freshState.messages).toHaveLength(0)
     expect(freshState.sessionToSpaceMap.size).toBe(0)
+  })
+})
+
+// ── getSessionSpaceId ─────────────────────────────────────────────────────────
+// Used by App.vue to suppress unread badges for sessions that belong to the
+// currently-active space (the user is already viewing that chat).
+
+const SPACE_B = 'space-b'
+const SESSION_B = 'session-b'
+
+describe('getSessionSpaceId', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns the space id when a session is in that space timeline', () => {
+    const tl = useSpaceTimeline(SPACE_ID)
+    tl.getState().sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    expect(getSessionSpaceId(SESSION_ID)).toBe(SPACE_ID)
+  })
+
+  it('returns null when the session is not in any timeline', () => {
+    expect(getSessionSpaceId('unknown-session')).toBeNull()
+  })
+
+  it('returns the correct space when multiple spaces are tracked', () => {
+    useSpaceTimeline(SPACE_ID).getState().sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    useSpaceTimeline(SPACE_B).getState().sessionToSpaceMap.set(SESSION_B, SPACE_B)
+
+    expect(getSessionSpaceId(SESSION_ID)).toBe(SPACE_ID)
+    expect(getSessionSpaceId(SESSION_B)).toBe(SPACE_B)
   })
 })

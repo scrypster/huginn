@@ -98,9 +98,11 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     for (const [, st] of stateMap.entries()) {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       if (msg.type === 'token' && msg.content) {
-        // Find the assistant message being streamed (last assistant msg in session).
+        // Find the active streaming placeholder for this session. Only stream- prefixed
+        // messages qualify — persisted messages (replaced after "done") must never receive
+        // new tokens, as that would append a second response to the first (multi-turn bug).
         const existing = [...st.messages].reverse().find(
-          (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant',
+          (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
         )
         if (existing) {
           if (loadingSessionIds.has(sessionId)) {
@@ -314,4 +316,14 @@ function relativeTime(ts: string): string {
 // clearSpaceTimeline removes cached state for a space (e.g. after archive).
 export function clearSpaceTimeline(spaceId: string) {
   stateMap.delete(spaceId)
+}
+
+// getSessionSpaceId returns the space id that owns the given session, or null if
+// the session is not tracked in any cached space timeline. Used by App.vue to
+// suppress unread badges for sessions that belong to the currently-active space.
+export function getSessionSpaceId(sessionId: string): string | null {
+  for (const [spaceId, st] of stateMap.entries()) {
+    if (st.sessionToSpaceMap.has(sessionId)) return spaceId
+  }
+  return null
 }

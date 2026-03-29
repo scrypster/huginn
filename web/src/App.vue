@@ -754,7 +754,7 @@ import { useWorkflows } from './composables/useWorkflows'
 import { wireThreadDetailWS } from './composables/useThreadDetail'
 import { useCloud } from './composables/useCloud'
 import { useSpaces, wireSpaceWS } from './composables/useSpaces'
-import { wireSpaceTimelineWS, getSpaceLastMessage } from './composables/useSpaceTimeline'
+import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId } from './composables/useSpaceTimeline'
 import { wireSwarmWS } from './composables/useSwarmStatus'
 import SpaceCreateModal from './components/SpaceCreateModal.vue'
 import { useAgents } from './composables/useAgents'
@@ -837,6 +837,7 @@ function clearUnseen(id: string) {
 
 // Clear a session's unseen state when the user navigates into it
 watch(activeSessionId, (id) => { if (id) clearUnseen(id) })
+
 
 // Sync activeSpaceId from route so sidebar highlights the correct space
 // when navigating via router.push('/space/:id').
@@ -995,8 +996,14 @@ async function initApp() {
       if (msg.session_id) {
         const sess = sessions.value.find(s => s.id === msg.session_id)
         if (sess) sess.state = 'idle'
-        // Mark unseen if user isn't currently viewing this session
-        if (msg.session_id !== activeSessionId.value) markUnseen(msg.session_id)
+        // Mark unseen only if the user isn't currently viewing this session or
+        // the space that owns it. Without the space check, sessions backing a
+        // space DM would always fire markUnseen (activeSessionId is empty in
+        // space mode since the route param is a spaceId, not a sessionId).
+        const sessionSpaceId = getSessionSpaceId(msg.session_id)
+        const isViewing = msg.session_id === activeSessionId.value ||
+          (sessionSpaceId !== null && sessionSpaceId === activeSpaceId.value)
+        if (!isViewing) markUnseen(msg.session_id)
       }
     })
   } catch (e: unknown) {
@@ -1026,6 +1033,14 @@ const {
   fetchSpaces, setActiveSpace, markRead,
   updateSpace, deleteSpace,
 } = useSpaces()
+
+// When the user navigates to a space, clear unseen marks for any sessions
+// that belong to that space (they were marked while the route param was empty).
+watch(activeSpaceId, (spaceId) => {
+  if (!spaceId) return
+  unseenSessionIds.value = unseenSessionIds.value.filter(id => getSessionSpaceId(id) !== spaceId)
+  saveUnseenToStorage(unseenSessionIds.value)
+})
 
 const showCreateChannelModal = ref(false)
 const channelSectionOpen = ref(true)

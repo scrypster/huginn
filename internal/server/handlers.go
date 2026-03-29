@@ -740,6 +740,22 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Migrate literal API keys to the OS keychain so they are never stored in
+	// plaintext in config.json. Keys already expressed as "keyring:…" or "$ENV"
+	// references are left unchanged (IsLiteralAPIKey returns false for them).
+	if backend.IsLiteralAPIKey(newCfg.Backend.APIKey) {
+		slot := newCfg.Backend.Provider
+		if slot == "" {
+			slot = "backend"
+		}
+		ref, err := s.storeAPIKey(slot, newCfg.Backend.APIKey)
+		if err != nil {
+			// storeAPIKey returns the literal when keychain is unavailable (e.g. Linux/CI).
+			// Log the warning but continue — the returned ref is still safe to persist.
+			slog.Warn("keychain unavailable, storing API key as literal", "err", err)
+		}
+		newCfg.Backend.APIKey = ref
+	}
 	// Check if restart is needed
 	needsRestart := s.cfg.WebUI.Port != newCfg.WebUI.Port ||
 		s.cfg.WebUI.Bind != newCfg.WebUI.Bind
