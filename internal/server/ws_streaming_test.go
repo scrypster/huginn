@@ -11,10 +11,13 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestStreamEventToWS_TextMappedToToken(t *testing.T) {
+	// StreamText must NOT map to "token" — the onToken callback already sends a
+	// "token" WS message per text chunk.  Normalising StreamText to "token" here
+	// causes every word to be delivered twice (word-doubling bug, issue #30).
 	ev := backend.StreamEvent{Type: backend.StreamText, Content: "hello"}
 	msg := streamEventToWS(ev, "sess-1")
-	if msg.Type != "token" {
-		t.Errorf("StreamText should map to type 'token', got %q", msg.Type)
+	if msg.Type == "token" {
+		t.Errorf("StreamText must not map to 'token' (causes word doubling); got type %q — fix streamEventToWS", msg.Type)
 	}
 	if msg.Content != "hello" {
 		t.Errorf("expected content 'hello', got %q", msg.Content)

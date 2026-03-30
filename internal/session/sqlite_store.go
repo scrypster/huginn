@@ -3,6 +3,7 @@ package session
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -142,7 +143,18 @@ func (s *SQLiteSessionStore) Load(id string) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session.Load: %w", err)
 	}
-	return &Session{ID: m.ID, Manifest: *m}, nil
+	sess := &Session{ID: m.ID, Manifest: *m}
+	// Initialize seq from the current max in the DB so that subsequent
+	// Append calls use the correct next sequence number. Without this,
+	// every Load returns seq=0 and the first Append after a fresh Load
+	// tries seq=1 again — the UNIQUE (container_id, seq) constraint causes
+	// INSERT OR IGNORE to silently drop all messages after the first turn.
+	var maxSeq int64
+	_ = s.db.Read().QueryRow(
+		`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE container_id = ?`, id,
+	).Scan(&maxSeq)
+	atomic.StoreInt64(&sess.seq, maxSeq)
+	return sess, nil
 }
 
 // LoadOrReconstruct is equivalent to Load for the SQLite store.
@@ -290,12 +302,22 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 		return fmt.Errorf("session sqlite: begin tx for message %s: %w", msg.ID, err)
 	}
 
+	var toolCallsJSON *string
+	if len(msg.ToolCalls) > 0 {
+		b, jsonErr := json.Marshal(msg.ToolCalls)
+		if jsonErr == nil {
+			s := string(b)
+			toolCallsJSON = &s
+		}
+	}
+
 	_, err = tx.Exec(`
 		INSERT OR IGNORE INTO messages
 			(id, container_type, container_id, seq, ts, role, content,
 			 agent, tool_name, tool_call_id, type,
-			 prompt_tokens, completion_tokens, cost_usd, model, parent_message_id)
-		VALUES (?, 'session', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 prompt_tokens, completion_tokens, cost_usd, model, parent_message_id,
+			 tool_calls_json)
+		VALUES (?, 'session', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, sess.ID, seq,
 		msg.Ts.UTC().Format(time.RFC3339),
 		roleOrDefault(msg.Role), msg.Content,
@@ -303,6 +325,7 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 		msg.Type,
 		msg.PromptTok, msg.CompTok, msg.CostUSD, msg.ModelName,
 		parentMsgID,
+		toolCallsJSON,
 	)
 	if err != nil {
 		_ = tx.Rollback()
@@ -358,11 +381,11 @@ func (s *SQLiteSessionStore) TailMessages(id string, n int) ([]SessionMessage, e
 	rows, err := rdb.Query(`
 		SELECT id, ts, seq, role, content, agent, tool_name, tool_call_id,
 		       type, prompt_tokens, completion_tokens, cost_usd, model,
-		       COALESCE(thread_reply_count, 0)
+		       COALESCE(thread_reply_count, 0), tool_calls_json
 		FROM (
 			SELECT id, ts, seq, role, content, agent, tool_name, tool_call_id,
 			       type, prompt_tokens, completion_tokens, cost_usd, model,
-			       thread_reply_count
+			       thread_reply_count, tool_calls_json
 			FROM messages
 			WHERE container_type = 'session' AND container_id = ?
 			  AND (parent_message_id IS NULL OR parent_message_id = '')
@@ -388,10 +411,10 @@ func (s *SQLiteSessionStore) TailMessagesBefore(id string, n int, beforeSeq int6
 
 	rows, err := s.db.Read().Query(`
 		SELECT id, ts, seq, role, content, agent, tool_name, tool_call_id,
-		       type, prompt_tokens, completion_tokens, cost_usd, model
+		       type, prompt_tokens, completion_tokens, cost_usd, model, tool_calls_json
 		FROM (
 			SELECT id, ts, seq, role, content, agent, tool_name, tool_call_id,
-			       type, prompt_tokens, completion_tokens, cost_usd, model
+			       type, prompt_tokens, completion_tokens, cost_usd, model, tool_calls_json
 			FROM messages
 			WHERE container_type = 'session' AND container_id = ? AND seq < ?
 			ORDER BY seq DESC
@@ -412,37 +435,46 @@ func scanSessionMessages(rows *sql.Rows) ([]SessionMessage, error) {
 	for rows.Next() {
 		var msg SessionMessage
 		var tsStr string
+		var toolCallsJSON sql.NullString
 		if err := rows.Scan(
 			&msg.ID, &tsStr, &msg.Seq, &msg.Role, &msg.Content,
 			&msg.Agent, &msg.ToolName, &msg.ToolCallID,
 			&msg.Type, &msg.PromptTok, &msg.CompTok, &msg.CostUSD, &msg.ModelName,
+			&toolCallsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan session message: %w", err)
 		}
 		if t, e := time.Parse(time.RFC3339, tsStr); e == nil {
 			msg.Ts = t.UTC()
+		}
+		if toolCallsJSON.Valid && toolCallsJSON.String != "" {
+			_ = json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls)
 		}
 		out = append(out, msg)
 	}
 	return out, rows.Err()
 }
 
-// scanSessionMessagesWithReplyCount scans rows that include a thread_reply_count column.
+// scanSessionMessagesWithReplyCount scans rows that include a thread_reply_count and tool_calls_json column.
 func scanSessionMessagesWithReplyCount(rows *sql.Rows) ([]SessionMessage, error) {
 	var out []SessionMessage
 	for rows.Next() {
 		var msg SessionMessage
 		var tsStr string
+		var toolCallsJSON sql.NullString
 		if err := rows.Scan(
 			&msg.ID, &tsStr, &msg.Seq, &msg.Role, &msg.Content,
 			&msg.Agent, &msg.ToolName, &msg.ToolCallID,
 			&msg.Type, &msg.PromptTok, &msg.CompTok, &msg.CostUSD, &msg.ModelName,
-			&msg.ThreadReplyCount,
+			&msg.ThreadReplyCount, &toolCallsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan session message: %w", err)
 		}
 		if t, e := time.Parse(time.RFC3339, tsStr); e == nil {
 			msg.Ts = t.UTC()
+		}
+		if toolCallsJSON.Valid && toolCallsJSON.String != "" {
+			_ = json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls)
 		}
 		out = append(out, msg)
 	}
@@ -591,10 +623,10 @@ func (s *SQLiteSessionStore) TailThreadMessages(sessionID, threadID string, n in
 
 	rows, err := s.db.Read().Query(`
 		SELECT id, ts, seq, role, content, agent, tool_name, tool_call_id,
-		       type, prompt_tokens, completion_tokens, cost_usd, model
+		       type, prompt_tokens, completion_tokens, cost_usd, model, tool_calls_json
 		FROM (
 			SELECT id, ts, seq, role, content, agent, tool_name, tool_call_id,
-			       type, prompt_tokens, completion_tokens, cost_usd, model
+			       type, prompt_tokens, completion_tokens, cost_usd, model, tool_calls_json
 			FROM messages
 			WHERE container_type = 'thread' AND container_id = ?
 			ORDER BY seq DESC LIMIT ?

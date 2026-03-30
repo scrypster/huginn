@@ -213,8 +213,10 @@ func TestStreamEventToWS(t *testing.T) {
 	if msg.Content != "hello world" {
 		t.Errorf("expected content=hello world, got %q", msg.Content)
 	}
-	if msg.Type != "token" {
-		t.Errorf("expected type=%q, got %q", "token", msg.Type)
+	// StreamText is NOT normalised to "token" — the onToken callback handles
+	// text tokens. Normalising here would double every word (issue #30).
+	if msg.Type != "text" {
+		t.Errorf("expected type=%q, got %q", "text", msg.Type)
 	}
 }
 

@@ -44,13 +44,16 @@ func ResolveAPIKey(raw string) (string, error) {
 }
 
 // IsLiteralAPIKey reports whether raw is a literal API key (not an env-var
-// reference like "$VAR" and not a keyring reference like "keyring:svc:user").
+// reference like "$VAR", not a keyring reference like "keyring:svc:user", and
+// not the UI redaction sentinel "[REDACTED]").
 // Empty strings return false (no key configured at all).
 func IsLiteralAPIKey(raw string) bool {
 	if raw == "" {
 		return false
 	}
-	return !strings.HasPrefix(raw, "$") && !strings.HasPrefix(raw, "keyring:")
+	return !strings.HasPrefix(raw, "$") &&
+		!strings.HasPrefix(raw, "keyring:") &&
+		raw != "[REDACTED]"
 }
 
 // StoreAPIKey stores value in the OS keyring under "huginn"/<slot> and returns

@@ -104,6 +104,14 @@ type SessionRef struct {
 	SpaceID   string `json:"space_id"`
 }
 
+// SpaceMessageToolCall is a single tool invocation included in a SpaceMessage.
+type SpaceMessageToolCall struct {
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Args   map[string]any `json:"args,omitempty"`
+	Result string         `json:"result,omitempty"`
+}
+
 // SpaceMessage is a single message returned by ListSpaceMessages.
 type SpaceMessage struct {
 	ID        string `json:"id"`
@@ -111,10 +119,11 @@ type SpaceMessage struct {
 	Seq       int64  `json:"seq"`
 	// Ts is assigned by SQLite (strftime default); lexicographic string comparison
 	// is safe for cursor pagination because SQLite is single-writer.
-	Ts      string `json:"ts"`
-	Role    string `json:"role"`
-	Content string `json:"content"`
-	Agent   string `json:"agent"`
+	Ts        string                 `json:"ts"`
+	Role      string                 `json:"role"`
+	Content   string                 `json:"content"`
+	Agent     string                 `json:"agent"`
+	ToolCalls []SpaceMessageToolCall `json:"toolCalls,omitempty"`
 }
 
 // SpaceMessagesResult is the paginated result of ListSpaceMessages.

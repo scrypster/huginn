@@ -93,6 +93,59 @@ const connectionsFixture = [
   },
 ]
 
+// Minimal catalog fixture — enough to drive CategoryNav categories and card grid.
+// Mirrors the shape of catalog.Entry from the Go server.
+const catalogFixture = [
+  {
+    id: 'slack', name: 'Slack', description: 'Slack messaging', category: 'communication',
+    icon: 'SL', icon_color: '#4a154b', type: 'oauth', default_label: 'Slack',
+    multi_account: false, fields: [], validation: { available: false },
+  },
+  {
+    id: 'discord', name: 'Discord', description: 'Discord bot', category: 'communication',
+    icon: 'DC', icon_color: '#5865f2', type: 'credentials', default_label: 'Discord',
+    multi_account: false,
+    fields: [{ key: 'bot_token', label: 'Bot Token', type: 'password', required: true, stored_in: 'creds', placeholder: 'Bot token' }],
+    validation: { available: true, description: 'Verifies bot token.' },
+  },
+  {
+    id: 'github', name: 'GitHub', description: 'GitHub OAuth', category: 'dev_tools',
+    icon: 'GH', icon_color: '#24292f', type: 'oauth', default_label: 'GitHub',
+    multi_account: false, fields: [], validation: { available: false },
+  },
+  {
+    id: 'datadog', name: 'Datadog', description: 'Datadog monitoring', category: 'observability',
+    icon: 'DD', icon_color: '#632ca6', type: 'credentials', default_label: 'Datadog',
+    multi_account: false,
+    fields: [{ key: 'api_key', label: 'API Key', type: 'password', required: true, stored_in: 'creds', placeholder: 'API key' }],
+    validation: { available: true, description: 'Calls /api/v1/validate.' },
+  },
+  {
+    id: 'aws', name: 'AWS', description: 'Amazon Web Services', category: 'cloud',
+    icon: 'AW', icon_color: '#ff9900', type: 'system', default_label: 'AWS',
+    multi_account: false, fields: [], validation: { available: false },
+  },
+  {
+    id: 'postgres', name: 'PostgreSQL', description: 'PostgreSQL database', category: 'databases',
+    icon: 'PG', icon_color: '#336791', type: 'credentials', default_label: 'PostgreSQL',
+    multi_account: false,
+    fields: [{ key: 'url', label: 'Connection URL', type: 'url', required: true, stored_in: 'creds', placeholder: 'postgres://...' }],
+    validation: { available: true, description: 'Connects to database.' },
+  },
+  {
+    id: 'notion', name: 'Notion', description: 'Notion workspace', category: 'productivity',
+    icon: 'NO', icon_color: '#000000', type: 'credentials', default_label: 'Notion',
+    multi_account: false,
+    fields: [{ key: 'api_key', label: 'API Key', type: 'password', required: true, stored_in: 'creds', placeholder: 'secret_...' }],
+    validation: { available: true, description: 'Calls /v1/users/me.' },
+  },
+  {
+    id: 'github_cli', name: 'GitHub CLI', description: 'GitHub CLI system tool', category: 'system',
+    icon: 'GC', icon_color: '#24292f', type: 'system', default_label: 'GitHub CLI',
+    multi_account: false, fields: [], validation: { available: false },
+  },
+]
+
 // Matches SystemToolStatus interface: name, installed, authed, identity, profiles, error
 const systemToolsFixture = [
   { name: 'github_cli', installed: true, authed: true, identity: 'test-user', profiles: [], error: '' },
@@ -269,6 +322,11 @@ export async function setupApiMocks(page: Page) {
   // 13. Connections list
   await page.route('**/api/v1/connections', route =>
     route.fulfill({ json: connectionsFixture })
+  )
+
+  // 13a. Connections catalog — registered AFTER /connections so it wins (LIFO)
+  await page.route('**/api/v1/connections/catalog', route =>
+    route.fulfill({ json: catalogFixture })
   )
 
   // 14. Individual agent by name (GET / PUT) — registered before agents list

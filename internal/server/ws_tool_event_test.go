@@ -59,14 +59,16 @@ func TestStreamEventToWS_ToolResult(t *testing.T) {
 	}
 }
 
-// TestStreamEventToWS_TokenHasNoPayload verifies that text/token events
-// are mapped to type "token" and do not carry a Payload field (omitempty in JSON output).
+// TestStreamEventToWS_TextEventHasNoPayload verifies that StreamText events
+// preserve their "text" type and carry no Payload. The onToken callback — not
+// streamEventToWS — is responsible for emitting "token" WS messages for text
+// chunks; normalising StreamText to "token" here causes word doubling (issue #30).
 func TestStreamEventToWS_TokenHasNoPayload(t *testing.T) {
 	ev := backend.StreamEvent{Type: backend.StreamText, Content: "hello"}
 	msg := streamEventToWS(ev, "sess-3")
 
-	if msg.Type != "token" {
-		t.Errorf("Type = %q, want %q", msg.Type, "token")
+	if msg.Type != "text" {
+		t.Errorf("Type = %q, want %q", msg.Type, "text")
 	}
 	if msg.Content != "hello" {
 		t.Errorf("Content = %q, want %q", msg.Content, "hello")
@@ -91,7 +93,9 @@ func TestToolEventOrdering(t *testing.T) {
 		msgs = append(msgs, streamEventToWS(ev, "sess-4"))
 	}
 
-	want := []string{"token", "tool_call", "tool_result", "token"}
+	// StreamText events now map to "text" (not "token") to prevent word doubling
+	// when the onToken callback also emits a "token" WS message (issue #30).
+	want := []string{"text", "tool_call", "tool_result", "text"}
 	for i, msg := range msgs {
 		if msg.Type != want[i] {
 			t.Errorf("msgs[%d].Type = %q, want %q", i, msg.Type, want[i])
@@ -148,9 +152,10 @@ func TestStreamEventToWS_TextVsDoneFiltering(t *testing.T) {
 	textMsg := streamEventToWS(text, "sess-6")
 	doneMsg := streamEventToWS(done, "sess-6")
 
-	// Text should map to "token" type, which is different from "done"
-	if textMsg.Type != "token" {
-		t.Errorf("StreamText mapped to Type=%q, want token", textMsg.Type)
+	// StreamText maps to "text" (not "token") — the onToken callback handles
+	// text-chunk display. Mapping to "token" here causes word doubling (issue #30).
+	if textMsg.Type != "text" {
+		t.Errorf("StreamText mapped to Type=%q, want text", textMsg.Type)
 	}
 	if textMsg.Content != "output" {
 		t.Errorf("StreamText Content=%q, want output", textMsg.Content)

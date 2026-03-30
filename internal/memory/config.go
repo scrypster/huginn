@@ -28,7 +28,11 @@ type GlobalConfig struct {
 	UserVault       string            `json:"user_vault"`                 // overrides username resolution
 	Strategy        VaultStrategy     `json:"strategy"`                   // default: two-tier
 	ActivationLimit int               `json:"activation_limit"`           // max results per activation call; default 10
-	VaultTokens     map[string]string `json:"vault_tokens,omitempty"`     // per-vault auth tokens
+	VaultTokens     map[string]string `json:"vault_tokens,omitempty"`     // per-vault REST API tokens (mk_...)
+	// MCPToken is the daemon token for authenticating to the MuninnDB MCP server (mdb_...).
+	// This is distinct from per-vault API keys. If set, it takes precedence over VaultTokens
+	// for all MCP transport connections. Run `muninn --mcp-token <value>` to find the value.
+	MCPToken string `json:"mcp_token,omitempty"`
 }
 
 // ProjectConfig is loaded from .huginn/muninn.json (nearest, walking up to git root).

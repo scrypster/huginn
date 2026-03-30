@@ -24,22 +24,33 @@
     <!-- Divider -->
     <div class="mx-3 my-2 border-t border-huginn-border/50" />
 
-    <!-- Category items -->
-    <button
-      v-for="item in categoryItems"
-      :key="item.id"
-      @click="$emit('update:category', item.id)"
-      class="flex items-center justify-between px-3 py-1.5 mx-2 rounded-lg text-xs transition-colors"
-      :class="category === item.id
-        ? 'bg-huginn-blue/15 text-huginn-blue'
-        : 'text-huginn-muted hover:text-huginn-text hover:bg-huginn-surface'"
-    >
-      <span>{{ item.label }}</span>
-      <span
-        v-if="item.count"
-        class="text-[10px] px-1 text-huginn-muted/60"
-      >{{ item.count }}</span>
-    </button>
+    <!-- Category items (skeleton while loading) -->
+    <template v-if="loading">
+      <div
+        v-for="n in categoryOrder.length"
+        :key="n"
+        class="flex items-center justify-between px-3 py-1.5 mx-2 rounded-lg animate-pulse"
+      >
+        <div class="h-2.5 rounded bg-huginn-border/60" :style="`width: ${50 + (n * 13) % 40}%`" />
+      </div>
+    </template>
+    <template v-else>
+      <button
+        v-for="item in categoryItems"
+        :key="item.id"
+        @click="$emit('update:category', item.id)"
+        class="flex items-center justify-between px-3 py-1.5 mx-2 rounded-lg text-xs transition-colors"
+        :class="category === item.id
+          ? 'bg-huginn-blue/15 text-huginn-blue'
+          : 'text-huginn-muted hover:text-huginn-text hover:bg-huginn-surface'"
+      >
+        <span>{{ item.label }}</span>
+        <span
+          v-if="item.count"
+          class="text-[10px] px-1 text-huginn-muted/60"
+        >{{ item.count }}</span>
+      </button>
+    </template>
   </nav>
 </template>
 
@@ -50,6 +61,7 @@ import { CATEGORY_LABELS, type ConnectionCategory, type CatalogConnection } from
 const props = defineProps<{
   category: ConnectionCategory
   connections: CatalogConnection[]
+  loading?: boolean
 }>()
 
 defineEmits<{
@@ -66,7 +78,7 @@ const specialItems = computed(() => [
 ])
 
 const categoryOrder: ConnectionCategory[] = [
-  'communication', 'dev_tools', 'cloud', 'productivity', 'databases', 'system',
+  'communication', 'dev_tools', 'cloud', 'productivity', 'databases', 'observability', 'system',
 ]
 
 const categoryItems = computed(() =>

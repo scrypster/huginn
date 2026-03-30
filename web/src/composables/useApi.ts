@@ -121,6 +121,9 @@ export interface SpaceMessage {
   role: 'user' | 'assistant'
   content: string
   agent: string
+  // Populated from WS tool_result events during streaming, or from the server on load.
+  // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
+  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean }[]
 }
 
 export interface SystemToolStatus {
@@ -306,6 +309,9 @@ export const api = {
   connections: {
     list: () => apiFetch<Connection[]>('/api/v1/connections'),
     providers: () => apiFetch<Provider[]>('/api/v1/providers'),
+    // catalog returns the credential provider catalog as a generic array;
+    // useCredentialCatalog.ts owns the typed CredentialCatalogEntry interface.
+    catalog: () => apiFetch<Record<string, unknown>[]>('/api/v1/connections/catalog'),
     start: (provider: string) =>
       apiFetch<{ auth_url: string }>('/api/v1/connections/start', {
         method: 'POST',
@@ -361,12 +367,12 @@ export const api = {
 
   muninn: {
     status: () => apiFetch<{ connected: boolean; endpoint?: string; username?: string }>('/api/v1/muninn/status'),
-    test: (payload: { endpoint: string; username: string; password: string }) =>
+    test: (payload: Record<string, string>) =>
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/muninn/test', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    connect: (payload: { endpoint: string; username: string; password: string }) =>
+    connect: (payload: Record<string, string>) =>
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/muninn/connect', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -380,146 +386,11 @@ export const api = {
   },
 
   credentials: {
-    datadogTest: (payload: { url: string; api_key: string; app_key: string }) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/datadog/test', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    datadogSave: (payload: { url: string; api_key: string; app_key: string; label?: string }) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/datadog', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    splunkTest: (payload: { url: string; token: string }) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/splunk/test', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    splunkSave: (payload: { url: string; token: string; label?: string }) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/splunk', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-
-    // Slack Bot
-    slackBotTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/slack_bot/test', { method: 'POST', body: JSON.stringify(payload) }),
-    slackBotSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/slack_bot', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Jira Service Account
-    jiraSATest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/jira_sa/test', { method: 'POST', body: JSON.stringify(payload) }),
-    jiraSASave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/jira_sa', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Linear
-    linearTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/linear/test', { method: 'POST', body: JSON.stringify(payload) }),
-    linearSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/linear', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // GitLab
-    gitlabTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/gitlab/test', { method: 'POST', body: JSON.stringify(payload) }),
-    gitlabSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/gitlab', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Discord
-    discordTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/discord/test', { method: 'POST', body: JSON.stringify(payload) }),
-    discordSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/discord', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Vercel
-    vercelTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/vercel/test', { method: 'POST', body: JSON.stringify(payload) }),
-    vercelSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/vercel', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Stripe
-    stripeTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/stripe/test', { method: 'POST', body: JSON.stringify(payload) }),
-    stripeSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/stripe', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // PagerDuty
-    pagerdutyTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/pagerduty/test', { method: 'POST', body: JSON.stringify(payload) }),
-    pagerdutySave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/pagerduty', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // New Relic
-    newrelicTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/newrelic/test', { method: 'POST', body: JSON.stringify(payload) }),
-    newrelicSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/newrelic', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Elastic
-    elasticTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/elastic/test', { method: 'POST', body: JSON.stringify(payload) }),
-    elasticSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/elastic', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Grafana
-    grafanaTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/grafana/test', { method: 'POST', body: JSON.stringify(payload) }),
-    grafanaSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/grafana', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // CrowdStrike
-    crowdstrikeTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/crowdstrike/test', { method: 'POST', body: JSON.stringify(payload) }),
-    crowdstrikeSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/crowdstrike', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Terraform Cloud
-    terraformTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/terraform/test', { method: 'POST', body: JSON.stringify(payload) }),
-    terraformSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/terraform', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // ServiceNow
-    servicenowTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/servicenow/test', { method: 'POST', body: JSON.stringify(payload) }),
-    servicenowSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/servicenow', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Notion
-    notionTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/notion/test', { method: 'POST', body: JSON.stringify(payload) }),
-    notionSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/notion', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Airtable
-    airtableTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/airtable/test', { method: 'POST', body: JSON.stringify(payload) }),
-    airtableSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/airtable', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // HubSpot
-    hubspotTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/hubspot/test', { method: 'POST', body: JSON.stringify(payload) }),
-    hubspotSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/hubspot', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Zendesk
-    zendeskTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/zendesk/test', { method: 'POST', body: JSON.stringify(payload) }),
-    zendeskSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/zendesk', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Asana
-    asanaTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/asana/test', { method: 'POST', body: JSON.stringify(payload) }),
-    asanaSave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/asana', { method: 'POST', body: JSON.stringify(payload) }),
-
-    // Monday
-    mondayTest: (payload: Record<string, string>) =>
-      apiFetch<{ ok: boolean; error?: string }>('/api/v1/credentials/monday/test', { method: 'POST', body: JSON.stringify(payload) }),
-    mondaySave: (payload: Record<string, string>) =>
-      apiFetch<{ id: string; provider: string; account_label: string }>('/api/v1/credentials/monday', { method: 'POST', body: JSON.stringify(payload) }),
+    // Generic catalog-driven endpoints — used by CredentialModal for all credential/database providers.
+    testGeneric: (provider: string, payload: Record<string, string>) =>
+      apiFetch<{ ok: boolean; error?: string }>(`/api/v1/credentials/${provider}/test`, { method: 'POST', body: JSON.stringify(payload) }),
+    saveGeneric: (provider: string, payload: Record<string, string>) =>
+      apiFetch<{ id: string; provider: string; account_label: string }>(`/api/v1/credentials/${provider}`, { method: 'POST', body: JSON.stringify(payload) }),
   },
 
   providers: {

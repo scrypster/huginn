@@ -16,6 +16,7 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
+	catalogpkg "github.com/scrypster/huginn/internal/connections/catalog"
 	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/relay"
@@ -60,11 +61,12 @@ type Server struct {
 	// provider key changes into the running cache without requiring a restart.
 	backendCache *backend.BackendCache
 
-	connMgr       *connections.Manager
-	connStore     connections.StoreInterface
-	connProviders map[connections.Provider]connections.IntegrationProvider
-	oauthLimiter  *flowRateLimiter
-	authLimiter   *authFailLimiter // per-server IP-based auth-failure rate limiter
+	connMgr        *connections.Manager
+	connStore      connections.StoreInterface
+	connProviders  map[connections.Provider]connections.IntegrationProvider
+	oauthLimiter   *flowRateLimiter
+	authLimiter    *authFailLimiter // per-server IP-based auth-failure rate limiter
+	credValidators *catalogpkg.Registry
 
 	// Per-endpoint HTTP rate limiters (per-IP sliding window).
 	sessionCreateLimiter *endpointRateLimiter
@@ -265,17 +267,18 @@ func New(
 		pm[p.Name()] = p
 	}
 	s := &Server{
-		cfg:           cfg,
-		orch:          orch,
-		store:         store,
-		token:         token,
-		huginnDir:     huginnDir,
-		wsHub:         newWSHub(),
-		connMgr:       connMgr,
-		connStore:     connStore,
-		connProviders: pm,
-		oauthLimiter:  newFlowRateLimiter(),
-		authLimiter:   newAuthFailLimiter(),
+		cfg:            cfg,
+		orch:           orch,
+		store:          store,
+		token:          token,
+		huginnDir:      huginnDir,
+		wsHub:          newWSHub(),
+		connMgr:        connMgr,
+		connStore:      connStore,
+		connProviders:  pm,
+		oauthLimiter:   newFlowRateLimiter(),
+		authLimiter:    newAuthFailLimiter(),
+		credValidators: buildCredentialValidatorRegistry(),
 		relayKeys:     make(map[string]string),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
@@ -946,52 +949,17 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/connections/oauth/relay", api(s.handleOAuthRelayFromCloud))
 	mux.HandleFunc("DELETE /api/v1/connections/{id}", api(s.handleDeleteConnection))
 
+	// Connection catalog — provider metadata for the frontend (authenticated)
+	mux.HandleFunc("GET /api/v1/connections/catalog", api(s.handleGetConnectionsCatalog))
+
 	// Credentials API — save + test for API-key providers (authenticated)
 	// All credential endpoints are capped at 100 KB.
 	credBody := func(h http.HandlerFunc) http.HandlerFunc { return api(withMaxBody(100<<10, h)) }
-	mux.HandleFunc("POST /api/v1/credentials/datadog",      credBody(s.handleSaveDatadogCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/datadog/test", credBody(s.handleTestDatadogCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/splunk",       credBody(s.handleSaveSplunkCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/splunk/test",  credBody(s.handleTestSplunkCredentials))
-	// Tier-2: PagerDuty
-	mux.HandleFunc("POST /api/v1/credentials/pagerduty",      credBody(s.handleSavePagerDutyCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/pagerduty/test", credBody(s.handleTestPagerDutyCredentials))
-	// Tier-2: New Relic
-	mux.HandleFunc("POST /api/v1/credentials/newrelic",      credBody(s.handleSaveNewRelicCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/newrelic/test", credBody(s.handleTestNewRelicCredentials))
-	// Tier-2: Elastic
-	mux.HandleFunc("POST /api/v1/credentials/elastic",      credBody(s.handleSaveElasticCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/elastic/test", credBody(s.handleTestElasticCredentials))
-	// Tier-2: Grafana
-	mux.HandleFunc("POST /api/v1/credentials/grafana",      credBody(s.handleSaveGrafanaCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/grafana/test", credBody(s.handleTestGrafanaCredentials))
-	// Tier-2: CrowdStrike
-	mux.HandleFunc("POST /api/v1/credentials/crowdstrike",      credBody(s.handleSaveCrowdStrikeCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/crowdstrike/test", credBody(s.handleTestCrowdStrikeCredentials))
-	// Tier-2: Terraform Cloud
-	mux.HandleFunc("POST /api/v1/credentials/terraform",      credBody(s.handleSaveTerraformCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/terraform/test", credBody(s.handleTestTerraformCredentials))
-	// Tier-2: ServiceNow
-	mux.HandleFunc("POST /api/v1/credentials/servicenow",      credBody(s.handleSaveServiceNowCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/servicenow/test", credBody(s.handleTestServiceNowCredentials))
-	// Tier-2: Notion
-	mux.HandleFunc("POST /api/v1/credentials/notion",      credBody(s.handleSaveNotionCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/notion/test", credBody(s.handleTestNotionCredentials))
-	// Tier-2: Airtable
-	mux.HandleFunc("POST /api/v1/credentials/airtable",      credBody(s.handleSaveAirtableCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/airtable/test", credBody(s.handleTestAirtableCredentials))
-	// Tier-2: HubSpot
-	mux.HandleFunc("POST /api/v1/credentials/hubspot",      credBody(s.handleSaveHubSpotCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/hubspot/test", credBody(s.handleTestHubSpotCredentials))
-	// Tier-2: Zendesk
-	mux.HandleFunc("POST /api/v1/credentials/zendesk",      credBody(s.handleSaveZendeskCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/zendesk/test", credBody(s.handleTestZendeskCredentials))
-	// Tier-2: Asana
-	mux.HandleFunc("POST /api/v1/credentials/asana",      credBody(s.handleSaveAsanaCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/asana/test", credBody(s.handleTestAsanaCredentials))
-	// Tier-2: Monday.com
-	mux.HandleFunc("POST /api/v1/credentials/monday",      credBody(s.handleSaveMondayCredentials))
-	mux.HandleFunc("POST /api/v1/credentials/monday/test", credBody(s.handleTestMondayCredentials))
+
+	// Generic catalog-driven handlers.  Explicit per-provider routes below take
+	// precedence over these wildcards when both are registered (Go 1.22 specificity).
+	mux.HandleFunc("POST /api/v1/credentials/{provider}",      credBody(s.handleSaveCredential))
+	mux.HandleFunc("POST /api/v1/credentials/{provider}/test", credBody(s.handleTestCredential))
 
 	// Integrations API (authenticated)
 	mux.HandleFunc("GET /api/v1/integrations/cli-status", api(s.handleCLIStatus))

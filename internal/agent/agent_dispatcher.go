@@ -599,14 +599,18 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		vr := o.connectAgentVault(ctx, ag, reg)
 		defer vr.cancel()
 
-		if vr.warning != "" && onEvent != nil {
-			onEvent(backend.StreamEvent{
-				Type:    backend.StreamWarning,
-				Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-			})
+		if vr.warning != "" {
+			slog.Warn("vault unavailable for agent session", "agent", ag.Name, "session_id", sessionID, "warning", vr.warning)
+			if onEvent != nil {
+				onEvent(backend.StreamEvent{
+					Type:    backend.StreamWarning,
+					Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
+				})
+			}
 		}
 		// Inject memory mode instructions only when vault tools are available this session.
 		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+			slog.Info("vault tools available", "agent", ag.Name, "session_id", sessionID, "vault", ag.VaultName)
 			msgs[0].Content += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
 		}
 		// Silently pre-fetch memory orientation and inject into system prompt.
@@ -631,6 +635,19 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		if agChatErr != nil {
 			return fmt.Errorf("chat(%s): %w", ag.Name, agChatErr)
 		}
+		// toolArgsMu guards toolArgsCapture against concurrent writes from parallel
+		// tool dispatches. dispatchTools spawns one goroutine per tool call, so
+		// OnToolCall/OnToolDone can fire concurrently.
+		var toolArgsMu sync.Mutex
+		// toolArgsCapture stores args keyed by tool name so OnToolDone can include
+		// them in the tool_result event. Last-write-wins when the same tool is called
+		// multiple times in one turn (a known limitation).
+		// TODO(tool-call-id): key by call ID instead of tool name to fix same-tool collision.
+		toolArgsCapture := make(map[string]map[string]any)
+		// toolCallIDCapture stores a correlation ID per tool name so that
+		// tool_call and tool_result events carry the same id. The frontend
+		// uses this id to match results back to the pending call chip.
+		toolCallIDCapture := make(map[string]string)
 		loopCfg := RunLoopConfig{
 			MaxTurns:      50,
 			ModelName:     ag.GetModelID(),
@@ -644,17 +661,44 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			VaultWarnOnce:    &sync.Once{},
 			VaultReconnector: vr.reconnector,
 			OnToolCall: func(name string, args map[string]any) {
+				callID := fmt.Sprintf("tc-%d-%s", time.Now().UnixNano(), name)
+				slog.Info("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
+				toolArgsMu.Lock()
+				toolArgsCapture[name] = args
+				toolCallIDCapture[name] = callID
+				toolArgsMu.Unlock()
 				if onToolEvent != nil {
 					onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
 				} else if onEvent != nil {
-					onEvent(backend.NewToolCallEvent(name))
+					// Emit full tool_call event with id+args so the frontend can show
+					// a "running…" chip with context before the result arrives.
+					onEvent(backend.StreamEvent{
+						Type:    backend.StreamToolCall,
+						Payload: map[string]any{"id": callID, "tool": name, "args": args},
+					})
 				}
 			},
 			OnToolDone: func(name string, result tools.ToolResult) {
+				toolArgsMu.Lock()
+				capturedArgs := toolArgsCapture[name]
+				callID := toolCallIDCapture[name]
+				toolArgsMu.Unlock()
+				slog.Info("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 				if onToolEvent != nil {
 					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})
 				} else if onEvent != nil {
-					onEvent(backend.NewToolResultEvent(name, result.Error == ""))
+					// Emit full tool_result event with matching id so the frontend
+					// can attach the result to the correct pending chip.
+					onEvent(backend.StreamEvent{
+						Type: backend.StreamToolResult,
+						Payload: map[string]any{
+							"id":      callID,
+							"tool":    name,
+							"success": result.Error == "",
+							"result":  result.Output,
+							"args":    capturedArgs,
+						},
+					})
 				}
 			},
 		}
