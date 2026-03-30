@@ -45,6 +45,27 @@ func TestHandleGetConnectionsCatalog_ReturnsArray(t *testing.T) {
 	}
 }
 
+// TestHandleGetConnectionsCatalog_TypeFieldPresent verifies that every entry in
+// the catalog response includes a non-empty "type" field.
+func TestHandleGetConnectionsCatalog_TypeFieldPresent(t *testing.T) {
+	srv := testServer(t)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/connections/catalog", nil)
+	srv.handleGetConnectionsCatalog(w, r)
+
+	var entries []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, e := range entries {
+		id, _ := e["id"].(string)
+		typ, _ := e["type"].(string)
+		if typ == "" {
+			t.Errorf("catalog entry %q: missing or empty 'type' field in HTTP response", id)
+		}
+	}
+}
+
 // ── POST /api/v1/credentials/{provider} ──────────────────────────────────────
 
 // TestHandleSaveCredential_UnknownProvider verifies that an unknown provider
@@ -64,6 +85,27 @@ func TestHandleSaveCredential_UnknownProvider(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "unknown provider") {
 		t.Errorf("response should mention 'unknown provider', got: %s", body)
+	}
+}
+
+// TestHandleSaveCredential_NonCredentialType verifies that 400 is returned
+// when the provider exists in the catalog but is not a credentials/database type
+// (e.g. oauth, system, coming_soon providers cannot store credentials here).
+func TestHandleSaveCredential_NonCredentialType(t *testing.T) {
+	srv := testServer(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/credentials/slack",
+		strings.NewReader(`{}`))
+	r.SetPathValue("provider", "slack")
+
+	srv.handleSaveCredential(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "does not support credential storage") {
+		t.Errorf("response should mention 'does not support credential storage', got: %s", w.Body.String())
 	}
 }
 
@@ -343,13 +385,16 @@ func TestHandleTestCredential_NoValidatorRegistered(t *testing.T) {
 // ── ValidatorRegistry (unit) ──────────────────────────────────────────────────
 
 // TestBuildCredentialValidatorRegistry_AllCatalogProvidersCovered ensures every
-// provider in the catalog has a registered validator after
-// buildCredentialValidatorRegistry() is called.
+// credentials/database provider in the catalog has a registered validator.
+// oauth, system, and coming_soon providers have no credential form and are skipped.
 func TestBuildCredentialValidatorRegistry_AllCatalogProvidersCovered(t *testing.T) {
 	r := buildCredentialValidatorRegistry()
 	for _, entry := range catalog.Global().All() {
+		if entry.Type != "credentials" && entry.Type != "database" {
+			continue
+		}
 		if _, ok := r.Get(entry.ID); !ok {
-			t.Errorf("no validator registered for catalog provider %q", entry.ID)
+			t.Errorf("no validator registered for catalog provider %q (type=%q)", entry.ID, entry.Type)
 		}
 	}
 }
@@ -430,6 +475,25 @@ func TestCatalogEndpoint_MissingRequiredFields(t *testing.T) {
 		{provider: "asana", missingKey: "token", payload: `{}`},
 		// Monday.com
 		{provider: "monday", missingKey: "token", payload: `{}`},
+		// Slack Bot
+		{provider: "slack_bot", missingKey: "bot_token", payload: `{}`},
+		// Jira Service Account
+		{provider: "jira_sa", missingKey: "instance_url", payload: `{"email":"a@b.com","api_token":"t"}`},
+		{provider: "jira_sa", missingKey: "email",        payload: `{"instance_url":"https://company.atlassian.net","api_token":"t"}`},
+		{provider: "jira_sa", missingKey: "api_token",    payload: `{"instance_url":"https://company.atlassian.net","email":"a@b.com"}`},
+		// Linear
+		{provider: "linear", missingKey: "api_key", payload: `{}`},
+		// GitLab — base_url optional (has default), token required.
+		{provider: "gitlab", missingKey: "token", payload: `{}`},
+		// Discord
+		{provider: "discord", missingKey: "bot_token", payload: `{}`},
+		// Vercel
+		{provider: "vercel", missingKey: "token", payload: `{}`},
+		// Stripe
+		{provider: "stripe", missingKey: "api_key", payload: `{}`},
+		// MuninnDB — endpoint and username have catalog defaults so they are never
+		// "missing"; only password (no default, stored_in=creds) triggers the check.
+		{provider: "muninn", missingKey: "password", payload: `{"endpoint":"http://localhost:8475","username":"root"}`},
 	}
 
 	for _, tc := range cases {

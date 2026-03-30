@@ -438,6 +438,42 @@ func TestHandleCreateSession_WithSpaceID(t *testing.T) {
 	}
 }
 
+// TestHandleCreateSession_WithSpaceID_PersistsToStore verifies that creating
+// a session with a space_id actually persists the session manifest to the store
+// with the correct space_id set. This is the regression test for the bug where
+// s.store.Load(sess.ID) always failed because the orchestrator session was
+// never written to SQLite, so space_id was silently dropped.
+func TestHandleCreateSession_WithSpaceID_PersistsToStore(t *testing.T) {
+	srv, ts := newTestServer(t)
+	body := `{"space_id":"space-xyz"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var respBody map[string]string
+	json.NewDecoder(resp.Body).Decode(&respBody)
+	sessionID := respBody["session_id"]
+	if sessionID == "" {
+		t.Fatal("expected non-empty session_id")
+	}
+
+	// Load the session directly from the store to verify space_id was persisted.
+	stored, loadErr := srv.store.Load(sessionID)
+	if loadErr != nil {
+		t.Fatalf("store.Load(%q): %v — session was never persisted to the store", sessionID, loadErr)
+	}
+	if stored.Manifest.SpaceID != "space-xyz" {
+		t.Errorf("expected SpaceID %q, got %q", "space-xyz", stored.Manifest.SpaceID)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleListThreads
 // ---------------------------------------------------------------------------

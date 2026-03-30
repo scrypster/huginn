@@ -667,6 +667,13 @@
       </div><!-- end flex row -->
     </template>
 
+    <!-- Tool call detail modal -->
+    <ToolCallModal
+      :open="selectedToolCall !== null"
+      :tc="selectedToolCall"
+      @close="selectedToolCall = null"
+    />
+
     <!-- Agent roster modal -->
     <AgentRosterModal
       v-if="rosterOpen && activeSpace"
@@ -733,6 +740,7 @@ import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
 import ThreadDetail from '../components/ThreadDetail.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
+import ToolCallModal from '../components/ToolCallModal.vue'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
@@ -1145,7 +1153,8 @@ function adaptSpaceMessages(msgs: SpaceMessage[]) {
     // stream- prefix means the message is in-flight (status placeholder or live
     // token stream). Show the blinking cursor so the user knows content is arriving.
     streaming: m.id.startsWith('stream-'),
-    toolCalls: (m.toolCalls ?? []) as import('../composables/useSessions').ToolCallRecord[],
+    // done is always true for persisted (API-loaded) tool calls; WS-streamed ones set it explicitly.
+    toolCalls: (m.toolCalls ?? []).map(tc => ({ ...tc, done: tc.done ?? true })),
   }))
 }
 
@@ -1319,9 +1328,10 @@ async function scrollToBottom() {
   if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
 }
 
+const selectedToolCall = ref<ToolCallRecord | null>(null)
+
 function toggleToolCall(tc: ToolCallRecord) {
-  if (expandedToolCalls.value.has(tc.id)) expandedToolCalls.value.delete(tc.id)
-  else expandedToolCalls.value.add(tc.id)
+  selectedToolCall.value = tc
 }
 
 function toggleMsgToolCalls(msgId: string) {
@@ -1591,6 +1601,37 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     if (props.sessionId) {
       const last = getMessages(props.sessionId).at(-1)
       if (last?.streaming) { last.content += `\n\nerror: ${msg.content}`; last.streaming = false }
+    }
+    scrollToBottom()
+  })
+
+registerWS(ws, 'warning', (msg: WSMessage) => {
+    // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
+    // Surface it inline so the user knows memory tools are disabled rather
+    // than silently missing tool calls.
+    if (props.sessionId) {
+      const msgs = getMessages(props.sessionId)
+      const last = msgs.at(-1)
+      if (last?.role === 'assistant' && last.streaming) {
+        last.content = (msg.content ?? '') + '\n\n' + last.content
+      } else {
+        const id = `warn-${Date.now()}`
+        msgs.push({ id, role: 'assistant', content: msg.content ?? '', createdAt: new Date().toISOString(), toolCalls: [] })
+      }
+    } else if (props.spaceId && currentSpaceTimeline.value) {
+      const st = currentSpaceTimeline.value.getState()
+      const sessionId = st.activeSessionId
+      if (sessionId) {
+        st.messages.push({
+          id: `warn-${Date.now()}`,
+          session_id: sessionId,
+          seq: -1,
+          ts: new Date().toISOString(),
+          role: 'assistant',
+          content: msg.content ?? '',
+          agent: '',
+        })
+      }
     }
     scrollToBottom()
   })

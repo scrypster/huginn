@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/scrypster/huginn/internal/connections/catalog"
+	"github.com/scrypster/huginn/internal/memory"
 )
 
 // buildCredentialValidatorRegistry constructs the process-wide registry that
@@ -21,11 +22,20 @@ import (
 // mapping clear, prevents silent zero-value misuse if a field is renamed in
 // the catalog, and keeps the validate functions unchanged (no new deps).
 //
-// Providers whose authentication is handled outside this system (OAuth, SSH,
-// databases, Muninn, and bespoke forms such as slack_bot, jira_sa, linear,
-// gitlab, discord, vercel, and stripe) are intentionally absent.
+// oauth, system, and coming_soon providers have no fields and are not
+// registered here — the catalog handler skips validation for those types.
 func buildCredentialValidatorRegistry() *catalog.Registry {
 	r := catalog.NewRegistry()
+
+	// ── Communication ─────────────────────────────────────────────────────────
+
+	r.Register("slack_bot", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateSlackBotCredentials(ctx, f["bot_token"])
+	}))
+
+	r.Register("discord", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateDiscordCredentials(ctx, f["bot_token"])
+	}))
 
 	// ── Observability ─────────────────────────────────────────────────────────
 
@@ -57,10 +67,28 @@ func buildCredentialValidatorRegistry() *catalog.Registry {
 		return validateCrowdStrikeCredentials(ctx, f["client_id"], f["client_secret"], "")
 	}))
 
+	// ── Dev Tools ─────────────────────────────────────────────────────────────
+
+	r.Register("jira_sa", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateJiraSACredentials(ctx, f["instance_url"], f["email"], f["api_token"])
+	}))
+
+	r.Register("linear", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateLinearCredentials(ctx, f["api_key"])
+	}))
+
+	r.Register("gitlab", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateGitLabCredentials(ctx, f["base_url"], f["token"])
+	}))
+
 	// ── Cloud ─────────────────────────────────────────────────────────────────
 
 	r.Register("terraform", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
 		return validateTerraformCredentials(ctx, f["token"], "")
+	}))
+
+	r.Register("vercel", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateVercelCredentials(ctx, f["token"])
 	}))
 
 	// ── Productivity ──────────────────────────────────────────────────────────
@@ -91,6 +119,16 @@ func buildCredentialValidatorRegistry() *catalog.Registry {
 
 	r.Register("monday", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
 		return validateMondayCredentials(ctx, f["token"])
+	}))
+
+	r.Register("stripe", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateStripeCredentials(ctx, f["api_key"])
+	}))
+
+	// ── Database ──────────────────────────────────────────────────────────────
+
+	r.Register("muninn", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateMuninnCredentials(ctx, f["endpoint"], f["username"], f["password"])
 	}))
 
 	return r
@@ -482,6 +520,186 @@ func validateMondayCredentials(ctx context.Context, token string) error {
 			"status", resp.StatusCode,
 			"body_preview", string(data[:min(len(data), 200)]))
 		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateSlackBotCredentials(ctx context.Context, botToken string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://slack.com/api/auth.test", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("slack_bot: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(body[:min(len(body), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateJiraSACredentials(ctx context.Context, instanceURL, email, apiToken string) error {
+	if err := validateBaseURL(instanceURL); err != nil {
+		return fmt.Errorf("jira: base URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", instanceURL+"/rest/api/3/myself", nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(email, apiToken)
+	req.Header.Set("Accept", "application/json")
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("jira_sa: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(body[:min(len(body), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateLinearCredentials(ctx context.Context, apiKey string) error {
+	body := strings.NewReader(`{"query":"{ viewer { id name } }"}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.linear.app/graphql", body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("linear: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(data[:min(len(data), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateGitLabCredentials(ctx context.Context, baseURL, token string) error {
+	if baseURL == "" {
+		baseURL = "https://gitlab.com"
+	}
+	if err := validateBaseURL(baseURL); err != nil {
+		return fmt.Errorf("gitlab: base URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/api/v4/user", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("gitlab: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(body[:min(len(body), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateDiscordCredentials(ctx context.Context, botToken string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://discord.com/api/v10/users/@me", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bot "+botToken)
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("discord: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(body[:min(len(body), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateVercelCredentials(ctx context.Context, token string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.vercel.com/v2/user", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("vercel: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(body[:min(len(body), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateStripeCredentials(ctx context.Context, apiKey string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.stripe.com/v1/balance", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	client := safeHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		slog.Warn("stripe: credential validation error",
+			"status", resp.StatusCode,
+			"body_preview", string(body[:min(len(body), 200)]))
+		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+// validateMuninnCredentials verifies MuninnDB credentials by attempting a login.
+// It uses the plain MuninnSetupClient (no SSRF filter) since MuninnDB is
+// expected to run on localhost or a trusted internal network.
+func validateMuninnCredentials(ctx context.Context, endpoint, username, password string) error {
+	if endpoint == "" {
+		endpoint = "http://localhost:8475"
+	}
+	_, err := memory.NewMuninnSetupClient(endpoint).Login(username, password)
+	if err != nil {
+		return fmt.Errorf("muninn: login failed: %w", err)
 	}
 	return nil
 }

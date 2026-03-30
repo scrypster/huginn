@@ -486,35 +486,6 @@ describe('useApi — apiFetch (via api.*)', () => {
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/muninn/vaults')
   })
 
-  // ── credential providers (table-driven) ─────────────────────────────────────
-
-  // Bespoke providers (OAuth / non-API-key auth not in catalog).
-  const credentialProviders: Array<{ key: string; slug: string }> = [
-    { key: 'slackBot', slug: 'slack_bot' },
-    { key: 'jiraSA',   slug: 'jira_sa' },
-    { key: 'linear',   slug: 'linear' },
-    { key: 'gitlab',   slug: 'gitlab' },
-    { key: 'discord',  slug: 'discord' },
-    { key: 'vercel',   slug: 'vercel' },
-    { key: 'stripe',   slug: 'stripe' },
-  ]
-
-  credentialProviders.forEach(({ key, slug }) => {
-    it(`api.credentials.${key}Test POSTs to /api/v1/credentials/${slug}/test`, async () => {
-      const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok({ ok: true }))
-      await (api.credentials as any)[`${key}Test`]({ key: 'val' })
-      expect(spy.mock.calls[0]![0]).toBe(`/api/v1/credentials/${slug}/test`)
-      expect((spy.mock.calls[0]![1] as RequestInit).method).toBe('POST')
-    })
-
-    it(`api.credentials.${key}Save POSTs to /api/v1/credentials/${slug}`, async () => {
-      const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok({ id: 'c1', provider: slug, account_label: 'test' }))
-      await (api.credentials as any)[`${key}Save`]({ key: 'val' })
-      expect(spy.mock.calls[0]![0]).toBe(`/api/v1/credentials/${slug}`)
-      expect((spy.mock.calls[0]![1] as RequestInit).method).toBe('POST')
-    })
-  })
-
   // ── builtin non-streaming ──────────────────────────────────────────────────
 
   it('api.builtin.status calls correct endpoint', async () => {

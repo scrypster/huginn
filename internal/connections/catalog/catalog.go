@@ -21,6 +21,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 )
 
@@ -51,6 +53,11 @@ type Entry struct {
 
 	// IconColor is the hex background color for the icon badge (e.g., "#632ca6").
 	IconColor string `json:"icon_color"`
+
+	// Type classifies the authentication model for this provider.
+	// Valid values: "credentials", "oauth", "system", "database", "coming_soon".
+	// Drives both the frontend form routing and the server-side validation path.
+	Type string `json:"type"`
 
 	// DefaultLabel is the value pre-filled in the "Label" field of the
 	// credential form (e.g., "Datadog").  Users can override it.
@@ -137,11 +144,13 @@ type Catalog struct {
 	byID    map[string]*Entry
 }
 
-// All returns a copy of the full catalog slice, ordered as defined in
-// catalog.json.
+// All returns a copy of the full catalog slice sorted alphabetically by name.
 func (c *Catalog) All() []Entry {
 	out := make([]Entry, len(c.entries))
 	copy(out, c.entries)
+	slices.SortFunc(out, func(a, b Entry) int {
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
 	return out
 }
 

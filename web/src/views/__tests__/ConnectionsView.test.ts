@@ -139,7 +139,26 @@ beforeEach(() => {
   mockApiConnectionsStart.mockReset().mockResolvedValue({ auth_url: 'https://auth.example.com' })
   mockApiConnectionsSetDefault.mockReset().mockResolvedValue({})
   mockApiSystemGithubSwitch.mockReset().mockResolvedValue({ active: 'user1' })
-  mockFetchCredentialCatalog.mockReset().mockResolvedValue([])
+  mockFetchCredentialCatalog.mockReset().mockResolvedValue([
+    {
+      id: 'slack', name: 'Slack', description: 'Slack messaging',
+      category: 'communication', icon: 'S', icon_color: '#4A154B',
+      type: 'oauth', default_label: 'Slack', multi_account: true,
+      fields: [], validation: { available: false },
+    },
+    {
+      id: 'github', name: 'GitHub', description: 'GitHub dev tools',
+      category: 'dev_tools', icon: 'G', icon_color: '#24292E',
+      type: 'oauth', default_label: 'GitHub', multi_account: false,
+      fields: [], validation: { available: false },
+    },
+    {
+      id: 'aws', name: 'AWS', description: 'Amazon Web Services',
+      category: 'cloud', icon: 'A', icon_color: '#FF9900',
+      type: 'system', default_label: 'AWS', multi_account: false,
+      fields: [], validation: { available: false },
+    },
+  ])
   vi.spyOn(window, 'open').mockImplementation(() => null)
 })
 
@@ -492,6 +511,7 @@ describe('ConnectionsView', () => {
         category: 'observability',
         icon: 'DD',
         icon_color: '#632ca6',
+        type: 'credentials',
         default_label: 'Datadog',
         multi_account: false,
         fields: [],
@@ -518,6 +538,7 @@ describe('ConnectionsView', () => {
         category: 'observability',
         icon: 'DD',
         icon_color: '#632ca6',
+        type: 'credentials',
         default_label: 'Datadog',
         multi_account: false,
         fields: [],
@@ -534,15 +555,16 @@ describe('ConnectionsView', () => {
     expect(ids).toContain('datadog')
   })
 
-  it('catalog fetch failure does not set error banner', async () => {
+  it('catalog fetch failure sets catalogError but not the main error ref', async () => {
     mockFetchCredentialCatalog.mockRejectedValue(new Error('Catalog unavailable'))
     const w = mountView()
     await flushPromises()
     const vm = w.vm as any
     expect(vm.error).toBeFalsy()
+    expect(vm.catalogError).toContain('Catalog unavailable')
   })
 
-  it('static CATALOG entries remain in filteredCatalog alongside server entries', async () => {
+  it('only server catalog entries appear in filteredCatalog (no static catalog)', async () => {
     mockFetchCredentialCatalog.mockResolvedValue([
       {
         id: 'datadog',
@@ -551,6 +573,7 @@ describe('ConnectionsView', () => {
         category: 'observability',
         icon: 'DD',
         icon_color: '#632ca6',
+        type: 'credentials',
         default_label: 'Datadog',
         multi_account: false,
         fields: [],
@@ -561,10 +584,10 @@ describe('ConnectionsView', () => {
     await flushPromises()
     const vm = w.vm as any
     const ids = vm.filteredCatalog.map((c: { id: string }) => c.id)
-    // Static entries (from mocked CATALOG: slack, github, aws) + server entry (datadog)
-    expect(ids).toContain('slack')
-    expect(ids).toContain('github')
+    // Only server-provided entries appear — no hard-coded static catalog
     expect(ids).toContain('datadog')
-    expect(vm.filteredCatalog.length).toBe(4)
+    expect(ids).not.toContain('slack')
+    expect(ids).not.toContain('github')
+    expect(vm.filteredCatalog.length).toBe(1)
   })
 })

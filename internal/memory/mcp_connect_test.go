@@ -39,3 +39,86 @@ func TestVaultTokenFor(t *testing.T) {
 		t.Fatal("expected error for unknown vault")
 	}
 }
+
+// MCPTokenFor tests — vault MCP uses a daemon token, not per-vault API keys.
+
+func TestMCPTokenFor_PrefersMCPToken(t *testing.T) {
+	// When both mcp_token and vault_tokens are set, mcp_token wins.
+	cfg := &GlobalConfig{
+		MCPToken:    "mdb_daemon_token",
+		VaultTokens: map[string]string{"huginn-mike": "mk_api_key"},
+	}
+	tok, err := MCPTokenFor(cfg, "huginn-mike")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "mdb_daemon_token" {
+		t.Fatalf("got %q, want mdb_daemon_token", tok)
+	}
+}
+
+func TestMCPTokenFor_FallbackToVaultToken(t *testing.T) {
+	// When mcp_token is empty, fall back to vault token.
+	cfg := &GlobalConfig{
+		VaultTokens: map[string]string{"huginn-mike": "mk_api_key"},
+	}
+	tok, err := MCPTokenFor(cfg, "huginn-mike")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "mk_api_key" {
+		t.Fatalf("got %q, want mk_api_key", tok)
+	}
+}
+
+func TestMCPTokenFor_NilConfig(t *testing.T) {
+	_, err := MCPTokenFor(nil, "huginn-mike")
+	if err == nil {
+		t.Fatal("expected error for nil config")
+	}
+}
+
+func TestMCPTokenFor_BothEmpty(t *testing.T) {
+	// No mcp_token and no vault token for the vault — error.
+	cfg := &GlobalConfig{}
+	_, err := MCPTokenFor(cfg, "huginn-mike")
+	if err == nil {
+		t.Fatal("expected error when both mcp_token and vault_tokens are empty")
+	}
+}
+
+func TestMCPTokenFor_WhitespaceOnlyMCPToken_FallsBack(t *testing.T) {
+	// A whitespace-only mcp_token must NOT be used — fall back to vault token.
+	cfg := &GlobalConfig{
+		MCPToken:    "   \t\n",
+		VaultTokens: map[string]string{"huginn-mike": "mk_api_key"},
+	}
+	tok, err := MCPTokenFor(cfg, "huginn-mike")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "mk_api_key" {
+		t.Fatalf("whitespace mcp_token should fall back to vault token, got %q", tok)
+	}
+}
+
+func TestGlobalConfig_MCPToken_RoundTrip(t *testing.T) {
+	// mcp_token survives SaveGlobalConfig → LoadGlobalConfig.
+	dir := t.TempDir()
+	path := dir + "/muninn.json"
+	cfg := &GlobalConfig{
+		Endpoint:        "http://localhost:8475",
+		MCPToken:        "mdb_testtoken",
+		VaultTokens:     map[string]string{"huginn-mike": "mk_api_key"},
+	}
+	if err := SaveGlobalConfig(path, cfg); err != nil {
+		t.Fatalf("SaveGlobalConfig: %v", err)
+	}
+	loaded, err := LoadGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig: %v", err)
+	}
+	if loaded.MCPToken != "mdb_testtoken" {
+		t.Fatalf("MCPToken: got %q, want mdb_testtoken", loaded.MCPToken)
+	}
+}

@@ -144,9 +144,27 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.SpaceID != "" {
-		if storedSess, loadErr := s.store.Load(sess.ID); loadErr == nil {
-			storedSess.Manifest.SpaceID = body.SpaceID
-			_ = s.store.SaveManifest(storedSess)
+		// The orchestrator session (sess) is only in-memory at this point —
+		// s.orch.NewSession never writes to the store. Construct the manifest
+		// directly and upsert it so ListSpaceMessages can find it via the
+		// sessions.space_id foreign key.
+		now := time.Now().UTC()
+		storedSess := &session.Session{
+			ID: sess.ID,
+			Manifest: session.Manifest{
+				ID:        sess.ID,
+				SessionID: sess.ID,
+				Status:    "active",
+				Version:   1,
+				SpaceID:   body.SpaceID,
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		}
+		if s.store != nil {
+			if saveErr := s.store.SaveManifest(storedSess); saveErr != nil {
+				slog.Error("handleCreateSession: failed to persist space_id", "session_id", sess.ID, "space_id", body.SpaceID, "err", saveErr)
+			}
 		}
 	}
 	jsonOK(w, map[string]string{"session_id": sess.ID})
@@ -566,9 +584,26 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "chat error: "+err.Error())
 		return
 	}
-	// Emit space_activity so all connected browser tabs update their unseen badges.
+	// Persist user + assistant messages and emit space_activity.
 	if s.store != nil {
 		if sess, loadErr := s.store.Load(id); loadErr == nil {
+			agentName := ""
+			if ag := s.resolveAgent(id); ag != nil {
+				agentName = ag.Name
+			}
+			now := time.Now().UTC()
+			if appendErr := s.store.Append(sess, session.SessionMessage{
+				ID: session.NewID(), Role: "user", Content: body.Content, Ts: now,
+			}); appendErr != nil {
+				slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
+			}
+			if buf.Len() > 0 {
+				if appendErr := s.store.Append(sess, session.SessionMessage{
+					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
+				}); appendErr != nil {
+					slog.Error("handleSendMessage: failed to persist assistant message", "session_id", id, "err", appendErr)
+				}
+			}
 			s.emitSpaceActivity(sess.SpaceID())
 		}
 	}

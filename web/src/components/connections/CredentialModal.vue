@@ -53,14 +53,8 @@
               :saving="saving"
             />
 
-            <!-- Legacy bespoke form (provider not in catalog) -->
-            <component
-              v-else
-              :is="FORM_COMPONENTS[provider]"
-              ref="formRef"
-              :testing="testing"
-              :saving="saving"
-            />
+            <!-- Provider not found in catalog -->
+            <div v-else class="text-[11px] text-huginn-red">Unknown provider: {{ provider }}</div>
           </div>
 
           <!-- Footer: Test btn | feedback message | Connect btn -->
@@ -109,10 +103,9 @@ import {
   type CredentialCatalogEntry,
 } from '../../composables/useCredentialCatalog'
 import GenericCredentialForm from './GenericCredentialForm.vue'
-import { FORM_COMPONENTS, PROVIDER_META, type CredentialProvider } from './forms/index'
 
 const props = defineProps<{
-  provider: CredentialProvider | null
+  provider: string | null
 }>()
 
 const emit = defineEmits<{
@@ -130,7 +123,7 @@ const catalogEntry   = ref<CredentialCatalogEntry | null | undefined>(undefined)
 const catalogLoading = ref(false)
 const catalogError   = ref(false)
 
-async function loadCatalogEntry(provider: CredentialProvider) {
+async function loadCatalogEntry(provider: string) {
   catalogEntry.value   = undefined
   catalogLoading.value = true
   catalogError.value   = false
@@ -148,7 +141,6 @@ async function loadCatalogEntry(provider: CredentialProvider) {
 // ── Provider meta ─────────────────────────────────────────────────────────────
 const meta = computed(() => {
   if (!props.provider) return { name: '', icon: '', iconColor: '#444' }
-  // Prefer catalog entry metadata when available; fall back to static PROVIDER_META.
   if (catalogEntry.value) {
     return {
       name:      catalogEntry.value.name,
@@ -156,7 +148,7 @@ const meta = computed(() => {
       iconColor: catalogEntry.value.icon_color,
     }
   }
-  return PROVIDER_META[props.provider] ?? { name: props.provider, icon: '?', iconColor: '#444' }
+  return { name: props.provider, icon: '?', iconColor: '#444' }
 })
 
 // ── State reset ───────────────────────────────────────────────────────────────
@@ -192,38 +184,33 @@ function handleClose() {
 }
 function handleBackdropClick() { handleClose() }
 
-// ── Bespoke API map (muninn + providers not in catalog) ───────────────────────
-type TestFn = (p: Record<string, string>) => Promise<{ ok: boolean; error?: string }>
-type SaveFn = (p: Record<string, string>) => Promise<unknown>
-
-const BESPOKE_API_MAP: Partial<Record<CredentialProvider, { test: TestFn; save: SaveFn }>> = {
-  muninn:    { test: api.muninn.test as unknown as TestFn,           save: api.muninn.connect as unknown as SaveFn },
-  slack_bot: { test: api.credentials.slackBotTest as unknown as TestFn,   save: api.credentials.slackBotSave as unknown as SaveFn },
-  jira_sa:   { test: api.credentials.jiraSATest as unknown as TestFn,     save: api.credentials.jiraSASave as unknown as SaveFn },
-  linear:    { test: api.credentials.linearTest as unknown as TestFn,     save: api.credentials.linearSave as unknown as SaveFn },
-  gitlab:    { test: api.credentials.gitlabTest as unknown as TestFn,     save: api.credentials.gitlabSave as unknown as SaveFn },
-  discord:   { test: api.credentials.discordTest as unknown as TestFn,    save: api.credentials.discordSave as unknown as SaveFn },
-  vercel:    { test: api.credentials.vercelTest as unknown as TestFn,     save: api.credentials.vercelSave as unknown as SaveFn },
-  stripe:    { test: api.credentials.stripeTest as unknown as TestFn,     save: api.credentials.stripeSave as unknown as SaveFn },
+// ── API routing ───────────────────────────────────────────────────────────────
+// Two branches: database (muninn) → dedicated endpoint; everything else → generic.
+function resolveApi(entryType: string): {
+  test: (payload: Record<string, string>) => Promise<{ ok: boolean; error?: string }>
+  save: (payload: Record<string, string>) => Promise<unknown>
+} {
+  if (entryType === 'database') {
+    return {
+      test: (p) => api.muninn.test(p),
+      save: (p) => api.muninn.connect(p),
+    }
+  }
+  return {
+    test: (p) => api.credentials.testGeneric(props.provider!, p),
+    save: (p) => api.credentials.saveGeneric(props.provider!, p),
+  }
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 async function handleTest() {
-  if (!props.provider) return
+  if (!props.provider || !catalogEntry.value) return
   testing.value    = true
   testResult.value = null
   saveMsg.value    = ''
   try {
     const payload = formRef.value?.getPayload() ?? {}
-    if (catalogEntry.value) {
-      // Catalog provider → generic endpoint.
-      testResult.value = await api.credentials.testGeneric(props.provider, payload)
-    } else {
-      const bespoke = BESPOKE_API_MAP[props.provider]
-      if (bespoke) {
-        testResult.value = await bespoke.test(payload)
-      }
-    }
+    testResult.value = await resolveApi(catalogEntry.value.type).test(payload)
   } catch (e) {
     testResult.value = { ok: false, error: e instanceof Error ? e.message : String(e) }
   } finally {
@@ -232,21 +219,13 @@ async function handleTest() {
 }
 
 async function handleConnect() {
-  if (!props.provider) return
+  if (!props.provider || !catalogEntry.value) return
   saving.value     = true
   saveMsg.value    = ''
   testResult.value = null
   try {
     const payload = formRef.value?.getPayload() ?? {}
-    if (catalogEntry.value) {
-      // Catalog provider → generic endpoint.
-      await api.credentials.saveGeneric(props.provider, payload)
-    } else {
-      const bespoke = BESPOKE_API_MAP[props.provider]
-      if (bespoke) {
-        await bespoke.save(payload)
-      }
-    }
+    await resolveApi(catalogEntry.value.type).save(payload)
     saveMsg.value = 'Connected!'
     _successTimer.value = setTimeout(() => emit('connected'), 1500)
   } catch (e) {

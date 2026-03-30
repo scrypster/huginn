@@ -261,9 +261,9 @@ func ProbeVaultConnectivity(ctx context.Context, cfgPath, vaultName string) (int
 		return 0, "", fmt.Errorf("muninn endpoint not configured")
 	}
 
-	token, err := mem.VaultTokenFor(muninnCfg, vaultName)
+	token, err := mem.MCPTokenFor(muninnCfg, vaultName)
 	if err != nil {
-		return 0, "", fmt.Errorf("no token for vault %q: %w", vaultName, err)
+		return 0, "", fmt.Errorf("no MCP token for vault %q: %w", vaultName, err)
 	}
 
 	// Best-effort token expiry check: try to decode the token as a JWT and
@@ -384,10 +384,10 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
-	token, err := mem.VaultTokenFor(muninnCfg, ag.VaultName)
+	token, err := mem.MCPTokenFor(muninnCfg, ag.VaultName)
 	if err != nil {
-		warn := fmt.Sprintf("no token for vault %q", ag.VaultName)
-		logger.Warn("muninn mcp: no token for vault", "agent", ag.Name, "vault", ag.VaultName)
+		warn := fmt.Sprintf("no MCP token configured (set mcp_token in muninn.json or add vault token for %q)", ag.VaultName)
+		logger.Warn("muninn mcp: no MCP token", "agent", ag.Name, "vault", ag.VaultName, "err", err)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
@@ -398,13 +398,13 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
-	// buildFn re-reads the vault token on every invocation so that a rotated JWT
+	// buildFn re-reads the MCP token on every invocation so that a rotated token
 	// is picked up automatically on mid-session reconnect. Falls back to the
 	// session-start token if the re-read fails (avoids hard failure on transient errors).
 	buildFn := func() (*mcp.MCPClient, func()) {
-		freshToken, err := mem.VaultTokenFor(muninnCfg, ag.VaultName)
+		freshToken, err := mem.MCPTokenFor(muninnCfg, ag.VaultName)
 		if err != nil {
-			slog.Warn("vault reconnect: token re-read failed, using session token", "err", err)
+			slog.Warn("vault reconnect: MCP token re-read failed, using session token", "err", err)
 			freshToken = token
 		}
 		tr := mcp.NewHTTPTransport(mcpURL, freshToken)

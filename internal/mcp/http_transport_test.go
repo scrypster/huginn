@@ -43,9 +43,13 @@ func TestHTTPTransportRoundTrip(t *testing.T) {
 
 func TestHTTPTransportReceiveWithoutSend(t *testing.T) {
 	tr := NewHTTPTransport("http://localhost:9999", "tok")
-	_, err := tr.Receive(context.Background())
+	// Receive now blocks until Send provides data. Use a cancelled context
+	// to verify it unblocks on context cancellation when no Send has been called.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	_, err := tr.Receive(ctx)
 	if err == nil {
-		t.Fatal("expected error when Receive called without prior Send")
+		t.Fatal("expected error when Receive called with cancelled context")
 	}
 }
 
@@ -60,9 +64,13 @@ func TestHTTPTransportNotificationNoContent(t *testing.T) {
 	if err := tr.Send(ctx, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); err != nil {
 		t.Fatalf("Send notification: %v", err)
 	}
-	_, err := tr.Receive(ctx)
+	// After a 204 notification ACK, no response is queued. Receive should block
+	// (not error immediately). Verify via context cancellation.
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := tr.Receive(cancelCtx)
 	if err == nil {
-		t.Fatal("expected Receive to error after notification-only Send (pending should be nil)")
+		t.Fatal("expected Receive to unblock via context cancellation when no response is queued")
 	}
 }
 

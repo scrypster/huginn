@@ -47,12 +47,34 @@ func TestAll_ReturnsCopy(t *testing.T) {
 	_ = b
 }
 
+func TestAll_AlphabeticalOrder(t *testing.T) {
+	entries := Global().All()
+	for i := 1; i < len(entries); i++ {
+		prev := strings.ToLower(entries[i-1].Name)
+		curr := strings.ToLower(entries[i].Name)
+		if prev > curr {
+			t.Errorf("All() not sorted: %q comes before %q", entries[i-1].Name, entries[i].Name)
+		}
+	}
+}
+
 func TestAll_ExpectedProviders(t *testing.T) {
 	c := Global()
 	want := []string{
+		// credentials — original 15
 		"datadog", "splunk", "pagerduty", "newrelic", "elastic", "grafana",
 		"crowdstrike", "terraform", "servicenow", "notion", "airtable",
 		"hubspot", "zendesk", "asana", "monday",
+		// credentials — new 7
+		"slack_bot", "jira_sa", "linear", "gitlab", "discord", "vercel", "stripe",
+		// database
+		"muninn",
+		// oauth
+		"slack", "github", "bitbucket", "jira", "google",
+		// system
+		"aws", "gcloud", "github_cli",
+		// coming_soon
+		"teams", "azure",
 	}
 	for _, id := range want {
 		if _, ok := c.Get(id); !ok {
@@ -101,11 +123,13 @@ func TestGet_ReturnsCopy(t *testing.T) {
 
 // ── Field invariants ───────────────────────────────────────────────────────────
 
-// TestFieldInvariants checks that every field across every entry satisfies the
-// invariants required by the generic credential handlers:
+// TestFieldInvariants checks that every field across credentials/database entries
+// satisfies the invariants required by the generic credential handlers:
 //   - key is non-empty
 //   - type is one of the supported values
 //   - stored_in is either "creds" or "metadata"
+//
+// oauth, system, and coming_soon entries have no form fields and are skipped.
 func TestFieldInvariants(t *testing.T) {
 	validTypes := map[string]bool{
 		"text": true, "password": true, "url": true,
@@ -116,8 +140,12 @@ func TestFieldInvariants(t *testing.T) {
 	}
 
 	for _, entry := range Global().All() {
+		// oauth, system, and coming_soon entries intentionally have no fields.
+		if entry.Type != "credentials" && entry.Type != "database" {
+			continue
+		}
 		if len(entry.Fields) == 0 {
-			t.Errorf("provider %q: must have at least one field", entry.ID)
+			t.Errorf("provider %q (type=%q): credentials/database entry must have at least one field", entry.ID, entry.Type)
 		}
 		for _, f := range entry.Fields {
 			if f.Key == "" {
@@ -194,10 +222,14 @@ func TestNoDuplicateIDs(t *testing.T) {
 
 // ── StoredIn distribution ──────────────────────────────────────────────────────
 
-// TestEachProviderHasCredsField verifies every provider stores at least one
-// secret field so that StoreAPIKeyConnection always receives a non-empty creds map.
+// TestEachProviderHasCredsField verifies every credentials/database provider
+// stores at least one secret field so that StoreAPIKeyConnection always receives
+// a non-empty creds map.  oauth, system, and coming_soon entries are skipped.
 func TestEachProviderHasCredsField(t *testing.T) {
 	for _, entry := range Global().All() {
+		if entry.Type != "credentials" && entry.Type != "database" {
+			continue
+		}
 		hasCreds := false
 		for _, f := range entry.Fields {
 			if f.StoredIn == "creds" {
@@ -206,8 +238,8 @@ func TestEachProviderHasCredsField(t *testing.T) {
 			}
 		}
 		if !hasCreds {
-			t.Errorf("provider %q: has no fields with stored_in=\"creds\" — every provider must store at least one secret",
-				entry.ID)
+			t.Errorf("provider %q (type=%q): has no fields with stored_in=\"creds\" — credentials/database entries must store at least one secret",
+				entry.ID, entry.Type)
 		}
 	}
 }
@@ -259,16 +291,41 @@ func TestParse_EmptyArray(t *testing.T) {
 
 // ── Validation config ──────────────────────────────────────────────────────────
 
-// TestValidationAvailable ensures every provider in the catalog exposes a test
-// endpoint — the catalog should only include providers that can be validated.
+// TestValidationAvailable ensures every credentials/database provider exposes a
+// live connectivity test.  oauth, system, and coming_soon entries do not use the
+// generic validation path and are skipped.
 func TestValidationAvailable(t *testing.T) {
 	for _, entry := range Global().All() {
+		if entry.Type != "credentials" && entry.Type != "database" {
+			continue
+		}
 		if !entry.Validation.Available {
-			t.Errorf("provider %q: validation.available must be true (catalog only includes testable providers)",
-				entry.ID)
+			t.Errorf("provider %q (type=%q): validation.available must be true",
+				entry.ID, entry.Type)
 		}
 		if entry.Validation.Description == "" {
-			t.Errorf("provider %q: validation.description must not be empty", entry.ID)
+			t.Errorf("provider %q (type=%q): validation.description must not be empty",
+				entry.ID, entry.Type)
+		}
+	}
+}
+
+// TestTypeField verifies every catalog entry has a valid type value.
+func TestTypeField(t *testing.T) {
+	validEntryTypes := map[string]bool{
+		"credentials": true,
+		"oauth":       true,
+		"system":      true,
+		"database":    true,
+		"coming_soon": true,
+	}
+	for _, entry := range Global().All() {
+		if entry.Type == "" {
+			t.Errorf("provider %q: type field must not be empty", entry.ID)
+		}
+		if !validEntryTypes[entry.Type] {
+			t.Errorf("provider %q: invalid type %q (want one of: credentials, oauth, system, database, coming_soon)",
+				entry.ID, entry.Type)
 		}
 	}
 }

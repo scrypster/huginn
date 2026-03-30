@@ -432,6 +432,68 @@ describe('wireSpaceTimelineWS', () => {
     expect(doneMsg!.toolCalls![0]).toMatchObject({ id: 'tc-late', result: 'late result' })
   })
 
+  // ── tool_call event (live indicator) ──────────────────────────────
+  //
+  // Regression: wireSpaceTimelineWS only registered 'tool_result' but never
+  // 'tool_call', so the streaming message never got tool call data when tools
+  // run as prefetch (before any tokens arrive — the normal MuninnDB pattern).
+  // Results were silently dropped because no stream- placeholder existed yet.
+
+  it('tool_call + token: tool result is visible on the streaming message', async () => {
+    // Simulates the muninn_recall prefetch pattern:
+    // tool_call fires → tool_result fires → first token arrives
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Step 1: tool_call arrives (before any token)
+    ws.emit('tool_call', {
+      type: 'tool_call',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-prefetch', tool: 'muninn_recall', args: { context: 'user history' } },
+    })
+    await nextTick()
+
+    // Step 2: tool_result arrives (before any token)
+    ws.emit('tool_result', {
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-prefetch', tool: 'muninn_recall', args: { context: 'user history' }, result: 'You talked about X before.' },
+    })
+    await nextTick()
+
+    // Step 3: first token arrives — creates streaming placeholder
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Based on your history...' })
+    await nextTick()
+
+    const streaming = state.messages.find(m => m.id.startsWith('stream-'))
+    expect(streaming).toBeDefined()
+    expect(streaming!.toolCalls).toBeDefined()
+    expect(streaming!.toolCalls!.length).toBeGreaterThanOrEqual(1)
+    const tc = streaming!.toolCalls!.find(t => t.id === 'tc-prefetch')
+    expect(tc).toBeDefined()
+    expect(tc!.name).toBe('muninn_recall')
+    expect(tc!.result).toBe('You talked about X before.')
+    expect(tc!.done).toBe(true)
+  })
+
+  it('tool_call is registered as a WS listener', () => {
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    expect(ws.handlerCount('tool_call')).toBeGreaterThan(0)
+  })
+
+  it('re-calling wireSpaceTimelineWS cleans up tool_call listener', async () => {
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    const countAfterFirst = ws.handlerCount('tool_call')
+    wireSpaceTimelineWS(ws as any)
+    const countAfterSecond = ws.handlerCount('tool_call')
+    expect(countAfterSecond).toBe(countAfterFirst)
+  })
+
   it('re-calling wireSpaceTimelineWS cleans up tool_result listener', async () => {
     const ws = createMockWs()
 

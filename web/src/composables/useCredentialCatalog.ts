@@ -46,6 +46,8 @@ export interface CredentialCatalogEntry {
   category: string
   icon: string
   icon_color: string
+  /** "credentials" | "oauth" | "system" | "database" | "coming_soon" */
+  type: string
   default_label: string
   multi_account: boolean
   fields: FieldDefinition[]
@@ -90,11 +92,10 @@ export async function fetchCredentialCatalog(): Promise<CredentialCatalogEntry[]
 }
 
 /**
- * Return the catalog entry for a given provider ID, or null if the provider
- * is not in the catalog (e.g., bespoke providers like muninn, slack_bot).
+ * Return the catalog entry for a given provider ID, or null if not found.
  *
- * This is the primary entry point for `CredentialModal` to decide whether to
- * render `GenericCredentialForm` or the legacy per-provider form.
+ * This is the primary entry point for `CredentialModal` to decide how to
+ * render the form and which API path to use for save/test.
  */
 export async function getCredentialCatalogEntry(
   id: string,

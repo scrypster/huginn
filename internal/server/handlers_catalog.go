@@ -76,6 +76,12 @@ func (s *Server) handleSaveCredential(w http.ResponseWriter, r *http.Request) {
 		label = entry.DefaultLabel
 	}
 
+	// Only credentials and database providers support credential storage.
+	if entry.Type != "credentials" && entry.Type != "database" {
+		jsonError(w, http.StatusBadRequest, "provider does not support credential storage")
+		return
+	}
+
 	// Live connectivity check via the registered validator.
 	validator, hasValidator := s.credValidators.Get(providerID)
 	if hasValidator {

@@ -479,7 +479,7 @@ describe('ChatView', () => {
     )
   })
 
-  it('tool call toggle: toggles expanded state on repeated clicks', async () => {
+  it('tool call toggle: clicking a tool call opens the detail modal', async () => {
     const mockWs = createMockWs()
     // Pre-populate a message with a completed tool call
     mockMessages['test-session-id'] = [
@@ -496,37 +496,37 @@ describe('ChatView', () => {
     const wrapper = mountChatView({}, mockWs)
     await nextTick()
 
-    // The chip renders collapsed showing "N tool calls · done" — find it by the "done" label.
+    // The chip renders collapsed showing "N tool calls · done" — find it by the "tool call" label.
     // Individual tool call buttons (with tool names) are hidden until the chip is expanded.
     const chipBtns = wrapper.findAll('button').filter(b => b.text().includes('tool call'))
     expect(chipBtns.length).toBeGreaterThan(0)
 
-    const chipBtn = chipBtns[0]
-
-    // Before expanding chip: the tool result ('file1') should not be visible
-    expect(wrapper.html()).not.toContain('file1')
-
     // Click the chip to expand the tool call list
-    await chipBtn.trigger('click')
+    await chipBtns[0].trigger('click')
     await nextTick()
 
     // After expanding: find the individual tool call button (renders tool name 'bash')
     const toolCallBtns = wrapper.findAll('button').filter(b => b.text().includes('bash'))
     expect(toolCallBtns.length).toBeGreaterThan(0)
 
-    // Click the individual tool button to reveal result
+    // Before clicking: modal should be closed (open=false)
+    const modal = wrapper.findComponent({ name: 'ToolCallModal' })
+    expect(modal.exists()).toBe(true)
+    expect(modal.props('open')).toBe(false)
+
+    // Click the individual tool button — should open the detail modal
     await toolCallBtns[0].trigger('click')
     await nextTick()
 
-    // After toggling individual tool call: result should be visible
-    expect(wrapper.html()).toContain('file1')
+    // After clicking: modal should be open with the correct tool call
+    expect(modal.props('open')).toBe(true)
+    expect((modal.props('tc') as any)?.id).toBe('tc-42')
+    expect((modal.props('tc') as any)?.name).toBe('bash')
 
-    // Click again to collapse
-    await toolCallBtns[0].trigger('click')
+    // Emit close from the modal — should close it
+    await modal.trigger('close')
     await nextTick()
-
-    // After second toggle: result should be hidden again
-    expect(wrapper.html()).not.toContain('file1')
+    expect(modal.props('open')).toBe(false)
   })
 
   it('WS handlers are registered when ws ref is provided', async () => {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -451,9 +452,10 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	// The inner query returns the limit+1 NEWEST messages (DESC) matching the
 	// cursor condition. The outer query reverses them into chronological order.
 	query := fmt.Sprintf(`
-		SELECT id, session_id, seq, ts, role, content, agent FROM (
+		SELECT id, session_id, seq, ts, role, content, agent, tool_calls_json FROM (
 			SELECT m.id, m.container_id AS session_id, m.seq, m.ts,
-			       m.role, m.content, COALESCE(m.agent, '') AS agent
+			       m.role, m.content, COALESCE(m.agent, '') AS agent,
+			       m.tool_calls_json
 			FROM messages m
 			JOIN sessions s ON s.id = m.container_id
 			WHERE s.space_id = ?
@@ -468,10 +470,10 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 
 	rows, err := s.db.Read().Query(query, args...)
 	if err != nil {
-		// parent_message_id may not exist on older databases — retry without it.
+		// tool_calls_json or parent_message_id may not exist on older databases — retry without them.
 		if isNoSuchColumnError(err) {
 			query = fmt.Sprintf(`
-				SELECT id, session_id, seq, ts, role, content, agent FROM (
+				SELECT id, session_id, seq, ts, role, content, agent, NULL FROM (
 					SELECT m.id, m.container_id AS session_id, m.seq, m.ts,
 					       m.role, m.content, COALESCE(m.agent, '') AS agent
 					FROM messages m
@@ -495,8 +497,12 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	var msgs []SpaceMessage
 	for rows.Next() {
 		var m SpaceMessage
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Seq, &m.Ts, &m.Role, &m.Content, &m.Agent); err != nil {
+		var toolCallsJSON sql.NullString
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Seq, &m.Ts, &m.Role, &m.Content, &m.Agent, &toolCallsJSON); err != nil {
 			return SpaceMessagesResult{}, fmt.Errorf("spaces: scan message: %w", err)
+		}
+		if toolCallsJSON.Valid && toolCallsJSON.String != "" {
+			_ = json.Unmarshal([]byte(toolCallsJSON.String), &m.ToolCalls)
 		}
 		msgs = append(msgs, m)
 	}

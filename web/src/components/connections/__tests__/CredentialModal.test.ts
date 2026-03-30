@@ -4,8 +4,6 @@ import CredentialModal from '../CredentialModal.vue'
 import type { CredentialCatalogEntry } from '../../../composables/useCredentialCatalog'
 
 // ── Catalog mock ──────────────────────────────────────────────────────────────
-// Mock useCredentialCatalog so tests can control whether a provider is
-// in the catalog or not, without hitting the network.
 const mockGetCatalogEntry = vi.fn<[string], Promise<CredentialCatalogEntry | null>>()
 
 vi.mock('../../../composables/useCredentialCatalog', () => ({
@@ -22,15 +20,6 @@ vi.mock('../../../composables/useApi', () => {
         catalog: vi.fn().mockResolvedValue([]),
       },
       credentials: {
-        // Bespoke providers
-        slackBotTest: vi.fn(), slackBotSave: vi.fn(),
-        jiraSATest: vi.fn(),   jiraSASave: vi.fn(),
-        linearTest: vi.fn(),   linearSave: vi.fn(),
-        gitlabTest: vi.fn(),   gitlabSave: vi.fn(),
-        discordTest: vi.fn(),  discordSave: vi.fn(),
-        vercelTest: vi.fn(),   vercelSave: vi.fn(),
-        stripeTest: vi.fn(),   stripeSave: vi.fn(),
-        // Generic catalog-driven endpoints
         testGeneric: vi.fn(),
         saveGeneric: vi.fn(),
       },
@@ -39,7 +28,6 @@ vi.mock('../../../composables/useApi', () => {
 })
 
 import { api } from '../../../composables/useApi'
-import type { CredentialProvider } from '../forms/index'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,6 +40,7 @@ function makeCatalogEntry(overrides?: Partial<CredentialCatalogEntry>): Credenti
     category: 'observability',
     icon: 'DD',
     icon_color: '#632ca6',
+    type: 'credentials',
     default_label: 'Datadog',
     multi_account: false,
     fields: [
@@ -77,7 +66,26 @@ function makeCatalogEntry(overrides?: Partial<CredentialCatalogEntry>): Credenti
   }
 }
 
-const mountModal = (provider: CredentialProvider | null) =>
+/** Catalog entry for muninn (type=database → resolveApi routes to api.muninn). */
+function makeMuninnEntry(): CredentialCatalogEntry {
+  return makeCatalogEntry({
+    id: 'muninn',
+    name: 'MuninnDB',
+    description: 'Agent memory',
+    category: 'databases',
+    icon: 'M',
+    icon_color: '#58a6ff',
+    type: 'database',
+    default_label: 'MuninnDB',
+    fields: [
+      { key: 'endpoint', label: 'Endpoint URL', type: 'url',      required: true, stored_in: 'metadata', placeholder: 'http://localhost:8475' },
+      { key: 'username', label: 'Username',     type: 'text',     required: true, stored_in: 'metadata', placeholder: 'root' },
+      { key: 'password', label: 'Password',     type: 'password', required: true, stored_in: 'creds',    placeholder: '••••••••' },
+    ],
+  })
+}
+
+const mountModal = (provider: string | null) =>
   mount(CredentialModal, {
     props: { provider },
     attachTo: document.body,
@@ -87,7 +95,7 @@ const mountModal = (provider: CredentialProvider | null) =>
 describe('CredentialModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    // Default: provider not in catalog (uses legacy form).
+    // Default: provider not found in catalog.
     mockGetCatalogEntry.mockResolvedValue(null)
   })
 
@@ -98,17 +106,6 @@ describe('CredentialModal', () => {
     expect(w.find('[data-testid="modal-panel"]').exists()).toBe(false)
   })
 
-  it('renders MuninnDB form when provider is "muninn" (bespoke, not in catalog)', async () => {
-    mockGetCatalogEntry.mockResolvedValue(null)
-    const w = mountModal('muninn')
-    await flushPromises()
-    expect(w.find('[data-testid="modal-panel"]').exists()).toBe(true)
-    expect(w.find('[data-testid="modal-title"]').text()).toContain('MuninnDB')
-    // Legacy MuninnForm fields
-    expect(w.find('[data-testid="field-endpoint"]').exists()).toBe(true)
-    expect(w.find('[data-testid="field-password"]').exists()).toBe(true)
-  })
-
   it('renders GenericCredentialForm when provider is in the catalog', async () => {
     mockGetCatalogEntry.mockResolvedValue(makeCatalogEntry())
     const w = mountModal('datadog')
@@ -117,6 +114,16 @@ describe('CredentialModal', () => {
     // GenericCredentialForm fields use data-testid="field-{key}"
     expect(w.find('[data-testid="field-api_key"]').exists()).toBe(true)
     expect(w.find('[data-testid="field-app_key"]').exists()).toBe(true)
+  })
+
+  it('renders MuninnDB form from catalog (type=database)', async () => {
+    mockGetCatalogEntry.mockResolvedValue(makeMuninnEntry())
+    const w = mountModal('muninn')
+    await flushPromises()
+    expect(w.find('[data-testid="modal-panel"]').exists()).toBe(true)
+    expect(w.find('[data-testid="modal-title"]').text()).toContain('MuninnDB')
+    expect(w.find('[data-testid="field-endpoint"]').exists()).toBe(true)
+    expect(w.find('[data-testid="field-password"]').exists()).toBe(true)
   })
 
   it('shows catalog-error state when catalog fetch fails', async () => {
@@ -136,10 +143,11 @@ describe('CredentialModal', () => {
     expect(w.emitted('close')).toBeTruthy()
   })
 
-  // ── Muninn (bespoke) test / connect ─────────────────────────────────────────
+  // ── Muninn (database type) test / connect ────────────────────────────────────
+  // resolveApi('database') routes to api.muninn.test and api.muninn.connect.
 
   it('calls muninn.test and shows success result', async () => {
-    mockGetCatalogEntry.mockResolvedValue(null)
+    mockGetCatalogEntry.mockResolvedValue(makeMuninnEntry())
     vi.mocked(api.muninn.test).mockResolvedValueOnce({ ok: true })
     const w = mountModal('muninn')
     await flushPromises()
@@ -151,8 +159,8 @@ describe('CredentialModal', () => {
 
   it('calls muninn.connect, shows Connected! for 1.5s then emits connected', async () => {
     vi.useFakeTimers()
-    mockGetCatalogEntry.mockResolvedValue(null)
-    vi.mocked(api.muninn.connect).mockResolvedValueOnce(undefined)
+    mockGetCatalogEntry.mockResolvedValue(makeMuninnEntry())
+    vi.mocked(api.muninn.connect).mockResolvedValueOnce({ ok: true })
     const w = mountModal('muninn')
     await flushPromises()
     await w.find('[data-testid="btn-connect"]').trigger('click')
@@ -166,7 +174,7 @@ describe('CredentialModal', () => {
   })
 
   it('shows save error message on muninn connect failure', async () => {
-    mockGetCatalogEntry.mockResolvedValue(null)
+    mockGetCatalogEntry.mockResolvedValue(makeMuninnEntry())
     vi.mocked(api.muninn.connect).mockRejectedValueOnce(new Error('bad credentials'))
     const w = mountModal('muninn')
     await flushPromises()

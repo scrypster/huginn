@@ -121,8 +121,9 @@ export interface SpaceMessage {
   role: 'user' | 'assistant'
   content: string
   agent: string
-  // Populated from WS tool_result events during streaming; not persisted server-side.
-  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done: boolean }[]
+  // Populated from WS tool_result events during streaming, or from the server on load.
+  // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
+  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean }[]
 }
 
 export interface SystemToolStatus {

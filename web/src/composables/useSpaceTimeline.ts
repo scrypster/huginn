@@ -63,6 +63,11 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   // it resets on reconnect and never leaks stale state into TimelineState.
   const loadingSessionIds = new Set<string>()
 
+  // pendingToolResults buffers tool call results that arrive before the
+  // streaming placeholder exists (the prefetch pattern: tools run before
+  // any tokens are emitted). Flushed when onToken creates the placeholder.
+  const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string }[]>()
+
   const onStatus = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
@@ -115,7 +120,10 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             existing.content += msg.content
           }
         } else {
-          // Start a new streaming message placeholder.
+          // Start a new streaming message placeholder, flushing any tool
+          // results that arrived as prefetch (before this first token).
+          const pending = pendingToolResults.get(sessionId) ?? []
+          pendingToolResults.delete(sessionId)
           st.messages.push({
             id: `stream-${sessionId}-${Date.now()}`,
             session_id: sessionId,
@@ -124,6 +132,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             role: 'assistant',
             content: msg.content ?? '',
             agent: ((msg as unknown as Record<string, unknown>).agent as string) ?? '',
+            toolCalls: pending.length > 0 ? pending.map(p => ({ ...p, done: true })) : undefined,
           })
         }
       }
@@ -197,6 +206,23 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     }
   }
 
+  const onToolCall = (msg: WSMessage): void => {
+    // tool_call fires when the model starts a tool invocation. We register it
+    // so that prefetch tool calls (before any tokens) are tracked and their
+    // results (from onToolResult) can be buffered and flushed onto the
+    // streaming placeholder once the first token creates it.
+    // The handler itself is intentionally minimal — the result is what matters
+    // for display, handled in onToolResult below.
+    const sessionId = msg.session_id
+    if (!sessionId) return
+    for (const [, st] of stateMap.entries()) {
+      if (!st.sessionToSpaceMap.has(sessionId)) continue
+      // Ensure the pending buffer exists for this session.
+      if (!pendingToolResults.has(sessionId)) pendingToolResults.set(sessionId, [])
+      break
+    }
+  }
+
   const onToolResult = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
@@ -204,6 +230,12 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       const p = msg.payload as Record<string, unknown> | undefined
       if (!p) break
+      const record = {
+        id: (p.id as string) ?? '',
+        name: (p.tool as string) ?? '',
+        args: (p.args as Record<string, unknown>) ?? {},
+        result: (p.result as string) ?? '',
+      }
       // Accept both stream- (result arrived before done) and done- (result
       // arrived after onDone renamed the placeholder — the late-result race).
       const streamMsg = [...st.messages].reverse().find(
@@ -212,13 +244,12 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       )
       if (streamMsg) {
         if (!streamMsg.toolCalls) streamMsg.toolCalls = []
-        streamMsg.toolCalls.push({
-          id: (p.id as string) ?? '',
-          name: (p.tool as string) ?? '',
-          args: (p.args as Record<string, unknown>) ?? {},
-          result: (p.result as string) ?? '',
-          done: true,
-        })
+        streamMsg.toolCalls.push({ ...record, done: true })
+      } else {
+        // No streaming placeholder yet — buffer for when the first token arrives.
+        const buf = pendingToolResults.get(sessionId) ?? []
+        buf.push(record)
+        pendingToolResults.set(sessionId, buf)
       }
       break
     }
@@ -228,6 +259,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   ws.on('token', onToken)
   ws.on('done', onDone)
   ws.on('chat', onChat)
+  ws.on('tool_call', onToolCall)
   ws.on('tool_result', onToolResult)
 
   _wsCleanup = () => {
@@ -235,6 +267,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     ws.off('token', onToken)
     ws.off('done', onDone)
     ws.off('chat', onChat)
+    ws.off('tool_call', onToolCall)
     ws.off('tool_result', onToolResult)
   }
   return _wsCleanup

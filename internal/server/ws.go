@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/logger"
+	"github.com/scrypster/huginn/internal/session"
 )
 
 // serverEpoch is a random uint64 generated at process startup. It is stamped
@@ -523,6 +525,22 @@ func parseBoolPayload(v any) bool {
 	return false
 }
 
+// payloadString safely extracts a string value from a payload map. Returns ""
+// if the map is nil, the key is absent, or the value is nil — never "<nil>".
+func payloadString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok || v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
 // streamEventToWS converts a backend.StreamEvent to a WSMessage.
 func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 	// Normalize streaming text and thought events to "token" so that the
@@ -612,15 +630,33 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		mentionDelegate := s.mentionDelegate
 		s.mu.Unlock()
 		go func(runID string) {
+			// assistantBuf accumulates response tokens for persistence after completion.
+			var assistantBuf strings.Builder
+			// collectedToolCalls accumulates tool results for persistence with the assistant message.
+			var collectedToolCalls []session.PersistedToolCall
 			onToken := func(token string) {
+				assistantBuf.WriteString(token)
 				c.send <- WSMessage{Type: "token", Content: token, SessionID: sessionID}
 			}
 			onEvent := func(ev backend.StreamEvent) {
 				c.send <- streamEventToWS(ev, sessionID)
+				// Capture tool results so they're persisted with the assistant message.
+				if ev.Type == backend.StreamToolResult && ev.Payload != nil {
+					tc := session.PersistedToolCall{
+						ID:     payloadString(ev.Payload, "id"),
+						Name:   payloadString(ev.Payload, "tool"),
+						Result: payloadString(ev.Payload, "result"),
+					}
+					if args, ok := ev.Payload["args"].(map[string]any); ok {
+						tc.Args = args
+					}
+					collectedToolCalls = append(collectedToolCalls, tc)
+				}
 			}
 
+			ag := s.resolveAgent(sessionID)
 			var err error
-			if ag := s.resolveAgent(sessionID); ag != nil {
+			if ag != nil {
 				err = s.orch.ChatWithAgent(c.ctx, ag, userMsg, sessionID, onToken, nil, onEvent)
 			} else {
 				// No agents configured — fall back to generic Chat.
@@ -633,17 +669,48 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			}
 			c.send <- WSMessage{Type: "done", SessionID: sessionID, RunID: runID}
 
+			// Persist user + assistant messages to the session store so history
+			// survives page reload. Also emits space_activity for unseen badges.
+			// Skipped when the session has no store entry (non-space sessions that
+			// were never persisted via handleCreateSession).
+			if s.store != nil && sessionID != "" {
+				if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
+					agentName := ""
+					if ag != nil {
+						agentName = ag.Name
+					}
+					now := time.Now().UTC()
+					if appendErr := s.store.Append(sess, session.SessionMessage{
+						ID:      session.NewID(),
+						Role:    "user",
+						Content: userMsg,
+						Ts:      now,
+					}); appendErr != nil {
+						logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
+					}
+					// Persist assistant message when there is response content or tool calls.
+					if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
+						assistantMsg := session.SessionMessage{
+							ID:        session.NewID(),
+							Role:      "assistant",
+							Content:   assistantBuf.String(),
+							Agent:     agentName,
+							Ts:        time.Now().UTC(),
+							ToolCalls: collectedToolCalls,
+						}
+						if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
+							logger.Error("ws chat: failed to persist assistant message", "session_id", sessionID, "err", appendErr)
+						}
+					}
+					s.emitSpaceActivity(sess.SpaceID())
+				}
+			}
+
 			// Parse @AgentName mentions and spawn threads for any matched agents.
 			// This is the fallback delegation path for models that don't support tools.
 			logger.Info("ws chat done", "session_id", sessionID, "mentionDelegate_set", mentionDelegate != nil, "user_msg", userMsg)
 			if mentionDelegate != nil {
 				mentionDelegate(c.ctx, sessionID, userMsg, "")
-			}
-			// Emit space_activity so all connected browser tabs update unseen badges.
-			if s.store != nil && sessionID != "" {
-				if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
-					s.emitSpaceActivity(sess.SpaceID())
-				}
 			}
 		}(runID)
 	case "ping":

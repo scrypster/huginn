@@ -262,12 +262,12 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	token, err := memory.VaultTokenFor(muninnCfg, vaultName)
+	token, err := memory.MCPTokenFor(muninnCfg, vaultName)
 	if err != nil {
 		jsonOK(w, map[string]any{
 			"status":     "degraded",
 			"tools_count": 0,
-			"warning":    "no token for vault: " + err.Error(),
+			"warning":    "no MCP token configured (set mcp_token in muninn.json): " + err.Error(),
 			"latency_ms": time.Since(start).Milliseconds(),
 		})
 		return

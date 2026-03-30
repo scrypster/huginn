@@ -755,6 +755,7 @@ import { wireThreadDetailWS } from './composables/useThreadDetail'
 import { useCloud } from './composables/useCloud'
 import { useSpaces, wireSpaceWS } from './composables/useSpaces'
 import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId } from './composables/useSpaceTimeline'
+import { pruneOrphanedUnseenIds } from './composables/unseenSessions'
 import { wireSwarmWS } from './composables/useSwarmStatus'
 import SpaceCreateModal from './components/SpaceCreateModal.vue'
 import { useAgents } from './composables/useAgents'
@@ -836,9 +837,18 @@ function clearUnseen(id: string) {
 }
 
 // markSpaceSeen removes all unseen session IDs that belong to spaceId.
+// Also removes orphaned IDs — those with no space mapping and not in the
+// regular sessions list. These arise from sessions in deleted spaces that
+// can never be cleared any other way.
 // Called after hydration so sessionToSpaceMap is populated.
 function markSpaceSeen(spaceId: string) {
-  unseenSessionIds.value = unseenSessionIds.value.filter(id => getSessionSpaceId(id) !== spaceId)
+  const knownRegularIds = new Set(sessions.value.map(s => s.id))
+  unseenSessionIds.value = unseenSessionIds.value.filter(id => {
+    if (knownRegularIds.has(id)) return true   // regular session — keep
+    const mapped = getSessionSpaceId(id)
+    if (mapped === null) return false            // orphaned (deleted space) — remove
+    return mapped !== spaceId                    // belongs to different space — keep
+  })
   saveUnseenToStorage(unseenSessionIds.value)
 }
 provide('markSpaceSeen', markSpaceSeen)
@@ -1037,18 +1047,40 @@ const cloudConnected = computed(() => cloudStatus.value.connected)
 
 // ── Spaces ───────────────────────────────────────────────────────────
 const {
-  channels, dms, activeSpaceId, loading: spacesLoading, error: spacesError,
+  spaces, channels, dms, activeSpaceId, loading: spacesLoading, error: spacesError,
   fetchSpaces, setActiveSpace, markRead,
   updateSpace, deleteSpace,
 } = useSpaces()
 
-// When the user navigates to a space, clear unseen marks for any sessions
-// that belong to that space (they were marked while the route param was empty).
+// When the user navigates to a space, clear unseen marks for sessions in that
+// space, and also prune any orphaned IDs (no mapping, not a regular session).
 watch(activeSpaceId, (spaceId) => {
   if (!spaceId) return
-  unseenSessionIds.value = unseenSessionIds.value.filter(id => getSessionSpaceId(id) !== spaceId)
+  const knownRegularIds = new Set(sessions.value.map(s => s.id))
+  unseenSessionIds.value = unseenSessionIds.value.filter(id => {
+    if (knownRegularIds.has(id)) return true
+    const mapped = getSessionSpaceId(id)
+    if (mapped === null) return false
+    return mapped !== spaceId
+  })
   saveUnseenToStorage(unseenSessionIds.value)
 })
+
+// Once spaces have loaded, prune stale/orphaned session IDs from the unseen list.
+// These are IDs from sessions that belonged to deleted spaces: getSessionSpaceId
+// returns null for them (no space mapping) and they're not regular sessions, so
+// markSpaceSeen never clears them, causing a perpetual badge count.
+const stopOrphanPrune = watch(spaces, (loaded) => {
+  if (loaded.length === 0) return
+  stopOrphanPrune()
+  const knownIds = new Set(sessions.value.map(s => s.id))
+  unseenSessionIds.value = pruneOrphanedUnseenIds(
+    unseenSessionIds.value,
+    id => knownIds.has(id),
+    getSessionSpaceId,
+  )
+  saveUnseenToStorage(unseenSessionIds.value)
+}, { immediate: true })
 
 const showCreateChannelModal = ref(false)
 const channelSectionOpen = ref(true)
