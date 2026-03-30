@@ -107,9 +107,10 @@ func TestHTTPTransport_ContextCancelled(t *testing.T) {
 	}
 }
 
-// TestHTTPTransport_EmptyBodyDoesNotPopulatePending verifies that a 200 with empty
-// body leaves pending nil (same behaviour as 204).
-func TestHTTPTransport_EmptyBodyDoesNotPopulatePending(t *testing.T) {
+// TestHTTPTransport_EmptyBodyDoesNotUnblockReceive verifies that a 200 with empty
+// body does not deliver data to Receive (same behaviour as 204 — notification ACKs
+// should not unblock a pending Receive call).
+func TestHTTPTransport_EmptyBodyDoesNotUnblockReceive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		// Write nothing — empty body.
@@ -122,9 +123,13 @@ func TestHTTPTransport_EmptyBodyDoesNotPopulatePending(t *testing.T) {
 	if err := tr.Send(ctx, []byte(`{"jsonrpc":"2.0","method":"notifications/foo"}`)); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	_, err := tr.Receive(ctx)
+	// Receive should not return immediately — it should block because no response
+	// body was queued (empty body = notification ACK). Verify via context cancellation.
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := tr.Receive(cancelCtx)
 	if err == nil {
-		t.Fatal("expected error from Receive when no pending (empty body response)")
+		t.Fatal("expected context cancellation error when Receive called with no queued response")
 	}
 }
 

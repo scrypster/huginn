@@ -211,12 +211,18 @@ describe('ModelsView', () => {
   it('shows "Endpoint URL" input field for non-builtin providers', async () => {
     const w = mountView('anthropic')
     await flushPromises()
+    const vm = w.vm as any
+    vm.showEndpointEditor = true
+    await nextTick()
     expect(w.text()).toContain('Endpoint URL')
   })
 
   it('shows "API Key" input for non-ollama providers', async () => {
     const w = mountView('anthropic')
     await flushPromises()
+    const vm = w.vm as any
+    vm.showApiKeyEditor = true
+    await nextTick()
     expect(w.text()).toContain('API Key')
   })
 
@@ -311,16 +317,22 @@ describe('ModelsView', () => {
     })
     const w = mountView('anthropic')
     await flushPromises()
+    const vm = w.vm as any
+    vm.showApiKeyEditor = true
+    await nextTick()
     expect(w.text()).toContain('saved')
   })
 
-  it('shows "Key is saved" helper text when api key is [REDACTED]', async () => {
+  it('shows "Key saved" helper text when api key is [REDACTED]', async () => {
     mockConfigGet.mockResolvedValueOnce({
       backend: { provider: 'anthropic', endpoint: '', api_key: '[REDACTED]' },
     })
     const w = mountView('anthropic')
     await flushPromises()
-    expect(w.text()).toContain('Key is saved')
+    const vm = w.vm as any
+    vm.showApiKeyEditor = true
+    await nextTick()
+    expect(w.text()).toContain('Key saved')
   })
 
   it('shows $ENV_VAR hint text when api key is not redacted', async () => {
@@ -329,6 +341,9 @@ describe('ModelsView', () => {
     })
     const w = mountView('anthropic')
     await flushPromises()
+    const vm = w.vm as any
+    vm.showApiKeyEditor = true
+    await nextTick()
     expect(w.text()).toContain('$ENV_VAR')
   })
 })

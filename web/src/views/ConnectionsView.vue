@@ -14,6 +14,7 @@
       <CategoryNav
         :category="activeCategory"
         :connections="hydratedCatalog"
+        :loading="catalogLoading"
         @update:category="activeCategory = $event"
         class="flex-1"
       />
@@ -45,8 +46,8 @@
       </div>
 
       <!-- Error banner -->
-      <div v-if="error" class="mx-6 mt-3 px-4 py-2.5 rounded-xl border border-huginn-red/40 text-huginn-red text-xs bg-huginn-red/8 flex-shrink-0">
-        {{ error }}
+      <div v-if="error || catalogError" class="mx-6 mt-3 px-4 py-2.5 rounded-xl border border-huginn-red/40 text-huginn-red text-xs bg-huginn-red/8 flex-shrink-0">
+        {{ error || catalogError }}
       </div>
 
       <!-- ── My Connections: list view ───────────────────────────────────── -->
@@ -179,13 +180,35 @@
           <button @click="cancelWait" class="ml-auto text-huginn-yellow/60 hover:text-huginn-yellow transition-colors">Cancel</button>
         </div>
 
+        <!-- Skeleton loader -->
+        <div v-if="catalogLoading" class="grid grid-cols-3 gap-3">
+          <div
+            v-for="n in 12"
+            :key="n"
+            class="flex flex-col rounded-xl border border-huginn-border bg-huginn-surface/50 overflow-hidden animate-pulse"
+          >
+            <div class="flex items-start gap-3 px-4 pt-4 pb-3">
+              <div class="w-8 h-8 rounded-lg bg-huginn-border flex-shrink-0" />
+              <div class="flex-1 min-w-0 space-y-2 pt-0.5">
+                <div class="h-2.5 w-2/5 rounded bg-huginn-border" />
+                <div class="h-2 w-full rounded bg-huginn-border/60" />
+                <div class="h-2 w-3/4 rounded bg-huginn-border/40" />
+              </div>
+            </div>
+            <div class="px-4 pb-3 flex items-center justify-between mt-auto">
+              <div class="h-2 w-1/4 rounded bg-huginn-border/50" />
+              <div class="h-2 w-1/5 rounded bg-huginn-border/50" />
+            </div>
+          </div>
+        </div>
+
         <!-- Empty state -->
-        <div v-if="filteredCatalog.length === 0" class="text-huginn-muted text-xs mt-8 text-center">
+        <div v-else-if="filteredCatalog.length === 0" class="text-huginn-muted text-xs mt-8 text-center">
           No connections match "{{ search }}"
         </div>
 
         <!-- Card grid -->
-        <div class="grid grid-cols-3 gap-3">
+        <div v-else class="grid grid-cols-3 gap-3">
           <ConnectionCard
             v-for="conn in filteredCatalog"
             :key="conn.id"
@@ -215,18 +238,18 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, type Connection, type SystemToolStatus } from '../composables/useApi'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import {
-  CATALOG,
   CATEGORY_LABELS,
   hydrateOAuth,
   hydrateSystem,
   hydrateCredentials,
+  type CatalogEntry,
   type CatalogConnection,
   type ConnectionCategory,
 } from '../composables/useConnectionsCatalog'
+import { fetchCredentialCatalog, type CredentialCatalogEntry } from '../composables/useCredentialCatalog'
 import CategoryNav from '../components/connections/CategoryNav.vue'
 import ConnectionCard from '../components/connections/ConnectionCard.vue'
 import CredentialModal from '../components/connections/CredentialModal.vue'
-import type { CredentialProvider } from '../components/connections/forms/index'
 
 const route  = useRoute()
 const router = useRouter()
@@ -241,16 +264,19 @@ const VALID_CATEGORIES = new Set<ConnectionCategory>([
 const activeCategory = ref<ConnectionCategory>('all')
 const search         = ref('')
 const loading            = ref(false)
+const catalogLoading     = ref(true)
 const error              = ref('')
+const catalogError       = ref('')
 const waitingFor         = ref<string | null>(null)
 const pendingDisconnect  = ref<string | null>(null)
-const activeModal = ref<CredentialProvider | null>(null)
+const activeModal = ref<string | null>(null)
 
 // Raw API data
-const oauthConnections = ref<Connection[]>([])
-const systemTools      = ref<SystemToolStatus[]>([])
-const muninnConnected  = ref(false)
-const muninnIdentity   = ref('')
+const oauthConnections     = ref<Connection[]>([])
+const systemTools          = ref<SystemToolStatus[]>([])
+const muninnConnected      = ref(false)
+const muninnIdentity       = ref('')
+const serverCatalogEntries = ref<CredentialCatalogEntry[]>([])
 
 // WS inject for token refresh events
 const wsRef = inject<Ref<HuginnWS | null>>('ws')
@@ -282,7 +308,17 @@ let snapshotBefore = new Set<string>()
 // ── Computed ──────────────────────────────────────────────────────────────────
 
 const hydratedCatalog = computed<CatalogConnection[]>(() =>
-  CATALOG.map(entry => {
+  serverCatalogEntries.value.map(e => {
+    const entry: CatalogEntry = {
+      id:           e.id,
+      name:         e.name,
+      description:  e.description,
+      category:     e.category as ConnectionCategory,
+      icon:         e.icon,
+      iconColor:    e.icon_color,
+      type:         e.type as CatalogEntry['type'],
+      multiAccount: e.multi_account,
+    }
     if (entry.type === 'coming_soon') {
       return { ...entry, state: null }
     }
@@ -295,7 +331,7 @@ const hydratedCatalog = computed<CatalogConnection[]>(() =>
     if (entry.type === 'system') {
       return { ...entry, state: hydrateSystem(entry, systemTools.value) }
     }
-    if (entry.type === 'credentials') {
+    if (entry.type === 'credentials' || entry.type === 'database') {
       return { ...entry, state: hydrateCredentials(entry, oauthConnections.value) }
     }
     return { ...entry, state: null }
@@ -364,6 +400,15 @@ onMounted(async () => {
   await refresh()
   await loadMuninnStatus()
 
+  // Fetch server-side credential catalog.
+  try {
+    serverCatalogEntries.value = await fetchCredentialCatalog()
+  } catch (e) {
+    catalogError.value = e instanceof Error ? e.message : 'Failed to load connections catalog'
+  } finally {
+    catalogLoading.value = false
+  }
+
   // Listen for token refresh WS events.
   const ws = wsRef?.value
   if (ws?.on) {
@@ -425,8 +470,8 @@ async function loadMuninnStatus() {
 function handleConnect(conn: CatalogConnection) {
   if (conn.type === 'oauth') {
     startOAuthConnect(conn.id)
-  } else if (conn.type === 'credentials' || conn.id === 'muninn') {
-    activeModal.value = conn.id as CredentialProvider
+  } else if (conn.type === 'credentials' || conn.type === 'database') {
+    activeModal.value = conn.id
   }
 }
 
@@ -521,6 +566,7 @@ defineExpose({
   handleDisconnect,
   doDisconnect,
   error,
+  catalogError,
   waitingFor,
   cancelWait,
   connectedItems,

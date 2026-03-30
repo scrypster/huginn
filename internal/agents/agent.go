@@ -181,7 +181,11 @@ func (a *Agent) SnapshotHistory(n int) []backend.Message {
 // prepending the agent's persona before the codebase context block.
 func BuildPersonaPrompt(ag *Agent, ctxText string) string {
 	if ag.SystemPrompt != "" {
-		return ag.SystemPrompt + "\n\n" + ctxText
+		prefix := ""
+		if ag.Name != "" {
+			prefix = "Your name is " + ag.Name + ".\n\n"
+		}
+		return prefix + ag.SystemPrompt + "\n\n" + ctxText
 	}
 	return "You are " + ag.Name + ", an expert assistant. " +
 		"Use markdown formatting — tables, bold, code blocks, lists — when it improves readability.\n\n" + ctxText
@@ -196,7 +200,9 @@ func BuildPersonaPromptWithRoster(ag *Agent, ctxText, roster string) string {
 		return base
 	}
 	return base + "\n\n## Your Team\n" + roster +
-		"\n\nUse `delegate_to_agent` to assign sub-tasks to team members."
+		"\n\nUse `delegate_to_agent` to assign sub-tasks to team members. " +
+		"Only delegate when the request clearly requires another agent's specialized expertise. " +
+		"For simple conversational messages (greetings, questions, general chat), respond directly — do not delegate."
 }
 
 // BuildPersonaPromptWithMemory constructs the system prompt with cross-session context.

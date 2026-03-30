@@ -63,6 +63,11 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   // it resets on reconnect and never leaks stale state into TimelineState.
   const loadingSessionIds = new Set<string>()
 
+  // pendingToolResults buffers tool call results that arrive before the
+  // streaming placeholder exists (the prefetch pattern: tools run before
+  // any tokens are emitted). Flushed when onToken creates the placeholder.
+  const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string }[]>()
+
   const onStatus = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
@@ -98,9 +103,11 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     for (const [, st] of stateMap.entries()) {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       if (msg.type === 'token' && msg.content) {
-        // Find the assistant message being streamed (last assistant msg in session).
+        // Find the active streaming placeholder for this session. Only stream- prefixed
+        // messages qualify — persisted messages (replaced after "done") must never receive
+        // new tokens, as that would append a second response to the first (multi-turn bug).
         const existing = [...st.messages].reverse().find(
-          (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant',
+          (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
         )
         if (existing) {
           if (loadingSessionIds.has(sessionId)) {
@@ -113,7 +120,10 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             existing.content += msg.content
           }
         } else {
-          // Start a new streaming message placeholder.
+          // Start a new streaming message placeholder, flushing any tool
+          // results that arrived as prefetch (before this first token).
+          const pending = pendingToolResults.get(sessionId) ?? []
+          pendingToolResults.delete(sessionId)
           st.messages.push({
             id: `stream-${sessionId}-${Date.now()}`,
             session_id: sessionId,
@@ -122,6 +132,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             role: 'assistant',
             content: msg.content ?? '',
             agent: ((msg as unknown as Record<string, unknown>).agent as string) ?? '',
+            toolCalls: pending.length > 0 ? pending.map(p => ({ ...p, done: true })) : undefined,
           })
         }
       }
@@ -136,20 +147,35 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       // Update activeSessionId for the space that owns this session.
       st.activeSessionId = sessionId
-      // Refresh the last message from the server to get the stable id.
-      // We fire-and-forget; if it fails the streaming content is still visible.
+      // Synchronously rename the stream- placeholder to done- before starting
+      // the async fetch. This closes the race window where turn-2 tokens arrive
+      // before the fetch resolves and onToken finds the old placeholder, causing
+      // the second response to be appended to the first message bubble.
+      const streamIdx = st.messages.findIndex(
+        e => e.session_id === sessionId && e.id.startsWith('stream-')
+      )
+      if (streamIdx >= 0) {
+        const placeholder = st.messages[streamIdx]
+        if (placeholder) placeholder.id = placeholder.id.replace('stream-', 'done-')
+      }
+      // Refresh the last message from the server to get the stable DB id.
+      // We fire-and-forget; if it fails the done- placeholder content is still visible.
       api.sessions.getMessages(sessionId, { limit: 5 }).then(fresh => {
         const freshMsgs = (Array.isArray(fresh) ? fresh : []) as SpaceMessage[]
         for (const m of freshMsgs) {
           if (!st.messages.some(e => e.id === m.id)) {
-            // Replace the streaming placeholder or append.
-            const streamIdx = st.messages.findIndex(
-              e => e.session_id === sessionId && e.id.startsWith('stream-')
-            )
-            if (streamIdx >= 0) {
-              st.messages.splice(streamIdx, 1, m)
-            } else {
-              st.messages.push(m)
+            // Only replace the done- placeholder with assistant messages — user
+            // messages are already present as optimistic entries and swapping the
+            // done- slot with a user message would corrupt the display order.
+            if (m.role === 'assistant') {
+              const doneIdx = st.messages.findIndex(
+                e => e.session_id === sessionId && e.id.startsWith('done-')
+              )
+              if (doneIdx >= 0) {
+                st.messages.splice(doneIdx, 1, m)
+              } else {
+                st.messages.push(m)
+              }
             }
           }
         }
@@ -180,16 +206,69 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     }
   }
 
+  const onToolCall = (msg: WSMessage): void => {
+    // tool_call fires when the model starts a tool invocation. We register it
+    // so that prefetch tool calls (before any tokens) are tracked and their
+    // results (from onToolResult) can be buffered and flushed onto the
+    // streaming placeholder once the first token creates it.
+    // The handler itself is intentionally minimal — the result is what matters
+    // for display, handled in onToolResult below.
+    const sessionId = msg.session_id
+    if (!sessionId) return
+    for (const [, st] of stateMap.entries()) {
+      if (!st.sessionToSpaceMap.has(sessionId)) continue
+      // Ensure the pending buffer exists for this session.
+      if (!pendingToolResults.has(sessionId)) pendingToolResults.set(sessionId, [])
+      break
+    }
+  }
+
+  const onToolResult = (msg: WSMessage): void => {
+    const sessionId = msg.session_id
+    if (!sessionId) return
+    for (const [, st] of stateMap.entries()) {
+      if (!st.sessionToSpaceMap.has(sessionId)) continue
+      const p = msg.payload as Record<string, unknown> | undefined
+      if (!p) break
+      const record = {
+        id: (p.id as string) ?? '',
+        name: (p.tool as string) ?? '',
+        args: (p.args as Record<string, unknown>) ?? {},
+        result: (p.result as string) ?? '',
+      }
+      // Accept both stream- (result arrived before done) and done- (result
+      // arrived after onDone renamed the placeholder — the late-result race).
+      const streamMsg = [...st.messages].reverse().find(
+        m => m.session_id === sessionId && m.role === 'assistant' &&
+          (m.id.startsWith('stream-') || m.id.startsWith('done-')),
+      )
+      if (streamMsg) {
+        if (!streamMsg.toolCalls) streamMsg.toolCalls = []
+        streamMsg.toolCalls.push({ ...record, done: true })
+      } else {
+        // No streaming placeholder yet — buffer for when the first token arrives.
+        const buf = pendingToolResults.get(sessionId) ?? []
+        buf.push(record)
+        pendingToolResults.set(sessionId, buf)
+      }
+      break
+    }
+  }
+
   ws.on('status', onStatus)
   ws.on('token', onToken)
   ws.on('done', onDone)
   ws.on('chat', onChat)
+  ws.on('tool_call', onToolCall)
+  ws.on('tool_result', onToolResult)
 
   _wsCleanup = () => {
     ws.off('status', onStatus)
     ws.off('token', onToken)
     ws.off('done', onDone)
     ws.off('chat', onChat)
+    ws.off('tool_call', onToolCall)
+    ws.off('tool_result', onToolResult)
   }
   return _wsCleanup
 }
@@ -314,4 +393,14 @@ function relativeTime(ts: string): string {
 // clearSpaceTimeline removes cached state for a space (e.g. after archive).
 export function clearSpaceTimeline(spaceId: string) {
   stateMap.delete(spaceId)
+}
+
+// getSessionSpaceId returns the space id that owns the given session, or null if
+// the session is not tracked in any cached space timeline. Used by App.vue to
+// suppress unread badges for sessions that belong to the currently-active space.
+export function getSessionSpaceId(sessionId: string): string | null {
+  for (const [spaceId, st] of stateMap.entries()) {
+    if (st.sessionToSpaceMap.has(sessionId)) return spaceId
+  }
+  return null
 }

@@ -3,17 +3,40 @@ import {
   hydrateOAuth,
   hydrateSystem,
   hydrateCredentials,
-  CATALOG,
   type CatalogEntry,
 } from '../useConnectionsCatalog'
 
-// Minimal catalog entries for each type
-const oauthEntry: CatalogEntry = CATALOG.find(e => e.id === 'github')!        // oauth, multiAccount:false
-const multiOAuthEntry: CatalogEntry = CATALOG.find(e => e.id === 'google')!   // oauth, multiAccount:true
-const systemEntry: CatalogEntry = CATALOG.find(e => e.id === 'github_cli')!   // system
-const awsEntry: CatalogEntry = CATALOG.find(e => e.id === 'aws')!             // system (no github_cli mapping)
-const credEntry: CatalogEntry = CATALOG.find(e => e.id === 'datadog')!        // credentials
-const comingSoonEntry: CatalogEntry = CATALOG.find(e => e.id === 'teams')!    // coming_soon
+// Minimal catalog entries for each type — defined inline (no static CATALOG export)
+const oauthEntry: CatalogEntry = {
+  id: 'github', name: 'GitHub', description: 'GitHub dev tools',
+  category: 'dev_tools', icon: 'G', iconColor: '#24292E',
+  type: 'oauth', multiAccount: false,
+}
+const multiOAuthEntry: CatalogEntry = {
+  id: 'google', name: 'Google', description: 'Google services',
+  category: 'productivity', icon: 'Go', iconColor: '#4285F4',
+  type: 'oauth', multiAccount: true,
+}
+const systemEntry: CatalogEntry = {
+  id: 'github_cli', name: 'GitHub CLI', description: 'GitHub CLI tool',
+  category: 'dev_tools', icon: 'GH', iconColor: '#24292E',
+  type: 'system', multiAccount: false,
+}
+const awsEntry: CatalogEntry = {
+  id: 'aws', name: 'AWS', description: 'Amazon Web Services',
+  category: 'cloud', icon: 'A', iconColor: '#FF9900',
+  type: 'system', multiAccount: false,
+}
+const credEntry: CatalogEntry = {
+  id: 'datadog', name: 'Datadog', description: 'Metrics, logs',
+  category: 'observability', icon: 'DD', iconColor: '#632ca6',
+  type: 'credentials', multiAccount: false,
+}
+const comingSoonEntry: CatalogEntry = {
+  id: 'teams', name: 'Teams', description: 'Microsoft Teams',
+  category: 'communication', icon: 'T', iconColor: '#6264A7',
+  type: 'coming_soon', multiAccount: false,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('hydrateOAuth', () => {
@@ -117,10 +140,22 @@ describe('hydrateSystem', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('hydrateCredentials', () => {
-  it('returns null for non-credentials types', () => {
+  it('returns null for non-credentials/database types', () => {
     expect(hydrateCredentials(oauthEntry, [])).toBeNull()
     expect(hydrateCredentials(systemEntry, [])).toBeNull()
     expect(hydrateCredentials(comingSoonEntry, [])).toBeNull()
+  })
+
+  it('returns connected state for database type providers', () => {
+    const dbEntry: CatalogEntry = {
+      id: 'muninn', name: 'MuninnDB', description: 'Agent memory',
+      category: 'databases', icon: 'M', iconColor: '#58a6ff',
+      type: 'database', multiAccount: false,
+    }
+    const conns = [{ id: 'c1', provider: 'muninn', account_label: 'local' }]
+    const state = hydrateCredentials(dbEntry, conns)
+    expect(state?.connected).toBe(true)
+    expect(state?.identity).toBe('local')
   })
 
   it('returns { connected: false } when no matching connection', () => {

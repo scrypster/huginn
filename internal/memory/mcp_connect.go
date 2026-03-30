@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 )
 
 const mcpPort = "8750"
@@ -35,4 +36,17 @@ func VaultTokenFor(cfg *GlobalConfig, vaultName string) (string, error) {
 		return "", fmt.Errorf("muninn: no token for vault %q — create the vault first", vaultName)
 	}
 	return tok, nil
+}
+
+// MCPTokenFor returns the token to use for MCP server connections.
+// The MuninnDB MCP server (port 8750) requires the daemon token (mdb_...), not per-vault API keys.
+// It prefers GlobalConfig.MCPToken; if not set, falls back to VaultTokenFor for backward compatibility.
+func MCPTokenFor(cfg *GlobalConfig, vaultName string) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("muninn: config is nil")
+	}
+	if tok := strings.TrimSpace(cfg.MCPToken); tok != "" {
+		return tok, nil
+	}
+	return VaultTokenFor(cfg, vaultName)
 }

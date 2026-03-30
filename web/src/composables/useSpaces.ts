@@ -165,6 +165,8 @@ export function useSpaces() {
       // Optimistically clear the badge — user is now viewing this space.
       const sp = spaces.value.find(s => s.id === id)
       if (sp) sp.unseenCount = 0
+      // Persist the read position to the backend so the badge resets on reload.
+      api.spaces.markRead(id).catch(() => { /* non-fatal */ })
     } else {
       localStorage.removeItem(ACTIVE_SPACE_KEY)
     }

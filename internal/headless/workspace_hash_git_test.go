@@ -197,7 +197,19 @@ func TestSanitizePath_UnicodePreserved(t *testing.T) {
 // TestRun_MultipleFiles_CountsScanned verifies that multiple files in the CWD
 // result in a positive FilesScanned count.
 func TestRun_MultipleFiles_CountsScanned(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
 	dir := t.TempDir()
+
+	// Initialise a git repo so findGitRoot anchors at dir instead of walking
+	// up to the huginn repository root (which would cause BuildIncrementalWithStats
+	// to index the entire repo + vendor tree, blowing the test timeout).
+	mustGit(t, dir, "init")
+	mustGit(t, dir, "config", "user.email", "test@example.com")
+	mustGit(t, dir, "config", "user.name", "Test")
+
 	for i := 0; i < 5; i++ {
 		name := filepath.Join(dir, filepath.FromSlash(
 			"file"+string(rune('a'+i))+".go",
@@ -206,6 +218,9 @@ func TestRun_MultipleFiles_CountsScanned(t *testing.T) {
 			t.Fatalf("WriteFile: %v", err)
 		}
 	}
+
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "init")
 
 	result, err := Run(HeadlessConfig{CWD: dir})
 	if err != nil {

@@ -29,23 +29,32 @@ type Manifest struct {
 	SpaceID string `json:"space_id,omitempty"` // ID of the Space this session belongs to
 }
 
+// PersistedToolCall is a single tool invocation stored with an assistant message.
+type PersistedToolCall struct {
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Args   map[string]any `json:"args,omitempty"`
+	Result string         `json:"result,omitempty"`
+}
+
 // SessionMessage is one line in messages.jsonl.
 type SessionMessage struct {
-	ID              string    `json:"id"`
-	Ts              time.Time `json:"ts"`
-	Seq             int64     `json:"seq"`
-	Role            string    `json:"role"`
-	Content         string    `json:"content"`
-	Agent           string    `json:"agent,omitempty"`
-	ToolName        string    `json:"tool_name,omitempty"`
-	ToolCallID      string    `json:"tool_call_id,omitempty"`
-	Type            string    `json:"type,omitempty"` // "cost" for cost records
-	PromptTok       int       `json:"prompt_tokens,omitempty"`
-	CompTok         int       `json:"completion_tokens,omitempty"`
-	CostUSD         float64   `json:"cost_usd,omitempty"`
-	ModelName       string    `json:"model,omitempty"`
-	ParentMessageID  string    `json:"parent_message_id,omitempty"`  // for thread replies
-	ThreadReplyCount int       `json:"thread_reply_count,omitempty"` // count of thread replies on this message
+	ID              string              `json:"id"`
+	Ts              time.Time           `json:"ts"`
+	Seq             int64               `json:"seq"`
+	Role            string              `json:"role"`
+	Content         string              `json:"content"`
+	Agent           string              `json:"agent,omitempty"`
+	ToolName        string              `json:"tool_name,omitempty"`
+	ToolCallID      string              `json:"tool_call_id,omitempty"`
+	Type            string              `json:"type,omitempty"` // "cost" for cost records
+	PromptTok       int                 `json:"prompt_tokens,omitempty"`
+	CompTok         int                 `json:"completion_tokens,omitempty"`
+	CostUSD         float64             `json:"cost_usd,omitempty"`
+	ModelName       string              `json:"model,omitempty"`
+	ParentMessageID  string              `json:"parent_message_id,omitempty"`  // for thread replies
+	ThreadReplyCount int                 `json:"thread_reply_count,omitempty"` // count of thread replies on this message
+	ToolCalls       []PersistedToolCall `json:"tool_calls,omitempty"` // tool calls made during this assistant turn
 }
 
 // Session is the in-memory representation of an active session.

@@ -144,9 +144,27 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.SpaceID != "" {
-		if storedSess, loadErr := s.store.Load(sess.ID); loadErr == nil {
-			storedSess.Manifest.SpaceID = body.SpaceID
-			_ = s.store.SaveManifest(storedSess)
+		// The orchestrator session (sess) is only in-memory at this point —
+		// s.orch.NewSession never writes to the store. Construct the manifest
+		// directly and upsert it so ListSpaceMessages can find it via the
+		// sessions.space_id foreign key.
+		now := time.Now().UTC()
+		storedSess := &session.Session{
+			ID: sess.ID,
+			Manifest: session.Manifest{
+				ID:        sess.ID,
+				SessionID: sess.ID,
+				Status:    "active",
+				Version:   1,
+				SpaceID:   body.SpaceID,
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		}
+		if s.store != nil {
+			if saveErr := s.store.SaveManifest(storedSess); saveErr != nil {
+				slog.Error("handleCreateSession: failed to persist space_id", "session_id", sess.ID, "space_id", body.SpaceID, "err", saveErr)
+			}
 		}
 	}
 	jsonOK(w, map[string]string{"session_id": sess.ID})
@@ -412,9 +430,51 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Cloud provider models — included when a provider with an API key is configured
+	// so the agent model picker shows Anthropic/OpenAI/OpenRouter models alongside
+	// local Ollama models (issue #30).
+	var cloudModels []any
+	if s.cfg.Backend.Provider != "" && s.cfg.Backend.Provider != "ollama" {
+		provider := s.cfg.Backend.Provider
+		apiKey := s.cfg.Backend.ResolvedAPIKey()
+		if apiKey != "" {
+			endpoint := s.cfg.Backend.Endpoint
+			var fetched []providerModel
+			var fetchErr error
+			switch provider {
+			case "anthropic":
+				if endpoint == "" {
+					endpoint = "https://api.anthropic.com"
+				}
+				fetched, fetchErr = fetchAnthropicModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			case "openai":
+				if endpoint == "" {
+					endpoint = "https://api.openai.com/v1"
+				}
+				fetched, fetchErr = fetchOpenAIModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			case "openrouter":
+				if endpoint == "" {
+					endpoint = "https://openrouter.ai/api/v1"
+				}
+				fetched, fetchErr = fetchOpenRouterModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			}
+			if fetchErr != nil {
+				if cached, cacheErr := readProviderModelsCache(provider); cacheErr == nil {
+					fetched = cached
+				}
+			} else if fetched != nil {
+				writeProviderModelsCache(provider, fetched)
+			}
+			for _, m := range fetched {
+				cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": provider})
+			}
+		}
+	}
+
 	out := map[string]any{
-		"models":        ollamaModels,
-		"builtin_models": builtinModels,
+		"models":          ollamaModels,
+		"builtin_models":  builtinModels,
+		"provider_models": cloudModels,
 	}
 	if ollamaErr != "" {
 		out["error"] = ollamaErr
@@ -524,9 +584,26 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "chat error: "+err.Error())
 		return
 	}
-	// Emit space_activity so all connected browser tabs update their unseen badges.
+	// Persist user + assistant messages and emit space_activity.
 	if s.store != nil {
 		if sess, loadErr := s.store.Load(id); loadErr == nil {
+			agentName := ""
+			if ag := s.resolveAgent(id); ag != nil {
+				agentName = ag.Name
+			}
+			now := time.Now().UTC()
+			if appendErr := s.store.Append(sess, session.SessionMessage{
+				ID: session.NewID(), Role: "user", Content: body.Content, Ts: now,
+			}); appendErr != nil {
+				slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
+			}
+			if buf.Len() > 0 {
+				if appendErr := s.store.Append(sess, session.SessionMessage{
+					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
+				}); appendErr != nil {
+					slog.Error("handleSendMessage: failed to persist assistant message", "session_id", id, "err", appendErr)
+				}
+			}
 			s.emitSpaceActivity(sess.SpaceID())
 		}
 	}
@@ -697,6 +774,22 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	// Migrate literal API keys to the OS keychain so they are never stored in
+	// plaintext in config.json. Keys already expressed as "keyring:…" or "$ENV"
+	// references are left unchanged (IsLiteralAPIKey returns false for them).
+	if backend.IsLiteralAPIKey(newCfg.Backend.APIKey) {
+		slot := newCfg.Backend.Provider
+		if slot == "" {
+			slot = "backend"
+		}
+		ref, err := s.storeAPIKey(slot, newCfg.Backend.APIKey)
+		if err != nil {
+			// storeAPIKey returns the literal when keychain is unavailable (e.g. Linux/CI).
+			// Log the warning but continue — the returned ref is still safe to persist.
+			slog.Warn("keychain unavailable, storing API key as literal", "err", err)
+		}
+		newCfg.Backend.APIKey = ref
 	}
 	// Check if restart is needed
 	needsRestart := s.cfg.WebUI.Port != newCfg.WebUI.Port ||

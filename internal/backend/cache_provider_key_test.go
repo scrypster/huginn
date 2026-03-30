@@ -153,6 +153,9 @@ func TestIsLiteralAPIKey_Variants(t *testing.T) {
 		{"keyring:custom:slot", false},
 		{"sk-ant-api03-realkey", true},
 		{"literal-value", true},
+		// [REDACTED] is the UI sentinel, not a real key — must be treated as
+		// non-literal so handleUpdateConfig never tries to store it in the keychain.
+		{"[REDACTED]", false},
 	}
 	for _, tt := range tests {
 		got := backend.IsLiteralAPIKey(tt.raw)

@@ -1,0 +1,890 @@
+[
+  {
+    "id": "datadog",
+    "name": "Datadog",
+    "description": "Metrics, logs, monitors, dashboards, events, hosts, SLOs",
+    "category": "observability",
+    "icon": "DD",
+    "icon_color": "#632ca6",
+    "type": "credentials",
+    "default_label": "Datadog",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "url",
+        "label": "Site",
+        "type": "select",
+        "required": false,
+        "stored_in": "metadata",
+        "help_text": "Select your Datadog site region or enter a custom URL.",
+        "default": "https://api.datadoghq.com",
+        "options": [
+          { "label": "US1 (datadoghq.com)",        "value": "https://api.datadoghq.com" },
+          { "label": "US3 (us3.datadoghq.com)",     "value": "https://api.us3.datadoghq.com" },
+          { "label": "US5 (us5.datadoghq.com)",     "value": "https://api.us5.datadoghq.com" },
+          { "label": "EU1 (datadoghq.eu)",          "value": "https://api.datadoghq.eu" },
+          { "label": "AP1 (ap1.datadoghq.com)",     "value": "https://api.ap1.datadoghq.com" },
+          { "label": "Custom URL",                   "value": "__custom__" }
+        ]
+      },
+      {
+        "key": "api_key",
+        "label": "API Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Found under Organization Settings → API Keys."
+      },
+      {
+        "key": "app_key",
+        "label": "Application Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Found under Organization Settings → Application Keys. Needed for write operations."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/v1/validate with your API and application keys."
+    }
+  },
+  {
+    "id": "splunk",
+    "name": "Splunk",
+    "description": "Search logs, indexes, saved searches, alerts, dashboards",
+    "category": "observability",
+    "icon": "SP",
+    "icon_color": "#000000",
+    "type": "credentials",
+    "default_label": "Splunk",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "url",
+        "label": "Splunk URL",
+        "type": "url",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "https://splunk.example.com:8089",
+        "help_text": "Base URL including port. Usually port 8089 for REST API."
+      },
+      {
+        "key": "token",
+        "label": "HEC / API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "Splunk xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        "help_text": "A Splunk HEC token or API token with search permissions."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /services/server/info to verify connectivity and token."
+    }
+  },
+  {
+    "id": "pagerduty",
+    "name": "PagerDuty",
+    "description": "Incidents, services, on-call schedules, alerts",
+    "category": "observability",
+    "icon": "PD",
+    "icon_color": "#06ac38",
+    "type": "credentials",
+    "default_label": "PagerDuty",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_token",
+        "label": "API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "y_NbAkKc66ryYTWUXYEu",
+        "help_text": "Create a REST API key under User Settings → User Token REST API Keys, or under Integrations → API Access Keys for full access."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /users/me to verify token and account access."
+    }
+  },
+  {
+    "id": "newrelic",
+    "name": "New Relic",
+    "description": "NRQL queries, alerts, dashboards, services, entities",
+    "category": "observability",
+    "icon": "NR",
+    "icon_color": "#1ce783",
+    "type": "credentials",
+    "default_label": "New Relic",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "User API Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "NRAK-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        "help_text": "Create a User API key under (Account) → API Keys. Must start with NRAK-."
+      },
+      {
+        "key": "account_id",
+        "label": "Account ID",
+        "type": "text",
+        "required": false,
+        "stored_in": "metadata",
+        "placeholder": "1234567",
+        "help_text": "Optional. Your New Relic account ID — used to scope queries. Found in the URL when logged in."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Runs a GraphQL introspection query to verify key validity."
+    }
+  },
+  {
+    "id": "elastic",
+    "name": "Elastic",
+    "description": "Search indices, cluster health, documents",
+    "category": "observability",
+    "icon": "ES",
+    "icon_color": "#005571",
+    "type": "credentials",
+    "default_label": "Elastic",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "url",
+        "label": "Elasticsearch URL",
+        "type": "url",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "https://my-deployment.es.us-east-1.aws.elastic-cloud.com:9243",
+        "help_text": "Full URL of your Elasticsearch endpoint including port."
+      },
+      {
+        "key": "api_key",
+        "label": "API Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "id:api_key or base64-encoded value",
+        "help_text": "Either a raw id:api_key pair or a pre-encoded Base64 value. Create under Stack Management → Security → API Keys."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /_cluster/health to verify URL and API key."
+    }
+  },
+  {
+    "id": "grafana",
+    "name": "Grafana",
+    "description": "Dashboards, alerts, data sources, search",
+    "category": "observability",
+    "icon": "GF",
+    "icon_color": "#f46800",
+    "type": "credentials",
+    "default_label": "Grafana",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "url",
+        "label": "Grafana URL",
+        "type": "url",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "https://grafana.example.com",
+        "help_text": "Base URL of your Grafana instance (Grafana Cloud or self-hosted)."
+      },
+      {
+        "key": "token",
+        "label": "Service Account Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_xxxxxxxx",
+        "help_text": "Create a Service Account with Viewer or Editor role, then generate a token under Administration → Service Accounts."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/org to verify token and URL."
+    }
+  },
+  {
+    "id": "crowdstrike",
+    "name": "CrowdStrike",
+    "description": "Detections, incidents, host management, threat intelligence",
+    "category": "observability",
+    "icon": "CS",
+    "icon_color": "#e4002b",
+    "type": "credentials",
+    "default_label": "CrowdStrike",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "client_id",
+        "label": "Client ID",
+        "type": "text",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Found under Support & Resources → API Clients & Keys → Add new API Client."
+      },
+      {
+        "key": "client_secret",
+        "label": "Client Secret",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "The secret shown once when the API client is created. Store it securely."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Exchanges client credentials for an OAuth2 token to verify access."
+    }
+  },
+  {
+    "id": "terraform",
+    "name": "Terraform Cloud",
+    "description": "Workspaces, runs, variables, plans",
+    "category": "cloud",
+    "icon": "TF",
+    "icon_color": "#7b42bc",
+    "type": "credentials",
+    "default_label": "Terraform Cloud",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "token",
+        "label": "API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxx.atlasv1.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a user or team token under User Settings → Tokens in Terraform Cloud or HCP Terraform."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/v2/account/details to verify token validity."
+    }
+  },
+  {
+    "id": "servicenow",
+    "name": "ServiceNow",
+    "description": "Incidents, changes, service catalog, CMDB",
+    "category": "productivity",
+    "icon": "SN",
+    "icon_color": "#81b5a1",
+    "type": "credentials",
+    "default_label": "ServiceNow",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "instance_url",
+        "label": "Instance URL",
+        "type": "url",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "https://dev12345.service-now.com",
+        "help_text": "Your ServiceNow instance URL, e.g., https://yourcompany.service-now.com."
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "type": "text",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "svc-huginn",
+        "help_text": "A user or service account with REST API access."
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "••••••••",
+        "help_text": "Password for the service account. Consider using a dedicated integration user."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls the Table API to verify credentials and instance connectivity."
+    }
+  },
+  {
+    "id": "notion",
+    "name": "Notion",
+    "description": "Pages, databases, search",
+    "category": "productivity",
+    "icon": "N",
+    "icon_color": "#191919",
+    "type": "credentials",
+    "default_label": "Notion",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "token",
+        "label": "Internal Integration Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create an internal integration at notion.so/my-integrations, then share your pages with it. Token starts with secret_."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /v1/users/me to verify the integration token."
+    }
+  },
+  {
+    "id": "airtable",
+    "name": "Airtable",
+    "description": "Bases, tables, records",
+    "category": "productivity",
+    "icon": "AT",
+    "icon_color": "#18bfff",
+    "type": "credentials",
+    "default_label": "Airtable",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "Personal Access Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "patxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a personal access token under Account → Developer Hub. Grant the scopes your workflows require."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /v0/meta/whoami to verify the token."
+    }
+  },
+  {
+    "id": "hubspot",
+    "name": "HubSpot",
+    "description": "Contacts, companies, deals",
+    "category": "productivity",
+    "icon": "HS",
+    "icon_color": "#ff7a59",
+    "type": "credentials",
+    "default_label": "HubSpot",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "token",
+        "label": "Private App Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        "help_text": "Create a Private App under Settings → Integrations → Private Apps. Grant CRM scopes as needed."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls the CRM contacts endpoint to verify token scope and validity."
+    }
+  },
+  {
+    "id": "zendesk",
+    "name": "Zendesk",
+    "description": "Tickets, users, support",
+    "category": "productivity",
+    "icon": "ZD",
+    "icon_color": "#03363d",
+    "type": "credentials",
+    "default_label": "Zendesk",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "subdomain",
+        "label": "Subdomain",
+        "type": "subdomain",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "yourcompany",
+        "help_text": "Your Zendesk subdomain, e.g., yourcompany in yourcompany.zendesk.com."
+      },
+      {
+        "key": "email",
+        "label": "Agent Email",
+        "type": "email",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "you@yourcompany.com",
+        "help_text": "Email address of an agent or admin account."
+      },
+      {
+        "key": "token",
+        "label": "API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create an API token under Admin Center → Apps and Integrations → Zendesk API → API Tokens."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/v2/users/me with token-based basic auth to verify access."
+    }
+  },
+  {
+    "id": "asana",
+    "name": "Asana",
+    "description": "Projects, tasks, workspaces",
+    "category": "productivity",
+    "icon": "AS",
+    "icon_color": "#f06a6a",
+    "type": "credentials",
+    "default_label": "Asana",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "token",
+        "label": "Personal Access Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "1/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a personal access token under My Profile Settings → Apps → Manage Developer Apps."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/1.0/users/me to verify token and workspace access."
+    }
+  },
+  {
+    "id": "monday",
+    "name": "Monday.com",
+    "description": "Boards, items, workflows",
+    "category": "productivity",
+    "icon": "MN",
+    "icon_color": "#f65d50",
+    "type": "credentials",
+    "default_label": "Monday.com",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "token",
+        "label": "API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "eyJhbGciOiJIUzI1NiJ9...",
+        "help_text": "Found under Profile → Developers → My Access Tokens → Show. Tokens are long JWT strings."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Runs a GraphQL { me { name } } query to verify token access."
+    }
+  },
+
+  {
+    "id": "slack_bot",
+    "name": "Slack (Bot)",
+    "description": "Send messages, read channels, search conversations via bot token",
+    "category": "communication",
+    "icon": "SB",
+    "icon_color": "#4a154b",
+    "type": "credentials",
+    "default_label": "Slack Bot",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "bot_token",
+        "label": "Bot Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a Slack app at api.slack.com/apps, install it to your workspace, and copy the Bot User OAuth Token (starts with xoxb-)."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/auth.test to verify bot token validity."
+    }
+  },
+  {
+    "id": "jira_sa",
+    "name": "Jira (Service Account)",
+    "description": "Issues, projects, sprints via service account API token",
+    "category": "dev_tools",
+    "icon": "JS",
+    "icon_color": "#0052cc",
+    "type": "credentials",
+    "default_label": "Jira Service Account",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "instance_url",
+        "label": "Instance URL",
+        "type": "url",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "https://yourcompany.atlassian.net",
+        "help_text": "Your Jira Cloud instance URL, e.g., https://yourcompany.atlassian.net."
+      },
+      {
+        "key": "email",
+        "label": "Account Email",
+        "type": "email",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "you@yourcompany.com",
+        "help_text": "Email address of the Atlassian account that owns the API token."
+      },
+      {
+        "key": "api_token",
+        "label": "API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "ATATT3xFfGF0...",
+        "help_text": "Create an API token at id.atlassian.com/manage-profile/security/api-tokens."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /rest/api/3/myself to verify credentials and instance access."
+    }
+  },
+  {
+    "id": "linear",
+    "name": "Linear",
+    "description": "Issues, projects, cycles, roadmaps",
+    "category": "dev_tools",
+    "icon": "LN",
+    "icon_color": "#5e6ad2",
+    "type": "credentials",
+    "default_label": "Linear",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "Personal API Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "lin_api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a personal API key under Settings → API → Personal API keys."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Runs a GraphQL { viewer { id } } query to verify key validity."
+    }
+  },
+  {
+    "id": "gitlab",
+    "name": "GitLab",
+    "description": "Repositories, merge requests, CI/CD pipelines",
+    "category": "dev_tools",
+    "icon": "GL",
+    "icon_color": "#fc6d26",
+    "type": "credentials",
+    "default_label": "GitLab",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "base_url",
+        "label": "GitLab URL",
+        "type": "url",
+        "required": false,
+        "stored_in": "metadata",
+        "default": "https://gitlab.com",
+        "placeholder": "https://gitlab.com",
+        "help_text": "Your GitLab instance URL. Leave as default for GitLab.com, or enter your self-hosted instance URL."
+      },
+      {
+        "key": "token",
+        "label": "Personal Access Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "glpat-xxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a personal access token under User Settings → Access Tokens with api scope."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/v4/user to verify token and instance URL."
+    }
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "description": "Read channels, send messages, manage servers",
+    "category": "communication",
+    "icon": "DC",
+    "icon_color": "#5865f2",
+    "type": "credentials",
+    "default_label": "Discord",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "bot_token",
+        "label": "Bot Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "MTxxxxxxxxxxxxxxxxxxxxxxxx.Xxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a bot application at discord.com/developers/applications. Under Bot, reset and copy the token."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /api/v10/users/@me to verify bot token."
+    }
+  },
+  {
+    "id": "vercel",
+    "name": "Vercel",
+    "description": "Deployments, domains, environment variables",
+    "category": "cloud",
+    "icon": "V",
+    "icon_color": "#000000",
+    "type": "credentials",
+    "default_label": "Vercel",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "token",
+        "label": "Access Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create an access token under Account Settings → Tokens."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /v2/user to verify token validity."
+    }
+  },
+  {
+    "id": "stripe",
+    "name": "Stripe",
+    "description": "Payments, subscriptions, customers",
+    "category": "productivity",
+    "icon": "S",
+    "icon_color": "#635bff",
+    "type": "credentials",
+    "default_label": "Stripe",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "Secret Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "sk_live_...",
+        "help_text": "Found under Developers → API Keys. Use a restricted key scoped to only the permissions your workflows need."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /v1/balance to verify secret key validity."
+    }
+  },
+
+  {
+    "id": "muninn",
+    "name": "MuninnDB",
+    "description": "Agent memory and long-term knowledge storage",
+    "category": "databases",
+    "icon": "M",
+    "icon_color": "#58a6ff",
+    "type": "database",
+    "default_label": "MuninnDB",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "endpoint",
+        "label": "Endpoint URL",
+        "type": "url",
+        "required": true,
+        "stored_in": "metadata",
+        "default": "http://localhost:8475",
+        "placeholder": "http://localhost:8475",
+        "help_text": "MuninnDB REST API endpoint. Default is http://localhost:8475 for local installations."
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "type": "text",
+        "required": true,
+        "stored_in": "metadata",
+        "default": "root",
+        "placeholder": "root",
+        "help_text": "MuninnDB admin username. Default is root."
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "••••••••",
+        "help_text": "MuninnDB admin password set during initial setup."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Authenticates with MuninnDB using your credentials to verify connectivity."
+    }
+  },
+
+  {
+    "id": "slack",
+    "name": "Slack",
+    "description": "Send messages, read channels, search conversations",
+    "category": "communication",
+    "icon": "#",
+    "icon_color": "#4a154b",
+    "type": "oauth",
+    "default_label": "Slack",
+    "multi_account": true,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "description": "Repositories, pull requests, issues, workflows",
+    "category": "dev_tools",
+    "icon": "GH",
+    "icon_color": "#333333",
+    "type": "oauth",
+    "default_label": "GitHub",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "bitbucket",
+    "name": "Bitbucket",
+    "description": "Repositories, pull requests, pipelines",
+    "category": "dev_tools",
+    "icon": "BB",
+    "icon_color": "#0052cc",
+    "type": "oauth",
+    "default_label": "Bitbucket",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "jira",
+    "name": "Jira",
+    "description": "Issues, projects, sprints, boards",
+    "category": "dev_tools",
+    "icon": "J",
+    "icon_color": "#0052cc",
+    "type": "oauth",
+    "default_label": "Jira",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "google",
+    "name": "Google",
+    "description": "Gmail, Google Drive, Google Calendar",
+    "category": "productivity",
+    "icon": "G",
+    "icon_color": "#4285f4",
+    "type": "oauth",
+    "default_label": "Google",
+    "multi_account": true,
+    "fields": [],
+    "validation": { "available": false }
+  },
+
+  {
+    "id": "aws",
+    "name": "AWS",
+    "description": "S3, Lambda, EC2, and all AWS services",
+    "category": "cloud",
+    "icon": "AWS",
+    "icon_color": "#ff9900",
+    "type": "system",
+    "default_label": "AWS",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "gcloud",
+    "name": "Google Cloud",
+    "description": "GCS, BigQuery, Cloud Run, and other GCP services",
+    "category": "cloud",
+    "icon": "GC",
+    "icon_color": "#4285f4",
+    "type": "system",
+    "default_label": "Google Cloud",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "github_cli",
+    "name": "GitHub CLI (gh)",
+    "description": "Repositories, pull requests, issues via gh CLI",
+    "category": "system",
+    "icon": "GH",
+    "icon_color": "#333333",
+    "type": "system",
+    "default_label": "GitHub CLI",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+
+  {
+    "id": "teams",
+    "name": "Microsoft Teams",
+    "description": "Messages, meetings, channels",
+    "category": "communication",
+    "icon": "MT",
+    "icon_color": "#6264a7",
+    "type": "coming_soon",
+    "default_label": "Microsoft Teams",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  },
+  {
+    "id": "azure",
+    "name": "Azure",
+    "description": "Storage, Functions, Kubernetes, and Azure services",
+    "category": "cloud",
+    "icon": "AZ",
+    "icon_color": "#0078d4",
+    "type": "coming_soon",
+    "default_label": "Azure",
+    "multi_account": false,
+    "fields": [],
+    "validation": { "available": false }
+  }
+]
