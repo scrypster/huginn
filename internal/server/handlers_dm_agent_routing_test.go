@@ -11,10 +11,15 @@ package server
 //   session creation.
 // Fix 2 (ws.go): runtime fallback in resolveAgent (step 1b) that heals
 //   sessions created before the fix without any DB migration.
+// Fix 3 (ws.go): block set_primary_agent in DM spaces (fail-closed).
+// Fix 4 (ws.go): channel @mention routing — @Name at start of message routes
+//   to that agent if they are a member of the channel (stateless per-message).
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,6 +29,36 @@ import (
 	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/sqlitedb"
 )
+
+// errSpaceStore is a spaces.StoreInterface that always returns an error from GetSpace.
+// Used to test fail-closed behavior in the DM guard.
+type errSpaceStore struct{}
+
+func (e *errSpaceStore) OpenDM(_ string) (*spaces.Space, error) { return nil, fmt.Errorf("err") }
+func (e *errSpaceStore) CreateChannel(_, _ string, _ []string, _, _ string) (*spaces.Space, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) GetSpace(_ string) (*spaces.Space, error) {
+	return nil, fmt.Errorf("space store unavailable")
+}
+func (e *errSpaceStore) ListSpaces(_ spaces.ListOpts) (spaces.ListSpacesResult, error) {
+	return spaces.ListSpacesResult{}, fmt.Errorf("err")
+}
+func (e *errSpaceStore) UpdateSpace(_ string, _ spaces.SpaceUpdates) (*spaces.Space, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) ArchiveSpace(_ string) error                    { return fmt.Errorf("err") }
+func (e *errSpaceStore) MarkRead(_ string) error                        { return fmt.Errorf("err") }
+func (e *errSpaceStore) UnseenCount(_ string) (int, error)              { return 0, fmt.Errorf("err") }
+func (e *errSpaceStore) ListSessionsForSpace(_ string) ([]spaces.SessionRef, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) RemoveAgentFromAllSpaces(_ string) (*spaces.SpaceCascadeResult, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) ListSpaceMessages(_ string, _ *spaces.SpaceMsgCursor, _ int) (spaces.SpaceMessagesResult, error) {
+	return spaces.SpaceMessagesResult{}, fmt.Errorf("err")
+}
 
 // openSpaceDB creates a fresh in-memory SQLite DB with both session and space
 // migrations applied, suitable for DM-routing regression tests.
@@ -276,5 +311,267 @@ func TestResolveAgent_NilSpaceStore_FallsThrough(t *testing.T) {
 	}
 	if ag.Name != "DefaultAgent" {
 		t.Errorf("expected default agent %q, got %q", "DefaultAgent", ag.Name)
+	}
+}
+
+// ── set_primary_agent DM guard ────────────────────────────────────────────────
+
+// TestSetPrimaryAgent_InDMSpace_ReturnsError verifies that set_primary_agent
+// is blocked in a DM space — DMs are strictly 1:1 between user and lead agent.
+func TestSetPrimaryAgent_InDMSpace_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	dm, err := spaceStore.OpenDM("Mark")
+	if err != nil {
+		t.Fatalf("OpenDM: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = dm.ID
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	hub := newWSHub()
+	go hub.run()
+
+	s := &Server{store: sessStore, spaceStore: spaceStore, wsHub: hub}
+	c := &wsClient{send: make(chan WSMessage, 4), ctx: context.Background()}
+
+	s.handleWSMessage(c, WSMessage{
+		Type:      "set_primary_agent",
+		SessionID: sess.ID,
+		Payload:   map[string]any{"agent": "Kimi"},
+	})
+
+	select {
+	case msg := <-c.send:
+		if msg.Type != "error" {
+			t.Errorf("expected error message type, got %q", msg.Type)
+		}
+		if msg.Content != "cannot change agent in a DM" {
+			t.Errorf("unexpected error content: %q", msg.Content)
+		}
+	default:
+		t.Error("expected an error message to be sent to client, got none")
+	}
+
+	// Session manifest must NOT have been changed.
+	loaded, loadErr := sessStore.Load(sess.ID)
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if loaded.PrimaryAgentID() == "Kimi" {
+		t.Error("PrimaryAgentID must not change in a DM space")
+	}
+}
+
+// TestSetPrimaryAgent_InDMSpace_SpaceLookupFails_ReturnsError verifies the
+// fail-closed behavior: if the space cannot be looked up, the switch is blocked
+// and an error is returned rather than silently allowing the change.
+func TestSetPrimaryAgent_InDMSpace_SpaceLookupFails_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = "some-space-id"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	hub := newWSHub()
+	go hub.run()
+
+	s := &Server{store: sessStore, spaceStore: &errSpaceStore{}, wsHub: hub}
+	c := &wsClient{send: make(chan WSMessage, 4), ctx: context.Background()}
+
+	s.handleWSMessage(c, WSMessage{
+		Type:      "set_primary_agent",
+		SessionID: sess.ID,
+		Payload:   map[string]any{"agent": "Kimi"},
+	})
+
+	select {
+	case msg := <-c.send:
+		if msg.Type != "error" {
+			t.Errorf("expected error message type, got %q", msg.Type)
+		}
+	default:
+		t.Error("expected an error message on space lookup failure, got none")
+	}
+
+	// Agent must NOT have been persisted.
+	loaded, loadErr := sessStore.Load(sess.ID)
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if loaded.PrimaryAgentID() == "Kimi" {
+		t.Error("PrimaryAgentID must not change when space lookup fails (fail-closed)")
+	}
+}
+
+// ── extractLeadMention unit tests ─────────────────────────────────────────────
+
+func TestExtractLeadMention_ValidMention(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"@Mark help me", "Mark"},
+		{"@Kimi", "Kimi"},
+		{"  @Atlas-2 what's up?", "Atlas-2"},
+		{"@agent_v2 go", "agent_v2"},
+	}
+	for _, tc := range cases {
+		got := extractLeadMention(tc.input)
+		if got != tc.want {
+			t.Errorf("extractLeadMention(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestExtractLeadMention_InvalidChars_ReturnsEmpty(t *testing.T) {
+	cases := []struct {
+		input string
+		desc  string
+	}{
+		{"hello @Mark", "mention not at start"},
+		{"@", "bare @"},
+		{"@123bad", "starts with digit"},
+		{"@!hack", "starts with punctuation"},
+		{"no mention here", "no @"},
+		{"@" + string(make([]byte, 65)), "name over 64 chars"},
+	}
+	for _, tc := range cases {
+		got := extractLeadMention(tc.input)
+		if got != "" {
+			t.Errorf("extractLeadMention(%q) [%s] = %q, want empty", tc.input, tc.desc, got)
+		}
+	}
+}
+
+// ── Channel @mention routing ──────────────────────────────────────────────────
+
+// TestResolveAgentForMessage_ChannelMention_RoutesToMember verifies that a
+// message starting with @Name in a channel space routes to the named agent
+// when they are a member of the channel.
+func TestResolveAgentForMessage_ChannelMention_RoutesToMember(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	// Channel with Mark as lead, Kimi as member.
+	ch, err := spaceStore.CreateChannel("Engineering", "Mark", []string{"Kimi"}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Mark", "model-a", "#fff", "M", true),
+		testAgent("Kimi", "model-b", "#000", "K", false),
+	)
+	s := &Server{
+		store:      sessStore,
+		spaceStore: spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	ag := s.resolveAgentForMessage(sess.ID, "@Kimi can you review this?")
+	if ag == nil {
+		t.Fatal("expected non-nil agent from @mention routing")
+	}
+	if ag.Name != "Kimi" {
+		t.Errorf("expected @mention to route to %q, got %q", "Kimi", ag.Name)
+	}
+}
+
+// TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough
+// verifies that @mentioning an agent who is NOT a member of the channel falls
+// through to the lead agent rather than routing to the named agent.
+func TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	// Channel with only Mark — Kimi is NOT a member.
+	ch, err := spaceStore.CreateChannel("Engineering", "Mark", []string{}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Mark", "model-a", "#fff", "M", true),
+		testAgent("Kimi", "model-b", "#000", "K", false),
+	)
+	s := &Server{
+		store:      sessStore,
+		spaceStore: spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	// @Kimi is not a channel member — should fall through to lead agent Mark.
+	ag := s.resolveAgentForMessage(sess.ID, "@Kimi are you there?")
+	if ag == nil {
+		t.Fatal("expected fallback to lead agent, got nil")
+	}
+	if ag.Name != "Mark" {
+		t.Errorf("expected fallback to lead agent %q, got %q", "Mark", ag.Name)
+	}
+}
+
+// TestResolveAgentForMessage_DMMention_IgnoredUsesLeadAgent verifies that
+// @mention routing is ignored in DM spaces — the lead agent always handles
+// the message regardless of any @mention in the content.
+func TestResolveAgentForMessage_DMMention_IgnoredUsesLeadAgent(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	dm, err := spaceStore.OpenDM("Mark")
+	if err != nil {
+		t.Fatalf("OpenDM: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = dm.ID
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Mark", "model-a", "#fff", "M", true),
+		testAgent("Kimi", "model-b", "#000", "K", false),
+	)
+	s := &Server{
+		store:      sessStore,
+		spaceStore: spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	// Even though the message starts with @Kimi, it's a DM — Mark must respond.
+	ag := s.resolveAgentForMessage(sess.ID, "@Kimi is anyone there?")
+	if ag == nil {
+		t.Fatal("expected non-nil agent, got nil")
+	}
+	if ag.Name != "Mark" {
+		t.Errorf("expected DM lead agent %q to be used (ignoring @Kimi mention), got %q", "Mark", ag.Name)
 	}
 }
