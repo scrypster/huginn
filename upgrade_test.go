@@ -310,11 +310,10 @@ func TestFetchExpectedSHA_HTTP404(t *testing.T) {
 	}
 }
 
-// ─── downloadAndExtract ───────────────────────────────────────────────────────
+// ─── downloadArchive ──────────────────────────────────────────────────────────
 
-func TestDownloadAndExtract_Success(t *testing.T) {
-	binaryContent := []byte("fake-huginn-binary-content")
-	archive := makeTarGzBytes(t, binaryContent)
+func TestDownloadArchive_Success(t *testing.T) {
+	archive := makeTarGzBytes(t, []byte("fake-huginn-binary-content"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archive)))
@@ -323,8 +322,74 @@ func TestDownloadAndExtract_Success(t *testing.T) {
 	defer srv.Close()
 
 	u := &Upgrader{HTTPClient: srv.Client()}
+	archivePath, err := u.downloadArchive(srv.URL, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer os.Remove(archivePath)
+
+	got, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Errorf("archive content mismatch: got %d bytes, want %d bytes", len(got), len(archive))
+	}
+}
+
+func TestDownloadArchive_WithProgress(t *testing.T) {
+	archive := makeTarGzBytes(t, bytes.Repeat([]byte("x"), 1024))
+	var progressCalls int
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archive)))
+		w.Write(archive)
+	}))
+	defer srv.Close()
+
+	u := &Upgrader{HTTPClient: srv.Client()}
+	archivePath, err := u.downloadArchive(srv.URL, func(dl, total int64) {
+		progressCalls++
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(archivePath)
+
+	if progressCalls == 0 {
+		t.Error("expected progress callbacks, got none")
+	}
+}
+
+func TestDownloadArchive_HTTP404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	u := &Upgrader{HTTPClient: srv.Client()}
+	_, err := u.downloadArchive(srv.URL, nil)
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected 404 error, got: %v", err)
+	}
+}
+
+// ─── extractBinary ────────────────────────────────────────────────────────────
+
+func TestExtractBinary_Success(t *testing.T) {
+	binaryContent := []byte("fake-huginn-binary-content")
+	archive := makeTarGzBytes(t, binaryContent)
+
+	// Write archive to a temp file.
+	archiveFile, err := os.CreateTemp(t.TempDir(), "huginn-archive-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveFile.Write(archive)
+	archiveFile.Close()
+
 	exePath := filepath.Join(t.TempDir(), "huginn")
-	tmpPath, err := u.downloadAndExtract(srv.URL, exePath, nil)
+	tmpPath, err := extractBinary(archiveFile.Name(), exePath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -339,45 +404,7 @@ func TestDownloadAndExtract_Success(t *testing.T) {
 	}
 }
 
-func TestDownloadAndExtract_WithProgress(t *testing.T) {
-	archive := makeTarGzBytes(t, bytes.Repeat([]byte("x"), 1024))
-	var progressCalls int
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archive)))
-		w.Write(archive)
-	}))
-	defer srv.Close()
-
-	u := &Upgrader{HTTPClient: srv.Client()}
-	exePath := filepath.Join(t.TempDir(), "huginn")
-	tmpPath, err := u.downloadAndExtract(srv.URL, exePath, func(dl, total int64) {
-		progressCalls++
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpPath)
-
-	if progressCalls == 0 {
-		t.Error("expected progress callbacks, got none")
-	}
-}
-
-func TestDownloadAndExtract_HTTP404(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	u := &Upgrader{HTTPClient: srv.Client()}
-	_, err := u.downloadAndExtract(srv.URL, t.TempDir()+"/huginn", nil)
-	if err == nil || !strings.Contains(err.Error(), "404") {
-		t.Errorf("expected 404 error, got: %v", err)
-	}
-}
-
-func TestDownloadAndExtract_BinaryNotInArchive(t *testing.T) {
+func TestExtractBinary_BinaryNotInArchive(t *testing.T) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -386,19 +413,20 @@ func TestDownloadAndExtract_BinaryNotInArchive(t *testing.T) {
 	tw.Close()
 	gz.Close()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(buf.Bytes())
-	}))
-	defer srv.Close()
+	archiveFile, err := os.CreateTemp(t.TempDir(), "huginn-archive-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveFile.Write(buf.Bytes())
+	archiveFile.Close()
 
-	u := &Upgrader{HTTPClient: srv.Client()}
-	_, err := u.downloadAndExtract(srv.URL, t.TempDir()+"/huginn", nil)
+	_, err = extractBinary(archiveFile.Name(), t.TempDir()+"/huginn")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' error, got: %v", err)
 	}
 }
 
-func TestDownloadAndExtract_OversizedEntry(t *testing.T) {
+func TestExtractBinary_OversizedEntry(t *testing.T) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -412,28 +440,63 @@ func TestDownloadAndExtract_OversizedEntry(t *testing.T) {
 	tw.Close()
 	gz.Close()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(buf.Bytes())
-	}))
-	defer srv.Close()
+	archiveFile, err := os.CreateTemp(t.TempDir(), "huginn-archive-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveFile.Write(buf.Bytes())
+	archiveFile.Close()
 
-	u := &Upgrader{HTTPClient: srv.Client()}
-	_, err := u.downloadAndExtract(srv.URL, t.TempDir()+"/huginn", nil)
+	_, err = extractBinary(archiveFile.Name(), t.TempDir()+"/huginn")
 	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
 		t.Errorf("expected size limit error, got: %v", err)
 	}
 }
 
-func TestDownloadAndExtract_CorruptGzip(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("this is not gzip data at all"))
-	}))
-	defer srv.Close()
+func TestExtractBinary_CorruptGzip(t *testing.T) {
+	archiveFile, err := os.CreateTemp(t.TempDir(), "huginn-archive-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveFile.Write([]byte("this is not gzip data at all"))
+	archiveFile.Close()
 
-	u := &Upgrader{HTTPClient: srv.Client()}
-	_, err := u.downloadAndExtract(srv.URL, t.TempDir()+"/huginn", nil)
+	_, err = extractBinary(archiveFile.Name(), t.TempDir()+"/huginn")
 	if err == nil {
 		t.Error("expected error for corrupt gzip, got nil")
+	}
+}
+
+// TestChecksumVerifiesArchive verifies the checksum is verified against the
+// archive (not the extracted binary), matching how the checksums file is generated.
+func TestChecksumVerifiesArchive(t *testing.T) {
+	binaryContent := []byte("fake-huginn-binary-content")
+	archive := makeTarGzBytes(t, binaryContent)
+
+	// SHA256 of the archive (what checksums.txt contains).
+	archiveSHA := sha256Hex(archive)
+
+	// Confirm the binary's SHA256 is different from the archive's SHA256.
+	binarySHA := sha256Hex(binaryContent)
+	if archiveSHA == binarySHA {
+		t.Fatal("test setup error: archive and binary have same SHA256")
+	}
+
+	// Write archive to file and verify against archive SHA — must succeed.
+	archiveFile, err := os.CreateTemp(t.TempDir(), "*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveFile.Write(archive)
+	archiveFile.Close()
+
+	if err := verifySHA256(archiveFile.Name(), archiveSHA); err != nil {
+		t.Errorf("expected archive checksum to pass, got: %v", err)
+	}
+
+	// Verifying with the binary's SHA must fail (the old bug).
+	if err := verifySHA256(archiveFile.Name(), binarySHA); err == nil {
+		t.Error("expected checksum mismatch when comparing archive against binary SHA, got nil")
 	}
 }
 
@@ -575,7 +638,7 @@ func TestSelfUpdateWithURLs_DownloadAndChecksumOK(t *testing.T) {
 
 	binaryContent := []byte("fake-huginn-binary")
 	archive := makeTarGzBytes(t, binaryContent)
-	archiveSHA := sha256Hex(binaryContent)
+	archiveSHA := sha256Hex(archive) // checksum of the archive, matching how checksums.txt is generated
 
 	checksumLine := fmt.Sprintf("%s  huginn_v0.3.0_linux_amd64.tar.gz\n", archiveSHA)
 
