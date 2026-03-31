@@ -194,10 +194,10 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 	}
 
 	// Download archive with inline progress.
-	var tmpPath string
+	var archivePath string
 	label := fmt.Sprintf("Downloading %s...", latest)
 	fmt.Printf("  %-32s", label)
-	tmpPath, err = u.downloadAndExtract(assetURL, exePath, func(dl, total int64) {
+	archivePath, err = u.downloadArchive(assetURL, func(dl, total int64) {
 		if total > 0 {
 			fmt.Printf("\r  %-32s%.1f / %.1f MB", label,
 				float64(dl)/1024/1024, float64(total)/1024/1024)
@@ -208,21 +208,34 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 		return err
 	}
 	fmt.Println(" ✓")
+	defer os.Remove(archivePath) // always remove the archive temp file
 
-	// Ensure temp file is removed on any error after this point.
+	// SHA256 check on the archive BEFORE extracting (primary integrity gate).
+	// The checksums file contains hashes of the compressed archives, not the
+	// extracted binaries — so we must verify the archive, not the binary.
+	if err := upgradeStep("Verifying checksum...", func() error {
+		return verifySHA256(archivePath, expectedSHA)
+	}); err != nil {
+		return err
+	}
+
+	// Extract the binary from the verified archive.
+	var tmpPath string
+	if err := upgradeStep("Extracting binary...", func() error {
+		var e error
+		tmpPath, e = extractBinary(archivePath, exePath)
+		return e
+	}); err != nil {
+		return err
+	}
+
+	// Ensure extracted binary is removed on any error after this point.
 	tmpCleanup := tmpPath
 	defer func() {
 		if tmpCleanup != "" {
 			os.Remove(tmpCleanup)
 		}
 	}()
-
-	// SHA256 check BEFORE executing the binary (primary integrity gate).
-	if err := upgradeStep("Verifying checksum...", func() error {
-		return verifySHA256(tmpPath, expectedSHA)
-	}); err != nil {
-		return err
-	}
 
 	// Secondary sanity check: run `huginn version` to confirm it starts.
 	if err := upgradeStep("Verifying binary...", func() error {
@@ -360,9 +373,10 @@ func verifySHA256(path, expected string) error {
 	return nil
 }
 
-// downloadAndExtract downloads the release tar.gz and extracts the huginn binary
-// to a temp file. progressFn is called with (bytesDownloaded, totalBytes).
-func (u *Upgrader) downloadAndExtract(assetURL, exePath string, progressFn func(dl, total int64)) (string, error) {
+// downloadArchive downloads the release archive to a temp file.
+// progressFn is called with (bytesDownloaded, totalBytes).
+// The caller is responsible for removing the returned temp file.
+func (u *Upgrader) downloadArchive(assetURL string, progressFn func(dl, total int64)) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, assetURL, nil)
 	if err != nil {
 		return "", err
@@ -378,8 +392,33 @@ func (u *Upgrader) downloadAndExtract(assetURL, exePath string, progressFn func(
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, assetURL)
 	}
 
+	tmp, err := os.CreateTemp("", ".huginn-archive-*")
+	if err != nil {
+		return "", fmt.Errorf("temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+
 	pr := &progressReader{r: resp.Body, total: resp.ContentLength, fn: progressFn}
-	gz, err := gzip.NewReader(pr)
+	_, copyErr := io.Copy(tmp, pr)
+	tmp.Close()
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("write archive: %w", copyErr)
+	}
+	return tmpPath, nil
+}
+
+// extractBinary extracts the huginn binary from a .tar.gz archive file.
+// The extracted binary is written to a temp file adjacent to exePath (for
+// atomic rename). The caller is responsible for removing the returned temp file.
+func extractBinary(archivePath, exePath string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open archive: %w", err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return "", fmt.Errorf("gzip open: %w", err)
 	}
