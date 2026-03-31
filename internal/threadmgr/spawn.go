@@ -304,10 +304,29 @@ func (tm *ThreadManager) runOnce(
 		return
 	}
 
+	// Snapshot tool registry and executor under read lock for goroutine safety.
+	tm.mu.RLock()
+	toolReg := tm.toolRegistry
+	toolExec := tm.toolExecutor
+	tm.mu.RUnlock()
+
 	tt := &ThreadTools{}
 	tools := []backend.Tool{
 		tt.FinishSchema(),
 		tt.RequestHelpSchema(),
+	}
+
+	// Append agent-specific local tools based on the agent's local_tools config.
+	// Wildcard ["*"] → all builtin schemas; named list → matching schemas only.
+	if toolReg != nil && reg != nil {
+		if ag, found := reg.ByName(agentID); found {
+			switch {
+			case len(ag.LocalTools) == 1 && ag.LocalTools[0] == "*":
+				tools = append(tools, toolReg.AllBuiltinSchemas()...)
+			case len(ag.LocalTools) > 0:
+				tools = append(tools, toolReg.SchemasByNames(ag.LocalTools)...)
+			}
+		}
 	}
 
 	// Build initial context messages.
@@ -565,15 +584,27 @@ func (tm *ThreadManager) runOnce(
 				tt.RequestHelp(tc.Function.Arguments)
 				// RequestHelp() panics — execution stops here via defer/recover.
 			default:
-				// Unknown tool — return an error result and continue.
-				resultContent := fmt.Sprintf("unknown tool: %s", tc.Function.Name)
-				toolResult := backend.Message{
+				// Dispatch to the wired tool executor (gate-wrapped). Falls back to
+				// "unknown tool" when no executor is set (e.g. in unit tests without
+				// server wiring). Server mode wires the auto-approve executor.
+				var resultContent string
+				if toolExec != nil {
+					result, execErr := toolExec(ctx, tc.Function.Name, tc.Function.Arguments)
+					if execErr != nil {
+						resultContent = fmt.Sprintf("tool error: %v", execErr)
+					} else {
+						resultContent = result
+					}
+				} else {
+					resultContent = fmt.Sprintf("unknown tool: %s", tc.Function.Name)
+				}
+				// Full content goes into LLM history; clipped for persistent store.
+				history = append(history, backend.Message{
 					Role:       "tool",
 					Content:    resultContent,
 					ToolName:   tc.Function.Name,
 					ToolCallID: tc.ID,
-				}
-				history = append(history, toolResult)
+				})
 				if err := store.AppendToThread(sess.ID, threadID, session.SessionMessage{
 					Role:       "tool",
 					Content:    clipResult(resultContent, 200),
