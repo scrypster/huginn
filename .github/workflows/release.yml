@@ -148,6 +148,14 @@ jobs:
               --generate-notes
           fi
 
+          sha256sum \
+            huginn_${GITHUB_REF_NAME}_darwin_arm64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_darwin_amd64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_linux_amd64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_linux_arm64.tar.gz \
+            huginn_${GITHUB_REF_NAME}_windows_amd64.zip \
+            > huginn_${GITHUB_REF_NAME}_checksums.txt
+
           gh release upload "${GITHUB_REF_NAME}" \
             --repo "${{ github.repository }}" \
             --clobber \
@@ -160,7 +168,8 @@ jobs:
             huginn_${GITHUB_REF_NAME}_darwin_amd64.tar.gz \
             huginn_${GITHUB_REF_NAME}_linux_amd64.tar.gz \
             huginn_${GITHUB_REF_NAME}_linux_arm64.tar.gz \
-            huginn_${GITHUB_REF_NAME}_windows_amd64.zip
+            huginn_${GITHUB_REF_NAME}_windows_amd64.zip \
+            huginn_${GITHUB_REF_NAME}_checksums.txt
 
   update-formula:
     name: Update Homebrew Formula
