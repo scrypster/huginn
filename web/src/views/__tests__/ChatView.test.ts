@@ -277,6 +277,25 @@ describe('ChatView', () => {
     expect(wrapper.exists()).toBe(true)
   })
 
+  it('editor is refocused after sending a message', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    // Grab the focus spy from the ChatEditor stub
+    const editorStub = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(editorStub.exists()).toBe(true)
+    const focusSpy = editorStub.vm.focus as ReturnType<typeof vi.fn>
+    focusSpy.mockClear()
+
+    // Simulate ChatEditor emitting a send event
+    await editorStub.vm.$emit('send', 'hello world')
+    await nextTick()
+    await nextTick() // second tick for the nextTick(() => focus()) inside handler
+
+    expect(focusSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('loads threads when session is active', async () => {
     // Verify that the session ID is provided for thread loading
     expect('test-session-id').toBeDefined()

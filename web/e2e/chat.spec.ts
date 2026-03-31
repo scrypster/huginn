@@ -16,9 +16,11 @@ async function setupChatWS(
         const data = JSON.parse(typeof msg === 'string' ? msg : msg.toString())
         if (data.type === 'chat') {
           for (const token of tokens) {
-            ws.send(JSON.stringify({ type: 'token', content: token }))
+            ws.send(JSON.stringify({ type: 'token', content: token, run_id: data.run_id }))
           }
-          ws.send(JSON.stringify({ type: 'done' }))
+          // Echo back run_id so the done-handler's run_id guard passes and
+          // streaming.value is set to false, re-enabling the editor.
+          ws.send(JSON.stringify({ type: 'done', run_id: data.run_id }))
         }
       } catch { /* ignore non-JSON */ }
     })
@@ -101,5 +103,21 @@ test.describe('ChatView — streaming', () => {
 
     // After send, editor should be empty (ChatEditor resets on send)
     await expect(editor).not.toContainText('A message', { timeout: 3000 })
+  })
+
+  test('editor is re-enabled after streaming response', async ({ page }) => {
+    await setupChatWS(page, ['Hello ', 'from AI!'])
+    await gotoChatSession(page)
+
+    const editor = page.locator('.editor-content .ProseMirror')
+    await editor.click()
+    await page.keyboard.type('First message')
+    await page.locator('button[title="Send (⏎)"]').click()
+
+    // Wait for the assistant response to confirm streaming occurred
+    await expect(page.locator('.md-content').nth(1)).toContainText('Hello from AI!', { timeout: 5000 })
+
+    // Editor must be re-enabled once streaming ends
+    await expect(editor).toHaveAttribute('contenteditable', 'true', { timeout: 5000 })
   })
 })

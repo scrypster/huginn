@@ -1424,6 +1424,7 @@ async function handleEditorSend(markdown: string) {
 
     ws.send({ type: 'chat', content: markdown, session_id: targetSessionId, run_id: runId })
     scrollToBottom()
+    nextTick(() => chatEditorRef.value?.focus())
     return
   }
 
@@ -1447,6 +1448,7 @@ async function handleEditorSend(markdown: string) {
 
   ws.send({ type: 'chat', content: markdown, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
+  nextTick(() => chatEditorRef.value?.focus())
 }
 
 

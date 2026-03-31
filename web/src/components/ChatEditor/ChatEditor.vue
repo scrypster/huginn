@@ -49,8 +49,17 @@ onMounted(() => {
   }
 })
 
-watch(() => props.disabled, (disabled) => {
+watch(() => props.disabled, (disabled, prevDisabled) => {
   editor.value?.setOptions({ editable: !disabled })
+  // When transitioning from disabled → enabled, restore focus so the user can
+  // type immediately without needing to click the editor again.
+  // setTimeout defers until after all Vue/ProseMirror DOM updates have settled.
+  if (prevDisabled && !disabled) {
+    setTimeout(() => {
+      const dom = editor.value?.view?.dom as HTMLElement | undefined
+      dom?.focus()
+    }, 0)
+  }
 })
 
 // Update the TipTap placeholder when the prop changes (e.g. switching spaces).
