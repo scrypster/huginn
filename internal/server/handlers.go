@@ -161,6 +161,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				UpdatedAt: now,
 			},
 		}
+		// Stamp the space's lead agent onto the session manifest so that
+		// resolveAgent selects the correct agent (e.g. "Mark" for a DM with
+		// Mark) rather than falling through to the default/first agent.
+		// Without this, a DM to Mark would be answered by whoever is first
+		// in agents.yaml — a security/correctness issue (issue #33).
+		if s.spaceStore != nil {
+			if sp, spErr := s.spaceStore.GetSpace(body.SpaceID); spErr == nil && sp.LeadAgent != "" {
+				storedSess.Manifest.Agent = sp.LeadAgent
+			} else if spErr != nil {
+				slog.Warn("handleCreateSession: space lookup failed; agent not stamped",
+					"space_id", body.SpaceID, "err", spErr)
+			}
+		}
 		if s.store != nil {
 			if saveErr := s.store.SaveManifest(storedSess); saveErr != nil {
 				slog.Error("handleCreateSession: failed to persist space_id", "session_id", sess.ID, "space_id", body.SpaceID, "err", saveErr)
