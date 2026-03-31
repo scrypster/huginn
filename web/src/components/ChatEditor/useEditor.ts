@@ -190,7 +190,8 @@ export function useEditor(options: {
   }
 
   function focus() {
-    editor.value?.commands.focus()
+    const dom = editor.value?.view?.dom as HTMLElement | undefined
+    dom?.focus()
   }
 
   function isEmpty(): boolean {
