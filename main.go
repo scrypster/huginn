@@ -2470,7 +2470,36 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		logger.Info("startServer: wiring agents", "count", len(agentsCfg.Agents), "names", agentReg.Names())
 		orch.SetAgentRegistry(agentReg)
 
+		// Compute working dir and bash timeout; shared by toolReg below.
+		srvCWD, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			srvCWD = huginnHome
+		}
+		srvBashTimeout := time.Duration(cfg.BashTimeoutSecs) * time.Second
+		if srvBashTimeout == 0 {
+			srvBashTimeout = 120 * time.Second
+		}
+
+		// Build the primary tool registry with all builtin tools registered and
+		// tagged "builtin". This is the fix for issue #34 — server mode was
+		// missing this registration, so applyToolbelt returned empty schemas for
+		// any agent with local_tools configured (["*"] or named list).
 		toolReg := tools.NewRegistry()
+		tools.RegisterBuiltins(toolReg, srvCWD, srvBashTimeout)
+		tools.RegisterGitTools(toolReg, srvCWD)
+		tools.RegisterTestsTool(toolReg, srvCWD, srvBashTimeout)
+		tools.RegisterGitHubTools(toolReg)
+		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
+		tools.RegisterWorktreeTools(toolReg, srvCWD)
+		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+		// Honor AllowedTools/DisallowedTools config filters (parity with TUI mode).
+		if len(cfg.AllowedTools) > 0 {
+			toolReg.SetAllowed(cfg.AllowedTools)
+		}
+		if len(cfg.DisallowedTools) > 0 {
+			toolReg.SetBlocked(cfg.DisallowedTools)
+		}
 		delegateTool := &threadmgr.DelegateToAgentTool{
 			Fn: func(ctx context.Context, p threadmgr.DelegateParams) threadmgr.DelegateResult {
 				sessionID := agent.GetSessionID(ctx)
@@ -2736,23 +2765,19 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			return serveCache.For(provider, endpoint, apiKey, model)
 		})
 
-		// Wire the tool registry so sub-agents get their configured toolbelt
-		// (bash, read_file, git_status, etc.) when running as threads.
-		{
-			cwd, cwdErr := os.Getwd()
-			if cwdErr != nil {
-				cwd = huginnHome
-			}
-			bashTimeout := time.Duration(cfg.BashTimeoutSecs) * time.Second
-			if bashTimeout == 0 {
-				bashTimeout = 120 * time.Second
-			}
-			subToolReg := tools.NewRegistry()
-			tools.RegisterBuiltins(subToolReg, cwd, bashTimeout)
-			tools.RegisterGitTools(subToolReg, cwd)
-			tools.RegisterTestsTool(subToolReg, cwd, bashTimeout)
-			tm.SetToolRegistry(subToolReg)
-		}
+		// Wire the unified tool registry into the thread manager so sub-agent
+		// threads can resolve and execute their local_tools. This replaces the
+		// old subToolReg block (now removed) which was wired but never read.
+		// The unified registry gives sub-agents the full toolbelt (worktree,
+		// notes, web, GitHub CLI) filtered by each agent's local_tools config —
+		// intentional parity with TUI mode.
+		tm.SetToolRegistry(toolReg)
+		// Gate-wrapped executor: server mode uses auto-approve (NewGate(true,nil)).
+		// Captured here so threadmgr stays free of the permissions package.
+		// Future interactive modes can swap in a gate that prompts the user.
+		tm.SetToolExecutor(func(ctx context.Context, name string, args map[string]any) (string, error) {
+			return toolReg.Execute(ctx, name, args)
+		})
 	}
 
 	// Wire relay config if HuginnCloud is configured.

@@ -104,9 +104,13 @@ type ThreadManager struct {
 	backendFor func(provider, endpoint, apiKey, model string) (backend.Backend, error)
 
 	// toolRegistry, if set, provides agent-specific tool schemas and dispatch.
-	// Sub-agent threads use this to execute real tools (bash, read_file, etc.)
-	// filtered by the agent's toolbelt config. Set via SetToolRegistry.
+	// Sub-agent threads use this to build per-agent toolbelts filtered by the
+	// agent's local_tools config. Set via SetToolRegistry.
 	toolRegistry ToolRegistryIface
+
+	// toolExecutor, if set, is the gate-wrapped executor for sub-agent tool
+	// calls. Captures the permission gate at wiring time. Set via SetToolExecutor.
+	toolExecutor ToolExecutorFn
 
 	// memberChecker, if set, validates that the AgentID in CreateParams is a
 	// member of the given SpaceID before creating the thread.
@@ -172,16 +176,34 @@ type ToolRegistryIface interface {
 	// SchemasByNames returns backend.Tool schemas for the given tool names.
 	// Used to build the per-agent toolbelt from the agent's config.
 	SchemasByNames(names []string) []backend.Tool
+	// AllBuiltinSchemas returns schemas for all tools tagged "builtin".
+	// Used when an agent's local_tools is set to the wildcard ["*"].
+	AllBuiltinSchemas() []backend.Tool
 	// Execute runs the named tool with the given args. Returns result text and error.
 	Execute(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
+// ToolExecutorFn is a gate-wrapped tool executor set via SetToolExecutor.
+// It captures the permission gate at wiring time so threadmgr stays free of
+// the permissions package. In server mode the executor uses the auto-approve
+// gate; future interactive modes can swap in a gate that prompts the user.
+type ToolExecutorFn func(ctx context.Context, name string, args map[string]any) (string, error)
+
 // SetToolRegistry wires the tool registry used by sub-agent threads to obtain
-// and execute agent-specific tools (bash, read_file, etc.).
+// agent-specific tool schemas (bash, read_file, etc.).
 func (tm *ThreadManager) SetToolRegistry(r ToolRegistryIface) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.toolRegistry = r
+}
+
+// SetToolExecutor wires the gate-wrapped executor used by sub-agent threads to
+// dispatch real tool calls. The executor captures the permission gate at wiring
+// time. If not set, sub-threads return "unknown tool" for any non-built-in call.
+func (tm *ThreadManager) SetToolExecutor(fn ToolExecutorFn) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.toolExecutor = fn
 }
 
 // SetMembershipChecker wires the SpaceMembershipChecker used to validate that
