@@ -12,26 +12,40 @@ import (
 	"github.com/scrypster/huginn/internal/tools"
 )
 
+// blockingTransport is a Transport whose Receive blocks until the context is
+// cancelled. Sending a ping to a client backed by this transport causes the
+// health probe to block for the full cbProbeTimeout duration rather than
+// returning an error immediately. This keeps the probe goroutine alive long
+// enough for the test to observe a stable registry state.
+type blockingTransport struct{}
+
+func (b *blockingTransport) Send(_ context.Context, _ []byte) error { return nil }
+func (b *blockingTransport) Receive(ctx context.Context) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (b *blockingTransport) Close() error { return nil }
+
 // TestServerManager_WatchServer_Reconnect verifies that watchServer reconnects
 // to a server that goes down and then comes back up, re-registering tools.
 func TestServerManager_WatchServer_Reconnect(t *testing.T) {
 	var factoryCalls atomic.Int32
 
-	// First factory call succeeds; the returned client will fail health checks
-	// (no queued responses), triggering a reconnect.
-	// Second factory call succeeds with a new tool.
+	// First factory call uses a mock transport that immediately fails health
+	// probes (no queued responses), triggering a reconnect. The second call uses
+	// a blockingTransport so the health probe blocks for cbProbeTimeout instead
+	// of failing immediately — this keeps tool_v2 stably in the registry for
+	// long enough to observe, preventing a reconnect storm in slow CI.
 	factory := func(_ context.Context, cfg MCPServerConfig) (*MCPClient, []MCPTool, error) {
 		n := factoryCalls.Add(1)
 		if n == 1 {
-			// Initial connect — healthy client, but no queued ping responses
-			// so the health probe will fail on the next tick.
-			tr := &mockTransport{}
-			client := NewMCPClient(tr)
+			// Initial connect — immediately-failing transport triggers reconnect.
+			client := NewMCPClient(&mockTransport{})
 			return client, []MCPTool{{Name: "tool_v1", Description: "v1"}}, nil
 		}
-		// Reconnect — return a new tool set.
-		tr := &mockTransport{}
-		client := NewMCPClient(tr)
+		// Reconnect — use a blocking transport so the probe doesn't fail
+		// again instantly, giving the test a stable window to check the registry.
+		client := NewMCPClient(&blockingTransport{})
 		return client, []MCPTool{{Name: "tool_v2", Description: "v2"}}, nil
 	}
 
@@ -47,8 +61,7 @@ func TestServerManager_WatchServer_Reconnect(t *testing.T) {
 	mgr.StartAll(ctx, reg)
 
 	// Wait for the watchServer goroutine to detect the health failure, reconnect,
-	// and re-register the new tools. Poll until tool_v2 appears in the registry
-	// (factory called >= 2 times AND registration complete).
+	// and re-register the new tools. The blocking transport keeps tool_v2 stable.
 	deadline := time.After(2 * time.Second)
 	for {
 		if factoryCalls.Load() >= 2 {
