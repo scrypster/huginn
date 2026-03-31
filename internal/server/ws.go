@@ -566,7 +566,10 @@ func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 // server restart.
 //
 // Resolution order:
-//  1. Session's primary agent (set via "set_primary_agent" WS message)
+//  1. Session's primary agent (set via "set_primary_agent" WS message or
+//     stamped at session-creation time from the space's lead agent)
+//  1b. Space lead agent — fallback for space/DM sessions created before fix #33
+//     or where the space lookup failed during session creation (defence-in-depth)
 //  2. First agent marked IsDefault in the config
 //  3. First agent in the config (last resort)
 //
@@ -582,9 +585,12 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 		return nil
 	}
 
+	var loadedSess *session.Session
+
 	// 1. Session primary agent
 	if s.store != nil && sessionID != "" {
 		if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
+			loadedSess = sess
 			if agentName := sess.PrimaryAgentID(); agentName != "" {
 				for _, def := range cfg.Agents {
 					if strings.EqualFold(def.Name, agentName) {
@@ -594,6 +600,22 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 				// Primary agent name saved but not found in config — log and fall through.
 				logger.Warn("resolveAgent: primary agent not found in config", "agent", agentName, "session_id", sessionID)
 			}
+		}
+	}
+
+	// 1b. Space lead agent — defence-in-depth for DM/channel sessions.
+	// Fires when PrimaryAgentID() is empty, which happens for sessions created
+	// before the fix in handleCreateSession (issue #33). Heals existing sessions
+	// at runtime without any DB migration.
+	if s.spaceStore != nil && loadedSess != nil && loadedSess.Manifest.SpaceID != "" {
+		if sp, spErr := s.spaceStore.GetSpace(loadedSess.Manifest.SpaceID); spErr == nil && sp.LeadAgent != "" {
+			for _, def := range cfg.Agents {
+				if strings.EqualFold(def.Name, sp.LeadAgent) {
+					return agents.FromDef(def)
+				}
+			}
+			logger.Warn("resolveAgent: space lead agent not found in config",
+				"agent", sp.LeadAgent, "space_id", loadedSess.Manifest.SpaceID)
 		}
 	}
 
