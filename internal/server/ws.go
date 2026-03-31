@@ -21,6 +21,7 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/spaces"
 )
 
 // serverEpoch is a random uint64 generated at process startup. It is stamped
@@ -561,18 +562,34 @@ func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 	}
 }
 
-// resolveAgent loads the agent to use for a chat request, reading fresh from
+// resolveAgent loads the agent to use for a chat request. It is a convenience
+// wrapper around resolveAgentForMessage for callers that don't have message
+// content (e.g. non-chat paths). For the chat path use resolveAgentForMessage
+// directly so that channel @mention routing is applied.
+func (s *Server) resolveAgent(sessionID string) *agents.Agent {
+	return s.resolveAgentForMessage(sessionID, "")
+}
+
+// resolveAgentForMessage loads the agent for a chat message, reading fresh from
 // disk so that model changes made via the UI take effect immediately without a
 // server restart.
 //
 // Resolution order:
-//  1. Session's primary agent (set via "set_primary_agent" WS message)
-//  2. First agent marked IsDefault in the config
-//  3. First agent in the config (last resort)
+//  1.  Session's primary agent (set via "set_primary_agent" WS message or
+//      stamped at session-creation time from the space's lead agent)
+//  1b. Channel @mention override — when the message starts with @Name and the
+//      named agent is a member of the channel space, route this message to
+//      that agent (stateless per-message, does not change session state).
+//      Only applies to KindChannel spaces; DMs are always 1:1.
+//  1c. Space lead agent — defence-in-depth for DM/channel sessions created
+//      before fix #33 or where space lookup failed at session creation.
+//      Heals existing sessions at runtime without any DB migration.
+//  2.  First agent marked IsDefault in the config
+//  3.  First agent in the config (last resort)
 //
 // Returns nil only if no agents are configured or the config cannot be loaded,
 // in which case callers should fall back to Orchestrator.Chat().
-func (s *Server) resolveAgent(sessionID string) *agents.Agent {
+func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent {
 	loader := s.agentLoader
 	if loader == nil {
 		loader = agents.LoadAgents
@@ -582,9 +599,12 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 		return nil
 	}
 
+	var loadedSess *session.Session
+
 	// 1. Session primary agent
 	if s.store != nil && sessionID != "" {
 		if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
+			loadedSess = sess
 			if agentName := sess.PrimaryAgentID(); agentName != "" {
 				for _, def := range cfg.Agents {
 					if strings.EqualFold(def.Name, agentName) {
@@ -592,8 +612,47 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 					}
 				}
 				// Primary agent name saved but not found in config — log and fall through.
-				logger.Warn("resolveAgent: primary agent not found in config", "agent", agentName, "session_id", sessionID)
+				logger.Warn("resolveAgentForMessage: primary agent not found in config", "agent", agentName, "session_id", sessionID)
 			}
+		}
+	}
+
+	if s.spaceStore != nil && loadedSess != nil && loadedSess.Manifest.SpaceID != "" {
+		sp, spErr := s.spaceStore.GetSpace(loadedSess.Manifest.SpaceID)
+		if spErr == nil && sp.LeadAgent != "" {
+			// 1b. Channel @mention override — stateless per-message routing.
+			// A leading @Name in the message routes to that agent if they are
+			// a member of this channel. DMs skip this step (always 1:1).
+			if sp.Kind == spaces.KindChannel && content != "" {
+				if mentioned := extractLeadMention(content); mentioned != "" {
+					isMember := false
+					for _, m := range sp.Members {
+						if strings.EqualFold(m, mentioned) {
+							isMember = true
+							break
+						}
+					}
+					if isMember {
+						for _, def := range cfg.Agents {
+							if strings.EqualFold(def.Name, mentioned) {
+								return agents.FromDef(def)
+							}
+						}
+						// Mentioned agent is a space member but missing from config — log and fall through.
+						logger.Warn("resolveAgentForMessage: mentioned agent not in config",
+							"agent", mentioned, "space_id", loadedSess.Manifest.SpaceID)
+					}
+				}
+			}
+			// 1c. Space lead agent (DMs always reach here; channels reach here when
+			// there is no valid @mention or the mentioned agent is not a member).
+			for _, def := range cfg.Agents {
+				if strings.EqualFold(def.Name, sp.LeadAgent) {
+					return agents.FromDef(def)
+				}
+			}
+			logger.Warn("resolveAgentForMessage: space lead agent not found in config",
+				"agent", sp.LeadAgent, "space_id", loadedSess.Manifest.SpaceID)
 		}
 	}
 
@@ -606,6 +665,39 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 
 	// 3. First agent
 	return agents.FromDef(cfg.Agents[0])
+}
+
+// extractLeadMention returns the agent name from a leading @mention at the
+// start of content. Returns "" if content doesn't start with a valid @mention.
+//
+// Valid agent names start with a letter and contain only letters, digits,
+// hyphens, and underscores (max 64 chars). This prevents garbage input from
+// hitting the agent-config scan loop.
+func extractLeadMention(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "@") {
+		return ""
+	}
+	rest := content[1:]
+	if len(rest) == 0 || !isAgentNameStart(rest[0]) {
+		return ""
+	}
+	end := 1
+	for end < len(rest) && isAgentNameChar(rest[end]) {
+		end++
+	}
+	if end > 64 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func isAgentNameStart(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isAgentNameChar(c byte) bool {
+	return isAgentNameStart(c) || (c >= '0' && c <= '9') || c == '-' || c == '_'
 }
 
 func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
@@ -654,7 +746,7 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 				}
 			}
 
-			ag := s.resolveAgent(sessionID)
+			ag := s.resolveAgentForMessage(sessionID, userMsg)
 			var err error
 			if ag != nil {
 				err = s.orch.ChatWithAgent(c.ctx, ag, userMsg, sessionID, onToken, nil, onEvent)
@@ -799,6 +891,22 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if err != nil {
 			logger.Error("set_primary_agent: load session", "session_id", sessionID, "err", err)
 			return
+		}
+		// Guard: DM spaces are strictly 1:1 — agent switching is not permitted.
+		// Fail closed: if the space cannot be read, block the switch rather than
+		// silently allowing it (consistent with the DM immutability principle).
+		if sess.Manifest.SpaceID != "" && s.spaceStore != nil {
+			sp, spErr := s.spaceStore.GetSpace(sess.Manifest.SpaceID)
+			if spErr != nil {
+				logger.Error("set_primary_agent: cannot verify space kind, blocking switch",
+					"space_id", sess.Manifest.SpaceID, "err", spErr)
+				c.send <- WSMessage{Type: "error", Content: "unable to verify space type"}
+				return
+			}
+			if sp.Kind == spaces.KindDM {
+				c.send <- WSMessage{Type: "error", Content: "cannot change agent in a DM"}
+				return
+			}
 		}
 		sess.SetPrimaryAgent(agentName)
 		if err := s.store.SaveManifest(sess); err != nil {
