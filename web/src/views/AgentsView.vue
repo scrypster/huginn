@@ -1978,11 +1978,10 @@ async function save() {
     await ensureVault()
     const originalName = (props.agentName && props.agentName !== 'new') ? props.agentName : form.value.name
     await api.agents.update(originalName, form.value)
+    updateAgent(form.value.name, { ...form.value })
     if (props.agentName && form.value.name !== props.agentName) {
       removeFromList(props.agentName)
       router.replace(`/agents/${form.value.name}`)
-    } else {
-      updateAgent(form.value.name, { ...form.value })
     }
     original.value = JSON.stringify(form.value)
     dirty.value = false
