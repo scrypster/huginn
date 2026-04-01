@@ -408,13 +408,24 @@
                     </div>
                     <span v-if="sp.leadAgent && isAgentActive(sp.leadAgent)"
                       class="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-huginn-green border border-huginn-sidebar animate-pulse" />
+                    <!-- Warning: agent has no model configured -->
+                    <span v-else-if="agentsWithoutModel.has(sp.leadAgent)"
+                      :data-testid="`dm-no-model-${sp.id}`"
+                      class="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-huginn-amber border border-huginn-sidebar flex items-center justify-center"
+                      title="Agent has no model configured — open Agent settings to fix">
+                      <span class="text-[7px] font-black leading-none text-huginn-bg">!</span>
+                    </span>
                   </div>
                   <div class="flex-1 min-w-0">
                     <span class="text-xs truncate block"
-                      :class="activeSpaceId === sp.id ? 'text-huginn-text font-medium' : ''">
+                      :class="[activeSpaceId === sp.id ? 'text-huginn-text font-medium' : '', agentsWithoutModel.has(sp.leadAgent) ? 'text-huginn-amber/80' : '']">
                       {{ sp.leadAgent }}
                     </span>
-                    <span v-if="spaceLastMessage(sp.id)"
+                    <span v-if="agentsWithoutModel.has(sp.leadAgent)"
+                      class="text-[10px] text-huginn-amber/50 truncate block leading-tight">
+                      No model configured
+                    </span>
+                    <span v-else-if="spaceLastMessage(sp.id)"
                       class="text-[10px] text-huginn-muted/50 truncate block leading-tight">
                       {{ spaceLastMessage(sp.id)!.text }}
                     </span>
@@ -1134,13 +1145,18 @@ const filteredChannels = computed(() => {
   )
 })
 
+// Track which agents are missing a model so DM items can show a warning badge.
+// We always show all DMs (even for misconfigured agents) so the user can see
+// the problem and navigate to Agent settings to fix it.
+const agentsWithoutModel = computed(() => {
+  if (agents.value.length === 0) return new Set<string>()
+  return new Set(agents.value.filter(a => !a.model).map(a => a.name))
+})
+
 const filteredDMs = computed(() => {
   const q = sidebarSearch.value.trim().toLowerCase()
-  // Exclude DMs whose lead agent has no model configured
-  const agentsWithModel = new Set(agents.value.filter(a => !!a.model).map(a => a.name))
-  const capable = dms.value.filter(s => agentsWithModel.size === 0 || agentsWithModel.has(s.leadAgent))
-  if (!q) return capable
-  return capable.filter(s => s.leadAgent.toLowerCase().includes(q))
+  if (!q) return dms.value
+  return dms.value.filter(s => s.leadAgent.toLowerCase().includes(q))
 })
 
 const agentColorMap = computed(() => {

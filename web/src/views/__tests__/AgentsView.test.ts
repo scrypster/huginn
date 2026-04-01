@@ -227,6 +227,27 @@ describe('AgentsView', () => {
     expect(w.text()).toContain('Unsaved changes')
   })
 
+  // ── Model validation ─────────────────────────────────────────────
+  it('save is blocked with error when model is empty', async () => {
+    // New agent — form.model starts empty
+    const w = mountAgent({ agentName: 'new' })
+    await flushPromises()
+
+    const nameInput = w.find('input[placeholder="Agent name"]')
+    await nameInput.setValue('NoModel')
+    await nameInput.trigger('input')
+    await nextTick()
+
+    const saveBtn = w.find('[data-testid="save-agent-btn-sticky"]')
+    await saveBtn.trigger('click')
+    await flushPromises()
+
+    // API must NOT have been called
+    expect(mockApiAgentsUpdate).not.toHaveBeenCalled()
+    // User sees a meaningful error
+    expect(w.text()).toContain('model')
+  })
+
   // ── Save button ──────────────────────────────────────────────────
   it('save button calls api.agents.update and shows success', async () => {
     mockApiAgentsGet.mockResolvedValueOnce({
@@ -970,10 +991,14 @@ describe('AgentsView', () => {
     const w = mountAgent({ agentName: 'new' })
     await flushPromises()
 
-    // Fill in form
+    // Fill in name
     const nameInput = w.find('input[placeholder="Agent name"]')
     await nameInput.setValue('BrandNew')
     await nameInput.trigger('input')
+    await nextTick()
+
+    // Set model via vm so validation passes (model is required)
+    ;(w.vm as unknown as { form: { model: string } }).form.model = 'claude-sonnet-4-6'
     await nextTick()
 
     const saveBtn = w.find('[data-testid="save-agent-btn-sticky"]')

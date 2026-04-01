@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/session"
 )
 
@@ -144,6 +145,100 @@ func TestHandleWSMessage_Chat_SpaceSession_PersistsToStore(t *testing.T) {
 	}
 	if len(msgs) < 2 {
 		t.Fatalf("expected at least 2 persisted messages, got %d (space session messages not persisted)", len(msgs))
+	}
+}
+
+// TestHandleWSMessage_Chat_ErrorPersistsMessagesAndEmitsActivity verifies that
+// when a chat turn fails (e.g. agent has no model configured), the user message
+// AND an error assistant message are still persisted to the store, and
+// emitSpaceActivity is called so the notification badge reflects a real message
+// rather than causing a ghost notification (badge with no messages to see).
+//
+// Regression: previously the error path returned early without persisting
+// anything, so users saw an unread badge leading to an empty conversation.
+func TestHandleWSMessage_Chat_ErrorPersistsMessagesAndEmitsActivity(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// Override agentLoader to return an agent without a model (simulates a
+	// legacy or manually-edited agent config where model was not set).
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{
+			Agents: []agents.AgentDef{
+				{Name: "Mike", Model: "", SystemPrompt: ""},
+			},
+		}, nil
+	}
+
+	// Create a session stamped with "Mike" as primary agent.
+	now := time.Now().UTC()
+	sess := &session.Session{
+		ID: session.NewID(),
+		Manifest: session.Manifest{
+			ID:        "",
+			SessionID: "",
+			Status:    "active",
+			Version:   1,
+			Agent:     "Mike",
+			SpaceID:   "dm-mike-test",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+	sess.Manifest.ID = sess.ID
+	sess.Manifest.SessionID = sess.ID
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	client := &wsClient{send: make(chan WSMessage, 64), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   "hello Mike",
+	})
+
+	// Drain until error/done or timeout.
+	deadline := time.After(5 * time.Second)
+	gotError := false
+	for !gotError {
+		select {
+		case m := <-client.send:
+			if m.Type == "error" {
+				gotError = true
+			}
+			if m.Type == "done" {
+				// Should never succeed — fail fast.
+				t.Fatal("expected error WS message, got done")
+			}
+		case <-deadline:
+			t.Log("timeout waiting for error WS message")
+			gotError = true
+		}
+	}
+	// Allow the goroutine to finish persisting.
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify both messages were persisted despite the error.
+	msgs, err := srv.store.TailMessages(sess.ID, 10)
+	if err != nil {
+		t.Fatalf("TailMessages: %v", err)
+	}
+	if len(msgs) < 2 {
+		t.Fatalf("expected 2 persisted messages (user + error reply) on chat error, got %d — ghost notification regression", len(msgs))
+	}
+
+	if msgs[0].Role != "user" {
+		t.Errorf("msgs[0].Role = %q, want 'user'", msgs[0].Role)
+	}
+	if msgs[0].Content != "hello Mike" {
+		t.Errorf("msgs[0].Content = %q, want 'hello Mike'", msgs[0].Content)
+	}
+
+	if msgs[1].Role != "assistant" {
+		t.Errorf("msgs[1].Role = %q, want 'assistant' (error reply)", msgs[1].Role)
+	}
+	if msgs[1].Content == "" {
+		t.Error("error reply message must have non-empty content")
 	}
 }
 
