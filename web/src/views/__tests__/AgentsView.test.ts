@@ -1302,4 +1302,133 @@ describe('AgentsView', () => {
 
     expect(w.text()).toContain('Agent in use')
   })
+
+  // ── Rename sidebar bug regression (#35) ─────────────────────────
+  // Renaming an agent must immediately update the sidebar — not leave it blank
+  // until a page refresh.  Root cause: the rename path called removeFromList
+  // without calling updateAgent, so the new name was never added back.
+  describe('agent rename updates sidebar immediately', () => {
+    it('calls updateAgent with new name when agent is renamed', async () => {
+      mockApiAgentsGet.mockResolvedValueOnce({
+        name: 'Tom',
+        model: 'claude-sonnet-4-6',
+        system_prompt: '',
+        color: '#58a6ff',
+        icon: 'T',
+        memory_type: 'none',
+        toolbelt: [],
+        skills: [],
+        local_tools: [],
+      })
+      mockApiAgentsUpdate.mockResolvedValueOnce({})
+
+      const w = mountAgent({ agentName: 'Tom' })
+      await flushPromises()
+
+      const nameInput = w.find('input[placeholder="Agent name"]')
+      await nameInput.setValue('Tony')
+      await nameInput.trigger('input')
+      await nextTick()
+
+      const saveBtn = w.find('[data-testid="save-agent-btn-sticky"]')
+      await saveBtn.trigger('click')
+      await flushPromises()
+
+      // updateAgent must be called with the NEW name so the sidebar entry exists
+      expect(mockUpdateAgent).toHaveBeenCalledWith('Tony', expect.objectContaining({ name: 'Tony' }))
+    })
+
+    it('calls removeAgent with old name when agent is renamed', async () => {
+      mockApiAgentsGet.mockResolvedValueOnce({
+        name: 'Tom',
+        model: 'claude-sonnet-4-6',
+        system_prompt: '',
+        color: '#58a6ff',
+        icon: 'T',
+        memory_type: 'none',
+        toolbelt: [],
+        skills: [],
+        local_tools: [],
+      })
+      mockApiAgentsUpdate.mockResolvedValueOnce({})
+
+      const w = mountAgent({ agentName: 'Tom' })
+      await flushPromises()
+
+      const nameInput = w.find('input[placeholder="Agent name"]')
+      await nameInput.setValue('Tony')
+      await nameInput.trigger('input')
+      await nextTick()
+
+      const saveBtn = w.find('[data-testid="save-agent-btn-sticky"]')
+      await saveBtn.trigger('click')
+      await flushPromises()
+
+      // The old sidebar entry must be removed
+      expect(mockRemoveAgent).toHaveBeenCalledWith('Tom')
+    })
+
+    it('navigates to new agent URL when renamed', async () => {
+      mockApiAgentsGet.mockResolvedValueOnce({
+        name: 'Tom',
+        model: 'claude-sonnet-4-6',
+        system_prompt: '',
+        color: '#58a6ff',
+        icon: 'T',
+        memory_type: 'none',
+        toolbelt: [],
+        skills: [],
+        local_tools: [],
+      })
+      mockApiAgentsUpdate.mockResolvedValueOnce({})
+
+      const w = mountAgent({ agentName: 'Tom' })
+      await flushPromises()
+
+      const nameInput = w.find('input[placeholder="Agent name"]')
+      await nameInput.setValue('Tony')
+      await nameInput.trigger('input')
+      await nextTick()
+
+      const saveBtn = w.find('[data-testid="save-agent-btn-sticky"]')
+      await saveBtn.trigger('click')
+      await flushPromises()
+
+      expect(mockRouterReplace).toHaveBeenCalledWith('/agents/Tony')
+    })
+
+    it('does not call removeAgent when name is unchanged', async () => {
+      mockApiAgentsGet.mockResolvedValueOnce({
+        name: 'Tom',
+        model: 'claude-sonnet-4-6',
+        system_prompt: 'You are helpful.',
+        color: '#58a6ff',
+        icon: 'T',
+        memory_type: 'none',
+        toolbelt: [],
+        skills: [],
+        local_tools: [],
+      })
+      mockApiAgentsUpdate.mockResolvedValueOnce({})
+
+      const w = mountAgent({ agentName: 'Tom' })
+      await flushPromises()
+
+      // Dirty the form without changing the name
+      const textarea = w.find('textarea')
+      await textarea.setValue('Updated prompt.')
+      await textarea.trigger('input')
+      await nextTick()
+
+      const saveBtn = w.find('[data-testid="save-agent-btn-sticky"]')
+      await saveBtn.trigger('click')
+      await flushPromises()
+
+      // Name unchanged — no removal, no redirect
+      expect(mockRemoveAgent).not.toHaveBeenCalled()
+      expect(mockRouterReplace).not.toHaveBeenCalled()
+      // updateAgent still called to sync sidebar
+      expect(mockUpdateAgent).toHaveBeenCalledWith('Tom', expect.objectContaining({ name: 'Tom' }))
+    })
+  })
 })
