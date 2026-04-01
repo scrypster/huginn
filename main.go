@@ -2163,6 +2163,24 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	if cfg.Backend.Provider != "" && cfg.Backend.APIKey != "" {
 		serveCache.SetProviderKey(cfg.Backend.Provider, cfg.Backend.APIKey)
 	}
+	// Auto-register keychain convention keys for providers used by agents that
+	// don't carry a per-agent api_key and differ from the global backend provider.
+	// Convention (set by handleUpdateConfig / StoreAPIKey): keyring:huginn:<provider>.
+	// This fixes a gap where the user changes the global backend to a different
+	// provider (e.g. "ollama") while agents still reference "anthropic" — without
+	// this loop the anthropic key is in the keychain but never wired into the cache.
+	if agentDefsForKeys, loadErr := agentslib.LoadAgents(); loadErr == nil && agentDefsForKeys != nil {
+		for _, def := range agentDefsForKeys.Agents {
+			if def.Provider == "" || def.Provider == cfg.Backend.Provider {
+				continue // already handled above or no provider set
+			}
+			if def.APIKey != "" {
+				continue // agent carries its own key; no provider-level fallback needed
+			}
+			ref := fmt.Sprintf("keyring:huginn:%s", def.Provider)
+			serveCache.SetProviderKey(def.Provider, ref)
+		}
+	}
 	orch.SetBackendCache(serveCache)
 	orch.WithMachineID(relay.GetMachineID()) // stable 8-char hex, not cfg.MachineID (hostname-dependent)
 
