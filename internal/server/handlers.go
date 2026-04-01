@@ -811,6 +811,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfg.WebUI.Bind != newCfg.WebUI.Bind
 	s.cfg = newCfg
 	s.mu.Unlock()
+	// Push the updated provider key into the live BackendCache so agents
+	// immediately inherit the new key without requiring a server restart.
+	// This must happen outside the server mutex; BackendCache has its own lock.
+	if s.backendCache != nil && newCfg.Backend.Provider != "" && newCfg.Backend.APIKey != "" {
+		s.backendCache.SetProviderKey(newCfg.Backend.Provider, newCfg.Backend.APIKey)
+	}
 	// Save config to disk
 	if err := s.cfg.Save(); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())
