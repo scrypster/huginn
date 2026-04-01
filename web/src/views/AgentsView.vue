@@ -910,7 +910,7 @@
                 class="w-full flex items-center gap-3 pl-10 pr-4 py-2 text-left transition-colors hover:bg-huginn-surface/60"
                 :class="form.model === m.name ? 'bg-huginn-blue/8' : ''">
                 <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" :style="{ background: group.color + '15' }">
-                  <span class="text-[10px] font-semibold" :style="{ color: group.color }">{{ m.details?.parameter_size?.replace(/[^0-9.BMGKbmgk]+/g,'').slice(0,4) || '?' }}</span>
+                  <span class="text-[10px] font-semibold" :style="{ color: group.color }">{{ m.details?.parameter_size?.replace(/[^0-9.BMGKbmgk]+/g,'').slice(0,4) || group.icon }}</span>
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-1.5 min-w-0">
