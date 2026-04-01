@@ -757,6 +757,23 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			if err != nil {
 				logger.Error("chat completion", "session_id", sessionID, "err", err)
 				c.send <- WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID, RunID: runID}
+				// Persist user message + error reply so the conversation log is
+				// complete and any notification badge leads to actual messages
+				// rather than a ghost notification with an empty thread.
+				if s.store != nil && sessionID != "" {
+					if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
+						now := time.Now().UTC()
+						_ = s.store.Append(sess, session.SessionMessage{
+							ID: session.NewID(), Role: "user", Content: userMsg, Ts: now,
+						})
+						_ = s.store.Append(sess, session.SessionMessage{
+							ID: session.NewID(), Role: "assistant",
+							Content: "⚠️ " + err.Error(),
+							Ts:      time.Now().UTC(),
+						})
+						s.emitSpaceActivity(sess.SpaceID())
+					}
+				}
 				return
 			}
 			c.send <- WSMessage{Type: "done", SessionID: sessionID, RunID: runID}

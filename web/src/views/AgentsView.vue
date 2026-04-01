@@ -1961,6 +1961,7 @@ function validateAgentForm(): string | null {
   if (/[/\\\0:]/.test(form.value.name) || /[\x00-\x1f]/.test(form.value.name)) {
     return 'Agent name contains invalid characters'
   }
+  if (!form.value.model?.trim()) return 'A model is required — select one from the model picker'
   return null
 }
 
