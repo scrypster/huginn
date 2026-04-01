@@ -109,6 +109,28 @@ func TestOrchestrator_ChatWithAgent_BackendError(t *testing.T) {
 	}
 }
 
+// TestOrchestrator_ChatWithAgent_NoModel verifies that ChatWithAgent returns a
+// clear, actionable error when the agent has no model configured, rather than
+// silently failing or returning a cryptic provider error.
+// Regression: agents created without a model were passing "" as the model ID
+// to the backend, causing a confusing auth/validation error from the LLM API.
+func TestOrchestrator_ChatWithAgent_NoModel(t *testing.T) {
+	mb := newMockBackend("should not be called")
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+
+	ag := &agents.Agent{Name: "Mike", ModelID: ""}
+	err := o.ChatWithAgent(context.Background(), ag, "hello", "", nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when agent has no model")
+	}
+	if !strings.Contains(err.Error(), "Mike") {
+		t.Errorf("expected error to mention agent name 'Mike', got: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "model") {
+		t.Errorf("expected error to mention 'model', got: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ReasonWithAgent
 // ---------------------------------------------------------------------------

@@ -571,6 +571,10 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	sess.setState(StateAgentLoop)
 	defer sess.setState(StateIdle)
 
+	if ag.GetModelID() == "" {
+		return fmt.Errorf("agent %q has no model configured — open Agent settings to assign a model", ag.Name)
+	}
+
 	ctxText := o.contextBuilder.Build(userMsg, ag.GetModelID())
 	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
 	systemPrompt := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
