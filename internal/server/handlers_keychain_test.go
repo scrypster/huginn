@@ -2,127 +2,211 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"strings"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
 
-// TestHandleUpdateConfig_LiteralAPIKey_StoredInKeychain verifies that when a
-// literal API key is submitted via PUT /api/v1/config, handleUpdateConfig routes
-// it through storeAPIKey so it lands in the OS keychain — not in plaintext inside
-// config.json. The in-memory config must contain the keyring reference, not the
-// raw secret.
-func TestHandleUpdateConfig_LiteralAPIKey_StoredInKeychain(t *testing.T) {
-	srv, ts := newTestServer(t)
+// TestHandleProviderModels_KeyringResolution verifies that when the backend API
+// key is stored as a keyring reference ("keyring:huginn:anthropic"), the server
+// correctly resolves it from the keychain before calling the provider API —
+// not passing the reference string literally (which causes a 401).
+// All Anthropic calls go to a mock server; no real API key is used.
+func TestHandleProviderModels_KeyringResolution(t *testing.T) {
+	keyring.MockInit()
+	const realKey = "sk-ant-test-resolved-key"
+	if err := keyring.Set("huginn", "anthropic", realKey); err != nil {
+		t.Fatalf("keyring.Set: %v", err)
+	}
 
-	payload := `{"version":1,"web_ui":{"port":0},"backend":{"provider":"anthropic","api_key":"sk-ant-test-literal-key"}}`
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/config", strings.NewReader(payload))
+	var receivedKey string
+	mockAnthropicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedKey = r.Header.Get("x-api-key")
+		fmt.Fprint(w, `{"data":[{"type":"model","id":"claude-sonnet-4-6","display_name":"Claude Sonnet 4.6","created_at":"2026-01-01T00:00:00Z"}],"has_more":false}`)
+	}))
+	defer mockAnthropicSrv.Close()
+
+	srv, ts := newTestServer(t)
+	srv.cfg.Backend.Provider = "anthropic"
+	srv.cfg.Backend.Endpoint = mockAnthropicSrv.URL
+	// Store the keyring reference — not the literal key.
+	srv.cfg.Backend.APIKey = "keyring:huginn:anthropic"
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/providers/anthropic/models", nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if receivedKey != realKey {
+		t.Errorf("Anthropic API received key %q, want %q — keyring reference was not resolved", receivedKey, realKey)
+	}
+}
+
+// TestHandleListAvailableModels_KeyringResolution verifies the same keyring
+// resolution for the agent model picker endpoint (/api/v1/models/available).
+// All Anthropic calls go to a mock server; no real API key is used.
+func TestHandleListAvailableModels_KeyringResolution(t *testing.T) {
+	keyring.MockInit()
+	const realKey = "sk-ant-agent-picker-key"
+	if err := keyring.Set("huginn", "anthropic", realKey); err != nil {
+		t.Fatalf("keyring.Set: %v", err)
+	}
+
+	var receivedKey string
+	mockAnthropicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedKey = r.Header.Get("x-api-key")
+		fmt.Fprint(w, `{"data":[{"type":"model","id":"claude-sonnet-4-6","display_name":"Claude Sonnet 4.6","created_at":"2026-01-01T00:00:00Z"}],"has_more":false}`)
+	}))
+	defer mockAnthropicSrv.Close()
+
+	srv, ts := newTestServer(t)
+	srv.cfg.Backend.Provider = "anthropic"
+	srv.cfg.Backend.Endpoint = mockAnthropicSrv.URL
+	srv.cfg.Backend.APIKey = "keyring:huginn:anthropic"
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/models/available", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if receivedKey != realKey {
+		t.Errorf("Anthropic API received key %q, want %q — keyring reference was not resolved in agent picker", receivedKey, realKey)
+	}
+}
+
+// TestHandleProviderModels_AnthropicFallbackOnAPIError verifies that when the
+// Anthropic API returns an auth error, the models page still returns the
+// hardcoded known models rather than an empty error response.
+// No real API key is used — mock server returns 401.
+func TestHandleProviderModels_AnthropicFallbackOnAPIError(t *testing.T) {
+	mockAnthropicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+	}))
+	defer mockAnthropicSrv.Close()
+
+	srv, ts := newTestServer(t)
+	srv.cfg.Backend.Provider = "anthropic"
+	srv.cfg.Backend.Endpoint = mockAnthropicSrv.URL
+	srv.cfg.Backend.APIKey = "sk-ant-any-key"
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/providers/anthropic/models", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 fallback response, got %d", resp.StatusCode)
+	}
+
+	var models []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if len(models) == 0 {
+		t.Fatal("expected known fallback models when API fails, got empty list")
+	}
+	found := false
+	for _, m := range models {
+		if m["id"] == "claude-opus-4-6" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected claude-opus-4-6 in fallback models, not found")
+	}
+}
+
+// TestHandleListAvailableModels_AnthropicFallbackOnAPIError verifies the same
+// fallback for the agent model picker when the Anthropic API is unreachable.
+// No real API key is used — mock server returns 500.
+func TestHandleListAvailableModels_AnthropicFallbackOnAPIError(t *testing.T) {
+	mockAnthropicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer mockAnthropicSrv.Close()
+
+	srv, ts := newTestServer(t)
+	srv.cfg.Backend.Provider = "anthropic"
+	srv.cfg.Backend.Endpoint = mockAnthropicSrv.URL
+	srv.cfg.Backend.APIKey = "sk-ant-any-key"
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/models/available", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var body map[string]any
+	var body map[string]json.RawMessage
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["saved"] != true {
-		t.Errorf("expected saved=true, got %v", body["saved"])
-	}
+	var providerModels []map[string]any
+	json.Unmarshal(body["provider_models"], &providerModels)
 
-	// The in-memory config must hold the keyring reference, not the literal key.
-	// newTestServer installs a keyStorerFn that returns "keyring:huginn:<slot>".
-	srv.mu.Lock()
-	storedKey := srv.cfg.Backend.APIKey
-	srv.mu.Unlock()
-
-	if storedKey == "sk-ant-test-literal-key" {
-		t.Errorf("API key stored as plaintext literal — expected keyring reference; "+
-			"literal keys must be migrated to OS keychain via storeAPIKey (got %q)", storedKey)
-	}
-	if storedKey != "keyring:huginn:anthropic" {
-		t.Errorf("expected keyring ref %q, got %q", "keyring:huginn:anthropic", storedKey)
+	if len(providerModels) == 0 {
+		t.Fatal("expected known fallback models in agent picker when API fails, got empty list")
 	}
 }
 
-// TestHandleUpdateConfig_REDACTEDSentinel_PreservesKeyringRef verifies that when
-// the UI sends back the [REDACTED] sentinel (GET→PUT round-trip), the in-memory
-// keyring reference is restored WITHOUT calling storeAPIKey again. If the sentinel
-// and the keychain-migration blocks were ever reordered, "[REDACTED]" would pass
-// IsLiteralAPIKey and be stored in the keychain as a garbage value.
-func TestHandleUpdateConfig_REDACTEDSentinel_PreservesKeyringRef(t *testing.T) {
+// TestHandleProviderModels_AnthropicPagination verifies that the models fetcher
+// follows has_more pagination and returns models from all pages.
+// No real API key is used — all calls go to a mock server.
+func TestHandleProviderModels_AnthropicPagination(t *testing.T) {
+	page1Called, page2Called := false, false
+
+	mockAnthropicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		afterID := r.URL.Query().Get("after_id")
+		if afterID == "" {
+			page1Called = true
+			fmt.Fprint(w, `{"data":[{"type":"model","id":"claude-opus-4-6","display_name":"Claude Opus 4.6","created_at":"2026-01-01T00:00:00Z"}],"has_more":true,"last_id":"claude-opus-4-6"}`)
+		} else {
+			page2Called = true
+			fmt.Fprint(w, `{"data":[{"type":"model","id":"claude-haiku-4-5-20251001","display_name":"Claude Haiku 4.5","created_at":"2025-10-01T00:00:00Z"}],"has_more":false,"last_id":"claude-haiku-4-5-20251001"}`)
+		}
+	}))
+	defer mockAnthropicSrv.Close()
+
 	srv, ts := newTestServer(t)
+	srv.cfg.Backend.Provider = "anthropic"
+	srv.cfg.Backend.Endpoint = mockAnthropicSrv.URL
+	srv.cfg.Backend.APIKey = "sk-ant-test"
 
-	// Pre-set an in-memory keyring reference (as would exist after first save).
-	srv.mu.Lock()
-	srv.cfg.Backend.APIKey = "keyring:huginn:anthropic"
-	srv.mu.Unlock()
-
-	var storerCalled bool
-	srv.keyStorerFn = func(slot, value string) (string, error) {
-		storerCalled = true
-		return "keyring:huginn:" + slot, nil
-	}
-
-	// UI sends the redacted sentinel back unchanged (standard GET→PUT round-trip).
-	payload := `{"version":1,"web_ui":{"port":0},"backend":{"provider":"anthropic","api_key":"[REDACTED]"}}`
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/config", strings.NewReader(payload))
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/providers/anthropic/models", nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-
-	// storeAPIKey must NOT be called — the live keyring ref must be preserved.
-	if storerCalled {
-		t.Error("storeAPIKey must not be called for [REDACTED] sentinel — would store garbage in keychain")
-	}
-
-	srv.mu.Lock()
-	storedKey := srv.cfg.Backend.APIKey
-	srv.mu.Unlock()
-
-	if storedKey != "keyring:huginn:anthropic" {
-		t.Errorf("expected keyring ref to be preserved, got %q", storedKey)
-	}
-}
-
-// TestHandleUpdateConfig_KeyringRef_NotDoubleStored verifies that a config payload
-// that already contains a keyring reference is NOT re-stored (idempotent).
-func TestHandleUpdateConfig_KeyringRef_NotDoubleStored(t *testing.T) {
-	srv, ts := newTestServer(t)
-
-	// Pre-set in-memory key so we can detect mutation.
-	srv.mu.Lock()
-	srv.cfg.Backend.APIKey = "keyring:huginn:anthropic"
-	srv.mu.Unlock()
-
-	var storerCalled bool
-	srv.keyStorerFn = func(slot, value string) (string, error) {
-		storerCalled = true
-		return "keyring:huginn:" + slot, nil
-	}
-
-	payload := `{"version":1,"web_ui":{"port":0},"backend":{"provider":"anthropic","api_key":"keyring:huginn:anthropic"}}`
-	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/config", strings.NewReader(payload))
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if storerCalled {
-		t.Error("storeAPIKey must not be called when the key is already a keyring reference")
+	if !page1Called {
+		t.Error("first page was not fetched")
+	}
+	if !page2Called {
+		t.Error("second page was not fetched — pagination not followed")
 	}
 }

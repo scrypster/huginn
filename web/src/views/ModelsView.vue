@@ -155,7 +155,7 @@
                       :type="showApiKey ? 'text' : 'password'"
                       :placeholder="`Your ${providerDisplayName} API key or $ENV_VAR`"
                       class="w-full bg-huginn-surface border border-huginn-border rounded-lg px-3 py-1.5 pr-9 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors" />
-                    <button @click="showApiKey = !showApiKey"
+                    <button v-if="!isApiKeyRedacted" @click="showApiKey = !showApiKey"
                       class="absolute right-2.5 top-1/2 -translate-y-1/2 text-huginn-muted hover:text-huginn-text transition-colors">
                       <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                         <path v-if="!showApiKey" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle v-if="!showApiKey" cx="12" cy="12" r="3" />
