@@ -449,7 +449,7 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	var cloudModels []any
 	if s.cfg.Backend.Provider != "" && s.cfg.Backend.Provider != "ollama" {
 		provider := s.cfg.Backend.Provider
-		apiKey := s.cfg.Backend.ResolvedAPIKey()
+		apiKey, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey)
 		if apiKey != "" {
 			endpoint := s.cfg.Backend.Endpoint
 			var fetched []providerModel
@@ -474,6 +474,8 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 			if fetchErr != nil {
 				if cached, cacheErr := readProviderModelsCache(provider); cacheErr == nil {
 					fetched = cached
+				} else if provider == "anthropic" {
+					fetched = anthropicKnownModels
 				}
 			} else if fetched != nil {
 				writeProviderModelsCache(provider, fetched)
