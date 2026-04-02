@@ -411,8 +411,12 @@ func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, re
 				// No activity for stallTimeout — abort the stream.
 				slog.Warn("anthropic: SSE stream idle timeout, aborting",
 					"timeout", stallTimeout)
-				resp.Body.Close()
+				// Cancel the context BEFORE closing the body so that by the
+				// time the scanner sees an I/O error, streamCtx.Err() is
+				// already set and the caller can distinguish an idle-timeout
+				// abort from a genuine network error.
 				streamCancel()
+				resp.Body.Close()
 				return
 			}
 		}
@@ -544,7 +548,14 @@ func (b *AnthropicBackend) parseContentBlockDelta(data string, result *ChatRespo
 		result.Content += text
 		if req.OnEvent != nil {
 			req.OnEvent(StreamEvent{Type: StreamText, Content: text})
-		} else if req.OnToken != nil {
+		}
+		// Always call OnToken when set — even when OnEvent is also set — so that
+		// callers relying on OnToken for content accumulation and WS "token"
+		// messages receive every text chunk. The external (OpenAI/Ollama) backend
+		// already does this; the Anthropic backend was using else-if which caused
+		// OnToken to be silently skipped, resulting in empty assistant messages
+		// after tool-call turns (no content persisted, no tokens streamed to UI).
+		if req.OnToken != nil {
 			req.OnToken(text)
 		}
 

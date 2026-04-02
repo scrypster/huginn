@@ -97,6 +97,56 @@ func TestApplyToolbelt_ExternalToolbeltOnlyReturnsExternal(t *testing.T) {
 	}
 }
 
+// TestApplyToolbelt_WildcardIncludesDelegationToolsWhenTaggedBuiltin verifies
+// that delegation tools (delegate_to_agent, list_team_status, recall_thread_result)
+// are visible to agents with LocalTools: ["*"] when tagged as "builtin".
+// This is critical for channel-based delegation to work.
+func TestApplyToolbelt_WildcardIncludesDelegationToolsWhenTaggedBuiltin(t *testing.T) {
+	reg := buildLocalTestRegistry()
+	// Add delegation tools and tag them as builtin (matches main.go wiring)
+	for _, name := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		reg.Register(&localTestTool{name: name})
+	}
+	reg.TagTools([]string{"delegate_to_agent", "list_team_status", "recall_thread_result"}, "builtin")
+
+	ag := &agents.Agent{Name: "Tom", LocalTools: []string{"*"}}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+
+	names := map[string]bool{}
+	for _, s := range schemas {
+		names[s.Function.Name] = true
+	}
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("expected %q in schemas with LocalTools=[*], got %v", expected, names)
+		}
+	}
+}
+
+// TestApplyToolbelt_DelegationToolsInvisibleWhenUntagged verifies that without
+// the "builtin" tag, delegation tools are NOT visible via LocalTools: ["*"].
+// This was the root cause of delegation not working before the fix.
+func TestApplyToolbelt_DelegationToolsInvisibleWhenUntagged(t *testing.T) {
+	reg := buildLocalTestRegistry()
+	// Add delegation tools WITHOUT tagging them (pre-fix behavior)
+	for _, name := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		reg.Register(&localTestTool{name: name})
+	}
+
+	ag := &agents.Agent{Name: "Tom", LocalTools: []string{"*"}}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+
+	names := map[string]bool{}
+	for _, s := range schemas {
+		names[s.Function.Name] = true
+	}
+	for _, notExpected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if names[notExpected] {
+			t.Errorf("untagged %q should NOT appear with LocalTools=[*]; this test validates the pre-fix behavior", notExpected)
+		}
+	}
+}
+
 func TestApplyToolbelt_BothLocalAndExternal(t *testing.T) {
 	reg := buildLocalTestRegistry()
 	ag := &agents.Agent{

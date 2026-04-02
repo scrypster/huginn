@@ -56,11 +56,12 @@ type AuditEntry struct {
 
 // FinishSummary is the structured output from a completed thread.
 type FinishSummary struct {
-	Summary       string   // human-readable narrative
-	FilesModified []string // paths written
-	KeyDecisions  []string // important choices made
-	Artifacts     []string // references to outputs
-	Status        string   // "completed" | "blocked" | "needs_review" | "completed-with-timeout" | "error"
+	Summary         string   // human-readable narrative
+	FilesModified   []string // paths written
+	KeyDecisions    []string // important choices made
+	Artifacts       []string // references to outputs
+	Status          string   // "completed" | "blocked" | "needs_review" | "completed-with-timeout" | "error"
+	ParentMessageID string   // ID of the chat message that triggered this thread (for reply threading)
 }
 
 // CreateParams holds arguments for ThreadManager.Create.

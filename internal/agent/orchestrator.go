@@ -38,6 +38,21 @@ func GetSessionID(ctx context.Context) string {
 	return v
 }
 
+type parentMessageIDCtxKey struct{}
+
+// SetParentMessageID returns a new context with the given parent message ID attached.
+// Used by the WS handler so the delegate_to_agent tool can thread replies under
+// the user message that triggered delegation.
+func SetParentMessageID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, parentMessageIDCtxKey{}, id)
+}
+
+// GetParentMessageID retrieves the parent message ID set by SetParentMessageID. Returns "" if not set.
+func GetParentMessageID(ctx context.Context) string {
+	v, _ := ctx.Value(parentMessageIDCtxKey{}).(string)
+	return v
+}
+
 // State represents the orchestrator's current phase.
 type State int
 

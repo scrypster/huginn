@@ -405,6 +405,26 @@ export async function setupApiMocks(page: Page) {
     route.fulfill({ json: { messages: [], next_cursor: '' } })
   )
 
+  // 22. Inbox summary (new endpoint for unread badge)
+  await page.route('**/api/v1/inbox/summary', route =>
+    route.fulfill({ json: { unread: 0, items: [] } })
+  )
+
+  // 23. Skills list
+  await page.route('**/api/v1/skills', route =>
+    route.fulfill({ json: [] })
+  )
+
+  // 24. Session messages (GET /api/v1/sessions/*/messages*)
+  await page.route('**/api/v1/sessions/*/messages*', route =>
+    route.fulfill({ json: [] })
+  )
+
+  // 25. Container threads (GET /api/v1/containers/*/threads)
+  await page.route('**/api/v1/containers/*/threads', route =>
+    route.fulfill({ json: [] })
+  )
+
   // 21a. Space sessions (more specific — registered before spaces/**)
   await page.route('**/api/v1/spaces/*/sessions', route =>
     route.fulfill({ json: [] })

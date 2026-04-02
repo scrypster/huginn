@@ -348,3 +348,6 @@ func (s *stubSpaceStore) RemoveAgentFromAllSpaces(agentName string) (*spaces.Spa
 func (s *stubSpaceStore) ListSpaceMessages(spaceID string, before *spaces.SpaceMsgCursor, limit int) (spaces.SpaceMessagesResult, error) {
 	return spaces.SpaceMessagesResult{Messages: []spaces.SpaceMessage{}, NextCursor: ""}, nil
 }
+func (s *stubSpaceStore) GetChannelsForAgent(_ string) ([]*spaces.Space, error) {
+	return nil, nil
+}

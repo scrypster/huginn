@@ -263,16 +263,21 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 		sb.WriteString(", the lead agent for the \"")
 		sb.WriteString(spaceName)
 		sb.WriteString("\" channel. Route specialized tasks to the right team member and synthesize results.\n\n")
+		sb.WriteString("**Delegation protocol — use @mentions, NOT tools:**\n")
+		sb.WriteString("When delegating work to a team member, write a natural message that @mentions them with the full task.\n")
+		sb.WriteString("Do NOT use the delegate_to_agent tool in channels. Instead, write your delegation as a natural message:\n\n")
+		sb.WriteString("  GOOD: \"@Sam, please calculate 3+3 and give me a one-sentence answer.\"\n")
+		sb.WriteString("  GOOD: \"@Adam, can you list the top 3 best practices for Go unit tests? Keep it brief.\"\n")
+		sb.WriteString("  BAD:  \"@Sam is on it — check the thread for his answer.\" (too vague, not a real task)\n")
+		sb.WriteString("  BAD:  Using delegate_to_agent tool call (use @mention instead)\n\n")
+		sb.WriteString("The @mention triggers automatic thread creation — the named agent receives your message as their task and replies in a thread on your message, just like Slack.\n")
+		sb.WriteString("Your message IS the delegation — make it specific and actionable so the agent knows exactly what to do.\n\n")
 		sb.WriteString("**Main channel discipline — speak only when additive:**\n")
-		sb.WriteString("After delegating work, respond in the main channel ONLY when you have one of the following:\n")
-		sb.WriteString("1. A synthesized recommendation or next step that goes beyond what the team already said — genuine judgment, not a recap.\n")
-		sb.WriteString("2. A question that only the user can answer to unblock the team.\n")
-		sb.WriteString("3. A blocker or problem the user needs to know about.\n")
-		sb.WriteString("Do NOT summarize or narrate what team members said if their responses are already visible in the thread. ")
-		sb.WriteString("The user can read the thread. When work completes with nothing to add, stay silent — the thread badge signals completion.\n\n")
-		sb.WriteString("**Delegation protocol:** When assigning work to a team member, use @AgentName in your response.\n")
-		sb.WriteString("Example: \"@Sam please run the test coverage report and summarize the gaps.\"\n")
-		sb.WriteString("The @mention triggers automatic thread creation — the named agent receives the task and works in a dedicated thread visible to the team.\n\n")
+		sb.WriteString("After delegating, the thread badge shows progress. Only post again when you have:\n")
+		sb.WriteString("1. A synthesized recommendation that goes beyond what the team said.\n")
+		sb.WriteString("2. A question only the user can answer.\n")
+		sb.WriteString("3. A blocker the user needs to know about.\n")
+		sb.WriteString("Do NOT summarize or narrate what team members said — the user can read the thread.\n\n")
 		sb.WriteString("**Team members:**\n")
 	} else {
 		sb.WriteString("**Channel:** ")
@@ -287,6 +292,45 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 			desc = "specialist agent"
 		}
 		fmt.Fprintf(&sb, "- **%s**: %s\n", m.Name, desc)
+	}
+	return sb.String()
+}
+
+// ChannelRoster summarizes a channel for cross-space awareness in DMs.
+type ChannelRoster struct {
+	Name      string
+	LeadAgent string
+	Members   []SpaceMember
+}
+
+// BuildDMCrossSpaceContextBlock generates context for a lead agent in a DM,
+// listing the channels they participate in and the team members in each.
+// This gives the agent Slack-like awareness: "I lead these channels with
+// these team members, and I can delegate work to them."
+func BuildDMCrossSpaceContextBlock(selfName string, channels []ChannelRoster) string {
+	if len(channels) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n[Your Channels & Teams]\n")
+	sb.WriteString("You participate in the following team channels. When the user asks you to do something that involves a team member, ")
+	sb.WriteString("you can delegate work using the delegate_to_agent tool or @mention the agent.\n\n")
+	for _, ch := range channels {
+		sb.WriteString("**#")
+		sb.WriteString(ch.Name)
+		sb.WriteString("**")
+		if strings.EqualFold(selfName, ch.LeadAgent) {
+			sb.WriteString(" (you are the lead)")
+		}
+		sb.WriteString("\n")
+		for _, m := range ch.Members {
+			desc := m.Description
+			if desc == "" {
+				desc = "specialist agent"
+			}
+			fmt.Fprintf(&sb, "  - **%s**: %s\n", m.Name, desc)
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }

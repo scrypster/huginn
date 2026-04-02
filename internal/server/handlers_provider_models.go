@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/scrypster/huginn/internal/backend"
 )
 
 const providerModelsFetchTimeout = 5 * time.Second
@@ -79,7 +81,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		}
 		apiKey := ""
 		if s.cfg.Backend.Provider == "openrouter" {
-			apiKey = s.cfg.Backend.ResolvedAPIKey()
+			apiKey = func() string { k, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey); return k }()
 		}
 		models, fetchErr = fetchOpenRouterModels(endpoint, apiKey)
 
@@ -88,7 +90,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, []providerModel{})
 			return
 		}
-		apiKey := s.cfg.Backend.ResolvedAPIKey()
+		apiKey := func() string { k, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey); return k }()
 		if apiKey == "" {
 			jsonOK(w, []providerModel{})
 			return
@@ -104,7 +106,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, []providerModel{})
 			return
 		}
-		apiKey := s.cfg.Backend.ResolvedAPIKey()
+		apiKey := func() string { k, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey); return k }()
 		if apiKey == "" {
 			jsonOK(w, []providerModel{})
 			return
@@ -121,6 +123,13 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if fetchErr != nil {
+		// For Anthropic, always fall back to the known model list so the UI
+		// remains usable even when the API is unreachable or returns an auth
+		// error (which can be transient, not necessarily a bad key).
+		if provider == "anthropic" {
+			jsonOK(w, anthropicKnownModels)
+			return
+		}
 		cached, cacheErr := readProviderModelsCache(provider)
 		if cacheErr != nil {
 			jsonError(w, http.StatusBadGateway, "fetch models: "+fetchErr.Error())
@@ -328,55 +337,101 @@ func openAIModelMeta(id string) (contextLength int, description string, tags []s
 
 // ── Anthropic ────────────────────────────────────────────────────────────────
 
+// anthropicKnownModels are the current-generation models always shown regardless
+// of what the /v1/models API returns (some keys/tiers may not list all models).
+var anthropicKnownModels = []providerModel{
+	{ID: "claude-opus-4-6", Name: "Claude Opus 4.6", Description: anthropicDescription("claude-opus-4-6"), ContextLength: 200000, Tags: anthropicTags("claude-opus-4-6")},
+	{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6", Description: anthropicDescription("claude-sonnet-4-6"), ContextLength: 200000, Tags: anthropicTags("claude-sonnet-4-6")},
+	{ID: "claude-haiku-4-5-20251001", Name: "Claude Haiku 4.5", Description: anthropicDescription("claude-haiku-4-5-20251001"), ContextLength: 200000, Tags: anthropicTags("claude-haiku-4-5-20251001")},
+}
+
 func fetchAnthropicModels(endpoint, apiKey string) ([]providerModel, error) {
-	req, err := http.NewRequest(http.MethodGet, endpoint+"/v1/models", nil)
-	if err != nil {
-		return nil, err
+	client := &http.Client{Timeout: providerModelsFetchTimeout}
+	type rawModel struct {
+		Type        string `json:"type"`
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+		CreatedAt   string `json:"created_at"`
 	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := (&http.Client{Timeout: providerModelsFetchTimeout}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch Anthropic models: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("invalid Anthropic API key")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch Anthropic models: HTTP %d", resp.StatusCode)
+	type page struct {
+		Data    []rawModel `json:"data"`
+		HasMore bool       `json:"has_more"`
+		LastID  string     `json:"last_id"`
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
+	seen := make(map[string]bool)
+	var apiModels []providerModel
+
+	afterID := ""
+	for {
+		url := endpoint + "/v1/models?limit=100"
+		if afterID != "" {
+			url += "&after_id=" + afterID
+		}
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetch Anthropic models: %w", err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("Anthropic API returned HTTP %d — key may be invalid or Anthropic is experiencing an auth service issue", resp.StatusCode)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("fetch Anthropic models: HTTP %d", resp.StatusCode)
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		var p page
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, fmt.Errorf("parse Anthropic response: %w", err)
+		}
+
+		for _, m := range p.Data {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			apiModels = append(apiModels, providerModel{
+				ID:            m.ID,
+				Name:          m.DisplayName,
+				Description:   anthropicDescription(m.ID),
+				ContextLength: 200000,
+				Tags:          anthropicTags(m.ID),
+				CreatedAt:     m.CreatedAt,
+			})
+		}
+
+		if !p.HasMore || p.LastID == "" {
+			break
+		}
+		afterID = p.LastID
 	}
 
-	var raw struct {
-		Data []struct {
-			Type        string `json:"type"`
-			ID          string `json:"id"`
-			DisplayName string `json:"display_name"`
-			CreatedAt   string `json:"created_at"`
-		} `json:"data"`
+	// Merge known models first, then append any additional models from the API
+	// that aren't already covered. This ensures current-gen models always appear
+	// even if the API key/tier doesn't list them.
+	merged := make([]providerModel, 0, len(anthropicKnownModels)+len(apiModels))
+	knownIDs := make(map[string]bool, len(anthropicKnownModels))
+	for _, m := range anthropicKnownModels {
+		merged = append(merged, m)
+		knownIDs[m.ID] = true
 	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("parse Anthropic response: %w", err)
+	for _, m := range apiModels {
+		if !knownIDs[m.ID] {
+			merged = append(merged, m)
+		}
 	}
-
-	models := make([]providerModel, 0, len(raw.Data))
-	for _, m := range raw.Data {
-		models = append(models, providerModel{
-			ID:            m.ID,
-			Name:          m.DisplayName,
-			Description:   anthropicDescription(m.ID),
-			ContextLength: 200000,
-			Tags:          anthropicTags(m.ID),
-			CreatedAt:     m.CreatedAt,
-		})
-	}
-	return models, nil
+	return merged, nil
 }
 
 func anthropicDescription(id string) string {

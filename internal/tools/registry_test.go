@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os/exec"
 	"sort"
 	"sync"
 	"testing"
@@ -324,6 +325,9 @@ func TestRegistry_ConcurrentRegisterAndBlock(t *testing.T) {
 // TestGitHubCLIToolNames_AllRegistered verifies that all names returned by
 // GitHubCLIToolNames are actually registered when RegisterGitHubTools is called.
 func TestGitHubCLIToolNames_AllRegistered(t *testing.T) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		t.Skip("gh CLI not installed, skipping")
+	}
 	reg := NewRegistry()
 	RegisterGitHubTools(reg)
 	names := GitHubCLIToolNames()

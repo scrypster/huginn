@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/spaces"
+	"github.com/scrypster/huginn/internal/workforce"
 )
 
 // serverEpoch is a random uint64 generated at process startup. It is stamped
@@ -700,6 +702,150 @@ func isAgentNameChar(c byte) bool {
 	return isAgentNameStart(c) || (c >= '0' && c <= '9') || c == '-' || c == '_'
 }
 
+// InjectSpaceContext builds and attaches space context (team roster, descriptions,
+// delegation instructions) to the context so that ChatWithAgent can inject it into
+// the system prompt. This is the critical wiring that makes agents aware of their
+// team members and their capabilities in channel contexts.
+//
+// For non-space sessions or when the space store is not configured, the original
+// context is returned unchanged.
+func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *agents.Agent) context.Context {
+	if s.spaceStore == nil || s.store == nil || sessionID == "" {
+		return ctx
+	}
+	sess, loadErr := s.store.Load(sessionID)
+	if loadErr != nil || sess.SpaceID() == "" {
+		return ctx
+	}
+	sp, spErr := s.spaceStore.GetSpace(sess.SpaceID())
+	if spErr != nil || sp == nil {
+		return ctx
+	}
+
+	// DMs get cross-space channel awareness so the lead agent knows about
+	// channels they participate in and can delegate work to team members.
+	if sp.Kind == spaces.KindDM {
+		selfName := ""
+		if ag != nil {
+			selfName = ag.Name
+		}
+		if selfName != "" {
+			channels, chErr := s.spaceStore.GetChannelsForAgent(selfName)
+			if chErr == nil && len(channels) > 0 {
+				// Load agent descriptions for all members.
+				loader := s.agentLoader
+				if loader == nil {
+					loader = agents.LoadAgents
+				}
+				cfg, cfgErr := loader()
+				descMap := make(map[string]string)
+				if cfgErr == nil {
+					for _, def := range cfg.Agents {
+						if def.Description != "" {
+							descMap[def.Name] = def.Description
+						}
+					}
+				}
+				var rosters []agent.ChannelRoster
+				for _, ch := range channels {
+					var members []agent.SpaceMember
+					// Include lead agent
+					members = append(members, agent.SpaceMember{
+						Name: ch.LeadAgent, Description: descMap[ch.LeadAgent],
+					})
+					for _, m := range ch.Members {
+						if !strings.EqualFold(m, ch.LeadAgent) {
+							members = append(members, agent.SpaceMember{
+								Name: m, Description: descMap[m],
+							})
+						}
+					}
+					rosters = append(rosters, agent.ChannelRoster{
+						Name: ch.Name, LeadAgent: ch.LeadAgent, Members: members,
+					})
+				}
+				block := agent.BuildDMCrossSpaceContextBlock(selfName, rosters)
+				if block != "" {
+					ctx = workforce.WithSpaceContext(ctx, block)
+				}
+			}
+		}
+		return ctx
+	}
+
+	// Only channels with members get full team context.
+	if sp.Kind != spaces.KindChannel || len(sp.Members) == 0 {
+		return ctx
+	}
+
+	// Load agent descriptions from config for each member.
+	loader := s.agentLoader
+	if loader == nil {
+		loader = agents.LoadAgents
+	}
+	cfg, cfgErr := loader()
+	descMap := make(map[string]string)
+	if cfgErr == nil {
+		for _, def := range cfg.Agents {
+			if def.Description != "" {
+				descMap[def.Name] = def.Description
+			}
+		}
+	}
+
+	// Build SpaceMember list with descriptions.
+	selfName := ""
+	if ag != nil {
+		selfName = ag.Name
+	}
+	var members []agent.SpaceMember
+	for _, m := range sp.Members {
+		members = append(members, agent.SpaceMember{
+			Name:        m,
+			Description: descMap[m],
+		})
+	}
+	// Include lead agent if not already in members list.
+	leadInMembers := false
+	for _, m := range sp.Members {
+		if strings.EqualFold(m, sp.LeadAgent) {
+			leadInMembers = true
+			break
+		}
+	}
+	if !leadInMembers {
+		members = append([]agent.SpaceMember{{
+			Name:        sp.LeadAgent,
+			Description: descMap[sp.LeadAgent],
+		}}, members...)
+	}
+
+	block := agent.BuildSpaceContextBlock(sp.Name, sp.Kind, selfName, sp.LeadAgent, members)
+	if block != "" {
+		ctx = workforce.WithSpaceContext(ctx, block)
+	}
+
+	// Build channel-recent summary from the last few messages.
+	if msgResult, msgErr := s.spaceStore.ListSpaceMessages(sp.ID, nil, 15); msgErr == nil && len(msgResult.Messages) > 0 {
+		var recentBuf strings.Builder
+		recentBuf.WriteString("\n\n[Recent Channel Messages]\n")
+		for _, m := range msgResult.Messages {
+			speaker := m.Agent
+			if speaker == "" {
+				speaker = m.Role
+			}
+			content := m.Content
+			if len(content) > 200 {
+				content = content[:200] + "…"
+			}
+			fmt.Fprintf(&recentBuf, "**%s**: %s\n", speaker, content)
+		}
+		ctx = workforce.WithChannelRecent(ctx, recentBuf.String())
+	}
+
+	return ctx
+}
+
 func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 	switch msg.Type {
 	case "chat":
@@ -726,12 +872,17 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			var assistantBuf strings.Builder
 			// collectedToolCalls accumulates tool results for persistence with the assistant message.
 			var collectedToolCalls []session.PersistedToolCall
+			// Pre-generate assistant message ID so mentionDelegate can parent
+			// threads under the assistant's @mention message (Slack-like UX)
+			// rather than the user's message.
+			assistantMsgID := session.NewID()
 			onToken := func(token string) {
 				assistantBuf.WriteString(token)
-				c.send <- WSMessage{Type: "token", Content: token, SessionID: sessionID}
+				// Use safeSend to avoid panic if client disconnects mid-stream.
+				c.safeSend(WSMessage{Type: "token", Content: token, SessionID: sessionID})
 			}
 			onEvent := func(ev backend.StreamEvent) {
-				c.send <- streamEventToWS(ev, sessionID)
+				c.safeSend(streamEventToWS(ev, sessionID))
 				// Capture tool results so they're persisted with the assistant message.
 				if ev.Type == backend.StreamToolResult && ev.Payload != nil {
 					tc := session.PersistedToolCall{
@@ -747,62 +898,113 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			}
 
 			ag := s.resolveAgentForMessage(sessionID, userMsg)
+
+			// Pre-generate the user message ID so the delegate_to_agent tool can
+			// thread replies under it. The same ID is reused in persistAccumulated.
+			userMsgID := session.NewID()
+
+			// Build space context (channel team roster + descriptions) and inject
+			// it into the context so BuildPersonaPromptWithMemory can pick it up.
+			// This is the critical wiring that makes the lead agent aware of its
+			// team members and their capabilities for intelligent delegation.
+			chatCtx := c.ctx
+			chatCtx = s.InjectSpaceContext(chatCtx, sessionID, ag)
+			chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)
+
 			var err error
 			if ag != nil {
-				err = s.orch.ChatWithAgent(c.ctx, ag, userMsg, sessionID, onToken, nil, onEvent)
+				err = s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, nil, onEvent)
 			} else {
 				// No agents configured — fall back to generic Chat.
-				err = s.orch.Chat(c.ctx, userMsg, onToken, onEvent)
+				err = s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
 			}
-			if err != nil {
-				logger.Error("chat completion", "session_id", sessionID, "err", err)
-				c.send <- WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID, RunID: runID}
-				return
-			}
-			c.send <- WSMessage{Type: "done", SessionID: sessionID, RunID: runID}
-
-			// Persist user + assistant messages to the session store so history
-			// survives page reload. Also emits space_activity for unseen badges.
-			// Skipped when the session has no store entry (non-space sessions that
-			// were never persisted via handleCreateSession).
-			if s.store != nil && sessionID != "" {
-				if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
-					agentName := ""
-					if ag != nil {
-						agentName = ag.Name
-					}
-					now := time.Now().UTC()
-					if appendErr := s.store.Append(sess, session.SessionMessage{
-						ID:      session.NewID(),
-						Role:    "user",
-						Content: userMsg,
-						Ts:      now,
-					}); appendErr != nil {
-						logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
-					}
-					// Persist assistant message when there is response content or tool calls.
-					if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
-						assistantMsg := session.SessionMessage{
-							ID:        session.NewID(),
-							Role:      "assistant",
-							Content:   assistantBuf.String(),
-							Agent:     agentName,
-							Ts:        time.Now().UTC(),
-							ToolCalls: collectedToolCalls,
-						}
-						if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
-							logger.Error("ws chat: failed to persist assistant message", "session_id", sessionID, "err", appendErr)
-						}
-					}
-					s.emitSpaceActivity(sess.SpaceID())
+			// persistAccumulated saves the user message and whatever assistant
+			// content/tool-calls have been accumulated so far. Called on
+			// success (done), disconnect (context cancelled mid-stream),
+			// and real errors.
+			persistAccumulated := func(errContent string) {
+				if s.store == nil || sessionID == "" {
+					return
 				}
+				sess, loadErr := s.store.Load(sessionID)
+				if loadErr != nil {
+					return
+				}
+				agentName := ""
+				if ag != nil {
+					agentName = ag.Name
+				}
+				now := time.Now().UTC()
+				if appendErr := s.store.Append(sess, session.SessionMessage{
+					ID: userMsgID, Role: "user", Content: userMsg, Ts: now,
+				}); appendErr != nil {
+					logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
+				}
+				// When we have accumulated response content or tool calls, persist them.
+				if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
+					assistantMsg := session.SessionMessage{
+						ID:        assistantMsgID,
+						Role:      "assistant",
+						Content:   assistantBuf.String(),
+						Agent:     agentName,
+						Ts:        time.Now().UTC(),
+						ToolCalls: collectedToolCalls,
+					}
+					if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
+						logger.Error("ws chat: failed to persist assistant message", "session_id", sessionID, "err", appendErr)
+					}
+				} else if errContent != "" {
+					// No accumulated content but there was an error — persist
+					// an error placeholder so the conversation log is complete.
+					_ = s.store.Append(sess, session.SessionMessage{
+						ID: session.NewID(), Role: "assistant",
+						Content: errContent,
+						Agent:   agentName,
+						Ts:      time.Now().UTC(),
+					})
+				}
+				s.emitSpaceActivity(sess.SpaceID())
 			}
 
-			// Parse @AgentName mentions and spawn threads for any matched agents.
-			// This is the fallback delegation path for models that don't support tools.
-			logger.Info("ws chat done", "session_id", sessionID, "mentionDelegate_set", mentionDelegate != nil, "user_msg", userMsg)
-			if mentionDelegate != nil {
-				mentionDelegate(c.ctx, sessionID, userMsg, "")
+			if err != nil {
+				// Distinguish client disconnect from real backend errors.
+				// A disconnect is when the client's WS context was cancelled
+				// (c.ctx.Err() != nil). Backend timeouts or API errors should
+				// still be reported as errors even if they wrap context.DeadlineExceeded.
+				isDisconnect := c.ctx.Err() != nil
+
+				if isDisconnect {
+					logger.Info("ws chat: client disconnected mid-stream, persisting accumulated content",
+						"session_id", sessionID, "buf_len", assistantBuf.Len(), "tool_calls", len(collectedToolCalls))
+					persistAccumulated("")
+				} else {
+					logger.Error("chat completion", "session_id", sessionID, "err", err)
+					c.safeSend(WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID, RunID: runID})
+					persistAccumulated("⚠️ " + err.Error())
+				}
+				// Fall through to mentionDelegate — even on disconnect/error the
+				// assistant may have produced @mentions that should spawn threads.
+				// The mentionDelegate uses srv.Context() for spawned threads so a
+				// cancelled c.ctx won't prevent them from running.
+			} else {
+				c.safeSend(WSMessage{Type: "done", SessionID: sessionID, RunID: runID, Payload: map[string]any{
+					"message_id": assistantMsgID,
+				}})
+
+				// Persist user + assistant messages to the session store so history
+				// survives page reload. Also emits space_activity for unseen badges.
+				persistAccumulated("")
+			}
+
+			// Parse @AgentName mentions in the assistant's response and spawn threads
+			// for any matched agents. This runs on BOTH success and error/disconnect
+			// paths because the assistant may have streamed @mentions before the error.
+			// The mentionDelegate in main.go uses srv.Context() (not c.ctx) for spawned
+			// threads, so even a cancelled client context won't prevent delegation.
+			assistantResponse := assistantBuf.String()
+			logger.Info("ws chat done", "session_id", sessionID, "mentionDelegate_set", mentionDelegate != nil, "assistant_response_len", len(assistantResponse), "had_error", err != nil)
+			if mentionDelegate != nil && assistantResponse != "" {
+				mentionDelegate(c.ctx, sessionID, assistantResponse, assistantMsgID)
 			}
 		}(runID)
 	case "ping":
