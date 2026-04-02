@@ -124,10 +124,18 @@ func (r *Runner) Run(ctx context.Context) {
 		SessionStore: sessionStore,
 		Outbox:       outbox,
 	})
-	go hb.Start(ctx)
+	// WaitGroup covers the heartbeater and the outbox flusher so that
+	// relayStore.Close() (deferred above) does not run until both goroutines
+	// have exited. Without this, a heartbeat tick that fires after ctx is
+	// cancelled can call sessionStore.List() on a closed pebble DB and panic.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hb.Start(ctx)
+	}()
 
 	// Periodic outbox flush: drain queued messages every 5 seconds.
-	var wg sync.WaitGroup
 	if outbox != nil {
 		wg.Add(1)
 		go func() {
