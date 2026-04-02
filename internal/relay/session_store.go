@@ -63,7 +63,11 @@ func (s *SessionStore) List() ([]SessionMeta, error) {
 	var sessions []SessionMeta
 	prefix := []byte(sessionPrefix)
 
-	iter, err := s.db.DB().NewIter(&pebble.IterOptions{
+	pdb := s.db.DB()
+	if pdb == nil {
+		return nil, fmt.Errorf("session_store: store is closed")
+	}
+	iter, err := pdb.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: incrementLastByte(prefix),
 	})
