@@ -468,6 +468,25 @@ func (o *Orchestrator) TaskWithAgent(
 
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
 
+	// Auto-inject read-only team tools when the agent is in a channel context.
+	// delegate_to_agent is NOT injected — channels use @mention-based delegation
+	// so the lead agent writes natural messages like "@Sam, please do X" and the
+	// mention parser (CreateFromMentions) spawns the thread automatically.
+	if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
+		delegationToolNames := []string{"list_team_status", "recall_thread_result"}
+		seen := make(map[string]bool, len(schemas))
+		for _, s := range schemas {
+			seen[s.Function.Name] = true
+		}
+		for _, name := range delegationToolNames {
+			if !seen[name] {
+				if t, ok := vr.sessionReg.Get(name); ok {
+					schemas = append(schemas, t.Schema())
+				}
+			}
+		}
+	}
+
 	// Create isolated session environment for this agent run.
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
 	if sessErr != nil {
@@ -624,6 +643,25 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 
 		ctx = SetSessionID(ctx, sessionID)
 		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+
+		// Auto-inject read-only team tools when the agent is in a channel context.
+		// delegate_to_agent is NOT injected — channels use @mention-based delegation
+		// so the lead agent writes natural messages like "@Sam, please do X" and the
+		// mention parser (CreateFromMentions) spawns the thread automatically.
+		if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
+			delegationToolNames := []string{"list_team_status", "recall_thread_result"}
+			seen := make(map[string]bool, len(schemas))
+			for _, s := range schemas {
+				seen[s.Function.Name] = true
+			}
+			for _, name := range delegationToolNames {
+				if !seen[name] {
+					if t, ok := vr.sessionReg.Get(name); ok {
+						schemas = append(schemas, t.Schema())
+					}
+				}
+			}
+		}
 
 		// Create isolated session environment for this agent run.
 		agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))

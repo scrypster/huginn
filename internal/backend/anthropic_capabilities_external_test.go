@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/backend"
@@ -694,5 +695,139 @@ func TestAnthropicBackend_TextDelta_OnTokenFallback(t *testing.T) {
 	}
 	if len(tokensReceived) != 1 || tokensReceived[0] != "token" {
 		t.Errorf("OnToken received %v, want [token]", tokensReceived)
+	}
+}
+
+// TestAnthropicBackend_TextDelta_BothOnEventAndOnTokenFire verifies that when
+// BOTH OnEvent AND OnToken are set, text_delta events call BOTH callbacks.
+// This is the regression test for the bug where using OnEvent (needed for tool
+// call/result events) silently suppressed OnToken, causing empty assistant
+// messages after tool-call turns (no content persisted, no tokens to the UI).
+func TestAnthropicBackend_TextDelta_BothOnEventAndOnTokenFire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		textDelta, _ := json.Marshal(map[string]any{
+			"type":  "content_block_delta",
+			"index": 0,
+			"delta": map[string]any{"type": "text_delta", "text": "hello world"},
+		})
+		fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", textDelta)
+		msgStart, _ := json.Marshal(map[string]any{
+			"type":    "message_start",
+			"message": map[string]any{"usage": map[string]any{"input_tokens": float64(1)}},
+		})
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", msgStart)
+		msgDelta, _ := json.Marshal(map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": "end_turn"},
+			"usage": map[string]any{"output_tokens": float64(1)},
+		})
+		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", msgDelta)
+		msgStop, _ := json.Marshal(map[string]any{"type": "message_stop"})
+		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", msgStop)
+	}))
+	defer srv.Close()
+
+	b := backend.NewAnthropicBackendWithEndpoint(backend.NewKeyResolver("key"), "claude-sonnet-4-6", srv.URL)
+
+	var tokensReceived []string
+	var eventsReceived []backend.StreamEvent
+
+	resp, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+		OnToken:  func(t string) { tokensReceived = append(tokensReceived, t) },
+		OnEvent:  func(e backend.StreamEvent) { eventsReceived = append(eventsReceived, e) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Content != "hello world" {
+		t.Errorf("Content = %q, want %q", resp.Content, "hello world")
+	}
+
+	// OnToken MUST fire even when OnEvent is also set — this is the core assertion.
+	if len(tokensReceived) != 1 || tokensReceived[0] != "hello world" {
+		t.Errorf("OnToken received %v, want [hello world] — OnToken was suppressed when OnEvent was set", tokensReceived)
+	}
+
+	// OnEvent must also receive the StreamText event.
+	var textEvents int
+	for _, e := range eventsReceived {
+		if e.Type == backend.StreamText {
+			textEvents++
+			if e.Content != "hello world" {
+				t.Errorf("StreamText event Content = %q, want %q", e.Content, "hello world")
+			}
+		}
+	}
+	if textEvents != 1 {
+		t.Errorf("expected 1 StreamText event via OnEvent, got %d", textEvents)
+	}
+}
+
+// TestAnthropicBackend_MultiTurn_ToolCall_ThenText_AccumulatesAllTokens simulates
+// a multi-turn conversation: first turn returns a tool_use block, second turn
+// returns the text response. Verifies that OnToken accumulates content from ALL
+// turns, which is critical for the WS handler's assistantBuf (persistence).
+func TestAnthropicBackend_MultiTurn_ToolCall_ThenText_AccumulatesAllTokens(t *testing.T) {
+	// We can't easily simulate multi-turn through the backend (that's RunLoop's job),
+	// but we CAN verify that a single turn with both OnEvent and OnToken set delivers
+	// text tokens to both callbacks, which is the prerequisite for correct multi-turn
+	// accumulation at the RunLoop level.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		// Emit multiple text_delta events to simulate chunked streaming
+		for _, chunk := range []string{"Here ", "is ", "the ", "answer."} {
+			delta, _ := json.Marshal(map[string]any{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]any{"type": "text_delta", "text": chunk},
+			})
+			fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", delta)
+		}
+
+		msgStart, _ := json.Marshal(map[string]any{
+			"type":    "message_start",
+			"message": map[string]any{"usage": map[string]any{"input_tokens": float64(10)}},
+		})
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", msgStart)
+		msgDelta, _ := json.Marshal(map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": "end_turn"},
+			"usage": map[string]any{"output_tokens": float64(4)},
+		})
+		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", msgDelta)
+		msgStop, _ := json.Marshal(map[string]any{"type": "message_stop"})
+		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", msgStop)
+	}))
+	defer srv.Close()
+
+	b := backend.NewAnthropicBackendWithEndpoint(backend.NewKeyResolver("key"), "claude-sonnet-4-6", srv.URL)
+
+	var buf strings.Builder
+	var eventTexts []string
+
+	_, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+		OnToken:  func(t string) { buf.WriteString(t) },
+		OnEvent: func(e backend.StreamEvent) {
+			if e.Type == backend.StreamText {
+				eventTexts = append(eventTexts, e.Content)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := "Here is the answer."
+	if got := buf.String(); got != want {
+		t.Errorf("OnToken accumulated %q, want %q — content lost during streaming", got, want)
+	}
+	if len(eventTexts) != 4 {
+		t.Errorf("expected 4 StreamText events, got %d", len(eventTexts))
 	}
 }

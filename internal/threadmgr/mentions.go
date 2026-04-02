@@ -127,7 +127,6 @@ func CreateFromMentions(
 			logger.Warn("CreateFromMentions: create failed", "agent", req.AgentName, "err", err)
 			continue
 		}
-		logger.Info("CreateFromMentions: thread created", "thread_id", t.ID, "agent", req.AgentName, "ready", tm.IsReady(t.ID))
 		if tm.IsReady(t.ID) {
 			tid := t.ID
 			dagFn := func() {

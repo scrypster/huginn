@@ -10,6 +10,7 @@ import (
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/session"
 )
 
@@ -139,14 +140,31 @@ func (tm *ThreadManager) SpawnThread(
 		tm.mu.RLock()
 		helpResolver := tm.helpResolver
 		completionNotifier := tm.completionNotifier
+		resolveBackend := tm.backendFor
 		tm.mu.RUnlock()
+
+		// Resolve the correct backend for this agent's provider. The raw `b`
+		// passed to SpawnThread is the fallback (often Ollama on localhost).
+		// Agents that specify a provider (e.g. "anthropic") need the resolver
+		// to get the right backend; without this Sam would talk to Ollama.
+		agentBackend := b
+		if resolveBackend != nil && reg != nil {
+			if ag, found := reg.ByName(agentID); found && ag.Provider != "" {
+				if resolved, err := resolveBackend(ag.Provider, ag.Endpoint, ag.APIKey, ag.GetModelID()); err == nil {
+					agentBackend = resolved
+				} else {
+					logger.Warn("SpawnThread: backend resolution failed, using fallback",
+						"thread_id", threadID, "agent", agentID, "provider", ag.Provider, "err", err)
+				}
+			}
+		}
 
 		// emitter is already snapshotted above (before the goroutine launch).
 
 		var injectedInput string
 		var tokenCounter int64
 		for {
-			result := tm.runOnce(threadCtx, threadID, agentID, injectedInput, sess, store, reg, b, broadcast, ca, dagFn, helpResolver, completionNotifier, emitter, &tokenCounter)
+			result := tm.runOnce(threadCtx, threadID, agentID, injectedInput, sess, store, reg, agentBackend, broadcast, ca, dagFn, helpResolver, completionNotifier, emitter, &tokenCounter)
 			if result.kind == loopDone {
 				return
 			}
@@ -328,7 +346,6 @@ func (tm *ThreadManager) runOnce(
 			}
 		}
 	}
-
 	// Build initial context messages.
 	history = buildContext(thread, store, tm, reg)
 

@@ -693,3 +693,36 @@ func (s *SQLiteSpaceStore) loadMembers(spaceID string) ([]string, error) {
 	}
 	return members, nil
 }
+
+// GetChannelsForAgent returns all non-archived channel spaces where agentName
+// is either the lead_agent or a member. Used for DM cross-space awareness so a
+// lead agent in a DM can know about the channels and teams they participate in.
+func (s *SQLiteSpaceStore) GetChannelsForAgent(agentName string) ([]*Space, error) {
+	rows, err := s.db.Read().Query(
+		`SELECT DISTINCT s.id FROM spaces s
+		 LEFT JOIN space_members sm ON sm.space_id = s.id
+		 WHERE s.kind = 'channel'
+		   AND s.archived_at IS NULL
+		   AND (s.lead_agent = ? OR sm.agent_name = ?)
+		 ORDER BY s.name`,
+		agentName, agentName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("spaces: channels for agent: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*Space
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		sp, loadErr := s.loadSpace(id)
+		if loadErr != nil {
+			continue // skip broken spaces
+		}
+		result = append(result, sp)
+	}
+	return result, rows.Err()
+}

@@ -70,6 +70,18 @@ func buildContextWithBudget(
 	snapshotMsgs := buildSnapshotMessages(t.SessionID, store, budget.Snapshot)
 	msgs = append(msgs, snapshotMsgs...)
 
+	// Ensure the conversation ends with a user message. Some providers
+	// (Anthropic) reject requests where the last message is an assistant
+	// message. When the session snapshot ends with an assistant message
+	// (common — the lead agent's @mention) we append the task as a user
+	// turn so the sub-agent knows what to do.
+	if len(msgs) > 0 && msgs[len(msgs)-1].Role != "user" {
+		msgs = append(msgs, backend.Message{
+			Role:    "user",
+			Content: t.Task,
+		})
+	}
+
 	return msgs
 }
 

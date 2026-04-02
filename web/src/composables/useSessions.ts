@@ -28,9 +28,16 @@ export interface ToolCallRecord {
 export interface DelegatedThread {
   threadId: string
   agentId: string
-  msgId?: string      // parent message ID for fetching thread messages (GET /api/v1/messages/{id}/thread)
+  msgId?: string          // parent message ID for fetching thread messages (GET /api/v1/messages/{id}/thread)
   done?: boolean
-  replyCount?: number // actual thread reply count from DB (for badge label)
+  replyCount?: number     // actual thread reply count from DB (for badge label)
+  inlineSummary?: string  // thread completion summary shown inline (Slack-style thread preview)
+}
+
+export interface ThreadReply {
+  id: string
+  agent: string
+  content: string
 }
 
 export interface ChatMessage {
@@ -42,6 +49,7 @@ export interface ChatMessage {
   streaming?: boolean
   toolCalls?: ToolCallRecord[]
   delegatedThreads?: DelegatedThread[]  // threads spawned by this message
+  threadReplies?: ThreadReply[]         // inline thread replies from agent_follow_up (Slack-style)
   replyCount?: number     // thread reply count (for badge display after hydration)
 }
 
@@ -187,12 +195,25 @@ export function useSessions() {
         })
         .map((m) => {
           const r = m as Record<string, unknown>
+          // Map persisted tool_calls so the "N tool calls · done" chip renders
+          // on page reload, not just during live streaming.
+          const rawToolCalls = r.tool_calls as Array<Record<string, unknown>> | undefined
+          const toolCalls: ToolCallRecord[] | undefined = rawToolCalls?.length
+            ? rawToolCalls.map(tc => ({
+                id: (tc.id as string) ?? '',
+                name: (tc.name as string) ?? '',
+                args: (tc.args as Record<string, unknown>) ?? {},
+                result: (tc.result as string | undefined) ?? undefined,
+                done: true,
+              }))
+            : undefined
           return {
             id: r.id as string,
             role: r.role as 'user' | 'assistant',
             content: r.content as string,
             agent: (r.agent as string | undefined) || undefined,
             createdAt: (r.ts as string | undefined) || undefined,
+            toolCalls,
           }
         })
       messagesBySession.value[sessionId] = msgs
