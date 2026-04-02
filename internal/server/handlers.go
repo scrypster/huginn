@@ -449,7 +449,7 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	var cloudModels []any
 	if s.cfg.Backend.Provider != "" && s.cfg.Backend.Provider != "ollama" {
 		provider := s.cfg.Backend.Provider
-		apiKey := s.cfg.Backend.ResolvedAPIKey()
+		apiKey, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey)
 		if apiKey != "" {
 			endpoint := s.cfg.Backend.Endpoint
 			var fetched []providerModel
@@ -474,6 +474,8 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 			if fetchErr != nil {
 				if cached, cacheErr := readProviderModelsCache(provider); cacheErr == nil {
 					fetched = cached
+				} else if provider == "anthropic" {
+					fetched = anthropicKnownModels
 				}
 			} else if fetched != nil {
 				writeProviderModelsCache(provider, fetched)
@@ -809,6 +811,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfg.WebUI.Bind != newCfg.WebUI.Bind
 	s.cfg = newCfg
 	s.mu.Unlock()
+	// Push the updated provider key into the live BackendCache so agents
+	// immediately inherit the new key without requiring a server restart.
+	// This must happen outside the server mutex; BackendCache has its own lock.
+	if s.backendCache != nil && newCfg.Backend.Provider != "" && newCfg.Backend.APIKey != "" {
+		s.backendCache.SetProviderKey(newCfg.Backend.Provider, newCfg.Backend.APIKey)
+	}
 	// Save config to disk
 	if err := s.cfg.Save(); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())

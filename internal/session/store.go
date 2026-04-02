@@ -53,6 +53,7 @@ const maxMessageContentBytes = 64 * 1024
 type Store struct {
 	baseDir              string
 	mu                   sync.Mutex // guards manifest update operations in SaveManifest
+	trimMu               sync.Mutex // guards trimMessagesIfNeeded to prevent concurrent trim races
 	MaxMessagesPerSession int        // 0 means use DefaultMaxMessagesPerSession
 
 	// appendMu is a per-session-ID mutex map that serialises concurrent JSONL
@@ -90,6 +91,8 @@ func (s *Store) maxMessages() int {
 // maxMessages entries. Called after Append when the count exceeds the cap.
 // The trim is best-effort — failures are logged but not surfaced to callers.
 func (s *Store) trimMessagesIfNeeded(id string) {
+	s.trimMu.Lock()
+	defer s.trimMu.Unlock()
 	limit := s.maxMessages()
 	all, err := s.TailMessages(id, limit+1) // read one extra to detect whether trim is needed
 	if err != nil || len(all) <= limit {

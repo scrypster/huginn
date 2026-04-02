@@ -14,7 +14,7 @@ import (
 func TestHandleUpdateAgent_InvalidColor_Returns422(t *testing.T) {
 	_, ts := newTestServer(t)
 
-	body := `{"name":"TestAgent","color":"notacolor"}`
+	body := `{"name":"TestAgent","model":"claude-sonnet-4-6","color":"notacolor"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/TestAgent", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -35,6 +35,36 @@ func TestHandleUpdateAgent_InvalidColor_Returns422(t *testing.T) {
 	}
 	if body2["error"] == "" {
 		t.Error("expected non-empty error message in response body")
+	}
+}
+
+// TestHandleUpdateAgent_MissingModel_Returns422 verifies that PUT to
+// /api/v1/agents/{name} without a model field is rejected with HTTP 422.
+// Regression: agents could be saved without a model, causing silent failures
+// at chat time (no helpful error, ghost notifications, broken DMs).
+func TestHandleUpdateAgent_MissingModel_Returns422(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	body := `{"name":"TestAgent"}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/TestAgent", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for missing model, got %d", resp.StatusCode)
+	}
+	var respBody map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(respBody["error"], "model") {
+		t.Errorf("expected 'model' in error message, got: %s", respBody["error"])
 	}
 }
 
@@ -121,7 +151,7 @@ func TestHandleUpdateAgent_RenameCollision_Returns409(t *testing.T) {
 	_, ts := newTestServer(t)
 
 	// Try to rename Alice to Bob (collision).
-	body := `{"name":"Bob","system_prompt":"test"}`
+	body := `{"name":"Bob","model":"test-model","system_prompt":"test"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/Alice", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -176,7 +206,7 @@ func TestHandleUpdateAgent_RenameToSameName_Returns200(t *testing.T) {
 	_, ts := newTestServer(t)
 
 	// Update Alice with the same name.
-	body := `{"name":"Alice","system_prompt":"updated"}`
+	body := `{"name":"Alice","model":"test-model","system_prompt":"updated"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/Alice", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -205,7 +235,7 @@ func TestHandleUpdateAgent_RenameToSameName_Returns200(t *testing.T) {
 func TestHandleUpdateAgent_InvalidPlasticity_Returns422(t *testing.T) {
 	_, ts := newTestServer(t)
 
-	body := `{"name":"TestAgent","plasticity":"turbo-charged"}`
+	body := `{"name":"TestAgent","model":"claude-sonnet-4-6","plasticity":"turbo-charged"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/TestAgent", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -233,7 +263,7 @@ func TestHandleUpdateAgent_InvalidPlasticity_Returns422(t *testing.T) {
 func TestHandleUpdateAgent_ValidPlasticity_Returns200(t *testing.T) {
 	_, ts := newTestServer(t)
 
-	body := `{"name":"TestAgent","plasticity":"knowledge-graph"}`
+	body := `{"name":"TestAgent","model":"claude-sonnet-4-6","plasticity":"knowledge-graph"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/TestAgent", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -254,7 +284,7 @@ func TestHandleUpdateAgent_ValidPlasticity_Returns200(t *testing.T) {
 func TestHandleUpdateAgent_InvalidMemoryMode_Returns422(t *testing.T) {
 	_, ts := newTestServer(t)
 
-	body := `{"name":"TestAgent","memory_mode":"aggressive"}`
+	body := `{"name":"TestAgent","model":"claude-sonnet-4-6","memory_mode":"aggressive"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/TestAgent", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -282,7 +312,7 @@ func TestHandleUpdateAgent_InvalidMemoryMode_Returns422(t *testing.T) {
 func TestHandleUpdateAgent_ValidMemoryMode_Returns200(t *testing.T) {
 	_, ts := newTestServer(t)
 
-	body := `{"name":"TestAgent","memory_mode":"immersive"}`
+	body := `{"name":"TestAgent","model":"claude-sonnet-4-6","memory_mode":"immersive"}`
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/TestAgent", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")

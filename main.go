@@ -2163,6 +2163,24 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	if cfg.Backend.Provider != "" && cfg.Backend.APIKey != "" {
 		serveCache.SetProviderKey(cfg.Backend.Provider, cfg.Backend.APIKey)
 	}
+	// Auto-register keychain convention keys for providers used by agents that
+	// don't carry a per-agent api_key and differ from the global backend provider.
+	// Convention (set by handleUpdateConfig / StoreAPIKey): keyring:huginn:<provider>.
+	// This fixes a gap where the user changes the global backend to a different
+	// provider (e.g. "ollama") while agents still reference "anthropic" — without
+	// this loop the anthropic key is in the keychain but never wired into the cache.
+	if agentDefsForKeys, loadErr := agentslib.LoadAgents(); loadErr == nil && agentDefsForKeys != nil {
+		for _, def := range agentDefsForKeys.Agents {
+			if def.Provider == "" || def.Provider == cfg.Backend.Provider {
+				continue // already handled above or no provider set
+			}
+			if def.APIKey != "" {
+				continue // agent carries its own key; no provider-level fallback needed
+			}
+			ref := fmt.Sprintf("keyring:huginn:%s", def.Provider)
+			serveCache.SetProviderKey(def.Provider, ref)
+		}
+	}
 	orch.SetBackendCache(serveCache)
 	orch.WithMachineID(relay.GetMachineID()) // stable 8-char hex, not cfg.MachineID (hostname-dependent)
 
@@ -2503,35 +2521,49 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		delegateTool := &threadmgr.DelegateToAgentTool{
 			Fn: func(ctx context.Context, p threadmgr.DelegateParams) threadmgr.DelegateResult {
 				sessionID := agent.GetSessionID(ctx)
+				logger.Info("delegate_to_agent: Fn called", "agent", p.AgentName, "task", p.Task, "session_id", sessionID)
 				if sessionID == "" {
+					logger.Error("delegate_to_agent: no session ID in context")
 					return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: no session ID in context")}
 				}
 
 				// Validate agent exists.
 				if _, found := agentReg.ByName(p.AgentName); !found {
+					logger.Error("delegate_to_agent: unknown agent", "agent", p.AgentName)
 					return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: unknown agent %q", p.AgentName)}
 				}
+				logger.Info("delegate_to_agent: agent validated", "agent", p.AgentName)
 
 				// Load the session for SpawnThread (may be a stub if not yet persisted).
 				sess, loadErr := sessStore.Load(sessionID)
 				if loadErr != nil {
+					logger.Warn("delegate_to_agent: session load failed, using stub", "err", loadErr)
 					sess = &session.Session{ID: sessionID}
 				}
+				logger.Info("delegate_to_agent: session loaded", "space_id", sess.SpaceID())
 
 				// Create the thread in the thread manager.
+				// Pull the parent message ID from context so the thread (and its
+				// eventual follow-up reply) is linked to the user message that
+				// triggered delegation, enabling reply threading in the UI.
+				parentMsgID := agent.GetParentMessageID(ctx)
 				t, createErr := tm.Create(threadmgr.CreateParams{
-					SessionID:      sessionID,
-					AgentID:        p.AgentName,
-					Task:           p.Task,
-					Rationale:      p.Rationale,
-					DependsOnHints: p.DependsOn,
-					SpaceID:        sess.SpaceID(),
+					SessionID:       sessionID,
+					AgentID:         p.AgentName,
+					Task:            p.Task,
+					Rationale:       p.Rationale,
+					DependsOnHints:  p.DependsOn,
+					SpaceID:         sess.SpaceID(),
+					ParentMessageID: parentMsgID,
 				})
 				if createErr != nil {
+					logger.Error("delegate_to_agent: thread create failed", "agent", p.AgentName, "err", createErr)
 					return threadmgr.DelegateResult{Err: createErr}
 				}
+				logger.Info("delegate_to_agent: thread created", "thread_id", t.ID, "agent", p.AgentName)
 
 				tm.ResolveDependencies(t.ID)
+				logger.Info("delegate_to_agent: dependencies resolved", "thread_id", t.ID, "ready", tm.IsReady(t.ID))
 
 				// Acquire file leases to detect conflicts.
 				if len(p.FileIntents) > 0 {
@@ -2550,15 +2582,33 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					srv.BroadcastToSession(sid, msgType, payload)
 				}
 
+				// Use the server's lifecycle context for spawned threads — NOT the
+				// request-scoped ctx which gets cancelled when the lead agent's
+				// chat response finishes. This was the root cause of delegation
+				// threads dying immediately after spawn.
+				spawnCtx := srv.Context()
+				if spawnCtx == nil {
+					logger.Error("delegate_to_agent: server context is nil, falling back to request ctx")
+					spawnCtx = ctx
+				}
+
+				// Check if context is already cancelled before spawning.
+				if spawnCtx.Err() != nil {
+					logger.Warn("delegate_to_agent: context already cancelled before spawn!", "thread_id", t.ID, "ctx_err", spawnCtx.Err())
+				}
+
 				// Spawn immediately if dependencies are met.
 				if tm.IsReady(t.ID) {
 					tid := t.ID
+					logger.Info("delegate_to_agent: spawning thread", "thread_id", tid, "agent", p.AgentName)
 					dagFn := func() {
-						tm.EvaluateDAG(ctx, sessionID, sessStore, sess, agentReg, b, broadcastFn, ca)
+						tm.EvaluateDAG(spawnCtx, sessionID, sessStore, sess, agentReg, b, broadcastFn, ca)
 					}
-					tm.SpawnThread(ctx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
+					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
+					logger.Info("delegate_to_agent: SpawnThread returned", "thread_id", tid)
 					return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true}
 				}
+				logger.Info("delegate_to_agent: thread not ready, queued", "thread_id", t.ID)
 				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false}
 			},
 		}
@@ -2592,6 +2642,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 		toolReg.Register(recallTool)
 
+		// Tag delegation tools as "builtin" so agents with LocalTools: ["*"]
+		// (i.e. "Allow all" in the UI) see them in their tool list. Without
+		// this tag, AllBuiltinSchemas() silently excludes them and the lead
+		// agent never knows it can delegate.
+		toolReg.TagTools([]string{
+			"delegate_to_agent",
+			"list_team_status",
+			"recall_thread_result",
+		}, "builtin")
+
 		// Auto-approve all tools in server mode — reuse the gate created above.
 		orch.SetTools(toolReg, serverGate)
 
@@ -2607,7 +2667,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			broadcastFn := func(sid, msgType string, payload map[string]any) {
 				srv.BroadcastToSession(sid, msgType, payload)
 			}
-			threadmgr.CreateFromMentions(ctx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm)
+			// Use server lifecycle context for spawned threads — the request
+			// ctx gets cancelled when the chat response finishes.
+			spawnCtx := srv.Context()
+			if spawnCtx == nil {
+				spawnCtx = ctx
+			}
+			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm)
 		})
 
 		// Wire automatic help resolution: when a sub-agent calls request_help,
@@ -2646,6 +2712,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return srv.ResolveAgent(sessionID)
 			},
 		}
+		// Wire ThreadLookup so Notify can stamp ParentMessageID for reply threading.
+		completionNotifier.ThreadLookup = tm.Get
+
 		// Wire lead-agent follow-up: when Sam finishes, Tom synthesizes and replies
 		// in the main chat so it feels like teammates communicating naturally.
 		// Runs in a goroutine (non-blocking); uses session-scoped WS broadcast.
@@ -2715,11 +2784,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// channel UI — tool calls during synthesis are implementation details.
 			noopToolEvent := func(string, map[string]any) {}
 
-			chatErr := orch.ChatWithAgent(ctx, ag, followUpMsg, sessionID, onToken, noopToolEvent, onEvent)
+			// Inject space context so the lead agent retains awareness of the
+			// channel, team roster, and delegation protocol during synthesis.
+			// Without this, Tom's follow-up would lack team context.
+			chatCtx := srv.InjectSpaceContext(ctx, sessionID, ag)
+
+			chatErr := orch.ChatWithAgent(chatCtx, ag, followUpMsg, sessionID, onToken, noopToolEvent, onEvent)
 			if chatErr != nil && strings.Contains(chatErr.Error(), "already running") {
 				// Defensive: if the idle wait raced with another request, retry once.
 				time.Sleep(500 * time.Millisecond)
-				chatErr = orch.ChatWithAgent(ctx, ag, followUpMsg, sessionID, onToken, noopToolEvent, onEvent)
+				chatErr = orch.ChatWithAgent(chatCtx, ag, followUpMsg, sessionID, onToken, noopToolEvent, onEvent)
 			}
 			if chatErr != nil {
 				logger.Warn("follow-up: ChatWithAgent failed", "session_id", sessionID, "agent", ag.Name, "err", chatErr)
@@ -2735,23 +2809,31 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return
 			}
 
-			// Persist Tom's follow-up reply to the session store.
+			// Persist Tom's follow-up reply to the session store, threaded under
+			// the original user message so the frontend renders it as a reply.
+			parentMsgID := summary.ParentMessageID
 			if loadedSess, loadErr := sessStore.Load(sessionID); loadErr == nil {
 				_ = sessStore.Append(loadedSess, session.SessionMessage{
-					ID:      session.NewID(),
-					Role:    "assistant",
-					Content: replyStr,
-					Agent:   ag.Name,
-					Ts:      time.Now().UTC(),
+					ID:              session.NewID(),
+					Role:            "assistant",
+					Content:         replyStr,
+					Agent:           ag.Name,
+					Ts:              time.Now().UTC(),
+					ParentMessageID: parentMsgID,
 				})
 			}
 
 			// Broadcast the finalized reply so the frontend replaces the streaming
-			// bubble with the persisted message content.
-			srv.BroadcastToSession(sessionID, "agent_follow_up", map[string]any{
+			// bubble with the persisted message content. Include parent_message_id
+			// so the frontend can thread it under the original message.
+			payload := map[string]any{
 				"agent":   ag.Name,
 				"content": replyStr,
-			})
+			}
+			if parentMsgID != "" {
+				payload["parent_message_id"] = parentMsgID
+			}
+			srv.BroadcastToSession(sessionID, "agent_follow_up", payload)
 		}
 		tm.SetCompletionNotifier(completionNotifier)
 

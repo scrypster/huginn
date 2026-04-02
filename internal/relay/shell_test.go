@@ -274,6 +274,156 @@ func TestShellManager_ShellExitDetected(t *testing.T) {
 	}
 }
 
+// TestShellManager_HubReconnect verifies that calling Start with a second hub
+// (simulating a browser reconnect) sends shell_ready to hub2 without sending a
+// second shell_ready to hub1.
+func TestShellManager_HubReconnect(t *testing.T) {
+	hub1 := &collectHub{}
+	sm := NewShellManager()
+	defer sm.Exit()
+
+	sm.Start(hub1, 80, 24)
+	hub1.waitFor(t, MsgShellReady, 3*time.Second)
+
+	// Count shell_ready messages on hub1 before the reattach.
+	countReadyHub1Before := func() int {
+		count := 0
+		for _, m := range hub1.collected() {
+			if m.Type == MsgShellReady {
+				count++
+			}
+		}
+		return count
+	}
+	beforeCount := countReadyHub1Before()
+
+	// Reattach with hub2 — shell is already running so this is the reattach path.
+	hub2 := &collectHub{}
+	sm.Start(hub2, 80, 24)
+	hub2.waitFor(t, MsgShellReady, 3*time.Second)
+
+	// hub1 must NOT have received another shell_ready — only hub2 gets it on reattach.
+	afterCount := countReadyHub1Before()
+	if afterCount != beforeCount {
+		t.Fatalf("hub1 received %d shell_ready messages after reattach (expected %d — no new messages to hub1)", afterCount, beforeCount)
+	}
+}
+
+// TestShellManager_EnvVarLeakPrevention verifies that env vars not in the
+// whitelist (e.g. HUGINN_SECRET_TEST_KEY) are not passed to the shell process.
+func TestShellManager_EnvVarLeakPrevention(t *testing.T) {
+	t.Setenv("HUGINN_SECRET_TEST_KEY", "supersecret")
+
+	hub := &collectHub{}
+	sm := NewShellManager()
+	sm.Start(hub, 220, 50)
+	hub.waitFor(t, MsgShellReady, 3*time.Second)
+	defer sm.Exit()
+
+	cmd := base64.StdEncoding.EncodeToString([]byte("echo \"KEY=$HUGINN_SECRET_TEST_KEY\"\n"))
+	sm.Input(cmd)
+
+	// Collect output for up to 5 seconds and decode each chunk.
+	deadline := time.Now().Add(5 * time.Second)
+	var allOutput strings.Builder
+	for time.Now().Before(deadline) {
+		for _, msg := range hub.collected() {
+			if msg.Type != MsgShellOutput {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(msg.Payload["data"].(string))
+			if err == nil {
+				allOutput.Write(raw)
+			}
+		}
+		// Once we see "KEY=" in the output we know the echo ran — stop early.
+		if strings.Contains(allOutput.String(), "KEY=") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	decoded := allOutput.String()
+	if strings.Contains(decoded, "supersecret") {
+		t.Fatalf("env var leaked into shell output: %q", decoded)
+	}
+	// Pass: either the output shows "KEY=" (empty value, not leaked) or the
+	// variable was completely absent. Either way "supersecret" was not present.
+}
+
+// TestShellManager_LargeOutput verifies that the readLoop correctly streams
+// large PTY output back as shell_output messages.
+func TestShellManager_LargeOutput(t *testing.T) {
+	hub := &collectHub{}
+	sm := NewShellManager()
+	sm.Start(hub, 220, 50)
+	hub.waitFor(t, MsgShellReady, 3*time.Second)
+	defer sm.Exit()
+
+	// Print 500 dashes — enough to exceed a small read buffer.
+	cmd := base64.StdEncoding.EncodeToString([]byte("printf '%0.s-' $(seq 1 500)\n"))
+	sm.Input(cmd)
+
+	// Collect output for up to 5 seconds; base64-decode and concatenate.
+	deadline := time.Now().Add(5 * time.Second)
+	var allOutput strings.Builder
+	for time.Now().Before(deadline) {
+		for _, msg := range hub.collected() {
+			if msg.Type != MsgShellOutput {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(msg.Payload["data"].(string))
+			if err == nil {
+				allOutput.Write(raw)
+			}
+		}
+		if allOutput.Len() >= 500 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if allOutput.Len() < 500 {
+		t.Fatalf("expected at least 500 bytes of output, got %d", allOutput.Len())
+	}
+}
+
+// TestShellManager_ConcurrentResizeAndInput verifies that concurrent Resize
+// and Input calls do not race or panic.
+func TestShellManager_ConcurrentResizeAndInput(t *testing.T) {
+	hub := &collectHub{}
+	sm := NewShellManager()
+	sm.Start(hub, 80, 24)
+	hub.waitFor(t, MsgShellReady, 3*time.Second)
+	defer sm.Exit()
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: repeated resize calls.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			sm.Resize(uint16(80+i%20), 24)
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	// Goroutine 2: repeated input calls.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cmd := base64.StdEncoding.EncodeToString([]byte("echo test\n"))
+		for i := 0; i < 5; i++ {
+			sm.Input(cmd)
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	// If we reach here without a panic or data race the test passes.
+}
+
 func TestShellManager_InputInvalidBase64(t *testing.T) {
 	hub := &collectHub{}
 	sm := NewShellManager()

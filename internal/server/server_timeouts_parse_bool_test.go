@@ -560,7 +560,7 @@ func TestHandleUpdateAgent_BadJSON(t *testing.T) {
 
 func TestHandleUpdateAgent_ValidJSON(t *testing.T) {
 	_, ts := newTestServer(t)
-	body := bytes.NewBufferString(`{"name":"myagent","slot":"planner","model_id":"gpt-4"}`)
+	body := bytes.NewBufferString(`{"name":"myagent","slot":"planner","model":"gpt-4"}`)
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/myagent", body)
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")

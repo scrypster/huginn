@@ -109,6 +109,16 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "name must be 80 characters or fewer")
 		return
 	}
+	// Prevent duplicate channel names (case-insensitive).
+	if existing, err := s.spaceStore.ListSpaces(spaces.ListOpts{Kind: "channel", Limit: 500}); err == nil {
+		trimmedName := strings.TrimSpace(body.Name)
+		for _, sp := range existing.Spaces {
+			if strings.EqualFold(sp.Name, trimmedName) {
+				jsonError(w, 409, fmt.Sprintf("a channel named %q already exists", sp.Name))
+				return
+			}
+		}
+	}
 	if body.LeadAgent == "" {
 		jsonError(w, 400, "lead_agent is required")
 		return

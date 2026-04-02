@@ -14,9 +14,30 @@ func TestAgentDef_Validate_EmptyName(t *testing.T) {
 }
 
 func TestAgentDef_Validate_ValidName(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris"}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6"}
 	if err := d.Validate(); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestAgentDef_Validate_EmptyModel(t *testing.T) {
+	d := agents.AgentDef{Name: "Chris", Model: ""}
+	if err := d.Validate(); err == nil {
+		t.Error("expected error for empty model")
+	}
+}
+
+func TestAgentDef_Validate_WhitespaceModel(t *testing.T) {
+	d := agents.AgentDef{Name: "Chris", Model: "   "}
+	if err := d.Validate(); err == nil {
+		t.Error("expected error for whitespace-only model")
+	}
+}
+
+func TestAgentDef_Validate_ModelSet(t *testing.T) {
+	d := agents.AgentDef{Name: "Chris", Model: "claude-haiku-4-5-20251001"}
+	if err := d.Validate(); err != nil {
+		t.Errorf("expected no error when model is set: %v", err)
 	}
 }
 
@@ -28,35 +49,35 @@ func TestAgentDef_Validate_NameTooLong(t *testing.T) {
 }
 
 func TestAgentDef_Validate_InvalidColor(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris", Color: "notacolor"}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", Color: "notacolor"}
 	if err := d.Validate(); err == nil {
 		t.Error("expected error for invalid color")
 	}
 }
 
 func TestAgentDef_Validate_ValidColor(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris", Color: "#58a6ff"}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", Color: "#58a6ff"}
 	if err := d.Validate(); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestAgentDef_Validate_EmptyColorAllowed(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris", Color: ""}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", Color: ""}
 	if err := d.Validate(); err != nil {
 		t.Errorf("empty color should be allowed: %v", err)
 	}
 }
 
 func TestAgentDef_Validate_BasicValid(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris"}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6"}
 	if err := d.Validate(); err != nil {
 		t.Errorf("expected no error for valid agent: %v", err)
 	}
 }
 
 func TestAgentDef_Validate_InvalidPlasticity(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris", Plasticity: "turbo"}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", Plasticity: "turbo"}
 	if err := d.Validate(); err == nil {
 		t.Error("expected error for invalid plasticity")
 	}
@@ -64,7 +85,7 @@ func TestAgentDef_Validate_InvalidPlasticity(t *testing.T) {
 
 func TestAgentDef_Validate_ValidPlasticity(t *testing.T) {
 	for _, p := range []string{"", "default", "knowledge-graph", "reference"} {
-		d := agents.AgentDef{Name: "Chris", Plasticity: p}
+		d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", Plasticity: p}
 		if err := d.Validate(); err != nil {
 			t.Errorf("plasticity %q should be valid: %v", p, err)
 		}
@@ -72,7 +93,7 @@ func TestAgentDef_Validate_ValidPlasticity(t *testing.T) {
 }
 
 func TestAgentDef_Validate_InvalidMemoryMode(t *testing.T) {
-	d := agents.AgentDef{Name: "Chris", MemoryMode: "aggressive"}
+	d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", MemoryMode: "aggressive"}
 	if err := d.Validate(); err == nil {
 		t.Error("expected error for invalid memory_mode")
 	}
@@ -80,7 +101,7 @@ func TestAgentDef_Validate_InvalidMemoryMode(t *testing.T) {
 
 func TestAgentDef_Validate_ValidMemoryMode(t *testing.T) {
 	for _, m := range []string{"", "passive", "conversational", "immersive"} {
-		d := agents.AgentDef{Name: "Chris", MemoryMode: m}
+		d := agents.AgentDef{Name: "Chris", Model: "claude-sonnet-4-6", MemoryMode: m}
 		if err := d.Validate(); err != nil {
 			t.Errorf("memory_mode %q should be valid: %v", m, err)
 		}

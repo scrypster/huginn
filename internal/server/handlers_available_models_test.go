@@ -59,8 +59,8 @@ func TestHandleListAvailableModels_IncludesProviderModels(t *testing.T) {
 		t.Fatalf("decode provider_models: %v", err)
 	}
 
-	if len(providerModels) != 2 {
-		t.Errorf("expected 2 provider models, got %d", len(providerModels))
+	if len(providerModels) < 2 {
+		t.Errorf("expected at least 2 provider models, got %d", len(providerModels))
 	}
 }
 

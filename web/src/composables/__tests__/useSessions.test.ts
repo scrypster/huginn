@@ -5,9 +5,10 @@ import { flushPromises } from '@vue/test-utils'
 vi.mock('../useApi', () => ({
   api: {
     sessions: {
-      list:   vi.fn(),
-      create: vi.fn(),
-      rename: vi.fn(),
+      list:        vi.fn(),
+      create:      vi.fn(),
+      rename:      vi.fn(),
+      getMessages: vi.fn(),
     },
   },
   getToken: vi.fn().mockReturnValue('test-token'),
@@ -186,6 +187,123 @@ describe('useSessions', () => {
       const { formatSessionLabel } = useSessions()
       const label = formatSessionLabel({ id: 'abcdefgh-xyz', agent_id: 'a', state: 'idle', created_at: 'not-a-date', updated_at: '' })
       expect(label).toBe('abcdefgh')
+    })
+  })
+
+  // ── fetchMessages ───────────────────────────────────────────────────────────
+
+  describe('fetchMessages', () => {
+    it('loads messages and maps basic fields', async () => {
+      vi.mocked(api.sessions.getMessages).mockResolvedValueOnce([
+        { id: 'm1', role: 'user', content: 'hello', ts: '2026-03-10T14:00:00Z' },
+        { id: 'm2', role: 'assistant', content: 'hi there', agent: 'Mark', ts: '2026-03-10T14:00:01Z' },
+      ] as never)
+
+      const { fetchMessages, getMessages } = useSessions()
+      await fetchMessages('sess-fetch-1')
+      const msgs = getMessages('sess-fetch-1')
+
+      expect(msgs).toHaveLength(2)
+      expect(msgs[0]).toMatchObject({ id: 'm1', role: 'user', content: 'hello' })
+      expect(msgs[1]).toMatchObject({ id: 'm2', role: 'assistant', content: 'hi there', agent: 'Mark' })
+    })
+
+    it('maps tool_calls from API response so chip renders on reload', async () => {
+      vi.mocked(api.sessions.getMessages).mockResolvedValueOnce([
+        { id: 'm1', role: 'user', content: 'do something' },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: 'Here is the result.',
+          agent: 'TestAgent',
+          ts: '2026-03-10T14:00:01Z',
+          tool_calls: [
+            { id: 'tc-1', name: 'bash', args: { command: 'ls' }, result: 'file1.txt\nfile2.txt' },
+            { id: 'tc-2', name: 'read_file', args: { file_path: '/tmp/x' }, result: 'contents' },
+          ],
+        },
+      ] as never)
+
+      const { fetchMessages, getMessages } = useSessions()
+      await fetchMessages('sess-fetch-tc')
+      const msgs = getMessages('sess-fetch-tc')
+
+      expect(msgs).toHaveLength(2)
+      const assistant = msgs[1]
+      expect(assistant.content).toBe('Here is the result.')
+      expect(assistant.toolCalls).toBeDefined()
+      expect(assistant.toolCalls).toHaveLength(2)
+      expect(assistant.toolCalls![0]).toMatchObject({
+        id: 'tc-1',
+        name: 'bash',
+        args: { command: 'ls' },
+        result: 'file1.txt\nfile2.txt',
+        done: true,
+      })
+      expect(assistant.toolCalls![1]).toMatchObject({
+        id: 'tc-2',
+        name: 'read_file',
+        done: true,
+      })
+    })
+
+    it('messages without tool_calls have undefined toolCalls', async () => {
+      vi.mocked(api.sessions.getMessages).mockResolvedValueOnce([
+        { id: 'm1', role: 'assistant', content: 'just text' },
+      ] as never)
+
+      const { fetchMessages, getMessages } = useSessions()
+      await fetchMessages('sess-fetch-no-tc')
+      const msgs = getMessages('sess-fetch-no-tc')
+
+      expect(msgs[0].toolCalls).toBeUndefined()
+    })
+
+    it('filters out cost-type messages', async () => {
+      vi.mocked(api.sessions.getMessages).mockResolvedValueOnce([
+        { id: 'm1', role: 'assistant', content: 'hello', type: '' },
+        { id: 'm2', role: 'assistant', content: 'cost info', type: 'cost' },
+      ] as never)
+
+      const { fetchMessages, getMessages } = useSessions()
+      await fetchMessages('sess-fetch-cost')
+      const msgs = getMessages('sess-fetch-cost')
+
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('m1')
+    })
+
+    it('persists both text AND tool calls for multi-turn agent conversations', async () => {
+      // Simulates what the server persists after a chat turn with tool calls:
+      // the assistant message has BOTH content (accumulated text tokens) AND
+      // tool_calls (the tools that were invoked during the turn).
+      vi.mocked(api.sessions.getMessages).mockResolvedValueOnce([
+        { id: 'u1', role: 'user', content: 'analyze the codebase' },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: 'I analyzed the codebase. Here are my findings:\n\n1. The main entry point is in main.go\n2. Tests are well-structured',
+          agent: 'Mark',
+          ts: '2026-03-10T14:00:01Z',
+          tool_calls: [
+            { id: 'tc-1', name: 'read_file', args: { file_path: 'main.go' }, result: 'package main...' },
+            { id: 'tc-2', name: 'grep', args: { pattern: '_test.go' }, result: 'found 15 test files' },
+          ],
+        },
+      ] as never)
+
+      const { fetchMessages, getMessages } = useSessions()
+      await fetchMessages('sess-multi-turn')
+      const msgs = getMessages('sess-multi-turn')
+
+      // Both text content AND tool calls must be present — the core bug was
+      // that text content was empty (not accumulated) when tool calls were present.
+      const assistant = msgs[1]
+      expect(assistant.content.length).toBeGreaterThan(0)
+      expect(assistant.content).toContain('I analyzed the codebase')
+      expect(assistant.toolCalls).toHaveLength(2)
+      expect(assistant.toolCalls![0].name).toBe('read_file')
+      expect(assistant.toolCalls![1].name).toBe('grep')
     })
   })
 

@@ -59,6 +59,9 @@ func (e *errSpaceStore) RemoveAgentFromAllSpaces(_ string) (*spaces.SpaceCascade
 func (e *errSpaceStore) ListSpaceMessages(_ string, _ *spaces.SpaceMsgCursor, _ int) (spaces.SpaceMessagesResult, error) {
 	return spaces.SpaceMessagesResult{}, fmt.Errorf("err")
 }
+func (e *errSpaceStore) GetChannelsForAgent(_ string) ([]*spaces.Space, error) {
+	return nil, fmt.Errorf("err")
+}
 
 // openSpaceDB creates a fresh in-memory SQLite DB with both session and space
 // migrations applied, suitable for DM-routing regression tests.

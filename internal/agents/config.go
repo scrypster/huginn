@@ -205,6 +205,9 @@ func (d AgentDef) Validate() error {
 	if len(d.Name) > 128 {
 		return fmt.Errorf("agent name must be 128 characters or fewer")
 	}
+	if strings.TrimSpace(d.Model) == "" {
+		return fmt.Errorf("agent model is required — select a model in Agent settings")
+	}
 	if d.Color != "" && !agentColorRE.MatchString(d.Color) {
 		return fmt.Errorf("color must be a hex color like #rrggbb, got %q", d.Color)
 	}
