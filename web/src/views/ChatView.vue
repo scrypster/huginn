@@ -806,7 +806,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
-import { useSpaceTimeline, type SpaceMessage } from '../composables/useSpaceTimeline'
+import { useSpaceTimeline } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
@@ -821,11 +821,11 @@ import { useThreads } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
-import { adaptSpaceMessages, useMessageEnrichment, type EnrichedMessage } from '../composables/useMessageEnrichment'
+import { adaptSpaceMessages, useMessageEnrichment } from '../composables/useMessageEnrichment'
 import { useMarkdownRenderer } from '../composables/useMarkdownRenderer'
 import { useChatSearch } from '../composables/useChatSearch'
 import { useUnreadTracking } from '../composables/useUnreadTracking'
-import { useChatStreaming, type ActiveToolCall } from '../composables/useChatStreaming'
+import { useChatStreaming } from '../composables/useChatStreaming'
 
 interface Agent {
   name: string
@@ -1111,10 +1111,13 @@ const { enrichedMessages } = useMessageEnrichment(messages as any)
 // ── Composables that depend on messages / messagesEl ─────────────────
 const sessionIdRef = computed(() => props.sessionId)
 const {
-  chatSearchOpen, chatSearchQuery, chatSearchIndex, chatSearchInputEl,
+  chatSearchOpen, chatSearchQuery, chatSearchIndex,
   chatSearchMatches, openChatSearch, closeChatSearch,
   nextChatSearchMatch, prevChatSearchMatch,
+  chatSearchInputEl, // template ref: bound via ref="chatSearchInputEl" in template
 } = useChatSearch(messages as any, messagesEl)
+// vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
+void (chatSearchInputEl satisfies unknown)
 
 const {
   atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
