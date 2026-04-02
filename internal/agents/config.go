@@ -196,6 +196,31 @@ var validMemoryMode = map[string]bool{
 // agentColorRE matches a CSS hex color: # followed by exactly 6 hex digits.
 var agentColorRE = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
+// isValidAgentNameChar checks if a character is allowed in agent names.
+// Allowed: letters, digits, spaces, hyphens, underscores, periods.
+// Disallowed: /, \, :, <, >, &, ", ', control characters, null bytes.
+func isValidAgentNameChar(r rune) bool {
+	// Disallow control characters and null bytes
+	if r < 0x20 && r != ' ' {
+		return false
+	}
+	if r == 0x7F { // DEL character
+		return false
+	}
+	// Allowed characters: letters, digits, space, hyphen, underscore, period
+	if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') || r == ' ' || r == '-' || r == '_' || r == '.' {
+		return true
+	}
+	// Disallow: /, \, :, <, >, &, ", '
+	switch r {
+	case '/', '\\', ':', '<', '>', '&', '"', '\'':
+		return false
+	}
+	// Any other character is disallowed
+	return false
+}
+
 // Validate checks AgentDef fields for basic correctness.
 // Returns a non-nil error describing the first validation failure.
 func (d AgentDef) Validate() error {
@@ -205,6 +230,23 @@ func (d AgentDef) Validate() error {
 	if len(d.Name) > 128 {
 		return fmt.Errorf("agent name must be 128 characters or fewer")
 	}
+
+	// Character validation: agent names must contain only allowed characters
+	// and start with a letter or digit (not a special character).
+	for _, r := range d.Name {
+		if !isValidAgentNameChar(r) {
+			return fmt.Errorf("agent name contains invalid character %q", r)
+		}
+	}
+	// Ensure the name starts with a letter or digit, not a special character.
+	if len(d.Name) > 0 {
+		first := rune(d.Name[0])
+		if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') ||
+			(first >= '0' && first <= '9')) {
+			return fmt.Errorf("agent name must start with a letter or digit, not %q", first)
+		}
+	}
+
 	if strings.TrimSpace(d.Model) == "" {
 		return fmt.Errorf("agent model is required — select a model in Agent settings")
 	}

@@ -88,6 +88,8 @@ func ParseMentions(msg string, agentNames []string) []DelegationRequest {
 // that cannot call delegate_to_agent as a tool.
 // parentMsgID, when non-empty, is the session message ID of the triggering message
 // so thread replies are linked back and visible in the thread panel.
+// callerAgent, when non-empty, is the name of the agent that produced userMsg.
+// Mentions of the caller agent are skipped (self-delegation guard).
 func CreateFromMentions(
 	ctx context.Context,
 	sessionID string,
@@ -100,6 +102,7 @@ func CreateFromMentions(
 	broadcast BroadcastFn,
 	ca *CostAccumulator,
 	tm *ThreadManager,
+	callerAgent string,
 ) {
 	// Collect canonical names from the registry.
 	all := reg.All()
@@ -112,10 +115,16 @@ func CreateFromMentions(
 	if sess != nil {
 		spaceID = sess.SpaceID()
 	}
-	logger.Info("CreateFromMentions", "session_id", sessionID, "msg", userMsg, "known_agents", names)
+	logger.Info("CreateFromMentions", "session_id", sessionID, "msg", userMsg, "known_agents", names, "caller", callerAgent)
 	requests := ParseMentions(userMsg, names)
 	logger.Info("CreateFromMentions: parsed", "requests", len(requests))
 	for _, req := range requests {
+		// Skip self-delegation: do not create threads for the caller agent mentioning itself.
+		if callerAgent != "" && strings.EqualFold(req.AgentName, callerAgent) {
+			logger.Info("CreateFromMentions: skipping self-delegation", "agent", req.AgentName, "caller", callerAgent)
+			continue
+		}
+
 		t, err := tm.Create(CreateParams{
 			SessionID:       sessionID,
 			AgentID:         req.AgentName,

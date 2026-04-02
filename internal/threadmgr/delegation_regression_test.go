@@ -479,3 +479,158 @@ func TestParseMentions_WordBoundaryPreventsPartialMatch(t *testing.T) {
 		t.Errorf("expected 0 (partial name should not match), got %d", len(reqs))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Self-Delegation Guard in CreateFromMentions
+// ---------------------------------------------------------------------------
+
+// TestCreateFromMentions_SkipsSelfDelegation verifies that when CreateFromMentions
+// is called with callerAgent="Tom", it skips creating threads for @Tom mentions
+// (self-delegation guard). It should still delegate to other agents like @Sam.
+func TestCreateFromMentions_SkipsSelfDelegation(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("test", "/tmp", "claude-haiku-4")
+
+	// Append a user message that will be the trigger for CreateFromMentions.
+	_ = store.Append(sess, session.SessionMessage{
+		Role:    "user",
+		Content: "@Tom and @Sam please help",
+	})
+
+	// Register Tom and Sam as agents.
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Tom", ModelID: "claude-haiku-4"})
+	reg.Register(&agents.Agent{Name: "Sam", ModelID: "claude-haiku-4"})
+
+	// Create fake backend and broadcast function.
+	b := &fakeBackend{
+		response: &backend.ChatResponse{Content: "Done", DoneReason: "stop"},
+	}
+	broadcastFn := func(string, string, map[string]any) {}
+	ca := NewCostAccumulator(0)
+
+	// Call CreateFromMentions with callerAgent="Tom".
+	// It should skip @Tom and only create a thread for @Sam.
+	CreateFromMentions(context.Background(), sess.ID, "@Tom and @Sam please help",
+		"", reg, store, sess, b, broadcastFn, ca, tm, "Tom")
+
+	// Give time for goroutines to complete.
+	deadline := time.Now().Add(2 * time.Second)
+	var tomThread, samThread *Thread
+	for time.Now().Before(deadline) {
+		for _, thr := range tm.ListBySession(sess.ID) {
+			if thr.AgentID == "Tom" {
+				tomThread = thr
+			}
+			if thr.AgentID == "Sam" {
+				samThread = thr
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Tom thread should NOT exist (self-delegation was skipped).
+	if tomThread != nil {
+		t.Error("Tom thread should not have been created (self-delegation guard should skip it)")
+	}
+
+	// Sam thread SHOULD exist.
+	if samThread == nil {
+		t.Error("Sam thread should have been created (not a self-delegation)")
+	}
+}
+
+// TestCreateFromMentions_NoCallerAgent_DelegatesAll verifies that when
+// callerAgent is empty, CreateFromMentions creates threads for all mentions.
+func TestCreateFromMentions_NoCallerAgent_DelegatesAll(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("test", "/tmp", "claude-haiku-4")
+
+	_ = store.Append(sess, session.SessionMessage{
+		Role:    "user",
+		Content: "@Tom and @Sam please help",
+	})
+
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Tom", ModelID: "claude-haiku-4"})
+	reg.Register(&agents.Agent{Name: "Sam", ModelID: "claude-haiku-4"})
+
+	b := &fakeBackend{
+		response: &backend.ChatResponse{Content: "Done", DoneReason: "stop"},
+	}
+	broadcastFn := func(string, string, map[string]any) {}
+	ca := NewCostAccumulator(0)
+
+	// Call CreateFromMentions with callerAgent="" (empty).
+	// Both @Tom and @Sam should get delegated to.
+	CreateFromMentions(context.Background(), sess.ID, "@Tom and @Sam please help",
+		"", reg, store, sess, b, broadcastFn, ca, tm, "")
+
+	deadline := time.Now().Add(2 * time.Second)
+	var tomThread, samThread *Thread
+	for time.Now().Before(deadline) {
+		for _, thr := range tm.ListBySession(sess.ID) {
+			if thr.AgentID == "Tom" {
+				tomThread = thr
+			}
+			if thr.AgentID == "Sam" {
+				samThread = thr
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Both threads should exist when callerAgent is empty.
+	if tomThread == nil {
+		t.Error("Tom thread should have been created when callerAgent is empty")
+	}
+	if samThread == nil {
+		t.Error("Sam thread should have been created when callerAgent is empty")
+	}
+}
+
+// TestCreateFromMentions_CaseInsensitiveSelfCheck verifies that the self-delegation
+// guard is case-insensitive (e.g., callerAgent="tom" matches @Tom).
+func TestCreateFromMentions_CaseInsensitiveSelfCheck(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("test", "/tmp", "claude-haiku-4")
+
+	_ = store.Append(sess, session.SessionMessage{
+		Role:    "user",
+		Content: "@tom please help", // lowercase @tom
+	})
+
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Tom", ModelID: "claude-haiku-4"}) // canonical: "Tom"
+
+	b := &fakeBackend{
+		response: &backend.ChatResponse{Content: "Done", DoneReason: "stop"},
+	}
+	broadcastFn := func(string, string, map[string]any) {}
+	ca := NewCostAccumulator(0)
+
+	// Call CreateFromMentions with callerAgent="tom" (lowercase).
+	// Even though @tom is mentioned, it should still be skipped because
+	// it's a case-insensitive match with the caller.
+	CreateFromMentions(context.Background(), sess.ID, "@tom please help",
+		"", reg, store, sess, b, broadcastFn, ca, tm, "tom")
+
+	deadline := time.Now().Add(2 * time.Second)
+	var tomThread *Thread
+	for time.Now().Before(deadline) {
+		for _, thr := range tm.ListBySession(sess.ID) {
+			if thr.AgentID == "Tom" {
+				tomThread = thr
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Tom thread should NOT exist (case-insensitive self-delegation guard).
+	if tomThread != nil {
+		t.Error("Tom thread should not have been created (case-insensitive self-delegation guard should skip it)")
+	}
+}

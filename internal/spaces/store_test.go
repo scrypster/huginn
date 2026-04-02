@@ -211,3 +211,99 @@ func TestCreateChannel_MembersAreStored(t *testing.T) {
 		t.Fatalf("expected 2 members, got %d", len(ch.Members))
 	}
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hardening: SpacesByLeadAgent tests (review/agents-channels-dm-hardening)
+// ────────────────────────────────────────────────────────────────────────────
+
+// TestSpacesByLeadAgent_ReturnsMatchingSpaces verifies that SpacesByLeadAgent
+// returns all non-archived spaces where the agent is the lead_agent.
+func TestSpacesByLeadAgent_ReturnsMatchingSpaces(t *testing.T) {
+	db := openTestDB(t)
+	store := spaces.NewSQLiteSpaceStore(db)
+
+	// Create channels with different lead agents
+	_, _ = store.CreateChannel("Team Alpha", "alice", []string{}, "", "")
+	_, _ = store.CreateChannel("Team Beta", "alice", []string{}, "", "")
+	ch3, _ := store.CreateChannel("Team Charlie", "bob", []string{}, "", "")
+
+	// Query spaces where alice is the lead agent
+	results, err := store.SpacesByLeadAgent("alice")
+	if err != nil {
+		t.Fatalf("SpacesByLeadAgent: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 spaces for alice, got %d", len(results))
+	}
+
+	// Verify the returned spaces are the correct ones
+	spaceNames := make(map[string]bool)
+	for _, s := range results {
+		spaceNames[s.Name] = true
+	}
+	if !spaceNames["Team Alpha"] || !spaceNames["Team Beta"] {
+		t.Errorf("expected Team Alpha and Team Beta, got: %v", spaceNames)
+	}
+
+	// Query spaces where bob is the lead agent
+	bobSpaces, err := store.SpacesByLeadAgent("bob")
+	if err != nil {
+		t.Fatalf("SpacesByLeadAgent for bob: %v", err)
+	}
+
+	if len(bobSpaces) != 1 {
+		t.Fatalf("expected 1 space for bob, got %d", len(bobSpaces))
+	}
+	if bobSpaces[0].ID != ch3.ID {
+		t.Errorf("expected Team Charlie, got: %s", bobSpaces[0].Name)
+	}
+}
+
+// TestSpacesByLeadAgent_EmptyForUnknownAgent verifies that SpacesByLeadAgent
+// returns an empty slice (not an error) when the agent is not a lead agent.
+func TestSpacesByLeadAgent_EmptyForUnknownAgent(t *testing.T) {
+	db := openTestDB(t)
+	store := spaces.NewSQLiteSpaceStore(db)
+
+	// Create a channel with alice as the lead agent
+	_, _ = store.CreateChannel("Team Alpha", "alice", []string{}, "", "")
+
+	// Query spaces where charlie (non-existent) is the lead agent
+	results, err := store.SpacesByLeadAgent("charlie")
+	if err != nil {
+		t.Fatalf("SpacesByLeadAgent: %v", err)
+	}
+
+	if len(results) != 0 {
+		t.Errorf("expected 0 spaces for charlie, got %d", len(results))
+	}
+}
+
+// TestSpacesByLeadAgent_ExcludesArchived verifies that SpacesByLeadAgent
+// does not return archived spaces.
+func TestSpacesByLeadAgent_ExcludesArchived(t *testing.T) {
+	db := openTestDB(t)
+	store := spaces.NewSQLiteSpaceStore(db)
+
+	// Create two channels with alice as the lead agent
+	ch1, _ := store.CreateChannel("Active Team", "alice", []string{}, "", "")
+	ch2, _ := store.CreateChannel("Archived Team", "alice", []string{}, "", "")
+
+	// Archive the second channel
+	_ = store.ArchiveSpace(ch2.ID)
+
+	// Query spaces where alice is the lead agent
+	results, err := store.SpacesByLeadAgent("alice")
+	if err != nil {
+		t.Fatalf("SpacesByLeadAgent: %v", err)
+	}
+
+	// Should only return the active channel, not the archived one
+	if len(results) != 1 {
+		t.Fatalf("expected 1 non-archived space for alice, got %d", len(results))
+	}
+	if results[0].ID != ch1.ID {
+		t.Errorf("expected Active Team, got: %s", results[0].Name)
+	}
+}

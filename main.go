@@ -2673,7 +2673,15 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			if spawnCtx == nil {
 				spawnCtx = ctx
 			}
-			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm)
+			// Resolve the caller agent (the agent that produced userMsg) to guard against
+			// self-delegation. The caller is the session's primary agent.
+			callerAgent := ""
+			if sess != nil {
+				if ag := srv.ResolveAgent(sessionID); ag != nil {
+					callerAgent = ag.Name
+				}
+			}
+			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
 		})
 
 		// Wire automatic help resolution: when a sub-agent calls request_help,
