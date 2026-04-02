@@ -316,7 +316,7 @@ func TestBuildSpaceContextBlock_LeadAgent_ContainsAllElements(t *testing.T) {
 		{"Lead agent identity", "You are Tom, the lead agent"},
 		{"Channel name", "Engineering"},
 		{"Delegation protocol", "Delegation protocol"},
-		{"@mention instruction", "@AgentName"},
+		{"@mention instruction", "@mentions"},
 		{"Sam listed", "Sam"},
 		{"Sam description", "Backend engineer"},
 		{"Dave listed", "Dave"},
