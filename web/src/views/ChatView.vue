@@ -916,6 +916,12 @@ watch(() => props.spaceId, async (newId) => {
   // Clear stale unseen-badge entries for this space after hydration so
   // sessionToSpaceMap is populated and getSessionSpaceId returns correct results.
   markSpaceSeen?.(newId)
+  // Hydrate thread badges for each session visible in this space.
+  const spMsgs = tl.getState().messages ?? []
+  const sessionIds = [...new Set(spMsgs.map(m => m.session_id).filter(Boolean))]
+  for (const sid of sessionIds) {
+    await hydrateThreadBadges(sid)
+  }
   await scrollToBottom()
 
   // Set up IntersectionObserver on the top sentinel for infinite scroll.
@@ -1176,17 +1182,18 @@ function closeThreadDetail() {
 // refresh. Calls GET /api/v1/containers/{id}/threads which returns root messages
 // that have at least one reply (thread_reply_count > 0), then attaches
 // delegatedThreads to the matching message in the UI.
-let hydratingBadges = false
+const hydratingBadgesFor = new Set<string>()
 async function hydrateThreadBadges(sessionId: string) {
-  if (!sessionId || hydratingBadges) return
-  hydratingBadges = true
+  if (!sessionId || hydratingBadgesFor.has(sessionId)) return
+  hydratingBadgesFor.add(sessionId)
   try {
     type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number }
     const rows = await apiFetch<ContainerThreadRow[]>(`/api/v1/containers/${sessionId}/threads`)
     if (!Array.isArray(rows) || rows.length === 0) return
-    const msgs = getMessages(sessionId)
+    // Use the mutable source messages so the data survives computed re-renders.
+    const msgs = getSourceMessages()
     for (const row of rows) {
-      const msg = msgs.find(m => m.id === row.id)
+      const msg = msgs.find((m: any) => m.id === row.id)
       if (!msg) continue
       // Only hydrate if the badge isn't already present (WS may have set it live)
       if (!(msg as any).delegatedThreads?.length) {
@@ -1210,7 +1217,7 @@ async function hydrateThreadBadges(sessionId: string) {
   } catch {
     // Non-fatal: badges will be missing but session is still usable
   } finally {
-    hydratingBadges = false
+    hydratingBadgesFor.delete(sessionId)
   }
 }
 
@@ -1230,7 +1237,22 @@ function adaptSpaceMessages(msgs: SpaceMessage[]) {
     streaming: m.id.startsWith('stream-'),
     // done is always true for persisted (API-loaded) tool calls; WS-streamed ones set it explicitly.
     toolCalls: (m.toolCalls ?? []).map(tc => ({ ...tc, done: tc.done ?? true })),
+    // Carry through thread data attached by hydration or WS handlers.
+    delegatedThreads: (m as any).delegatedThreads,
+    threadReplies: (m as any).threadReplies,
   }))
+}
+
+// getSourceMessages returns the *mutable* source message array for the current
+// view mode. In space mode this is the SpaceMessage[] from the timeline state;
+// in session mode it's the session message array from useSessions. Thread
+// handlers must mutate these objects (not the adapted copies) so the data
+// survives computed re-evaluations.
+function getSourceMessages(): any[] {
+  if (props.spaceId) {
+    return (currentSpaceTimeline.value?.getState().messages ?? []) as any[]
+  }
+  return props.sessionId ? getMessages(props.sessionId) : []
 }
 
 const messages = computed(() => {
@@ -1734,8 +1756,8 @@ registerWS(ws, 'primary_agent_changed', (msg: WSMessage) => {
   // Falls back to the last assistant message for delegate_to_agent tool threads.
 registerWS(ws, 'thread_started', (msg: WSMessage) => {
     const p = msg.payload as Record<string, string>
-    if (!p.thread_id || !props.sessionId) return
-    const msgs = getMessages(props.sessionId)
+    if (!p.thread_id || (!props.sessionId && !props.spaceId)) return
+    const msgs = getSourceMessages()
     // Prefer exact match by parent_message_id; fall back to last assistant message.
     let target: ChatMessage | undefined
     if (p.parent_message_id) {
@@ -1913,14 +1935,17 @@ registerWS(ws, 'thread_inject_error', (_msg: WSMessage) => {
   // Do NOT add a system message to the main channel; the thread panel is the
   // correct place for completion details.
 registerWS(ws, 'thread_done', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    // In session mode, verify session_id matches. In space mode, accept any
+    // thread_done for sessions in this space (the WS subscription handles scoping).
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const threadId = p?.thread_id as string | undefined
     if (!threadId) return
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
-    const msgs = getMessages(props.sessionId)
+    const msgs = getSourceMessages()
     for (const m of msgs) {
       const dt = (m as any).delegatedThreads as Array<{ threadId: string; agentId: string; msgId?: string; done?: boolean; replyCount?: number; inlineSummary?: string }> | undefined
       if (dt) {
@@ -1972,7 +1997,7 @@ watch(() => props.sessionId, async () => {
   activeToolCalls.value = []
   pendingPermission.value = null
   agentDropdownOpen.value = false
-  hydratingBadges = false  // reset so new session can hydrate
+  hydratingBadgesFor.clear()  // reset so new session can hydrate
   syncSessionAgent()
   fetchStatus()
   nextTick(() => chatEditorRef.value?.focus())
