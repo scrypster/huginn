@@ -325,7 +325,10 @@ function toggleGroup(key: string) {
 
 const groupedMessages = computed((): GroupedItem[] => {
   const result: GroupedItem[] = []
-  const msgs = props.messages
+  // Filter out internal bookkeeping roles (cost, system) that should never
+  // appear in the thread panel. The backend already filters these, but this
+  // is a safety net for stale data or WS-streamed messages.
+  const msgs = props.messages.filter(m => (m.role as string) !== 'cost' && (m.role as string) !== 'system')
   let i = 0
   while (i < msgs.length) {
     const m = msgs[i]!

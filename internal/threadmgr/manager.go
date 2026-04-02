@@ -9,13 +9,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/session"
 )
-
-var idCounter int64
 
 // SpaceMembershipChecker checks whether an agent is a member of a space.
 // Returns (nil, nil) when the space is not found — callers treat that as deny-all.
@@ -32,7 +30,7 @@ var ErrAgentNotSpaceMember = errors.New("agent is not a member of the space")
 var ErrCyclicDependency = errors.New("cyclic dependency detected in thread DAG")
 
 func newID() string {
-	return fmt.Sprintf("t-%d", atomic.AddInt64(&idCounter, 1))
+	return session.NewID()
 }
 
 // DefaultMaxThreadsPerSession is the default cap on active threads per session.

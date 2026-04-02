@@ -806,10 +806,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
-import { useSpaceTimeline, type SpaceMessage } from '../composables/useSpaceTimeline'
-// import { useRouter } from 'vue-router'
-import { marked, Renderer } from 'marked'
-import hljs from 'highlight.js'
+import { useSpaceTimeline } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
@@ -824,6 +821,11 @@ import { useThreads } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
+import { adaptSpaceMessages, useMessageEnrichment } from '../composables/useMessageEnrichment'
+import { useMarkdownRenderer } from '../composables/useMarkdownRenderer'
+import { useChatSearch } from '../composables/useChatSearch'
+import { useUnreadTracking } from '../composables/useUnreadTracking'
+import { useChatStreaming } from '../composables/useChatStreaming'
 
 interface Agent {
   name: string
@@ -841,48 +843,8 @@ interface Agent {
   [key: string]: unknown
 }
 
-// ── marked + highlight.js setup ──────────────────────────────────────
-const renderer = new Renderer()
-renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
-  const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext'
-  const highlighted = language === 'plaintext'
-    ? hljs.highlightAuto(text).value
-    : hljs.highlight(text, { language }).value
-  const label = lang || ''
-  return `<div class="code-block">
-    <div class="code-header">
-      <span class="code-lang">${label}</span>
-      <button class="code-copy" onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('code').innerText).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1500)})">copy</button>
-    </div>
-    <pre><code class="hljs language-${language}">${highlighted}</code></pre>
-  </div>`
-}
-marked.use({ renderer, breaks: true, gfm: true })
-
-function renderMarkdown(content: string): string {
-  return marked.parse(content) as string
-}
-
-// renderWithMentions wraps @agent-name tokens in styled, hoverable spans.
-// Agent names are resolved from agentsList so tooltip shows real model info.
-//
-// Safety: the lookbehind (?<![a-zA-Z0-9.]) ensures we don't match @domain.com
-// inside email addresses like mailto:user@example.com (where @ is preceded by
-// a word character). Only @mentions preceded by whitespace/punctuation match.
-function renderWithMentions(content: string): string {
-  const html = renderMarkdown(content)
-  if (!html.includes('@')) return html
-  return html.replace(/(?<![a-zA-Z0-9.])@([\w-]+)/g, (match, name: string) => {
-    const agent = agentsList.value.find(a => a.name.toLowerCase() === name.toLowerCase())
-    if (!agent) return match
-    // Escape values used in HTML attributes to prevent injection.
-    const safeName = name.replace(/[<>"'&]/g, '')
-    const safeTooltip = `${agent.name} · ${agent.model}`
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-    const safeColor = (agent.color ?? 'rgba(88,166,255,0.9)').replace(/[<>"']/g, '')
-    return `<span class="agent-mention" data-agent="${safeName.toLowerCase()}" data-tooltip="${safeTooltip}" style="color:${safeColor}">@${safeName}</span>`
-  })
-}
+// ── Markdown rendering (extracted to useMarkdownRenderer) ────────────
+// Initialized after agentsList is declared below.
 
 const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 
@@ -916,6 +878,12 @@ watch(() => props.spaceId, async (newId) => {
   // Clear stale unseen-badge entries for this space after hydration so
   // sessionToSpaceMap is populated and getSessionSpaceId returns correct results.
   markSpaceSeen?.(newId)
+  // Hydrate thread badges for each session visible in this space.
+  const spMsgs = tl.getState().messages ?? []
+  const sessionIds = [...new Set(spMsgs.map(m => m.session_id).filter(Boolean))]
+  for (const sid of sessionIds) {
+    await hydrateThreadBadges(sid)
+  }
   await scrollToBottom()
 
   // Set up IntersectionObserver on the top sentinel for infinite scroll.
@@ -966,91 +934,11 @@ watch(hydrationQueueOverflowed, (overflowed) => {
 // ── Session-switch loading state ─────────────────────────────────────
 const sessionSwitching = ref(false)
 
-// ── In-chat search (Ctrl+F / Cmd+F) ─────────────────────────────────
-const chatSearchOpen = ref(false)
-const chatSearchQuery = ref('')
-const chatSearchIndex = ref(0)
-const chatSearchInputEl = ref<HTMLInputElement | null>(null)
+// ── In-chat search (extracted to useChatSearch) ─────────────────────
+// Initialized after messagesEl + messages are declared (see below).
 
-const chatSearchMatches = computed((): string[] => {
-  const q = chatSearchQuery.value.trim().toLowerCase()
-  if (!q) return []
-  return messages.value
-    .filter(m => m.content?.toLowerCase().includes(q) && (m.role as string) !== 'tool_call' && (m.role as string) !== 'tool_result')
-    .map(m => m.id)
-})
-
-function openChatSearch() {
-  chatSearchOpen.value = true
-  chatSearchIndex.value = 0
-  nextTick(() => chatSearchInputEl.value?.focus())
-}
-
-function closeChatSearch() {
-  chatSearchOpen.value = false
-  chatSearchQuery.value = ''
-  chatSearchIndex.value = 0
-}
-
-function nextChatSearchMatch() {
-  if (!chatSearchMatches.value.length) return
-  chatSearchIndex.value = (chatSearchIndex.value + 1) % chatSearchMatches.value.length
-  scrollToSearchMatch()
-}
-
-function prevChatSearchMatch() {
-  if (!chatSearchMatches.value.length) return
-  chatSearchIndex.value = (chatSearchIndex.value - 1 + chatSearchMatches.value.length) % chatSearchMatches.value.length
-  scrollToSearchMatch()
-}
-
-function scrollToSearchMatch() {
-  const id = chatSearchMatches.value[chatSearchIndex.value]
-  if (!id) return
-  const el = messagesEl.value?.querySelector(`[data-msg-id="${id}"]`)
-  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-}
-
-// ── Unread jump pill ─────────────────────────────────────────────────
-const lastSeenMessageCount = ref<Record<string, number>>({})
-const atBottom = ref(true)
-
-const unreadCount = computed(() => {
-  if (!props.sessionId) return 0
-  const seen = lastSeenMessageCount.value[props.sessionId] ?? 0
-  const total = messages.value.filter(m => m.role === 'assistant' || m.role === 'user').length
-  return Math.max(0, total - seen)
-})
-
-function onMessagesScroll() {
-  const el = messagesEl.value
-  if (!el) return
-  const threshold = 80
-  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
-  if (atBottom.value && props.sessionId) {
-    markCurrentSessionSeen()
-  }
-}
-
-function markCurrentSessionSeen() {
-  if (!props.sessionId) return
-  const count = messages.value.filter(m => m.role === 'assistant' || m.role === 'user').length
-  lastSeenMessageCount.value = { ...lastSeenMessageCount.value, [props.sessionId]: count }
-}
-
-function jumpToUnread() {
-  if (!props.sessionId) return
-  const seen = lastSeenMessageCount.value[props.sessionId] ?? 0
-  const relevant = messages.value.filter(m => m.role === 'assistant' || m.role === 'user')
-  const firstUnread = relevant[seen]
-  if (firstUnread) {
-    const el = messagesEl.value?.querySelector(`[data-msg-id="${firstUnread.id}"]`)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  } else {
-    messagesEl.value?.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
-  }
-  markCurrentSessionSeen()
-}
+// ── Unread tracking (extracted to useUnreadTracking) ─────────────────
+// Initialized after messagesEl + messages are declared (see below).
 
 // ── Header inline rename ─────────────────────────────────────────────
 const headerEditing   = ref(false)
@@ -1076,36 +964,13 @@ function cancelHeaderEdit() {
   headerEditing.value = false
 }
 
-// ── Local UI state ───────────────────────────────────────────────────
-interface ActiveToolCall { id: string; name: string; args: Record<string, unknown> }
-
-const activeToolCalls   = ref<ActiveToolCall[]>([])
-const expandedToolCalls = ref<Set<string>>(new Set())
-const expandedMsgCalls  = ref<Set<string>>(new Set())
-const streaming         = ref(false)
-const currentRunId      = ref('')   // matches run_id echoed by server; guards against stale done events
-const notifyStreaming    = ref(false)
-
-// ── Streaming watchdog ────────────────────────────────────────────────────────
-// If no token/done/error arrives within 60s of starting a run, reset streaming
-// so the user is not permanently locked out of sending. Handles server crashes,
-// network partitions, and any other scenario where done/error never arrives.
-const STREAMING_WATCHDOG_MS = 60_000
-let streamingWatchdog: ReturnType<typeof setTimeout> | null = null
-function startStreamingWatchdog() {
-  if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
-  streamingWatchdog = setTimeout(() => {
-    if (streaming.value) {
-      console.warn('[chat] streaming watchdog: no activity for 60s — resetting streaming state')
-      streaming.value = false
-      activeToolCalls.value = []
-    }
-    streamingWatchdog = null
-  }, STREAMING_WATCHDOG_MS)
-}
-function clearStreamingWatchdog() {
-  if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
-}
+// ── Streaming state (extracted to useChatStreaming) ──────────────────
+const {
+  activeToolCalls, expandedToolCalls, expandedMsgCalls,
+  streaming, currentRunId, notifyStreaming,
+  startStreamingWatchdog, clearStreamingWatchdog, toggleMsgToolCalls,
+  resetStreaming,
+} = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
 const pendingPermission = ref<WSMessage | null>(null)
 const runtimeState      = ref('')
@@ -1131,6 +996,9 @@ const agentsList        = ref<Agent[]>([])
 const selectedAgentName = ref('')
 const agentDropdownOpen = ref(false)
 const rosterOpen        = ref(false)
+
+// ── Extracted composables (depend on agentsList / messagesEl / messages) ──
+const { renderWithMentions } = useMarkdownRenderer(agentsList)
 
 // ── Swarm status panel ────────────────────────────────────────────────
 const { swarmState } = useSwarmStatus()
@@ -1176,17 +1044,18 @@ function closeThreadDetail() {
 // refresh. Calls GET /api/v1/containers/{id}/threads which returns root messages
 // that have at least one reply (thread_reply_count > 0), then attaches
 // delegatedThreads to the matching message in the UI.
-let hydratingBadges = false
+const hydratingBadgesFor = new Set<string>()
 async function hydrateThreadBadges(sessionId: string) {
-  if (!sessionId || hydratingBadges) return
-  hydratingBadges = true
+  if (!sessionId || hydratingBadgesFor.has(sessionId)) return
+  hydratingBadgesFor.add(sessionId)
   try {
     type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number }
     const rows = await apiFetch<ContainerThreadRow[]>(`/api/v1/containers/${sessionId}/threads`)
     if (!Array.isArray(rows) || rows.length === 0) return
-    const msgs = getMessages(sessionId)
+    // Use the mutable source messages so the data survives computed re-renders.
+    const msgs = getSourceMessages()
     for (const row of rows) {
-      const msg = msgs.find(m => m.id === row.id)
+      const msg = msgs.find((m: any) => m.id === row.id)
       if (!msg) continue
       // Only hydrate if the badge isn't already present (WS may have set it live)
       if (!(msg as any).delegatedThreads?.length) {
@@ -1210,27 +1079,22 @@ async function hydrateThreadBadges(sessionId: string) {
   } catch {
     // Non-fatal: badges will be missing but session is still usable
   } finally {
-    hydratingBadges = false
+    hydratingBadgesFor.delete(sessionId)
   }
 }
 
 // ── Computed ─────────────────────────────────────────────────────────
 
-// Adapt SpaceMessage[] (which uses `ts` for timestamp) to the shape the
-// existing enrichedMessages / template expect (which uses `createdAt`).
-function adaptSpaceMessages(msgs: SpaceMessage[]) {
-  return msgs.map(m => ({
-    id: m.id,
-    role: m.role as 'user' | 'assistant',
-    content: m.content,
-    agent: m.agent || undefined,
-    createdAt: m.ts,
-    // stream- prefix means the message is in-flight (status placeholder or live
-    // token stream). Show the blinking cursor so the user knows content is arriving.
-    streaming: m.id.startsWith('stream-'),
-    // done is always true for persisted (API-loaded) tool calls; WS-streamed ones set it explicitly.
-    toolCalls: (m.toolCalls ?? []).map(tc => ({ ...tc, done: tc.done ?? true })),
-  }))
+// getSourceMessages returns the *mutable* source message array for the current
+// view mode. In space mode this is the SpaceMessage[] from the timeline state;
+// in session mode it's the session message array from useSessions. Thread
+// handlers must mutate these objects (not the adapted copies) so the data
+// survives computed re-evaluations.
+function getSourceMessages(): any[] {
+  if (props.spaceId) {
+    return (currentSpaceTimeline.value?.getState().messages ?? []) as any[]
+  }
+  return props.sessionId ? getMessages(props.sessionId) : []
 }
 
 const messages = computed(() => {
@@ -1241,72 +1105,23 @@ const messages = computed(() => {
   return props.sessionId ? getMessages(props.sessionId) : []
 })
 
-// enrichedMessages adds two display hints to each message:
-//   showHeader  — false when this is a continuation from same agent (collapses avatar + name)
-//   dateLabel   — set to "Today" / "Yesterday" / "Mon, Mar 15" when a date boundary is crossed
-type EnrichedMessage = (typeof messages.value[number]) & {
-  showHeader: boolean
-  dateLabel?: string
-}
+// enrichedMessages (extracted to useMessageEnrichment)
+const { enrichedMessages } = useMessageEnrichment(messages as any)
 
-function dateLabelFor(ts: string | undefined): string {
-  if (!ts) return ''
-  const d = new Date(ts)
-  if (isNaN(d.getTime())) return ''
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const msgDay = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const diffDays = Math.round((today.getTime() - msgDay.getTime()) / 86400000)
-  if (diffDays === 0) return 'Today'
-  if (diffDays === 1) return 'Yesterday'
-  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
-}
+// ── Composables that depend on messages / messagesEl ─────────────────
+const sessionIdRef = computed(() => props.sessionId)
+const {
+  chatSearchOpen, chatSearchQuery, chatSearchIndex,
+  chatSearchMatches, openChatSearch, closeChatSearch,
+  nextChatSearchMatch, prevChatSearchMatch,
+  chatSearchInputEl, // template ref: bound via ref="chatSearchInputEl" in template
+} = useChatSearch(messages as any, messagesEl)
+// vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
+void (chatSearchInputEl satisfies unknown)
 
-function isSameDay(a: string | undefined, b: string | undefined): boolean {
-  if (!a || !b) return false
-  const da = new Date(a), db = new Date(b)
-  return da.getFullYear() === db.getFullYear() &&
-    da.getMonth() === db.getMonth() &&
-    da.getDate() === db.getDate()
-}
-
-const enrichedMessages = computed((): EnrichedMessage[] => {
-  const result: EnrichedMessage[] = []
-  const msgs = messages.value
-  for (let i = 0; i < msgs.length; i++) {
-    const msg = msgs[i]!
-    const prev = result[i - 1]
-
-    // Date divider: show when this message is on a different day from the previous
-    const ts = (msg as any).createdAt as string | undefined
-    const prevTs = prev ? (prev as any).createdAt as string | undefined : undefined
-    const dateLabel = (i === 0 || !isSameDay(ts, prevTs)) ? dateLabelFor(ts) : undefined
-
-    // Header suppression: hide avatar+name for continuations from same agent
-    // A message is a "continuation" when all of:
-    //   1. Same role as previous
-    //   2. Same agent name (assistant) or both user messages
-    //   3. No date boundary between them
-    //   4. Previous message is not a threadSummary separator
-    let showHeader = true
-    if (prev && !dateLabel) {
-      const sameRole = msg.role === prev.role
-      const prevIsThreadSummary = !!(prev as any).threadSummary
-      const currIsThreadSummary = !!(msg as any).threadSummary
-      if (sameRole && !prevIsThreadSummary && !currIsThreadSummary) {
-        if (msg.role === 'user') {
-          showHeader = false
-        } else if (msg.role === 'assistant') {
-          const sameAgent = (msg.agent || '') === (prev.agent || '')
-          if (sameAgent) showHeader = false
-        }
-      }
-    }
-
-    result.push({ ...msg, showHeader, dateLabel } as EnrichedMessage)
-  }
-  return result
-})
+const {
+  atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
+} = useUnreadTracking(sessionIdRef, messages as any, messagesEl)
 
 const sessionLabel = computed(() => {
   const s = sessions.value.find(s => s.id === props.sessionId)
@@ -1407,11 +1222,6 @@ const selectedToolCall = ref<ToolCallRecord | null>(null)
 
 function toggleToolCall(tc: ToolCallRecord) {
   selectedToolCall.value = tc
-}
-
-function toggleMsgToolCalls(msgId: string) {
-  if (expandedMsgCalls.value.has(msgId)) expandedMsgCalls.value.delete(msgId)
-  else expandedMsgCalls.value.add(msgId)
 }
 
 // ── Thread helpers ────────────────────────────────────────────────────
@@ -1734,8 +1544,8 @@ registerWS(ws, 'primary_agent_changed', (msg: WSMessage) => {
   // Falls back to the last assistant message for delegate_to_agent tool threads.
 registerWS(ws, 'thread_started', (msg: WSMessage) => {
     const p = msg.payload as Record<string, string>
-    if (!p.thread_id || !props.sessionId) return
-    const msgs = getMessages(props.sessionId)
+    if (!p.thread_id || (!props.sessionId && !props.spaceId)) return
+    const msgs = getSourceMessages()
     // Prefer exact match by parent_message_id; fall back to last assistant message.
     let target: ChatMessage | undefined
     if (p.parent_message_id) {
@@ -1797,21 +1607,23 @@ registerWS(ws, 'notify_done', (msg: WSMessage) => {
 // marked done by thread_done) and Tom's follow-up synthesis are the main-chat
 // signals. Keeping the handler so future telemetry can be added here.
 registerWS(ws, 'thread_result', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     // No-op for main chat display intentionally.
   })
 
 // follow_up_start: lead agent is about to synthesize. Show a "thinking" bubble
 // immediately so the user knows Tom is picking up where Sam left off.
 registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
-    const msgs = getMessages(props.sessionId)
+    const msgs = getSourceMessages()
     // Only add if there isn't already a follow-up streaming bubble
     const alreadyExists = msgs.some(m => (m as any).followUpStreaming)
     if (!alreadyExists) {
-      msgs.push({
+      const fupStreamMsg: any = {
         id: `fup-stream-${Date.now()}`,
         role: 'assistant',
         content: '',
@@ -1819,7 +1631,15 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
         createdAt: new Date().toISOString(),
         followUpStreaming: true,
         followUpThinking: true,
-      } as any)
+        isFollowUp: true,
+      }
+      // In space mode, include SpaceMessage fields so adaptSpaceMessages works.
+      if (props.spaceId && msg.session_id) {
+        fupStreamMsg.session_id = msg.session_id
+        fupStreamMsg.seq = -1
+        fupStreamMsg.ts = new Date().toISOString()
+      }
+      msgs.push(fupStreamMsg)
       scrollToBottom()
     }
   })
@@ -1827,75 +1647,79 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
 // follow_up_token: streaming token from the lead agent's follow-up synthesis.
 // Builds a live streaming bubble in the main chat so the user sees Tom "typing".
 registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
     const token = p?.token as string | undefined
     if (!token) return
-    const msgs = getMessages(props.sessionId)
+    const msgs = getSourceMessages()
     // Find the existing follow-up streaming bubble or create one
     const existing = [...msgs].reverse().find(m => (m as any).followUpStreaming)
     if (existing) {
       existing.content += token
       ;(existing as any).followUpThinking = false // first token: stop thinking dots
     } else {
-      msgs.push({
+      const fupFallback: any = {
         id: `fup-stream-${Date.now()}`,
         role: 'assistant',
         content: token,
         agent: agentName || 'Agent',
         followUpStreaming: true,
-      } as any)
+        isFollowUp: true,
+      }
+      if (props.spaceId && msg.session_id) {
+        fupFallback.session_id = msg.session_id
+        fupFallback.seq = -1
+        fupFallback.ts = new Date().toISOString()
+      }
+      msgs.push(fupFallback)
     }
     scrollToBottom()
   })
 
 // agent_follow_up: final persisted follow-up reply from the lead agent.
-// If the payload has parent_message_id, render as a thread reply on the parent
-// message (Slack-style inline reply). Otherwise add as a top-level message.
+// Always renders as a top-level message in the main channel (Slack-like UX:
+// Tom synthesises Sam's thread result and posts it to the channel, not as
+// a nested reply on the @mention message).
 registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
     const content = p?.content as string | undefined
     if (!content) return
-    const msgs = getMessages(props.sessionId)
+    const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
 
-    const parentMsgId = p?.parent_message_id as string | undefined
-    if (parentMsgId) {
-      // Thread reply: find the parent message and attach as inline reply
-      const parentMsg = msgs.find(m => m.id === parentMsgId)
-      if (parentMsg) {
-        if (!parentMsg.threadReplies) parentMsg.threadReplies = []
-        parentMsg.threadReplies.push({
-          id: `fup-${Date.now()}`,
-          agent: agentName || 'Agent',
-          content,
-        })
-        scrollToBottom()
-        return
-      }
-      // Fall through to top-level if parent not found
-    }
-
-    // Top-level message (no parent or parent not found)
-    msgs.push({
+    // Top-level message in the main channel — marked as follow-up so the
+    // enrichedMessages computed always shows a header (prevents visual merge
+    // with Tom's preceding @mention message).
+    const fupMsg: any = {
       id: `fup-${Date.now()}`,
       role: 'assistant',
       content,
       agent: agentName || 'Agent',
-    } as any)
+      isFollowUp: true,
+    }
+    // In space mode, include SpaceMessage fields so adaptSpaceMessages works.
+    if (props.spaceId && msg.session_id) {
+      fupMsg.session_id = msg.session_id
+      fupMsg.seq = -1
+      fupMsg.ts = new Date().toISOString()
+    }
+    msgs.push(fupMsg)
     scrollToBottom()
   })
 
 // follow_up_cancelled: lead agent failed to synthesize (session busy or error).
 // Remove the thinking bubble so the UI doesn't hang indefinitely.
 registerWS(ws, 'follow_up_cancelled', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
-    const msgs = getMessages(props.sessionId)
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const msgs = getSourceMessages()
     // Remove the thinking bubble if it exists
     const idx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (idx >= 0) msgs.splice(idx, 1)
@@ -1913,14 +1737,17 @@ registerWS(ws, 'thread_inject_error', (_msg: WSMessage) => {
   // Do NOT add a system message to the main channel; the thread panel is the
   // correct place for completion details.
 registerWS(ws, 'thread_done', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    // In session mode, verify session_id matches. In space mode, accept any
+    // thread_done for sessions in this space (the WS subscription handles scoping).
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const threadId = p?.thread_id as string | undefined
     if (!threadId) return
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
-    const msgs = getMessages(props.sessionId)
+    const msgs = getSourceMessages()
     for (const m of msgs) {
       const dt = (m as any).delegatedThreads as Array<{ threadId: string; agentId: string; msgId?: string; done?: boolean; replyCount?: number; inlineSummary?: string }> | undefined
       if (dt) {
@@ -1965,14 +1792,10 @@ onUnmounted(() => {
 
 // Reset state and sync agent when switching sessions
 watch(() => props.sessionId, async () => {
-  clearStreamingWatchdog()
-  streaming.value = false
-  currentRunId.value = ''  // prevent late done from old session matching new session's run
-  notifyStreaming.value = false
-  activeToolCalls.value = []
+  resetStreaming()
   pendingPermission.value = null
   agentDropdownOpen.value = false
-  hydratingBadges = false  // reset so new session can hydrate
+  hydratingBadgesFor.clear()  // reset so new session can hydrate
   syncSessionAgent()
   fetchStatus()
   nextTick(() => chatEditorRef.value?.focus())
@@ -2019,7 +1842,7 @@ async function handleMessagesClick(e: MouseEvent) {
 
 function handleGlobalKeydown(e: KeyboardEvent) {
   // Ctrl+F / Cmd+F — open in-chat search
-  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && props.sessionId) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && (props.sessionId || props.spaceId)) {
     e.preventDefault()
     if (chatSearchOpen.value) {
       closeChatSearch()

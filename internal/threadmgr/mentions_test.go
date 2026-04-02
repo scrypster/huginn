@@ -114,3 +114,31 @@ func TestParseMentions_MentionReExported(t *testing.T) {
 		t.Errorf("MentionRe should extract 'Sam', got %v", matches)
 	}
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hardening: Self-delegation guard in CreateFromMentions (review/agents-channels-dm-hardening)
+// ────────────────────────────────────────────────────────────────────────────
+
+// TestParseMentions_SelfDelegationGuard verifies that ParseMentions correctly
+// returns mentions even when the caller is in the mention list, since
+// the self-delegation filtering happens in CreateFromMentions (not ParseMentions).
+// ParseMentions is a stateless utility that just returns all matches.
+func TestParseMentions_SelfDelegationGuard(t *testing.T) {
+	// This test verifies that ParseMentions returns all matches including the caller.
+	// The filtering is done by CreateFromMentions using the callerAgent parameter.
+	names := []string{"Tom", "Sam"}
+	reqs := ParseMentions("@Tom and @Sam work together", names)
+
+	// ParseMentions should return both mentions (the filtering is elsewhere).
+	if len(reqs) != 2 {
+		t.Fatalf("expected 2 requests from ParseMentions, got %d", len(reqs))
+	}
+
+	agentSet := make(map[string]bool)
+	for _, r := range reqs {
+		agentSet[r.AgentName] = true
+	}
+	if !agentSet["Tom"] || !agentSet["Sam"] {
+		t.Errorf("expected both Tom and Sam in mentions, got: %v", agentSet)
+	}
+}

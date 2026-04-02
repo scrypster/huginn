@@ -233,3 +233,75 @@ func TestHandleUpdateAgent_Rename_ExistingAgentCount(t *testing.T) {
 		t.Error("alice.json should be deleted")
 	}
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hardening: Duplicate agent name check on CREATE (review/agents-channels-dm-hardening)
+// ────────────────────────────────────────────────────────────────────────────
+
+// TestHandleUpdateAgent_Create_DuplicateName_CaseInsensitive verifies that
+// creating a NEW agent whose name collides case-insensitively with an existing
+// agent returns 409. The URL path uses a unique new name ("bob") but the body
+// sets name to "alice" which collides with the existing "Alice".
+func TestHandleUpdateAgent_Create_DuplicateName_CaseInsensitive(t *testing.T) {
+	setupAgentsDir(t, map[string]string{
+		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
+	})
+	_, ts := newTestServer(t)
+
+	// Create a NEW agent "bob" but set body name to "alice" (rename-into-collision).
+	body := `{"name":"alice","model":"claude-sonnet-4-6","color":"#3fb950"}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/bob", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Should return 409 Conflict because "alice" (case-insensitive) already exists.
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for duplicate name, got %d", resp.StatusCode)
+	}
+
+	var errResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if msg, ok := errResp["error"].(string); ok && strings.Contains(msg, "already exists") {
+			// Good: error message mentions the duplicate.
+		}
+	}
+}
+
+// TestHandleUpdateAgent_Create_DifferentName_Succeeds verifies that creating
+// agents with different names both succeeds.
+func TestHandleUpdateAgent_Create_DifferentName_Succeeds(t *testing.T) {
+	setupAgentsDir(t, map[string]string{
+		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
+	})
+	_, ts := newTestServer(t)
+
+	// Create a different agent "Bob" (should succeed).
+	body := `{"name":"Bob","model":"claude-sonnet-4-6","color":"#3fb950"}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/Bob", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for creating different agent, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result["saved"] != "Bob" {
+		t.Errorf("expected saved agent 'Bob', got %v", result["saved"])
+	}
+}

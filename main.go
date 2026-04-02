@@ -2281,7 +2281,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		if migrErr := sqlDB.Migrate(threadmgr.Migrations()); migrErr != nil {
 			fmt.Fprintf(os.Stderr, "huginn: warning: thread persistence migration failed: %v\n", migrErr)
 		} else {
-			tm.SetStore(threadmgr.NewSQLiteThreadStore(sqlDB))
+			threadStore := threadmgr.NewSQLiteThreadStore(sqlDB)
+			// Wire the thread reply-count broadcast so the frontend badge
+			// updates when a new thread is created with a parent message.
+			threadStore.OnThreadReplyCount = func(sessionID, parentMsgID string, newCount int64) {
+				srv.BroadcastToSession(sessionID, "thread_reply_updated", map[string]any{
+					"message_id":  parentMsgID,
+					"reply_count": newCount,
+					"session_id":  sessionID,
+				})
+			}
+			tm.SetStore(threadStore)
 		}
 	}
 
@@ -2671,9 +2681,28 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// ctx gets cancelled when the chat response finishes.
 			spawnCtx := srv.Context()
 			if spawnCtx == nil {
+				logger.Warn("mentionDelegate: srv.Context() is nil, falling back to request ctx", "session_id", sessionID)
 				spawnCtx = ctx
+			} else {
+				logger.Info("mentionDelegate: using server lifecycle context", "session_id", sessionID, "ctx_err", spawnCtx.Err())
 			}
-			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm)
+			// Resolve the caller agent (the agent that produced userMsg) to guard against
+			// self-delegation. The caller is the session's primary agent.
+			callerAgent := ""
+			if sess != nil {
+				if ag := srv.ResolveAgent(sessionID); ag != nil {
+					callerAgent = ag.Name
+				}
+			}
+			var spaceID string
+			if sess != nil {
+				spaceID = sess.SpaceID()
+			}
+			logger.Info("mentionDelegate: resolved context",
+				"session_id", sessionID, "caller_agent", callerAgent,
+				"space_id", spaceID, "sess_nil", sess == nil)
+			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
+			logger.Info("mentionDelegate: CreateFromMentions returned", "session_id", sessionID)
 		})
 
 		// Wire automatic help resolution: when a sub-agent calls request_help,
@@ -2775,10 +2804,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					"token": tok,
 				})
 			}
+			// onEvent is intentionally a no-op for content accumulation —
+			// onToken already captures all text tokens into replyBuf.
+			// Writing StreamText here too would DOUBLE the content.
 			onEvent := func(ev backend.StreamEvent) {
-				if ev.Type == backend.StreamText {
-					replyBuf.WriteString(ev.Content)
-				}
+				// no-op: onToken handles content accumulation + WS broadcast
 			}
 			// noopToolEvent suppresses Tom's synthesis tool calls from the main
 			// channel UI — tool calls during synthesis are implementation details.
@@ -2809,31 +2839,27 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return
 			}
 
-			// Persist Tom's follow-up reply to the session store, threaded under
-			// the original user message so the frontend renders it as a reply.
-			parentMsgID := summary.ParentMessageID
+			// Persist Tom's follow-up synthesis as a top-level channel message.
+			// Do NOT set ParentMessageID — follow-up synthesis is a main-channel
+			// message (Slack-like UX), not a thread reply. Messages with
+			// parent_message_id are filtered out of the space timeline query,
+			// which would make the synthesis vanish after page refresh.
 			if loadedSess, loadErr := sessStore.Load(sessionID); loadErr == nil {
 				_ = sessStore.Append(loadedSess, session.SessionMessage{
-					ID:              session.NewID(),
-					Role:            "assistant",
-					Content:         replyStr,
-					Agent:           ag.Name,
-					Ts:              time.Now().UTC(),
-					ParentMessageID: parentMsgID,
+					ID:      session.NewID(),
+					Role:    "assistant",
+					Content: replyStr,
+					Agent:   ag.Name,
+					Ts:      time.Now().UTC(),
 				})
 			}
 
 			// Broadcast the finalized reply so the frontend replaces the streaming
-			// bubble with the persisted message content. Include parent_message_id
-			// so the frontend can thread it under the original message.
-			payload := map[string]any{
+			// bubble with the persisted message content.
+			srv.BroadcastToSession(sessionID, "agent_follow_up", map[string]any{
 				"agent":   ag.Name,
 				"content": replyStr,
-			}
-			if parentMsgID != "" {
-				payload["parent_message_id"] = parentMsgID
-			}
-			srv.BroadcastToSession(sessionID, "agent_follow_up", payload)
+			})
 		}
 		tm.SetCompletionNotifier(completionNotifier)
 

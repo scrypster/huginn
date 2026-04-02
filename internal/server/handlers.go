@@ -338,10 +338,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Guard against rename collisions: if the name is changing, reject if target already exists.
+	// Also guard against duplicate names when creating a NEW agent (existingAgent is nil).
 	isRename := !strings.EqualFold(incoming.Name, name)
-	if isRename {
+	isCreation := existingAgent == nil
+	if isRename || isCreation {
 		for _, a := range existingCfg.Agents {
 			if strings.EqualFold(a.Name, incoming.Name) {
+				// Skip self when checking for rename (allow non-changing saves).
+				if isRename && strings.EqualFold(a.Name, name) {
+					continue
+				}
 				jsonError(w, 409, fmt.Sprintf("agent %q already exists", incoming.Name))
 				return
 			}
@@ -636,6 +642,19 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 409, "cannot delete the last agent")
 		return
 	}
+
+	// Check if the agent is assigned as a lead agent in any space.
+	if s.spaceStore != nil {
+		if spaces, err := s.spaceStore.SpacesByLeadAgent(name); err == nil && len(spaces) > 0 {
+			var spaceNames []string
+			for _, sp := range spaces {
+				spaceNames = append(spaceNames, sp.Name)
+			}
+			jsonError(w, 409, fmt.Sprintf("cannot delete agent %q: assigned as lead agent in spaces: %v", name, spaceNames))
+			return
+		}
+	}
+
 	if err := agents.DeleteAgentDefault(name); err != nil {
 		jsonError(w, 404, err.Error())
 		return

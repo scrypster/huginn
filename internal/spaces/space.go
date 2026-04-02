@@ -190,6 +190,9 @@ type StoreInterface interface {
 	// GetChannelsForAgent returns all non-archived channel spaces where the agent
 	// is either the lead or a member. Used for DM cross-space awareness.
 	GetChannelsForAgent(agentName string) ([]*Space, error)
+	// SpacesByLeadAgent returns all non-archived spaces where agentName is the lead agent.
+	// Used to prevent deletion of agents that are assigned as channel/space leads.
+	SpacesByLeadAgent(agentName string) ([]*Space, error)
 	// RemoveAgentFromAllSpaces removes an agent from all space membership lists,
 	// archives any DMs for that agent, and archives channels where that agent
 	// was the lead. Returns a SpaceCascadeResult describing the side effects.
