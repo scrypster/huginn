@@ -926,5 +926,32 @@ func (s *SQLiteSessionStore) GetThreadReplyCounts(sessionID string) (map[string]
 	return out, rows.Err()
 }
 
+// ReconcileThreadReplyCounts updates thread_reply_count for all messages that
+// have threads pointing to them via the threads.parent_msg_id column. This
+// fixes existing data where thread_reply_count was never incremented because
+// the increment was missing from the original thread creation path.
+// Safe to call on every startup — idempotent.
+func (s *SQLiteSessionStore) ReconcileThreadReplyCounts() error {
+	wdb := s.db.Write()
+	if wdb == nil {
+		return nil
+	}
+	_, err := wdb.Exec(`
+		UPDATE messages
+		SET thread_reply_count = (
+			SELECT COUNT(*) FROM threads WHERE parent_msg_id = messages.id
+		)
+		WHERE id IN (
+			SELECT parent_msg_id FROM threads WHERE parent_msg_id != ''
+		)
+		  AND thread_reply_count != (
+			SELECT COUNT(*) FROM threads WHERE parent_msg_id = messages.id
+		)`)
+	if err != nil {
+		return fmt.Errorf("session sqlite: reconcile thread reply counts: %w", err)
+	}
+	return nil
+}
+
 // Compile-time assertion: *SQLiteSessionStore must satisfy StoreInterface.
 var _ StoreInterface = (*SQLiteSessionStore)(nil)

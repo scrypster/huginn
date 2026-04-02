@@ -317,6 +317,15 @@ func New(
 			}
 		}()
 	}
+	// Reconcile thread_reply_count for existing data. This fixes messages that
+	// have threads but zero thread_reply_count because the increment was missing.
+	if sqlStore, ok := store.(*session.SQLiteSessionStore); ok {
+		go func() {
+			if err := sqlStore.ReconcileThreadReplyCounts(); err != nil {
+				log.Printf("warn: reconcile thread reply counts: %v", err)
+			}
+		}()
+	}
 	return s
 }
 
