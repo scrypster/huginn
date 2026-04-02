@@ -147,31 +147,54 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       // Update activeSessionId for the space that owns this session.
       st.activeSessionId = sessionId
-      // Synchronously rename the stream- placeholder to done- before starting
-      // the async fetch. This closes the race window where turn-2 tokens arrive
-      // before the fetch resolves and onToken finds the old placeholder, causing
-      // the second response to be appended to the first message bubble.
+
       const streamIdx = st.messages.findIndex(
         e => e.session_id === sessionId && e.id.startsWith('stream-')
       )
+
+      // Stamp the server-assigned message ID onto the placeholder immediately
+      // (synchronously) so that thread_started events — which carry
+      // parent_message_id matching the server ID — can find this message
+      // before the async fetch resolves. This also closes the race window
+      // where turn-2 tokens could append to the old stream- placeholder.
+      const serverMsgId = (msg.payload as Record<string, string> | undefined)?.message_id
       if (streamIdx >= 0) {
         const placeholder = st.messages[streamIdx]
-        if (placeholder) placeholder.id = placeholder.id.replace('stream-', 'done-')
+        if (placeholder) {
+          if (serverMsgId) {
+            placeholder.id = serverMsgId
+          } else {
+            placeholder.id = placeholder.id.replace('stream-', 'done-')
+          }
+        }
       }
-      // Refresh the last message from the server to get the stable DB id.
-      // We fire-and-forget; if it fails the done- placeholder content is still visible.
+
+      // Refresh the last message from the server to get full stable data.
+      // We fire-and-forget; if it fails the placeholder content is still visible.
       api.sessions.getMessages(sessionId, { limit: 5 }).then(fresh => {
         const freshMsgs = (Array.isArray(fresh) ? fresh : []) as SpaceMessage[]
         for (const m of freshMsgs) {
-          if (!st.messages.some(e => e.id === m.id)) {
-            // Only replace the done- placeholder with assistant messages — user
-            // messages are already present as optimistic entries and swapping the
-            // done- slot with a user message would corrupt the display order.
+          // Check if this message already exists in the timeline (by server ID).
+          const existingIdx = st.messages.findIndex(e => e.id === m.id)
+          if (existingIdx >= 0) {
+            // Already in timeline (stamped by server ID above). Replace with
+            // full server data but preserve any thread data attached by WS handlers.
+            const existing = st.messages[existingIdx]!
+            if ((existing as any).delegatedThreads) {
+              ;(m as any).delegatedThreads = (existing as any).delegatedThreads
+            }
+            st.messages.splice(existingIdx, 1, m)
+          } else if (!st.messages.some(e => e.id === m.id)) {
+            // New message — check for done- placeholder to replace.
             if (m.role === 'assistant') {
               const doneIdx = st.messages.findIndex(
                 e => e.session_id === sessionId && e.id.startsWith('done-')
               )
               if (doneIdx >= 0) {
+                const old = st.messages[doneIdx]!
+                if ((old as any).delegatedThreads) {
+                  ;(m as any).delegatedThreads = (old as any).delegatedThreads
+                }
                 st.messages.splice(doneIdx, 1, m)
               } else {
                 st.messages.push(m)

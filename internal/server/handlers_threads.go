@@ -52,10 +52,11 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Query messages that are direct replies (parent_message_id) OR belong to
-	// a thread whose parent_msg_id matches this message. The latter covers the
-	// @mention delegation path where thread messages are stored with
-	// container_type='thread' but no parent_message_id on individual messages.
+	// Query messages that belong to the thread container for this parent message.
+	// We only return thread-scoped messages (container_type='thread') so that
+	// follow-up synthesis messages posted to the main session channel don't leak
+	// into the thread panel. Internal bookkeeping roles (cost, system) are
+	// excluded so only user-visible messages appear.
 	rows, err := rdb.QueryContext(r.Context(), `
 		SELECT id, container_id, seq, ts, role, content,
 		       COALESCE(agent, ''),
@@ -64,12 +65,13 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		       COALESCE(triggering_message_id, ''),
 		       COALESCE(thread_reply_count, 0)
 		FROM messages
-		WHERE parent_message_id = ?
-		   OR (container_type = 'thread' AND container_id IN (
-		       SELECT id FROM threads WHERE parent_msg_id = ?
-		   ))
+		WHERE container_type = 'thread'
+		  AND container_id IN (
+		      SELECT id FROM threads WHERE parent_msg_id = ?
+		  )
+		  AND role NOT IN ('cost', 'system')
 		ORDER BY seq ASC`,
-		messageID, messageID,
+		messageID,
 	)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "query thread: "+err.Error())
@@ -107,21 +109,19 @@ func (s *Server) handleGetContainerThreads(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Join with the threads table to get the delegated sub-agent name
+	// (threads.agent_name) instead of relying on the parent message's agent.
+	// This ensures the badge shows "Sam" (who ran the thread) not "Tom" (who
+	// authored the @mention).
 	rows, err := rdb.QueryContext(r.Context(), `
 		SELECT m.id, m.container_id, m.seq, m.ts, m.role, m.content,
-		       COALESCE((
-		           SELECT r.agent FROM messages r
-		           WHERE r.parent_message_id = m.id
-		             AND r.role = 'assistant'
-		             AND COALESCE(r.agent, '') != ''
-		           ORDER BY r.seq ASC
-		           LIMIT 1
-		       ), COALESCE(m.agent, '')),
+		       COALESCE(t.agent_name, COALESCE(m.agent, '')),
 		       COALESCE(m.tool_name, ''),
 		       COALESCE(m.parent_message_id, ''),
 		       COALESCE(m.triggering_message_id, ''),
 		       COALESCE(m.thread_reply_count, 0)
 		FROM messages m
+		LEFT JOIN threads t ON t.parent_msg_id = m.id
 		WHERE m.container_type = 'session' AND m.container_id = ?
 		  AND (m.parent_message_id IS NULL OR m.parent_message_id = '')
 		  AND COALESCE(m.thread_reply_count, 0) > 0
