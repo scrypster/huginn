@@ -2281,7 +2281,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		if migrErr := sqlDB.Migrate(threadmgr.Migrations()); migrErr != nil {
 			fmt.Fprintf(os.Stderr, "huginn: warning: thread persistence migration failed: %v\n", migrErr)
 		} else {
-			tm.SetStore(threadmgr.NewSQLiteThreadStore(sqlDB))
+			threadStore := threadmgr.NewSQLiteThreadStore(sqlDB)
+			// Wire the thread reply-count broadcast so the frontend badge
+			// updates when a new thread is created with a parent message.
+			threadStore.OnThreadReplyCount = func(sessionID, parentMsgID string, newCount int64) {
+				srv.BroadcastToSession(sessionID, "thread_reply_updated", map[string]any{
+					"message_id":  parentMsgID,
+					"reply_count": newCount,
+					"session_id":  sessionID,
+				})
+			}
+			tm.SetStore(threadStore)
 		}
 	}
 

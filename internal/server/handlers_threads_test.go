@@ -66,26 +66,35 @@ func TestGetMessageThread_WithReplies(t *testing.T) {
 		t.Fatalf("append parent: %v", err)
 	}
 
-	// Insert two reply messages with parent_message_id = "parent-1".
-	// We use the raw write DB since the StoreInterface doesn't expose
-	// parent_message_id directly (that column is added by the workforce migration).
 	wdb := db.Write()
 	if wdb == nil {
 		t.Fatal("write db is nil")
 	}
+
+	// Create a thread row linking to parent-1, matching the current query
+	// pattern: handleGetMessageThread looks for container_type='thread'
+	// messages via threads.parent_msg_id.
+	threadID := "thread-1"
+	_, err := wdb.Exec(`
+		INSERT OR IGNORE INTO threads
+			(id, parent_type, parent_id, agent_name, task, status,
+			 parent_msg_id, created_at, files_modified, key_decisions, artifacts)
+		VALUES (?, 'session', ?, 'Sam', 'test task', 'done',
+		        'parent-1', ?, '[]', '[]', '[]')`,
+		threadID, sess.ID, time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		t.Fatalf("insert thread: %v", err)
+	}
+
+	// Insert two thread-scoped reply messages (container_type='thread').
 	for i, content := range []string{"reply 1", "reply 2"} {
-		id := "reply-" + string(rune('A'+i))
-		_, err := wdb.Exec(`
-			INSERT OR IGNORE INTO messages
-				(id, container_type, container_id, seq, ts, role, content, agent,
-				 tool_name, tool_call_id, type,
-				 prompt_tokens, completion_tokens, cost_usd, model,
-				 parent_message_id, thread_reply_count)
-			VALUES (?, 'session', ?, ?, ?, 'assistant', ?, '', '', '', '', 0, 0, 0.0, '', 'parent-1', 0)`,
-			id, sess.ID, int64(10+i), time.Now().UTC().Format(time.RFC3339), content,
-		)
-		if err != nil {
-			t.Fatalf("insert reply %d: %v", i, err)
+		if err := sqliteStore.AppendToThread(sess.ID, threadID, session.SessionMessage{
+			Role:    "assistant",
+			Content: content,
+			Agent:   "Sam",
+		}); err != nil {
+			t.Fatalf("append thread reply %d: %v", i, err)
 		}
 	}
 
@@ -173,8 +182,8 @@ func TestGetMessageThread_NilDB(t *testing.T) {
 
 // TestGetContainerThreads_ReplyAgentName is the regression test for the badge
 // label bug: GET /api/v1/containers/{id}/threads must return the REPLYING agent's
-// name (Sam), not the parent message's agent (Tom). Previously the SQL used the
-// parent message's agent column, causing the badge to show "Tom" instead of "Sam".
+// name (Sam, from the threads table), not the parent message's agent (Tom).
+// The SQL LEFT JOINs threads.agent_name to override the message's agent column.
 func TestGetContainerThreads_ReplyAgentName(t *testing.T) {
 	srv := testServer(t)
 	db := openTestSQLiteDB(t)
@@ -193,7 +202,7 @@ func TestGetContainerThreads_ReplyAgentName(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	// Parent message by "Tom" (the lead agent).
+	// Parent message by "Tom" (the lead agent) with thread_reply_count = 1.
 	_, err := wdb.Exec(`
 		INSERT OR IGNORE INTO messages
 			(id, container_type, container_id, seq, ts, role, content, agent,
@@ -208,19 +217,18 @@ func TestGetContainerThreads_ReplyAgentName(t *testing.T) {
 		t.Fatalf("insert parent: %v", err)
 	}
 
-	// Thread reply by "Sam" (the delegate agent) with parent_message_id = parent-tom.
+	// Thread row linking to parent-tom, with agent_name = "Sam" (the delegate).
+	// This is how the real code creates threads via SaveThread.
 	_, err = wdb.Exec(`
-		INSERT OR IGNORE INTO messages
-			(id, container_type, container_id, seq, ts, role, content, agent,
-			 tool_name, tool_call_id, type,
-			 prompt_tokens, completion_tokens, cost_usd, model,
-			 parent_message_id, thread_reply_count)
-		VALUES (?, 'session', ?, 2, ?, 'assistant', 'Analysis complete.', 'Sam',
-		        '', '', '', 0, 0, 0.0, '', 'parent-tom', 0)`,
-		"reply-sam", sess.ID, ts,
+		INSERT OR IGNORE INTO threads
+			(id, parent_type, parent_id, agent_name, task, status,
+			 parent_msg_id, created_at, files_modified, key_decisions, artifacts)
+		VALUES (?, 'session', ?, 'Sam', 'Analyze data', 'done',
+		        'parent-tom', ?, '[]', '[]', '[]')`,
+		"thread-sam-1", sess.ID, ts,
 	)
 	if err != nil {
-		t.Fatalf("insert reply: %v", err)
+		t.Fatalf("insert thread: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/containers/"+sess.ID+"/threads", nil)
@@ -238,7 +246,7 @@ func TestGetContainerThreads_ReplyAgentName(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("expected 1 thread root, got %d", len(result))
 	}
-	// Agent field must be Sam (the replying agent), not Tom (the parent message author).
+	// Agent field must be Sam (from threads.agent_name), not Tom (the parent message author).
 	if result[0].Agent != "Sam" {
 		t.Errorf("thread root Agent = %q, want \"Sam\" (the replying delegate agent, not the parent message author)", result[0].Agent)
 	}

@@ -807,9 +807,6 @@
 import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
 import { useSpaceTimeline, type SpaceMessage } from '../composables/useSpaceTimeline'
-// import { useRouter } from 'vue-router'
-import { marked, Renderer } from 'marked'
-import hljs from 'highlight.js'
 import { ChatEditor } from '../components/ChatEditor'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
@@ -824,6 +821,11 @@ import { useThreads } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
+import { adaptSpaceMessages, useMessageEnrichment, type EnrichedMessage } from '../composables/useMessageEnrichment'
+import { useMarkdownRenderer } from '../composables/useMarkdownRenderer'
+import { useChatSearch } from '../composables/useChatSearch'
+import { useUnreadTracking } from '../composables/useUnreadTracking'
+import { useChatStreaming, type ActiveToolCall } from '../composables/useChatStreaming'
 
 interface Agent {
   name: string
@@ -841,48 +843,8 @@ interface Agent {
   [key: string]: unknown
 }
 
-// ── marked + highlight.js setup ──────────────────────────────────────
-const renderer = new Renderer()
-renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
-  const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext'
-  const highlighted = language === 'plaintext'
-    ? hljs.highlightAuto(text).value
-    : hljs.highlight(text, { language }).value
-  const label = lang || ''
-  return `<div class="code-block">
-    <div class="code-header">
-      <span class="code-lang">${label}</span>
-      <button class="code-copy" onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('code').innerText).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1500)})">copy</button>
-    </div>
-    <pre><code class="hljs language-${language}">${highlighted}</code></pre>
-  </div>`
-}
-marked.use({ renderer, breaks: true, gfm: true })
-
-function renderMarkdown(content: string): string {
-  return marked.parse(content) as string
-}
-
-// renderWithMentions wraps @agent-name tokens in styled, hoverable spans.
-// Agent names are resolved from agentsList so tooltip shows real model info.
-//
-// Safety: the lookbehind (?<![a-zA-Z0-9.]) ensures we don't match @domain.com
-// inside email addresses like mailto:user@example.com (where @ is preceded by
-// a word character). Only @mentions preceded by whitespace/punctuation match.
-function renderWithMentions(content: string): string {
-  const html = renderMarkdown(content)
-  if (!html.includes('@')) return html
-  return html.replace(/(?<![a-zA-Z0-9.])@([\w-]+)/g, (match, name: string) => {
-    const agent = agentsList.value.find(a => a.name.toLowerCase() === name.toLowerCase())
-    if (!agent) return match
-    // Escape values used in HTML attributes to prevent injection.
-    const safeName = name.replace(/[<>"'&]/g, '')
-    const safeTooltip = `${agent.name} · ${agent.model}`
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-    const safeColor = (agent.color ?? 'rgba(88,166,255,0.9)').replace(/[<>"']/g, '')
-    return `<span class="agent-mention" data-agent="${safeName.toLowerCase()}" data-tooltip="${safeTooltip}" style="color:${safeColor}">@${safeName}</span>`
-  })
-}
+// ── Markdown rendering (extracted to useMarkdownRenderer) ────────────
+// Initialized after agentsList is declared below.
 
 const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 
@@ -972,91 +934,11 @@ watch(hydrationQueueOverflowed, (overflowed) => {
 // ── Session-switch loading state ─────────────────────────────────────
 const sessionSwitching = ref(false)
 
-// ── In-chat search (Ctrl+F / Cmd+F) ─────────────────────────────────
-const chatSearchOpen = ref(false)
-const chatSearchQuery = ref('')
-const chatSearchIndex = ref(0)
-const chatSearchInputEl = ref<HTMLInputElement | null>(null)
+// ── In-chat search (extracted to useChatSearch) ─────────────────────
+// Initialized after messagesEl + messages are declared (see below).
 
-const chatSearchMatches = computed((): string[] => {
-  const q = chatSearchQuery.value.trim().toLowerCase()
-  if (!q) return []
-  return messages.value
-    .filter(m => m.content?.toLowerCase().includes(q) && (m.role as string) !== 'tool_call' && (m.role as string) !== 'tool_result')
-    .map(m => m.id)
-})
-
-function openChatSearch() {
-  chatSearchOpen.value = true
-  chatSearchIndex.value = 0
-  nextTick(() => chatSearchInputEl.value?.focus())
-}
-
-function closeChatSearch() {
-  chatSearchOpen.value = false
-  chatSearchQuery.value = ''
-  chatSearchIndex.value = 0
-}
-
-function nextChatSearchMatch() {
-  if (!chatSearchMatches.value.length) return
-  chatSearchIndex.value = (chatSearchIndex.value + 1) % chatSearchMatches.value.length
-  scrollToSearchMatch()
-}
-
-function prevChatSearchMatch() {
-  if (!chatSearchMatches.value.length) return
-  chatSearchIndex.value = (chatSearchIndex.value - 1 + chatSearchMatches.value.length) % chatSearchMatches.value.length
-  scrollToSearchMatch()
-}
-
-function scrollToSearchMatch() {
-  const id = chatSearchMatches.value[chatSearchIndex.value]
-  if (!id) return
-  const el = messagesEl.value?.querySelector(`[data-msg-id="${id}"]`)
-  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-}
-
-// ── Unread jump pill ─────────────────────────────────────────────────
-const lastSeenMessageCount = ref<Record<string, number>>({})
-const atBottom = ref(true)
-
-const unreadCount = computed(() => {
-  if (!props.sessionId) return 0
-  const seen = lastSeenMessageCount.value[props.sessionId] ?? 0
-  const total = messages.value.filter(m => m.role === 'assistant' || m.role === 'user').length
-  return Math.max(0, total - seen)
-})
-
-function onMessagesScroll() {
-  const el = messagesEl.value
-  if (!el) return
-  const threshold = 80
-  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
-  if (atBottom.value && props.sessionId) {
-    markCurrentSessionSeen()
-  }
-}
-
-function markCurrentSessionSeen() {
-  if (!props.sessionId) return
-  const count = messages.value.filter(m => m.role === 'assistant' || m.role === 'user').length
-  lastSeenMessageCount.value = { ...lastSeenMessageCount.value, [props.sessionId]: count }
-}
-
-function jumpToUnread() {
-  if (!props.sessionId) return
-  const seen = lastSeenMessageCount.value[props.sessionId] ?? 0
-  const relevant = messages.value.filter(m => m.role === 'assistant' || m.role === 'user')
-  const firstUnread = relevant[seen]
-  if (firstUnread) {
-    const el = messagesEl.value?.querySelector(`[data-msg-id="${firstUnread.id}"]`)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  } else {
-    messagesEl.value?.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
-  }
-  markCurrentSessionSeen()
-}
+// ── Unread tracking (extracted to useUnreadTracking) ─────────────────
+// Initialized after messagesEl + messages are declared (see below).
 
 // ── Header inline rename ─────────────────────────────────────────────
 const headerEditing   = ref(false)
@@ -1082,36 +964,13 @@ function cancelHeaderEdit() {
   headerEditing.value = false
 }
 
-// ── Local UI state ───────────────────────────────────────────────────
-interface ActiveToolCall { id: string; name: string; args: Record<string, unknown> }
-
-const activeToolCalls   = ref<ActiveToolCall[]>([])
-const expandedToolCalls = ref<Set<string>>(new Set())
-const expandedMsgCalls  = ref<Set<string>>(new Set())
-const streaming         = ref(false)
-const currentRunId      = ref('')   // matches run_id echoed by server; guards against stale done events
-const notifyStreaming    = ref(false)
-
-// ── Streaming watchdog ────────────────────────────────────────────────────────
-// If no token/done/error arrives within 60s of starting a run, reset streaming
-// so the user is not permanently locked out of sending. Handles server crashes,
-// network partitions, and any other scenario where done/error never arrives.
-const STREAMING_WATCHDOG_MS = 60_000
-let streamingWatchdog: ReturnType<typeof setTimeout> | null = null
-function startStreamingWatchdog() {
-  if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
-  streamingWatchdog = setTimeout(() => {
-    if (streaming.value) {
-      console.warn('[chat] streaming watchdog: no activity for 60s — resetting streaming state')
-      streaming.value = false
-      activeToolCalls.value = []
-    }
-    streamingWatchdog = null
-  }, STREAMING_WATCHDOG_MS)
-}
-function clearStreamingWatchdog() {
-  if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
-}
+// ── Streaming state (extracted to useChatStreaming) ──────────────────
+const {
+  activeToolCalls, expandedToolCalls, expandedMsgCalls,
+  streaming, currentRunId, notifyStreaming,
+  startStreamingWatchdog, clearStreamingWatchdog, toggleMsgToolCalls,
+  resetStreaming,
+} = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
 const pendingPermission = ref<WSMessage | null>(null)
 const runtimeState      = ref('')
@@ -1137,6 +996,9 @@ const agentsList        = ref<Agent[]>([])
 const selectedAgentName = ref('')
 const agentDropdownOpen = ref(false)
 const rosterOpen        = ref(false)
+
+// ── Extracted composables (depend on agentsList / messagesEl / messages) ──
+const { renderWithMentions } = useMarkdownRenderer(agentsList)
 
 // ── Swarm status panel ────────────────────────────────────────────────
 const { swarmState } = useSwarmStatus()
@@ -1223,33 +1085,6 @@ async function hydrateThreadBadges(sessionId: string) {
 
 // ── Computed ─────────────────────────────────────────────────────────
 
-// Adapt SpaceMessage[] (which uses `ts` for timestamp) to the shape the
-// existing enrichedMessages / template expect (which uses `createdAt`).
-function adaptSpaceMessages(msgs: SpaceMessage[]) {
-  return msgs.map(m => ({
-    id: m.id,
-    role: m.role as 'user' | 'assistant',
-    content: m.content,
-    agent: m.agent || undefined,
-    createdAt: m.ts,
-    // stream- prefix means the message is in-flight (status placeholder or live
-    // token stream). Show the blinking cursor so the user knows content is arriving.
-    streaming: m.id.startsWith('stream-'),
-    // done is always true for persisted (API-loaded) tool calls; WS-streamed ones set it explicitly.
-    toolCalls: (m.toolCalls ?? []).map(tc => ({ ...tc, done: tc.done ?? true })),
-    // Carry through thread data attached by hydration or WS handlers.
-    delegatedThreads: (m as any).delegatedThreads,
-    threadReplies: (m as any).threadReplies,
-    // Follow-up marker for header suppression logic. True when:
-    //   (a) WS handler set it during live streaming (isFollowUp), OR
-    //   (b) Server returned a persisted follow-up with parent_message_id.
-    isFollowUp: !!(m as any).isFollowUp || !!m.parent_message_id,
-    // Carry through follow-up streaming flags for token appending.
-    followUpStreaming: (m as any).followUpStreaming,
-    followUpThinking: (m as any).followUpThinking,
-  }))
-}
-
 // getSourceMessages returns the *mutable* source message array for the current
 // view mode. In space mode this is the SpaceMessage[] from the timeline state;
 // in session mode it's the session message array from useSessions. Thread
@@ -1270,82 +1105,20 @@ const messages = computed(() => {
   return props.sessionId ? getMessages(props.sessionId) : []
 })
 
-// enrichedMessages adds two display hints to each message:
-//   showHeader  — false when this is a continuation from same agent (collapses avatar + name)
-//   dateLabel   — set to "Today" / "Yesterday" / "Mon, Mar 15" when a date boundary is crossed
-type EnrichedMessage = (typeof messages.value[number]) & {
-  showHeader: boolean
-  dateLabel?: string
-}
+// enrichedMessages (extracted to useMessageEnrichment)
+const { enrichedMessages } = useMessageEnrichment(messages as any)
 
-function dateLabelFor(ts: string | undefined): string {
-  if (!ts) return ''
-  const d = new Date(ts)
-  if (isNaN(d.getTime())) return ''
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const msgDay = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const diffDays = Math.round((today.getTime() - msgDay.getTime()) / 86400000)
-  if (diffDays === 0) return 'Today'
-  if (diffDays === 1) return 'Yesterday'
-  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
-}
+// ── Composables that depend on messages / messagesEl ─────────────────
+const sessionIdRef = computed(() => props.sessionId)
+const {
+  chatSearchOpen, chatSearchQuery, chatSearchIndex, chatSearchInputEl,
+  chatSearchMatches, openChatSearch, closeChatSearch,
+  nextChatSearchMatch, prevChatSearchMatch,
+} = useChatSearch(messages as any, messagesEl)
 
-function isSameDay(a: string | undefined, b: string | undefined): boolean {
-  if (!a || !b) return false
-  const da = new Date(a), db = new Date(b)
-  return da.getFullYear() === db.getFullYear() &&
-    da.getMonth() === db.getMonth() &&
-    da.getDate() === db.getDate()
-}
-
-const enrichedMessages = computed((): EnrichedMessage[] => {
-  const result: EnrichedMessage[] = []
-  const msgs = messages.value
-  for (let i = 0; i < msgs.length; i++) {
-    const msg = msgs[i]!
-    const prev = result[i - 1]
-
-    // Date divider: show when this message is on a different day from the previous
-    const ts = (msg as any).createdAt as string | undefined
-    const prevTs = prev ? (prev as any).createdAt as string | undefined : undefined
-    const dateLabel = (i === 0 || !isSameDay(ts, prevTs)) ? dateLabelFor(ts) : undefined
-
-    // Header suppression: hide avatar+name for continuations from same agent.
-    // A message is a "continuation" when all of:
-    //   1. Same role as previous
-    //   2. Same agent name (assistant) or both user messages
-    //   3. No date boundary between them
-    //   4. Previous message is not a threadSummary separator
-    //   5. Current message is not a follow-up synthesis (isFollowUp flag)
-    //   6. Messages are within 60s of each other (time gap → new thought)
-    let showHeader = true
-    if (prev && !dateLabel) {
-      const sameRole = msg.role === prev.role
-      const prevIsThreadSummary = !!(prev as any).threadSummary
-      const currIsThreadSummary = !!(msg as any).threadSummary
-      const currIsFollowUp = !!(msg as any).isFollowUp
-      // Time gap check: if > 60s between messages, treat as new thought (show header).
-      // This naturally separates Tom's @mention response from Tom's follow-up synthesis,
-      // even after page refresh when the isFollowUp flag is lost.
-      const prevTime = prev.createdAt ? new Date(prev.createdAt).getTime() : 0
-      const currTime = ts ? new Date(ts).getTime() : 0
-      const timeGapSec = (prevTime && currTime) ? (currTime - prevTime) / 1000 : 0
-      const hasLargeGap = timeGapSec > 60
-      if (sameRole && !prevIsThreadSummary && !currIsThreadSummary && !currIsFollowUp && !hasLargeGap) {
-        if (msg.role === 'user') {
-          showHeader = false
-        } else if (msg.role === 'assistant') {
-          const sameAgent = (msg.agent || '') === (prev.agent || '')
-          if (sameAgent) showHeader = false
-        }
-      }
-    }
-
-    result.push({ ...msg, showHeader, dateLabel } as EnrichedMessage)
-  }
-  return result
-})
+const {
+  atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
+} = useUnreadTracking(sessionIdRef, messages as any, messagesEl)
 
 const sessionLabel = computed(() => {
   const s = sessions.value.find(s => s.id === props.sessionId)
@@ -1446,11 +1219,6 @@ const selectedToolCall = ref<ToolCallRecord | null>(null)
 
 function toggleToolCall(tc: ToolCallRecord) {
   selectedToolCall.value = tc
-}
-
-function toggleMsgToolCalls(msgId: string) {
-  if (expandedMsgCalls.value.has(msgId)) expandedMsgCalls.value.delete(msgId)
-  else expandedMsgCalls.value.add(msgId)
 }
 
 // ── Thread helpers ────────────────────────────────────────────────────
@@ -2021,11 +1789,7 @@ onUnmounted(() => {
 
 // Reset state and sync agent when switching sessions
 watch(() => props.sessionId, async () => {
-  clearStreamingWatchdog()
-  streaming.value = false
-  currentRunId.value = ''  // prevent late done from old session matching new session's run
-  notifyStreaming.value = false
-  activeToolCalls.value = []
+  resetStreaming()
   pendingPermission.value = null
   agentDropdownOpen.value = false
   hydratingBadgesFor.clear()  // reset so new session can hydrate
@@ -2075,7 +1839,7 @@ async function handleMessagesClick(e: MouseEvent) {
 
 function handleGlobalKeydown(e: KeyboardEvent) {
   // Ctrl+F / Cmd+F — open in-chat search
-  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && props.sessionId) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && (props.sessionId || props.spaceId)) {
     e.preventDefault()
     if (chatSearchOpen.value) {
       closeChatSearch()
