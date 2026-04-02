@@ -157,10 +157,15 @@ test.describe('AgentsView — fresh install (no agents)', () => {
   test('can create and save first agent on fresh install', async ({ page }) => {
     let saveRequestMade = false
 
+    // Override models/available so the model picker has at least one model to select.
+    await page.route('**/api/v1/models/available', route =>
+      route.fulfill({ json: { models: [], provider_models: [{ name: 'claude-sonnet-4-6' }], builtin_models: [] } })
+    )
+
     await page.route('**/api/v1/agents/FirstAgent', route => {
       if (route.request().method() === 'PUT') {
         saveRequestMade = true
-        return route.fulfill({ json: { name: 'FirstAgent', model: '', icon: 'F', color: '#58a6ff', is_default: false, memory_enabled: false, vault_name: '', toolbelt: [] } })
+        return route.fulfill({ json: { name: 'FirstAgent', model: 'claude-sonnet-4-6', icon: 'F', color: '#58a6ff', is_default: false, memory_enabled: false, vault_name: '', toolbelt: [] } })
       }
       return route.continue()
     })
@@ -168,7 +173,7 @@ test.describe('AgentsView — fresh install (no agents)', () => {
     let agentCreated = false
     await page.route('**/api/v1/agents', route => {
       if (route.request().method() === 'GET') {
-        return route.fulfill({ json: agentCreated ? [{ name: 'FirstAgent', model: '', icon: 'F', color: '#58a6ff', is_default: false, memory_enabled: false, vault_name: '', toolbelt: [] }] : [] })
+        return route.fulfill({ json: agentCreated ? [{ name: 'FirstAgent', model: 'claude-sonnet-4-6', icon: 'F', color: '#58a6ff', is_default: false, memory_enabled: false, vault_name: '', toolbelt: [] }] : [] })
       }
       return route.continue()
     })
@@ -177,6 +182,11 @@ test.describe('AgentsView — fresh install (no agents)', () => {
     await page.waitForSelector('input[placeholder="Agent name"]', { timeout: 5000 })
 
     await page.fill('input[placeholder="Agent name"]', 'FirstAgent')
+
+    // Model is now required — open the model picker and select a model.
+    await page.click('text=No model selected')
+    await page.click('text=claude-sonnet-4-6')
+
     agentCreated = true
 
     const saveBtn = page.locator('[data-testid="save-agent-btn-sticky"]')

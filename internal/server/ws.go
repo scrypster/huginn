@@ -987,9 +987,9 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 				// The mentionDelegate uses srv.Context() for spawned threads so a
 				// cancelled c.ctx won't prevent them from running.
 			} else {
-				c.send <- WSMessage{Type: "done", SessionID: sessionID, RunID: runID, Payload: map[string]any{
+				c.safeSend(WSMessage{Type: "done", SessionID: sessionID, RunID: runID, Payload: map[string]any{
 					"message_id": assistantMsgID,
-				}}
+				}})
 
 				// Persist user + assistant messages to the session store so history
 				// survives page reload. Also emits space_activity for unseen badges.
