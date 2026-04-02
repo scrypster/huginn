@@ -1240,6 +1240,11 @@ function adaptSpaceMessages(msgs: SpaceMessage[]) {
     // Carry through thread data attached by hydration or WS handlers.
     delegatedThreads: (m as any).delegatedThreads,
     threadReplies: (m as any).threadReplies,
+    // Carry through follow-up marker for header suppression logic.
+    isFollowUp: (m as any).isFollowUp,
+    // Carry through follow-up streaming flags for token appending.
+    followUpStreaming: (m as any).followUpStreaming,
+    followUpThinking: (m as any).followUpThinking,
   }))
 }
 
@@ -1315,7 +1320,8 @@ const enrichedMessages = computed((): EnrichedMessage[] => {
       const sameRole = msg.role === prev.role
       const prevIsThreadSummary = !!(prev as any).threadSummary
       const currIsThreadSummary = !!(msg as any).threadSummary
-      if (sameRole && !prevIsThreadSummary && !currIsThreadSummary) {
+      const currIsFollowUp = !!(msg as any).isFollowUp
+      if (sameRole && !prevIsThreadSummary && !currIsThreadSummary && !currIsFollowUp) {
         if (msg.role === 'user') {
           showHeader = false
         } else if (msg.role === 'assistant') {
@@ -1819,21 +1825,23 @@ registerWS(ws, 'notify_done', (msg: WSMessage) => {
 // marked done by thread_done) and Tom's follow-up synthesis are the main-chat
 // signals. Keeping the handler so future telemetry can be added here.
 registerWS(ws, 'thread_result', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     // No-op for main chat display intentionally.
   })
 
 // follow_up_start: lead agent is about to synthesize. Show a "thinking" bubble
 // immediately so the user knows Tom is picking up where Sam left off.
 registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
-    const msgs = getMessages(props.sessionId)
+    const msgs = getSourceMessages()
     // Only add if there isn't already a follow-up streaming bubble
     const alreadyExists = msgs.some(m => (m as any).followUpStreaming)
     if (!alreadyExists) {
-      msgs.push({
+      const fupStreamMsg: any = {
         id: `fup-stream-${Date.now()}`,
         role: 'assistant',
         content: '',
@@ -1841,7 +1849,15 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
         createdAt: new Date().toISOString(),
         followUpStreaming: true,
         followUpThinking: true,
-      } as any)
+        isFollowUp: true,
+      }
+      // In space mode, include SpaceMessage fields so adaptSpaceMessages works.
+      if (props.spaceId && msg.session_id) {
+        fupStreamMsg.session_id = msg.session_id
+        fupStreamMsg.seq = -1
+        fupStreamMsg.ts = new Date().toISOString()
+      }
+      msgs.push(fupStreamMsg)
       scrollToBottom()
     }
   })
@@ -1849,75 +1865,79 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
 // follow_up_token: streaming token from the lead agent's follow-up synthesis.
 // Builds a live streaming bubble in the main chat so the user sees Tom "typing".
 registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
     const token = p?.token as string | undefined
     if (!token) return
-    const msgs = getMessages(props.sessionId)
+    const msgs = getSourceMessages()
     // Find the existing follow-up streaming bubble or create one
     const existing = [...msgs].reverse().find(m => (m as any).followUpStreaming)
     if (existing) {
       existing.content += token
       ;(existing as any).followUpThinking = false // first token: stop thinking dots
     } else {
-      msgs.push({
+      const fupFallback: any = {
         id: `fup-stream-${Date.now()}`,
         role: 'assistant',
         content: token,
         agent: agentName || 'Agent',
         followUpStreaming: true,
-      } as any)
+        isFollowUp: true,
+      }
+      if (props.spaceId && msg.session_id) {
+        fupFallback.session_id = msg.session_id
+        fupFallback.seq = -1
+        fupFallback.ts = new Date().toISOString()
+      }
+      msgs.push(fupFallback)
     }
     scrollToBottom()
   })
 
 // agent_follow_up: final persisted follow-up reply from the lead agent.
-// If the payload has parent_message_id, render as a thread reply on the parent
-// message (Slack-style inline reply). Otherwise add as a top-level message.
+// Always renders as a top-level message in the main channel (Slack-like UX:
+// Tom synthesises Sam's thread result and posts it to the channel, not as
+// a nested reply on the @mention message).
 registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
     const content = p?.content as string | undefined
     if (!content) return
-    const msgs = getMessages(props.sessionId)
+    const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
 
-    const parentMsgId = p?.parent_message_id as string | undefined
-    if (parentMsgId) {
-      // Thread reply: find the parent message and attach as inline reply
-      const parentMsg = msgs.find(m => m.id === parentMsgId)
-      if (parentMsg) {
-        if (!parentMsg.threadReplies) parentMsg.threadReplies = []
-        parentMsg.threadReplies.push({
-          id: `fup-${Date.now()}`,
-          agent: agentName || 'Agent',
-          content,
-        })
-        scrollToBottom()
-        return
-      }
-      // Fall through to top-level if parent not found
-    }
-
-    // Top-level message (no parent or parent not found)
-    msgs.push({
+    // Top-level message in the main channel — marked as follow-up so the
+    // enrichedMessages computed always shows a header (prevents visual merge
+    // with Tom's preceding @mention message).
+    const fupMsg: any = {
       id: `fup-${Date.now()}`,
       role: 'assistant',
       content,
       agent: agentName || 'Agent',
-    } as any)
+      isFollowUp: true,
+    }
+    // In space mode, include SpaceMessage fields so adaptSpaceMessages works.
+    if (props.spaceId && msg.session_id) {
+      fupMsg.session_id = msg.session_id
+      fupMsg.seq = -1
+      fupMsg.ts = new Date().toISOString()
+    }
+    msgs.push(fupMsg)
     scrollToBottom()
   })
 
 // follow_up_cancelled: lead agent failed to synthesize (session busy or error).
 // Remove the thinking bubble so the UI doesn't hang indefinitely.
 registerWS(ws, 'follow_up_cancelled', (msg: WSMessage) => {
-    if (!props.sessionId || msg.session_id !== props.sessionId) return
-    const msgs = getMessages(props.sessionId)
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const msgs = getSourceMessages()
     // Remove the thinking bubble if it exists
     const idx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (idx >= 0) msgs.splice(idx, 1)

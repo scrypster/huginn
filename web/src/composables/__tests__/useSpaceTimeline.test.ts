@@ -506,6 +506,134 @@ describe('wireSpaceTimelineWS', () => {
     expect(countAfterSecond).toBe(countAfterFirst)
   })
 
+  // ── done: server message ID stamping ─────────────────────────────
+
+  it('done: stamps server message_id onto placeholder synchronously so thread_started can find it', async () => {
+    // Regression: thread_started fires right after done with parent_message_id
+    // matching the server ID. The placeholder must have the server ID before
+    // the async fetch resolves, otherwise thread_started can't find the message.
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    // Never-resolving fetch so we can inspect state before fetch resolves
+    mockGetMessages.mockReturnValue(new Promise(() => {}))
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Stream a token then fire done with server message ID in payload
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'response' })
+    await nextTick()
+
+    ws.emit('done', {
+      type: 'done',
+      session_id: SESSION_ID,
+      payload: { message_id: 'server-msg-001' },
+    })
+    await nextTick()
+
+    // Placeholder must now have the server ID (not stream- or done- prefix)
+    expect(state.messages[0].id).toBe('server-msg-001')
+    expect(state.messages[0].content).toBe('response')
+  })
+
+  it('done: falls back to done- prefix when payload has no message_id', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    mockGetMessages.mockReturnValue(new Promise(() => {}))
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'hello' })
+    await nextTick()
+    ws.emit('done', { type: 'done', session_id: SESSION_ID }) // no payload
+    await nextTick()
+
+    expect(state.messages[0].id).toMatch(/^done-/)
+  })
+
+  it('done: preserves delegatedThreads when async fetch replaces message', async () => {
+    // Regression: thread_started attaches delegatedThreads to the placeholder.
+    // When the async fetch resolves and replaces it with a fresh server message,
+    // delegatedThreads must be carried over.
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Stream and done with server ID
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'delegating...' })
+    await nextTick()
+
+    mockGetMessages.mockResolvedValue([
+      {
+        id: 'server-msg-002',
+        session_id: SESSION_ID,
+        seq: 1,
+        ts: new Date().toISOString(),
+        role: 'assistant',
+        content: 'delegating...',
+        agent: 'Tom',
+      },
+    ])
+
+    ws.emit('done', {
+      type: 'done',
+      session_id: SESSION_ID,
+      payload: { message_id: 'server-msg-002' },
+    })
+    await nextTick()
+
+    // Simulate thread_started attaching delegatedThreads BEFORE fetch resolves
+    const msg = state.messages.find((m: any) => m.id === 'server-msg-002')
+    expect(msg).toBeDefined()
+    ;(msg as any).delegatedThreads = [{ threadId: 't-1', agentId: 'Sam', msgId: 'server-msg-002', replyCount: 0 }]
+
+    // Let the async fetch resolve and replace
+    await new Promise(r => setTimeout(r, 0))
+
+    // delegatedThreads must survive the replacement
+    const replaced = state.messages.find((m: any) => m.id === 'server-msg-002')
+    expect(replaced).toBeDefined()
+    expect((replaced as any).delegatedThreads).toHaveLength(1)
+    expect((replaced as any).delegatedThreads[0].threadId).toBe('t-1')
+  })
+
+  it('done: next-turn tokens still create new bubble after server ID stamping', async () => {
+    // Verify the stream- prefix protection still works when we use server IDs
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    mockGetMessages.mockReturnValue(new Promise(() => {}))
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    // Turn 1
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'first' })
+    await nextTick()
+    ws.emit('done', {
+      type: 'done',
+      session_id: SESSION_ID,
+      payload: { message_id: 'server-msg-003' },
+    })
+    await nextTick()
+
+    // Turn 2 tokens must NOT append to the server-ID message
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'second' })
+    await nextTick()
+
+    const assistantMsgs = state.messages.filter((m: any) => m.role === 'assistant')
+    expect(assistantMsgs).toHaveLength(2)
+    expect(assistantMsgs[0].content).toBe('first')
+    expect(assistantMsgs[0].id).toBe('server-msg-003')
+    expect(assistantMsgs[1].content).toBe('second')
+    expect(assistantMsgs[1].id).toMatch(/^stream-/)
+  })
+
   // ── clearSpaceTimeline ────────────────────────────────────────────
 
   it('clearSpaceTimeline removes cached state so next hydrate starts fresh', async () => {
