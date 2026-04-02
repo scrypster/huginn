@@ -127,9 +127,15 @@ func (s *SQLiteThreadStore) SaveThread(ctx context.Context, t *Thread) error {
 			 timeout_ns)
 		VALUES (?, 'session', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
+			parent_id      = excluded.parent_id,
+			agent_name     = excluded.agent_name,
+			task           = excluded.task,
 			status         = excluded.status,
+			parent_msg_id  = excluded.parent_msg_id,
+			created_at     = excluded.created_at,
 			started_at     = excluded.started_at,
 			completed_at   = excluded.completed_at,
+			token_budget   = excluded.token_budget,
 			tokens_used    = excluded.tokens_used,
 			summary_text   = excluded.summary_text,
 			summary_status = excluded.summary_status,

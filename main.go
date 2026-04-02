@@ -2671,7 +2671,10 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// ctx gets cancelled when the chat response finishes.
 			spawnCtx := srv.Context()
 			if spawnCtx == nil {
+				logger.Warn("mentionDelegate: srv.Context() is nil, falling back to request ctx", "session_id", sessionID)
 				spawnCtx = ctx
+			} else {
+				logger.Info("mentionDelegate: using server lifecycle context", "session_id", sessionID, "ctx_err", spawnCtx.Err())
 			}
 			// Resolve the caller agent (the agent that produced userMsg) to guard against
 			// self-delegation. The caller is the session's primary agent.
@@ -2681,7 +2684,15 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					callerAgent = ag.Name
 				}
 			}
+			var spaceID string
+			if sess != nil {
+				spaceID = sess.SpaceID()
+			}
+			logger.Info("mentionDelegate: resolved context",
+				"session_id", sessionID, "caller_agent", callerAgent,
+				"space_id", spaceID, "sess_nil", sess == nil)
 			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
+			logger.Info("mentionDelegate: CreateFromMentions returned", "session_id", sessionID)
 		})
 
 		// Wire automatic help resolution: when a sub-agent calls request_help,

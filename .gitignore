@@ -45,3 +45,4 @@ test-results/
 web/test-results/
 web/playwright-report/
 web/coverage/
+.fuse_hidden*
