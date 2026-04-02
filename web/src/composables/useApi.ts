@@ -121,6 +121,10 @@ export interface SpaceMessage {
   role: 'user' | 'assistant'
   content: string
   agent: string
+  // Set on persisted follow-up messages (lead-agent synthesis replies).
+  // Used by the frontend to force header rendering even when the previous
+  // message is from the same agent.
+  parent_message_id?: string
   // Populated from WS tool_result events during streaming, or from the server on load.
   // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
   toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean }[]

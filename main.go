@@ -2794,10 +2794,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					"token": tok,
 				})
 			}
+			// onEvent is intentionally a no-op for content accumulation —
+			// onToken already captures all text tokens into replyBuf.
+			// Writing StreamText here too would DOUBLE the content.
 			onEvent := func(ev backend.StreamEvent) {
-				if ev.Type == backend.StreamText {
-					replyBuf.WriteString(ev.Content)
-				}
+				// no-op: onToken handles content accumulation + WS broadcast
 			}
 			// noopToolEvent suppresses Tom's synthesis tool calls from the main
 			// channel UI — tool calls during synthesis are implementation details.
@@ -2828,31 +2829,27 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return
 			}
 
-			// Persist Tom's follow-up reply to the session store, threaded under
-			// the original user message so the frontend renders it as a reply.
-			parentMsgID := summary.ParentMessageID
+			// Persist Tom's follow-up synthesis as a top-level channel message.
+			// Do NOT set ParentMessageID — follow-up synthesis is a main-channel
+			// message (Slack-like UX), not a thread reply. Messages with
+			// parent_message_id are filtered out of the space timeline query,
+			// which would make the synthesis vanish after page refresh.
 			if loadedSess, loadErr := sessStore.Load(sessionID); loadErr == nil {
 				_ = sessStore.Append(loadedSess, session.SessionMessage{
-					ID:              session.NewID(),
-					Role:            "assistant",
-					Content:         replyStr,
-					Agent:           ag.Name,
-					Ts:              time.Now().UTC(),
-					ParentMessageID: parentMsgID,
+					ID:      session.NewID(),
+					Role:    "assistant",
+					Content: replyStr,
+					Agent:   ag.Name,
+					Ts:      time.Now().UTC(),
 				})
 			}
 
 			// Broadcast the finalized reply so the frontend replaces the streaming
-			// bubble with the persisted message content. Include parent_message_id
-			// so the frontend can thread it under the original message.
-			payload := map[string]any{
+			// bubble with the persisted message content.
+			srv.BroadcastToSession(sessionID, "agent_follow_up", map[string]any{
 				"agent":   ag.Name,
 				"content": replyStr,
-			}
-			if parentMsgID != "" {
-				payload["parent_message_id"] = parentMsgID
-			}
-			srv.BroadcastToSession(sessionID, "agent_follow_up", payload)
+			})
 		}
 		tm.SetCompletionNotifier(completionNotifier)
 
