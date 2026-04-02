@@ -268,7 +268,18 @@ func TestRun_PlainDir_NoError(t *testing.T) {
 }
 
 func TestRun_EmptyCWD_UsesCurrentDir(t *testing.T) {
-	// CWD="" means os.Getwd(); just verify it doesn't error out.
+	// CWD="" means Run falls back to os.Getwd(). Redirect to a temp dir so the
+	// incremental indexer doesn't scan the full repo (which can exceed CI timeouts).
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Skipf("can't get working dir: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Skipf("can't chdir to temp dir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
 	cfg := HeadlessConfig{
 		CWD:     "",
 		Command: "",
