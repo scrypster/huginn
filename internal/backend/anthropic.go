@@ -411,8 +411,12 @@ func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, re
 				// No activity for stallTimeout — abort the stream.
 				slog.Warn("anthropic: SSE stream idle timeout, aborting",
 					"timeout", stallTimeout)
-				resp.Body.Close()
+				// Cancel the context BEFORE closing the body so that by the
+				// time the scanner sees an I/O error, streamCtx.Err() is
+				// already set and the caller can distinguish an idle-timeout
+				// abort from a genuine network error.
 				streamCancel()
+				resp.Body.Close()
 				return
 			}
 		}
