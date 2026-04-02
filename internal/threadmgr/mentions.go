@@ -118,7 +118,12 @@ func CreateFromMentions(
 	logger.Info("CreateFromMentions", "session_id", sessionID, "msg", userMsg, "known_agents", names, "caller", callerAgent)
 	requests := ParseMentions(userMsg, names)
 	logger.Info("CreateFromMentions: parsed", "requests", len(requests))
-	for _, req := range requests {
+	for i, req := range requests {
+		logger.Info("CreateFromMentions: processing mention",
+			"index", i, "agent", req.AgentName, "caller", callerAgent,
+			"session_id", sessionID, "space_id", spaceID,
+			"parent_msg_id", parentMsgID, "ctx_err", ctx.Err())
+
 		// Skip self-delegation: do not create threads for the caller agent mentioning itself.
 		if callerAgent != "" && strings.EqualFold(req.AgentName, callerAgent) {
 			logger.Info("CreateFromMentions: skipping self-delegation", "agent", req.AgentName, "caller", callerAgent)
@@ -133,15 +138,23 @@ func CreateFromMentions(
 			SpaceID:         spaceID,
 		})
 		if err != nil {
-			logger.Warn("CreateFromMentions: create failed", "agent", req.AgentName, "err", err)
+			logger.Warn("CreateFromMentions: create FAILED", "agent", req.AgentName, "err", err,
+				"session_id", sessionID, "space_id", spaceID)
 			continue
 		}
-		if tm.IsReady(t.ID) {
+		ready := tm.IsReady(t.ID)
+		logger.Info("CreateFromMentions: thread created",
+			"thread_id", t.ID, "agent", req.AgentName, "ready", ready,
+			"status", t.Status, "parent_msg_id", t.ParentMessageID)
+		if ready {
 			tid := t.ID
+			logger.Info("CreateFromMentions: about to SpawnThread",
+				"thread_id", tid, "ctx_err", ctx.Err())
 			dagFn := func() {
 				tm.EvaluateDAG(ctx, sessionID, store, sess, reg, b, broadcast, ca)
 			}
 			tm.SpawnThread(ctx, tid, store, sess, reg, b, broadcast, ca, dagFn)
+			logger.Info("CreateFromMentions: SpawnThread returned", "thread_id", tid)
 		}
 	}
 }

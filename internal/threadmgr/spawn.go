@@ -66,14 +66,19 @@ func (tm *ThreadManager) SpawnThread(
 	ca *CostAccumulator,
 	dagFn DagFn,
 ) {
+	logger.Info("SpawnThread: enter", "thread_id", threadID, "ctx_err", ctx.Err())
+
 	threadCtx, cancel := context.WithCancel(ctx)
 
 	if !tm.Start(threadID, threadCtx, cancel) {
 		// Another goroutine already won the race and transitioned this thread
 		// out of StatusQueued. Discard the context we just created and bail.
+		logger.Warn("SpawnThread: Start() returned false — thread not in StatusQueued",
+			"thread_id", threadID)
 		cancel()
 		return
 	}
+	logger.Info("SpawnThread: started successfully", "thread_id", threadID)
 
 	agentID := ""
 	task := ""
@@ -152,11 +157,19 @@ func (tm *ThreadManager) SpawnThread(
 			if ag, found := reg.ByName(agentID); found && ag.Provider != "" {
 				if resolved, err := resolveBackend(ag.Provider, ag.Endpoint, ag.APIKey, ag.GetModelID()); err == nil {
 					agentBackend = resolved
+					logger.Info("SpawnThread: resolved agent-specific backend",
+						"thread_id", threadID, "agent", agentID, "provider", ag.Provider)
 				} else {
 					logger.Warn("SpawnThread: backend resolution failed, using fallback",
 						"thread_id", threadID, "agent", agentID, "provider", ag.Provider, "err", err)
 				}
+			} else {
+				logger.Info("SpawnThread: using default backend (no provider set)",
+					"thread_id", threadID, "agent", agentID)
 			}
+		} else {
+			logger.Info("SpawnThread: no resolveBackend or reg, using default backend",
+				"thread_id", threadID, "agent", agentID)
 		}
 
 		// emitter is already snapshotted above (before the goroutine launch).
@@ -317,8 +330,11 @@ func (tm *ThreadManager) runOnce(
 		}
 	}()
 
+	logger.Info("runOnce: enter", "thread_id", threadID, "agent", agentID, "ctx_err", ctx.Err())
+
 	thread := tm.getThread(threadID)
 	if thread == nil {
+		logger.Warn("runOnce: thread not found, exiting", "thread_id", threadID)
 		return
 	}
 
@@ -348,6 +364,14 @@ func (tm *ThreadManager) runOnce(
 	}
 	// Build initial context messages.
 	history = buildContext(thread, store, tm, reg)
+	logger.Info("runOnce: context built", "thread_id", threadID, "history_len", len(history))
+	// Log roles for debugging the "must end with user message" constraint.
+	if len(history) > 0 {
+		lastRole := history[len(history)-1].Role
+		lastContentLen := len(history[len(history)-1].Content)
+		logger.Info("runOnce: context last message",
+			"thread_id", threadID, "last_role", lastRole, "last_content_len", lastContentLen)
+	}
 
 	// If resuming after help, inject the user input into history.
 	if injectedInput != "" {
@@ -359,6 +383,7 @@ func (tm *ThreadManager) runOnce(
 
 	// Determine which model to use.
 	modelID := tm.resolveModelID(threadID, reg, sess)
+	logger.Info("runOnce: resolved model", "thread_id", threadID, "model", modelID)
 
 	for turn := 0; turn < maxTurns; turn++ {
 		// Check for context cancellation before each LLM call.
@@ -429,12 +454,17 @@ func (tm *ThreadManager) runOnce(
 		var resp *backend.ChatResponse
 		var err error
 
+		logger.Info("runOnce: calling ChatCompletion",
+			"thread_id", threadID, "model", modelID, "turn", turn, "history_len", len(history))
+
 		// Single retry on error.
 		for attempt := 0; attempt < 2; attempt++ {
 			resp, err = b.ChatCompletion(ctx, req)
 			if err == nil {
 				break
 			}
+			logger.Warn("runOnce: ChatCompletion error",
+				"thread_id", threadID, "turn", turn, "attempt", attempt, "err", err)
 			if attempt == 0 {
 				// Wait 2s before retry, but respect ctx cancellation.
 				select {
@@ -450,6 +480,12 @@ func (tm *ThreadManager) runOnce(
 				case <-time.After(2 * time.Second):
 				}
 			}
+		}
+
+		if err == nil {
+			logger.Info("runOnce: ChatCompletion succeeded",
+				"thread_id", threadID, "turn", turn, "content_len", len(resp.Content),
+				"tool_calls", len(resp.ToolCalls), "done_reason", resp.DoneReason)
 		}
 
 		if err != nil {
@@ -526,13 +562,16 @@ func (tm *ThreadManager) runOnce(
 		if err := store.AppendToThread(sess.ID, threadID, session.SessionMessage{
 			Role:    "assistant",
 			Content: resp.Content,
-			Agent:   threadID,
+			Agent:   agentID,
 		}); err != nil {
 			slog.Warn("threadmgr: failed to append to thread", "thread_id", threadID, "err", err)
 		}
 
 		// If no tool calls, and done reason is "stop" or "length", we're done.
 		if len(resp.ToolCalls) == 0 {
+			logger.Info("runOnce: no tool calls, completing thread",
+				"thread_id", threadID, "done_reason", resp.DoneReason,
+				"content_preview", clipResult(resp.Content, 120))
 			if resp.DoneReason == "length" {
 				summary := summariseFromHistory(history, "context length exceeded", "completed-with-timeout")
 				tm.Complete(threadID, summary)

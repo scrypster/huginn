@@ -52,6 +52,10 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Query messages that are direct replies (parent_message_id) OR belong to
+	// a thread whose parent_msg_id matches this message. The latter covers the
+	// @mention delegation path where thread messages are stored with
+	// container_type='thread' but no parent_message_id on individual messages.
 	rows, err := rdb.QueryContext(r.Context(), `
 		SELECT id, container_id, seq, ts, role, content,
 		       COALESCE(agent, ''),
@@ -61,8 +65,11 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		       COALESCE(thread_reply_count, 0)
 		FROM messages
 		WHERE parent_message_id = ?
+		   OR (container_type = 'thread' AND container_id IN (
+		       SELECT id FROM threads WHERE parent_msg_id = ?
+		   ))
 		ORDER BY seq ASC`,
-		messageID,
+		messageID, messageID,
 	)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "query thread: "+err.Error())
