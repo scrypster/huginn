@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/scrypster/huginn/internal/sqlitedb"
@@ -14,6 +15,11 @@ import (
 // It maps Thread struct fields to the existing threads table columns.
 type SQLiteThreadStore struct {
 	db *sqlitedb.DB
+
+	// OnThreadReplyCount is an optional callback invoked when a new thread
+	// increments the parent message's thread_reply_count. Used by the server
+	// to broadcast badge updates to WS clients on page-load hydration.
+	OnThreadReplyCount func(sessionID, parentMessageID string, newCount int64)
 }
 
 // NewSQLiteThreadStore creates a SQLiteThreadStore backed by db.
@@ -116,7 +122,21 @@ func (s *SQLiteThreadStore) SaveThread(ctx context.Context, t *Thread) error {
 		status = "error"
 	}
 
-	_, err := wdb.ExecContext(ctx, `
+	// Use a transaction so the thread upsert and the thread_reply_count
+	// increment on the parent message are atomic.
+	tx, err := wdb.Begin()
+	if err != nil {
+		return fmt.Errorf("threadmgr sqlite: SaveThread %s: begin: %w", t.ID, err)
+	}
+
+	// Check if this thread already exists (to avoid double-incrementing
+	// thread_reply_count on subsequent SaveThread calls / upserts).
+	var exists bool
+	if err := tx.QueryRow(`SELECT 1 FROM threads WHERE id = ?`, t.ID).Scan(new(int)); err == nil {
+		exists = true
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO threads
 			(id, parent_type, parent_id, agent_name, task, status,
 			 parent_msg_id,
@@ -127,9 +147,15 @@ func (s *SQLiteThreadStore) SaveThread(ctx context.Context, t *Thread) error {
 			 timeout_ns)
 		VALUES (?, 'session', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
+			parent_id      = excluded.parent_id,
+			agent_name     = excluded.agent_name,
+			task           = excluded.task,
 			status         = excluded.status,
+			parent_msg_id  = excluded.parent_msg_id,
+			created_at     = excluded.created_at,
 			started_at     = excluded.started_at,
 			completed_at   = excluded.completed_at,
+			token_budget   = excluded.token_budget,
 			tokens_used    = excluded.tokens_used,
 			summary_text   = excluded.summary_text,
 			summary_status = excluded.summary_status,
@@ -146,8 +172,38 @@ func (s *SQLiteThreadStore) SaveThread(ctx context.Context, t *Thread) error {
 		int64(t.Timeout),
 	)
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("threadmgr sqlite: SaveThread %s: %w", t.ID, err)
 	}
+
+	// On new thread creation (not upsert), increment thread_reply_count on
+	// the parent message so the UI shows a thread badge after page refresh.
+	// The badge is driven by `thread_reply_count > 0` in the container
+	// threads query. Without this, badges only appear via live WS events
+	// and vanish on reload.
+	var newReplyCount int64
+	if !exists && t.ParentMessageID != "" {
+		if _, updateErr := tx.Exec(`
+			UPDATE messages SET thread_reply_count = thread_reply_count + 1
+			WHERE id = ?`, t.ParentMessageID); updateErr != nil {
+			// Non-fatal: log but still commit the thread record.
+			slog.Warn("threadmgr sqlite: thread_reply_count increment failed",
+				"thread_id", t.ID, "parent_msg_id", t.ParentMessageID, "err", updateErr)
+		} else {
+			_ = tx.QueryRow(`SELECT thread_reply_count FROM messages WHERE id = ?`,
+				t.ParentMessageID).Scan(&newReplyCount)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("threadmgr sqlite: SaveThread %s: commit: %w", t.ID, err)
+	}
+
+	// Notify listeners (e.g. WS hub) of the updated reply count after commit.
+	if newReplyCount > 0 && s.OnThreadReplyCount != nil {
+		s.OnThreadReplyCount(t.SessionID, t.ParentMessageID, newReplyCount)
+	}
+
 	return nil
 }
 

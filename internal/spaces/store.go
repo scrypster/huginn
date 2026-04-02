@@ -726,3 +726,32 @@ func (s *SQLiteSpaceStore) GetChannelsForAgent(agentName string) ([]*Space, erro
 	}
 	return result, rows.Err()
 }
+
+// SpacesByLeadAgent returns all non-archived spaces where agentName is the lead agent.
+// Used to prevent deletion of agents that are assigned as space leads.
+func (s *SQLiteSpaceStore) SpacesByLeadAgent(agentName string) ([]*Space, error) {
+	rows, err := s.db.Read().Query(
+		`SELECT id FROM spaces
+		 WHERE lead_agent = ? AND archived_at IS NULL
+		 ORDER BY name`,
+		agentName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("spaces: spaces by lead agent: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*Space
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		sp, loadErr := s.loadSpace(id)
+		if loadErr != nil {
+			continue // skip broken spaces
+		}
+		result = append(result, sp)
+	}
+	return result, rows.Err()
+}
