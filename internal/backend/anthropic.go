@@ -544,7 +544,14 @@ func (b *AnthropicBackend) parseContentBlockDelta(data string, result *ChatRespo
 		result.Content += text
 		if req.OnEvent != nil {
 			req.OnEvent(StreamEvent{Type: StreamText, Content: text})
-		} else if req.OnToken != nil {
+		}
+		// Always call OnToken when set — even when OnEvent is also set — so that
+		// callers relying on OnToken for content accumulation and WS "token"
+		// messages receive every text chunk. The external (OpenAI/Ollama) backend
+		// already does this; the Anthropic backend was using else-if which caused
+		// OnToken to be silently skipped, resulting in empty assistant messages
+		// after tool-call turns (no content persisted, no tokens streamed to UI).
+		if req.OnToken != nil {
 			req.OnToken(text)
 		}
 

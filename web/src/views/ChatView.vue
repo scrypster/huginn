@@ -414,8 +414,50 @@
                 <!-- Message text -->
                 <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
-                <span v-if="msg.streaming && !activeToolCalls.length"
-                  class="inline-block w-1.5 h-3.5 bg-huginn-blue ml-0.5 align-middle rounded-sm animate-pulse" />
+                <!-- Streaming "still responding" indicator — prominent bouncing dots
+                     shown between tool-result chips and the next text segment, or while
+                     tokens are still arriving. Replaces the old tiny 6px cursor. -->
+                <div v-if="msg.streaming && !activeToolCalls.length"
+                  data-testid="streaming-thinking"
+                  class="flex items-center gap-2 mt-2 py-1.5">
+                  <div class="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
+                    :style="displayAgent
+                      ? `background:${displayAgent.color}22;border:1px solid ${displayAgent.color}33`
+                      : 'background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)'">
+                    <span class="text-[9px] font-bold"
+                      :style="displayAgent ? `color:${displayAgent.color}` : 'color:rgba(88,166,255,0.9)'">
+                      {{ displayAgent?.icon ?? 'H' }}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-1">
+                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
+                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
+                      style="animation-delay:0ms" />
+                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
+                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
+                      style="animation-delay:150ms" />
+                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
+                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
+                      style="animation-delay:300ms" />
+                  </div>
+                  <span class="text-[11px] text-huginn-muted">responding…</span>
+                </div>
+                <!-- Active (in-flight) tool calls — anchored inside this message bubble so
+                     it always appears below the content, never floating above it. -->
+                <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
+                  <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50">
+                    <div class="flex gap-0.5 flex-shrink-0">
+                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:0ms" />
+                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:120ms" />
+                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:240ms" />
+                    </div>
+                    <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                    </svg>
+                    <span class="text-xs text-huginn-text">{{ activeToolCalls.length }} tool call{{ activeToolCalls.length === 1 ? '' : 's' }}</span>
+                    <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
+                  </div>
+                </div>
                 <!-- Follow-up thinking indicator: lead agent is preparing their synthesis -->
                 <div v-if="(msg as any).followUpThinking && !(msg as any).content"
                   class="flex items-center gap-1.5 py-1">
@@ -425,52 +467,81 @@
                 </div>
 
                 <!-- Delegated thread reply strips (Slack-style compact) -->
-                <div v-if="msg.delegatedThreads?.length" class="mt-1.5 space-y-0.5">
-                  <button
-                    v-for="d in msg.delegatedThreads"
-                    :key="d.threadId"
-                    @click="openThreadDetail(d)"
-                    class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60"
-                  >
-                    <!-- Agent avatar mini — animated pulse when thread is active -->
-                    <div class="relative w-4 h-4 flex-shrink-0">
-                      <div class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center"
-                        :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                        {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                <div v-if="msg.delegatedThreads?.length" class="mt-1.5 space-y-1">
+                  <div v-for="d in msg.delegatedThreads" :key="d.threadId" class="space-y-1">
+                    <button
+                      @click="openThreadDetail(d)"
+                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60"
+                    >
+                      <!-- Agent avatar mini — animated pulse when thread is active -->
+                      <div class="relative w-4 h-4 flex-shrink-0">
+                        <div class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center"
+                          :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
+                          {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                        </div>
+                        <!-- Active pulse ring when thread is running/thinking/queued -->
+                        <span v-if="['running','thinking','queued'].includes(getThreadById(d.threadId)?.Status ?? '')"
+                          class="absolute inset-0 rounded animate-ping opacity-50"
+                          :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`" />
                       </div>
-                      <!-- Active pulse ring when thread is running/thinking/queued -->
-                      <span v-if="['running','thinking','queued'].includes(getThreadById(d.threadId)?.Status ?? '')"
-                        class="absolute inset-0 rounded animate-ping opacity-50"
-                        :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`" />
+                      <!-- Reply count label or "working…" indicator -->
+                      <span class="text-xs font-medium" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
+                        <template v-if="['running','thinking','queued'].includes(getThreadById(d.threadId)?.Status ?? '')">
+                          working…
+                        </template>
+                        <template v-else>
+                          {{ (d.replyCount ?? 1) === 1 ? '1 reply' : `${d.replyCount} replies` }}
+                        </template>
+                      </span>
+                      <!-- Separator · agent name · status when done/error -->
+                      <span class="text-[11px] text-huginn-muted/50">
+                        · {{ d.agentId }}
+                        <template v-if="getThreadById(d.threadId) && !['running','thinking','queued'].includes(getThreadById(d.threadId)!.Status)">
+                          · {{ formatThreadStatus(getThreadById(d.threadId)!.Status) }}
+                        </template>
+                      </span>
+                      <!-- Chevron on hover -->
+                      <svg class="w-3 h-3 text-huginn-muted/30 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                        viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
+                    </button>
+                    <!-- Inline thread reply preview: show agent's reply summary when thread completes -->
+                    <div v-if="d.inlineSummary"
+                      @click="openThreadDetail(d)"
+                      class="ml-5 pl-3 py-2 border-l-2 rounded-r-lg cursor-pointer hover:bg-huginn-surface/40 transition-colors"
+                      :style="`border-color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`">
+                      <div class="flex items-center gap-1.5 mb-1">
+                        <div class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center"
+                          :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
+                          {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                        </div>
+                        <span class="text-xs font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">{{ d.agentId }}</span>
+                      </div>
+                      <div class="text-sm text-huginn-text/80 whitespace-pre-wrap">{{ d.inlineSummary }}</div>
                     </div>
-                    <!-- Reply count label or "working…" indicator -->
-                    <span class="text-xs font-medium" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                      <template v-if="['running','thinking','queued'].includes(getThreadById(d.threadId)?.Status ?? '')">
-                        working…
-                      </template>
-                      <template v-else>
-                        {{ (d.replyCount ?? 1) === 1 ? '1 reply' : `${d.replyCount} replies` }}
-                      </template>
-                    </span>
-                    <!-- Separator · agent name · status when done/error -->
-                    <span class="text-[11px] text-huginn-muted/50">
-                      · {{ d.agentId }}
-                      <template v-if="getThreadById(d.threadId) && !['running','thinking','queued'].includes(getThreadById(d.threadId)!.Status)">
-                        · {{ formatThreadStatus(getThreadById(d.threadId)!.Status) }}
-                      </template>
-                    </span>
-                    <!-- Chevron on hover -->
-                    <svg class="w-3 h-3 text-huginn-muted/30 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                      viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                      <polyline points="9 18 15 12 9 6" />
-                    </svg>
-                  </button>
+                  </div>
+                </div>
+
+                <!-- Inline thread replies from agent_follow_up (Slack-style) -->
+                <div v-if="msg.threadReplies?.length" class="mt-2 space-y-2">
+                  <div v-for="reply in msg.threadReplies" :key="reply.id"
+                    class="ml-5 pl-3 py-2 border-l-2 border-huginn-blue/40 rounded-r-lg bg-huginn-surface/20">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <div class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center"
+                        :style="`background:${agentColorMap[reply.agent] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[reply.agent] ?? 'rgba(88,166,255,0.8)'}`">
+                        {{ agentIconMap[reply.agent] || reply.agent?.[0]?.toUpperCase() || '?' }}
+                      </div>
+                      <span class="text-xs font-semibold" :style="`color:${agentColorMap[reply.agent] ?? 'rgba(88,166,255,0.8)'}`">{{ reply.agent }}</span>
+                    </div>
+                    <div class="text-sm text-huginn-text/90 whitespace-pre-wrap">{{ reply.content }}</div>
+                  </div>
                 </div>
 
                 <!-- Tool call chip (completed, attached to this message).
-                     Hidden while streaming so the running chip is the sole indicator
-                     and we don't show duplicate done+running chips mid-response. -->
-                <div v-if="msg.toolCalls?.length && !msg.streaming" class="mt-2">
+                     Visible as soon as no tool calls are actively running, so the
+                     chip persists below the content even while text is still streaming. -->
+                <div v-if="msg.toolCalls?.length && (!msg.streaming || !activeToolCalls.length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
                     class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100">
@@ -516,27 +587,16 @@
             </div>
           </template>
 
-          <!-- Active (in-flight) tool calls — single chip -->
-          <div v-if="activeToolCalls.length" class="ml-10">
-            <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50">
-              <div class="flex gap-0.5 flex-shrink-0">
-                <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:0ms" />
-                <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:120ms" />
-                <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:240ms" />
-              </div>
-              <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-              </svg>
-              <span class="text-xs text-huginn-text">{{ activeToolCalls.length }} tool call{{ activeToolCalls.length === 1 ? '' : 's' }}</span>
-              <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
-            </div>
-          </div>
-
           <!-- Streaming thinking indicator (before first token) -->
           <div v-if="streaming && messages.at(-1)?.role !== 'assistant'" class="flex gap-3">
             <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-              style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)">
-              <span class="text-huginn-blue text-xs font-bold">H</span>
+              :style="displayAgent
+                ? `background:${displayAgent.color}18;border:1px solid ${displayAgent.color}33`
+                : 'background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)'">
+              <span class="text-xs font-bold"
+                :style="displayAgent ? `color:${displayAgent.color}` : 'color:rgba(88,166,255,0.9)'">
+                {{ displayAgent?.icon ?? 'H' }}
+              </span>
             </div>
             <div class="flex items-center gap-1 py-2">
               <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:0ms" />
@@ -624,6 +684,21 @@
               </svg>
             </button>
           </div>
+        </div>
+      </Transition>
+
+      <!-- ── Streaming banner (above input) ─────────────────────── -->
+      <Transition name="ws-banner">
+        <div v-if="streaming"
+          data-testid="streaming-banner"
+          class="flex-shrink-0 flex items-center gap-2 px-4 py-1.5 text-xs font-medium"
+          style="background:rgba(88,166,255,0.08);border-top:1px solid rgba(88,166,255,0.18);color:rgba(88,166,255,0.85)">
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:0ms" />
+            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:120ms" />
+            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:240ms" />
+          </div>
+          <span>{{ displayAgent?.name ?? 'Agent' }} is responding…</span>
         </div>
       </Transition>
 
@@ -744,7 +819,7 @@ import ToolCallModal from '../components/ToolCallModal.vue'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
-import { useSessions, hydrationQueueOverflowed, type ToolCallRecord } from '../composables/useSessions'
+import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread } from '../composables/useSessions'
 import { useThreads } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
@@ -1587,7 +1662,15 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     if (props.sessionId) {
       flushPendingToolResults(props.sessionId)
       const last = getMessages(props.sessionId).at(-1)
-      if (last) last.streaming = false
+      if (last) {
+        last.streaming = false
+        // Stamp the server-assigned message ID onto the streaming message so
+        // thread_started events (with parent_message_id) can find the exact
+        // assistant message. Without this, the client-generated "h-..." ID
+        // wouldn't match the server's ID in the thread_started payload.
+        const serverMsgId = (msg.payload as Record<string, string>)?.message_id
+        if (serverMsgId) last.id = serverMsgId
+      }
     }
     scrollToBottom()
     fetchStatus()
@@ -1645,22 +1728,30 @@ registerWS(ws, 'primary_agent_changed', (msg: WSMessage) => {
     }
   })
 
-  // Attach spawned threads to the last assistant message (Slack-style thread anchoring)
+  // Attach spawned threads to the parent message (Slack-style thread anchoring).
+  // When parent_message_id is present (from @mention delegation), find that exact
+  // message so the thread badge appears on Tom's "@Sam, please do X" message.
+  // Falls back to the last assistant message for delegate_to_agent tool threads.
 registerWS(ws, 'thread_started', (msg: WSMessage) => {
     const p = msg.payload as Record<string, string>
     if (!p.thread_id || !props.sessionId) return
     const msgs = getMessages(props.sessionId)
-    const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
-    if (lastAssistant) {
-      if (!lastAssistant.delegatedThreads) lastAssistant.delegatedThreads = []
-      const already = lastAssistant.delegatedThreads.some(d => d.threadId === p.thread_id)
+    // Prefer exact match by parent_message_id; fall back to last assistant message.
+    let target: ChatMessage | undefined
+    if (p.parent_message_id) {
+      target = msgs.find(m => m.id === p.parent_message_id)
+    }
+    if (!target) {
+      target = [...msgs].reverse().find(m => m.role === 'assistant')
+    }
+    if (target) {
+      if (!target.delegatedThreads) target.delegatedThreads = []
+      const already = target.delegatedThreads.some((d: DelegatedThread) => d.threadId === p.thread_id)
       if (!already) {
-        lastAssistant.delegatedThreads.push({
+        target.delegatedThreads.push({
           threadId: p.thread_id,
           agentId: p.agent_id || '',
-          // Use parent_message_id from WS payload; fall back to lastAssistant.id
-          // for @mention-initiated threads where parent_message_id may be absent.
-          msgId: p.parent_message_id || (lastAssistant as any).id || '',
+          msgId: p.parent_message_id || target.id || '',
           replyCount: 0,
         })
       }
@@ -1760,7 +1851,8 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
   })
 
 // agent_follow_up: final persisted follow-up reply from the lead agent.
-// Replaces the streaming bubble with the complete content.
+// If the payload has parent_message_id, render as a thread reply on the parent
+// message (Slack-style inline reply). Otherwise add as a top-level message.
 registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     if (!props.sessionId || msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
@@ -1771,7 +1863,25 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
-    // Add the final message
+
+    const parentMsgId = p?.parent_message_id as string | undefined
+    if (parentMsgId) {
+      // Thread reply: find the parent message and attach as inline reply
+      const parentMsg = msgs.find(m => m.id === parentMsgId)
+      if (parentMsg) {
+        if (!parentMsg.threadReplies) parentMsg.threadReplies = []
+        parentMsg.threadReplies.push({
+          id: `fup-${Date.now()}`,
+          agent: agentName || 'Agent',
+          content,
+        })
+        scrollToBottom()
+        return
+      }
+      // Fall through to top-level if parent not found
+    }
+
+    // Top-level message (no parent or parent not found)
     msgs.push({
       id: `fup-${Date.now()}`,
       role: 'assistant',
@@ -1812,7 +1922,7 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     const replyCount = p?.reply_count as number | undefined
     const msgs = getMessages(props.sessionId)
     for (const m of msgs) {
-      const dt = (m as any).delegatedThreads as Array<{ threadId: string; agentId: string; msgId?: string; done?: boolean; replyCount?: number }> | undefined
+      const dt = (m as any).delegatedThreads as Array<{ threadId: string; agentId: string; msgId?: string; done?: boolean; replyCount?: number; inlineSummary?: string }> | undefined
       if (dt) {
         const entry = dt.find(d => d.threadId === threadId)
         if (entry) {
@@ -1822,6 +1932,11 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
             entry.replyCount = replyCount
           } else if (!entry.replyCount) {
             entry.replyCount = 1
+          }
+          // Show the thread summary inline under the badge (Slack-style thread preview)
+          const summary = p?.summary as string | undefined
+          if (summary) {
+            entry.inlineSummary = summary
           }
         }
       }

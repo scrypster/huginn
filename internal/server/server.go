@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -318,6 +320,11 @@ func New(
 	return s
 }
 
+// Context returns the server's lifecycle context, set during Start().
+// Long-running goroutines (e.g. SpawnThread) should use this instead of
+// request-scoped contexts to avoid premature cancellation.
+func (s *Server) Context() context.Context { return s.ctx }
+
 // Start begins listening. Binds to cfg.WebUI.Bind (default 127.0.0.1).
 // If cfg.WebUI.Port == 0, uses a dynamically allocated port.
 func (s *Server) Start(ctx context.Context) error {
@@ -482,8 +489,26 @@ func (s *Server) ResolveAgent(sessionID string) *agents.Agent {
 // channel sessions so the correct lead agent (e.g. Tom) synthesizes, not the
 // default/first agent (e.g. Alice).
 func (s *Server) ResolveAgentForSpace(sessionID, spaceID string) *agents.Agent {
-	// Fall back to the session-level resolver; space-specific lead-agent
-	// resolution can be added here in the future if needed.
+	// Try to resolve via the space's lead agent first.
+	if spaceID != "" && s.spaceStore != nil {
+		sp, err := s.spaceStore.GetSpace(spaceID)
+		if err == nil && sp != nil && sp.LeadAgent != "" {
+			loader := s.agentLoader
+			if loader == nil {
+				loader = agents.LoadAgents
+			}
+			if cfg, cfgErr := loader(); cfgErr == nil {
+				for _, def := range cfg.Agents {
+					if strings.EqualFold(def.Name, sp.LeadAgent) {
+						return agents.FromDef(def)
+					}
+				}
+			}
+			slog.Warn("ResolveAgentForSpace: lead agent not found in config",
+				"agent", sp.LeadAgent, "space_id", spaceID)
+		}
+	}
+	// Fall back to session-level resolver.
 	return s.resolveAgent(sessionID)
 }
 

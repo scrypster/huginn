@@ -187,6 +187,9 @@ type StoreInterface interface {
 	MarkRead(spaceID string) error
 	UnseenCount(spaceID string) (int, error)
 	ListSessionsForSpace(spaceID string) ([]SessionRef, error)
+	// GetChannelsForAgent returns all non-archived channel spaces where the agent
+	// is either the lead or a member. Used for DM cross-space awareness.
+	GetChannelsForAgent(agentName string) ([]*Space, error)
 	// RemoveAgentFromAllSpaces removes an agent from all space membership lists,
 	// archives any DMs for that agent, and archives channels where that agent
 	// was the lead. Returns a SpaceCascadeResult describing the side effects.

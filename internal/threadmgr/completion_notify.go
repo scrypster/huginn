@@ -24,6 +24,10 @@ type CompletionNotifier struct {
 	Broadcast    BroadcastFn
 	PrimaryAgent func(sessionID string) *agents.Agent
 
+	// ThreadLookup resolves a thread by ID so Notify can stamp ParentMessageID
+	// onto the summary for reply threading. Nil is safe (skips lookup).
+	ThreadLookup func(threadID string) (*Thread, bool)
+
 	// FollowUpFn, if set, is called in a goroutine after broadcasting thread_result
 	// to trigger a lead-agent synthesis reply in the main chat.
 	// Called with a background context that has a 3-minute timeout.
@@ -66,6 +70,14 @@ func (n *CompletionNotifier) Notify(_ context.Context, sessionID, threadID, agen
 		"status":    status,
 		"summary":   broadcastSummary,
 	})
+
+	// Stamp ParentMessageID onto the summary so the FollowUpFn can thread
+	// the lead agent's synthesis reply under the original user message.
+	if n.ThreadLookup != nil {
+		if t, ok := n.ThreadLookup(threadID); ok && t.ParentMessageID != "" {
+			summary.ParentMessageID = t.ParentMessageID
+		}
+	}
 
 	// Trigger lead-agent follow-up asynchronously so Tom can acknowledge
 	// Sam's completion and synthesize a response in the main chat.
