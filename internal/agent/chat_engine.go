@@ -166,12 +166,19 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
 			msgs[0].Content += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
 		}
-		// Silently pre-fetch memory orientation and inject into system prompt.
-		if memCtx := o.prefetchMemoryContext(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg); memCtx != "" {
-			msgs[0].Content += memCtx
-			if onEvent != nil {
-				// Memory context injected into system prompt; no separate event emitted.
+		// Pre-fetch memory orientation and inject into system prompt. Surface
+		// synthetic tool_call/tool_result events so the UI can display
+		// "agent recalled memory" — but skip duplicate events for cache hits
+		// to avoid flooding the timeline on every turn.
+		prefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
+			if cached || onToolEvent == nil {
+				return
 			}
+			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
+			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, prefetchCallback); memCtx != "" {
+			msgs[0].Content += memCtx
 		}
 
 		ctx = SetSessionID(ctx, sessionID)

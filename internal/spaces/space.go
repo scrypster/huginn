@@ -136,19 +136,28 @@ type SpaceMessagesResult struct {
 
 // SpaceMsgCursor encodes a position for keyset pagination of space messages.
 // It points to the oldest message in the previously returned page.
+//
+// Seq is included so identical-ts collisions are deterministically tie-broken
+// by the monotonic write counter rather than the lexicographic uuid id, which
+// matches the ORDER BY (ts, seq, id) used by ListSpaceMessages and prevents
+// conversation order from flipping on refresh (issue #2).
 type SpaceMsgCursor struct {
-	Ts string `json:"ts"`
-	ID string `json:"id"`
+	Ts  string `json:"ts"`
+	Seq int64  `json:"seq"`
+	ID  string `json:"id"`
 }
 
 // EncodeSpaceMsgCursor serialises a cursor to an opaque base64url token.
-func EncodeSpaceMsgCursor(ts, id string) string {
-	c := SpaceMsgCursor{Ts: ts, ID: id}
+func EncodeSpaceMsgCursor(ts string, seq int64, id string) string {
+	c := SpaceMsgCursor{Ts: ts, Seq: seq, ID: id}
 	b, _ := json.Marshal(c)
 	return base64.URLEncoding.EncodeToString(b)
 }
 
 // DecodeSpaceMsgCursor parses an opaque cursor token produced by EncodeSpaceMsgCursor.
+// Cursors written before the seq field was added decode with Seq=0; the SQL
+// uses (ts, seq, id) so a cursor with seq=0 still produces correct results
+// (it points at "everything before this ts/id boundary, regardless of seq").
 func DecodeSpaceMsgCursor(token string) (SpaceMsgCursor, error) {
 	b, err := base64.URLEncoding.DecodeString(token)
 	if err != nil {

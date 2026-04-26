@@ -28,12 +28,23 @@ const maxMentionsPerMessage = 10
 // message contains more unique @agent mentions than maxMentionsPerMessage.
 var ErrTooManyMentions = errors.New("threadmgr: too many @mentions in one message (max 10)")
 
-// MentionRe matches @Word at the start of the string or after whitespace/punctuation.
-// This prevents false positives on email-style addresses (alice@Bob) and requires
-// mentions to appear as standalone tokens. \b enforces a word boundary so @StacyFoo
-// does not match agent "Stacy".
-// Exported so callers can build consistent exclusion sets without duplicating the pattern.
-var MentionRe = regexp.MustCompile(`(?:^|[\s,;:!?])@([\w-]+)\b`)
+// MentionRe matches @Word at the start of the string or after whitespace/
+// punctuation/markdown wrappers, and ending at end-of-string or another
+// non-name character.
+//
+// The leading and trailing character classes are intentionally permissive
+// about characters LLMs commonly emit around mentions in chat responses:
+// bold (**, __), italic (*, _), inline code (`), parentheses (()), brackets
+// ([]), curly braces ({}), and the standard punctuation/whitespace.
+//
+// We can't use `\b` for the trailing boundary because `_` belongs to `\w` and
+// `_@Bob_` (italic) would fail — `_` after `b` is not a word boundary. We
+// also can't use a lookahead (Go's RE2 has no lookaround). Instead the
+// trailing class explicitly matches one boundary char (or end-of-string).
+//
+// Email-style addresses are still rejected: alice@Bob has `e` (a name char)
+// immediately before `@`, which is not in the leading boundary class.
+var MentionRe = regexp.MustCompile("(?:^|[\\s,;:!?.*_`~()\\[\\]{}'\"<>])@([\\w-]+?)(?:[\\s,;:!?.*_`~()\\[\\]{}'\"<>]|$)")
 
 // mentionRe is the package-internal alias kept for backward compat with existing callers.
 var mentionRe = MentionRe
@@ -45,11 +56,24 @@ var mentionRe = MentionRe
 // At most maxMentionsPerMessage unique mentions are returned; excess mentions are
 // silently truncated with a warning log.
 func ParseMentions(msg string, agentNames []string) []DelegationRequest {
-	if msg == "" || len(agentNames) == 0 {
-		return nil
+	reqs, _ := parseMentionsInternal(msg, agentNames)
+	return reqs
+}
+
+// ParseMentionsWithUnknown is like ParseMentions but additionally returns the
+// list of @-tokens that were syntactically valid mentions but did not match
+// any agent in the registry (case-insensitive). Useful for diagnostic logging
+// and for surfacing "hallucinated" agent names to the UI so users see why a
+// delegation didn't fire.
+func ParseMentionsWithUnknown(msg string, agentNames []string) (matched []DelegationRequest, unknown []string) {
+	return parseMentionsInternal(msg, agentNames)
+}
+
+func parseMentionsInternal(msg string, agentNames []string) ([]DelegationRequest, []string) {
+	if msg == "" {
+		return nil, nil
 	}
 
-	// Build case-insensitive lookup: lowercase → canonical
 	canonical := make(map[string]string, len(agentNames))
 	for _, name := range agentNames {
 		canonical[strings.ToLower(name)] = name
@@ -57,7 +81,9 @@ func ParseMentions(msg string, agentNames []string) []DelegationRequest {
 
 	matches := mentionRe.FindAllStringSubmatch(msg, -1)
 	seen := make(map[string]bool)
+	seenUnknown := make(map[string]bool)
 	var requests []DelegationRequest
+	var unknown []string
 	for _, m := range matches {
 		if len(m) < 2 {
 			continue
@@ -65,7 +91,14 @@ func ParseMentions(msg string, agentNames []string) []DelegationRequest {
 		rawName := m[1]
 		lower := strings.ToLower(rawName)
 		canon, found := canonical[lower]
-		if !found || seen[canon] {
+		if !found {
+			if !seenUnknown[lower] {
+				seenUnknown[lower] = true
+				unknown = append(unknown, rawName)
+			}
+			continue
+		}
+		if seen[canon] {
 			continue
 		}
 		seen[canon] = true
@@ -80,7 +113,7 @@ func ParseMentions(msg string, agentNames []string) []DelegationRequest {
 		requests = requests[:maxMentionsPerMessage]
 	}
 
-	return requests
+	return requests, unknown
 }
 
 // CreateFromMentions parses @AgentName mentions in userMsg, creates a thread for
@@ -116,8 +149,34 @@ func CreateFromMentions(
 		spaceID = sess.SpaceID()
 	}
 	logger.Info("CreateFromMentions", "session_id", sessionID, "msg", userMsg, "known_agents", names, "caller", callerAgent)
-	requests := ParseMentions(userMsg, names)
-	logger.Info("CreateFromMentions: parsed", "requests", len(requests))
+	requests, unknown := ParseMentionsWithUnknown(userMsg, names)
+	logger.Info("CreateFromMentions: parsed", "requests", len(requests), "unknown", unknown)
+
+	// Surface unknown @-mentions both in logs (so operators can detect prompt
+	// regressions where the orchestrator hallucinates agent names) and via a
+	// WS event so the UI can render an explanatory badge instead of leaving
+	// the user wondering why nothing happened (issue #3).
+	if len(unknown) > 0 {
+		logger.Warn("CreateFromMentions: unknown @-mentions in agent reply",
+			"session_id", sessionID, "caller", callerAgent,
+			"unknown", unknown, "known_agents", names)
+		if broadcast != nil {
+			broadcast(sessionID, "delegation_warning", map[string]any{
+				"session_id":    sessionID,
+				"parent_msg_id": parentMsgID,
+				"caller":        callerAgent,
+				"unknown":       unknown,
+				"known_agents":  names,
+				"reason":        "unknown_agent",
+			})
+		}
+	}
+
+	if len(requests) == 0 {
+		logger.Warn("CreateFromMentions: no valid mentions resolved",
+			"session_id", sessionID, "caller", callerAgent,
+			"unknown", unknown, "raw_msg_len", len(userMsg))
+	}
 	for i, req := range requests {
 		logger.Info("CreateFromMentions: processing mention",
 			"index", i, "agent", req.AgentName, "caller", callerAgent,

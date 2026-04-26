@@ -319,7 +319,7 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 			 tool_calls_json)
 		VALUES (?, 'session', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, sess.ID, seq,
-		msg.Ts.UTC().Format(time.RFC3339),
+		msg.Ts.UTC().Format(time.RFC3339Nano),
 		roleOrDefault(msg.Role), msg.Content,
 		msg.Agent, msg.ToolName, msg.ToolCallID,
 		msg.Type,
@@ -444,7 +444,10 @@ func scanSessionMessages(rows *sql.Rows) ([]SessionMessage, error) {
 		); err != nil {
 			return nil, fmt.Errorf("scan session message: %w", err)
 		}
-		if t, e := time.Parse(time.RFC3339, tsStr); e == nil {
+		// RFC3339Nano accepts both RFC3339 (no fractional seconds) and nano-precision
+		// strings, so this is backward-compatible with rows written before the
+		// nano upgrade.
+		if t, e := time.Parse(time.RFC3339Nano, tsStr); e == nil {
 			msg.Ts = t.UTC()
 		}
 		if toolCallsJSON.Valid && toolCallsJSON.String != "" {
@@ -470,7 +473,7 @@ func scanSessionMessagesWithReplyCount(rows *sql.Rows) ([]SessionMessage, error)
 		); err != nil {
 			return nil, fmt.Errorf("scan session message: %w", err)
 		}
-		if t, e := time.Parse(time.RFC3339, tsStr); e == nil {
+		if t, e := time.Parse(time.RFC3339Nano, tsStr); e == nil {
 			msg.Ts = t.UTC()
 		}
 		if toolCallsJSON.Valid && toolCallsJSON.String != "" {
@@ -588,7 +591,7 @@ func (s *SQLiteSessionStore) AppendToThread(sessionID, threadID string, msg Sess
 			 prompt_tokens, completion_tokens, cost_usd, model)
 		VALUES (?, 'thread', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, threadID, seq,
-		msg.Ts.UTC().Format(time.RFC3339),
+		msg.Ts.UTC().Format(time.RFC3339Nano),
 		roleOrDefault(msg.Role), msg.Content,
 		msg.Agent, msg.ToolName, msg.ToolCallID,
 		msg.Type, msg.PromptTok, msg.CompTok, msg.CostUSD, msg.ModelName,
@@ -761,7 +764,7 @@ func (s *SQLiteSessionStore) AppendMessage(sessionID string, msg *PersistedMessa
 		msg.ID = NewID()
 	}
 	if msg.Ts == "" {
-		msg.Ts = time.Now().UTC().Format(time.RFC3339)
+		msg.Ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
 	_, err := s.db.Write().Exec(`

@@ -361,6 +361,62 @@ func TestSQLiteSession_Exists_ScanErrorReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestSQLiteSession_Append_NanoPrecisionTimestamp verifies that two messages
+// appended with timestamps that differ by sub-second amounts are stored with
+// enough precision to distinguish them after read-back.
+//
+// Regression: previously ts was stored as RFC3339 (second-precision) so two
+// messages persisted in the same second (very common: user msg + assistant
+// reply written by persistAccumulated) shared an identical ts. When ordered
+// by (ts, id) at read time, the random id tie-break could flip conversation
+// order on refresh in space-view.
+func TestSQLiteSession_Append_NanoPrecisionTimestamp(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+	s := session.NewSQLiteSessionStore(db)
+
+	sess := s.New("nano test", "", "")
+	if err := s.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	base := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	t1 := base.Add(100 * time.Microsecond) // 12:00:00.000100Z
+	t2 := base.Add(900 * time.Microsecond) // 12:00:00.000900Z
+
+	if err := s.Append(sess, session.SessionMessage{
+		Role: "user", Content: "first", Ts: t1,
+	}); err != nil {
+		t.Fatalf("Append first: %v", err)
+	}
+	if err := s.Append(sess, session.SessionMessage{
+		Role: "assistant", Content: "second", Ts: t2,
+	}); err != nil {
+		t.Fatalf("Append second: %v", err)
+	}
+
+	msgs, err := s.TailMessages(sess.ID, 10)
+	if err != nil {
+		t.Fatalf("TailMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 messages, got %d", len(msgs))
+	}
+
+	if msgs[0].Ts.Equal(msgs[1].Ts) {
+		t.Errorf("expected distinct timestamps after read-back, both got %s", msgs[0].Ts.Format(time.RFC3339Nano))
+	}
+	// Confirm the actual sub-second offsets survive: 800 microseconds apart.
+	delta := msgs[1].Ts.Sub(msgs[0].Ts)
+	if delta < 500*time.Microsecond || delta > 2*time.Millisecond {
+		t.Errorf("expected ~800µs between rows, got %v (t1=%s t2=%s)",
+			delta,
+			msgs[0].Ts.Format(time.RFC3339Nano),
+			msgs[1].Ts.Format(time.RFC3339Nano),
+		)
+	}
+}
+
 func TestSQLiteSession_RepairJSONL_NoOp(t *testing.T) {
 	t.Parallel()
 	db := openSessTestDB(t)

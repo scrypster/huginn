@@ -119,6 +119,59 @@ func TestParseMentions_MentionReExported(t *testing.T) {
 // Hardening: Self-delegation guard in CreateFromMentions (review/agents-channels-dm-hardening)
 // ────────────────────────────────────────────────────────────────────────────
 
+// TestParseMentions_MarkdownWrappers verifies that mentions wrapped in common
+// markdown formatting characters that LLMs frequently emit (bold/italic/code/
+// parentheses/list bullets) still parse correctly.
+//
+// Regression context (issue #3: orchestrator delegation died):
+// "Max" responded with text like "Delegating to **@Stacy** and **@Bob**..."
+// The previous regex `(?:^|[\s,;:!?])@(...)` rejects the "*" character before
+// "@", silently dropping every mention and the delegation flow stalled.
+func TestParseMentions_MarkdownWrappers(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want []string
+	}{
+		{"bold-asterisks", "I'll delegate to **@Stacy** for triage.", []string{"Stacy"}},
+		{"italic-underscore", "Please loop in _@Bob_ as well.", []string{"Bob"}},
+		{"inline-code-backtick", "Routing to `@Sam` and `@Tom`.", []string{"Sam", "Tom"}},
+		{"parens", "Cc (@Sam) on the design.", []string{"Sam"}},
+		{"list-bullet-dash", "- @Stacy: investigate the auth bug\n- @Bob: review the PR", []string{"Stacy", "Bob"}},
+		{"list-bullet-asterisk", "* @Stacy build a search prototype\n* @Sam help integrate it", []string{"Stacy", "Sam"}},
+		{"list-bullet-numeric", "1. @Bob to draft RFC\n2. @Sam to circulate it", []string{"Bob", "Sam"}},
+		{"bold-mixed", "Delegating: **@Stacy**, **@Bob**, **@Sam**", []string{"Stacy", "Bob", "Sam"}},
+	}
+
+	registry := []string{"Stacy", "Bob", "Sam", "Tom"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs := ParseMentions(tc.msg, registry)
+			if len(reqs) != len(tc.want) {
+				t.Fatalf("expected %d mentions, got %d (msg=%q reqs=%v)", len(tc.want), len(reqs), tc.msg, reqs)
+			}
+			got := make(map[string]bool, len(reqs))
+			for _, r := range reqs {
+				got[r.AgentName] = true
+			}
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Errorf("expected %q in mentions, got %v (msg=%q)", w, got, tc.msg)
+				}
+			}
+		})
+	}
+}
+
+// TestParseMentions_EmailStillRejected guards that the markdown-wrapper relax
+// does not regress the email-style false-positive guard.
+func TestParseMentions_EmailStillRejected(t *testing.T) {
+	registry := []string{"Bob", "Domain"}
+	if reqs := ParseMentions("send to alice@Bob and contact admin@domain.com", registry); len(reqs) != 0 {
+		t.Errorf("email-style addresses must not parse as mentions, got %v", reqs)
+	}
+}
+
 // TestParseMentions_SelfDelegationGuard verifies that ParseMentions correctly
 // returns mentions even when the caller is in the mention list, since
 // the self-delegation filtering happens in CreateFromMentions (not ParseMentions).

@@ -21,10 +21,29 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/logger"
+	"github.com/scrypster/huginn/internal/memory"
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/workforce"
 )
+
+// agentFromDefWithVault wraps agents.FromDef and forces the resulting Agent
+// to have its effective VaultName resolved exactly the way
+// agents.BuildRegistryWithUsername does. Without this, agents whose
+// VaultName field is empty in agents.json would be returned with VaultName=""
+// — and connectAgentVault skips connecting in that case, so the orchestrator
+// loses MuninnDB access for any chat handled via resolveAgentForMessage.
+// This was the source of the "no muninn_* tool calls" regression: the
+// registry built at startup had VaultName populated, but ws.go was building
+// fresh Agents from defs and dropping it.
+func agentFromDefWithVault(def agents.AgentDef) *agents.Agent {
+	a := agents.FromDef(def)
+	if a.VaultName == "" {
+		username := memory.ResolveUsername("")
+		a.VaultName = def.ResolvedVaultName(username)
+	}
+	return a
+}
 
 // serverEpoch is a random uint64 generated at process startup. It is stamped
 // on every session-scoped WebSocket message so that clients can detect server
@@ -610,7 +629,7 @@ func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent
 			if agentName := sess.PrimaryAgentID(); agentName != "" {
 				for _, def := range cfg.Agents {
 					if strings.EqualFold(def.Name, agentName) {
-						return agents.FromDef(def)
+						return agentFromDefWithVault(def)
 					}
 				}
 				// Primary agent name saved but not found in config — log and fall through.
@@ -637,7 +656,7 @@ func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent
 					if isMember {
 						for _, def := range cfg.Agents {
 							if strings.EqualFold(def.Name, mentioned) {
-								return agents.FromDef(def)
+								return agentFromDefWithVault(def)
 							}
 						}
 						// Mentioned agent is a space member but missing from config — log and fall through.
@@ -650,7 +669,7 @@ func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent
 			// there is no valid @mention or the mentioned agent is not a member).
 			for _, def := range cfg.Agents {
 				if strings.EqualFold(def.Name, sp.LeadAgent) {
-					return agents.FromDef(def)
+					return agentFromDefWithVault(def)
 				}
 			}
 			logger.Warn("resolveAgentForMessage: space lead agent not found in config",
@@ -661,12 +680,12 @@ func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent
 	// 2. Default agent
 	for _, def := range cfg.Agents {
 		if def.IsDefault {
-			return agents.FromDef(def)
+			return agentFromDefWithVault(def)
 		}
 	}
 
 	// 3. First agent
-	return agents.FromDef(cfg.Agents[0])
+	return agentFromDefWithVault(cfg.Agents[0])
 }
 
 // extractLeadMention returns the agent name from a leading @mention at the

@@ -704,7 +704,7 @@ func TestRunOnce_LLMPermanentError(t *testing.T) {
 	ca := NewCostAccumulator(0)
 
 	ctx := context.Background()
-	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, errBackend, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, errBackend, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone on LLM error, got %v", result.kind)
 	}
@@ -746,7 +746,7 @@ func TestRunOnce_BudgetExceeded(t *testing.T) {
 
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ctx := context.Background()
-	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone on budget exceeded, got %v", result.kind)
 	}
@@ -802,7 +802,7 @@ func TestRunOnce_UnknownTool(t *testing.T) {
 	}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -875,7 +875,7 @@ func TestRunOnce_ContextCancelledDuringRetry(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, cancellingBackend, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, cancellingBackend, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone when context cancelled, got %v", result.kind)
 	}
@@ -921,7 +921,7 @@ func TestRunOnce_LengthDoneReason(t *testing.T) {
 	}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone for length reason, got %v", result.kind)
 	}
@@ -945,7 +945,7 @@ func TestRunOnce_ThreadNotFound(t *testing.T) {
 	ca := NewCostAccumulator(0)
 
 	// Thread ID doesn't exist in the manager.
-	result := tm.runOnce(context.Background(), "nonexistent-id", "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), "nonexistent-id", "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone for not-found thread, got %v", result.kind)
 	}
@@ -981,7 +981,7 @@ func TestRunOnce_WithInjectedInput(t *testing.T) {
 	ca := NewCostAccumulator(0)
 
 	// Pass injected input — exercises the "injectedInput != ''" branch.
-	result := tm.runOnce(context.Background(), thread.ID, "", "user clarification", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "user clarification", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone with injected input, got %v", result.kind)
 	}
