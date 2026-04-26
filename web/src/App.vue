@@ -16,9 +16,11 @@
     <!-- ── Column 1: Icon strip (48px) ─────────────────────────────── -->
     <nav class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
 
-      <!-- Logo mark -->
-      <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none cursor-default"
-        style="background:linear-gradient(135deg,rgba(88,166,255,0.2),rgba(88,166,255,0.05));border:1px solid rgba(88,166,255,0.3)">
+      <!-- Logo mark — tooltip surfaces the build version for update confirmation -->
+      <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none cursor-help"
+        style="background:linear-gradient(135deg,rgba(88,166,255,0.2),rgba(88,166,255,0.05));border:1px solid rgba(88,166,255,0.3)"
+        :title="`Huginn ${versionLabel}`"
+        data-testid="logo-version-tooltip">
         <span class="text-huginn-blue font-bold text-sm leading-none">H</span>
       </div>
 
@@ -165,6 +167,13 @@
             <span class="text-[11px] text-huginn-muted">
               Local server {{ wsConnected ? 'reachable' : 'unreachable' }}
             </span>
+          </div>
+
+          <!-- Build version footer — small, muted, just for update confirmation -->
+          <div class="px-4 pb-2.5 pt-0.5 flex items-center justify-between text-[10px] text-huginn-muted/60"
+            data-testid="popover-version-row">
+            <span class="uppercase tracking-wider">Version</span>
+            <span class="font-mono">{{ versionLabel }}</span>
           </div>
         </div>
       </div>
@@ -764,6 +773,7 @@ import { useNotifications } from './composables/useNotifications'
 import { useWorkflows } from './composables/useWorkflows'
 import { wireThreadDetailWS } from './composables/useThreadDetail'
 import { useCloud } from './composables/useCloud'
+import { useVersion } from './composables/useVersion'
 import { useSpaces, wireSpaceWS } from './composables/useSpaces'
 import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId } from './composables/useSpaceTimeline'
 import { pruneOrphanedUnseenIds } from './composables/unseenSessions'
@@ -1056,6 +1066,11 @@ const {
 
 const cloudConnected = computed(() => cloudStatus.value.connected)
 
+// Build version surfaced in three places: the H-logo tooltip, the profile
+// popover footer, and Settings → About. The composable caches across the
+// app lifetime so all three render the same value with one network call.
+const { versionLabel, loadVersion } = useVersion()
+
 // ── Spaces ───────────────────────────────────────────────────────────
 const {
   spaces, channels, dms, activeSpaceId, loading: spacesLoading, error: spacesError,
@@ -1265,6 +1280,9 @@ function handleGlobalAppKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   initApp()
+  // Fire-and-forget: the version is purely informational, no UI flow gates
+  // on its arrival, and useVersion swallows errors gracefully.
+  void loadVersion()
   document.addEventListener('click', onDocClick, true)
   document.addEventListener('keydown', handleGlobalAppKeydown)
 })

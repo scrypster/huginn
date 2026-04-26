@@ -122,6 +122,13 @@ type Server struct {
 
 	muninnCfgPath string // path to ~/.config/huginn/muninn.json
 
+	// version is the build-time application version, injected by main.go via
+	// SetVersion. It propagates to /api/v1/health so the frontend can surface
+	// "different version" confirmation in the UI (logo tooltip, profile
+	// popover, settings About row). Empty string falls back to "dev" so the
+	// label never renders blank, even on a plain `go build` without -ldflags.
+	version string
+
 	// vaultProberFn probes MCP vault connectivity for handleVaultTest.
 	// When nil the production implementation (agent.ProbeVaultConnectivity) is used.
 	// Tests override this to avoid real network connections.
@@ -673,6 +680,16 @@ func (s *Server) SetWorkflowRunStore(store scheduler.WorkflowRunStoreInterface) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowRunStore = store
+}
+
+// SetVersion sets the application version string used in /api/v1/health
+// responses. main.go calls this with the build-time value baked in by
+// `-ldflags "-X main.version=..."`. Pass an empty string in tests or
+// dev builds; the health handler falls back to "dev".
+func (s *Server) SetVersion(v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.version = v
 }
 
 // SetMuninnConfigPath sets the path to the muninn.json global config.

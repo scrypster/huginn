@@ -2931,6 +2931,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	srv.SetMuninnConfigPath(muninnCfgFilePath)
 	orch.SetMuninnConfigPath(muninnCfgFilePath)
 
+	// Surface the build-time version (set via -ldflags="-X main.version=...")
+	// to /api/v1/health so the frontend can render it in the H-logo tooltip,
+	// the profile popover footer, and Settings → About.
+	srv.SetVersion(version)
+
 	ctx := context.Background()
 	if err := srv.Start(ctx); err != nil {
 		return nil, "", nil, fmt.Errorf("server start: %w", err)

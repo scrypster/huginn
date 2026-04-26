@@ -74,9 +74,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		relayInfo["dropped_messages"] = hub.WSDroppedMessages()
 	}
 
+	s.mu.Lock()
+	ver := s.version
+	s.mu.Unlock()
+	if ver == "" {
+		ver = "dev"
+	}
+
 	jsonOK(w, map[string]any{
 		"status":              "ok",
-		"version":             "0.2.0",
+		"version":             ver,
 		"satellite_connected": satConnected, // preserved for backward compatibility
 		"relay":               relayInfo,
 	})
