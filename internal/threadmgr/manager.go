@@ -110,6 +110,16 @@ type ThreadManager struct {
 	// calls. Captures the permission gate at wiring time. Set via SetToolExecutor.
 	toolExecutor ToolExecutorFn
 
+	// runtimePreparer, if set, is invoked once when a thread spawns to build
+	// the agent's per-thread execution context: tool schemas (toolbelt +
+	// MuninnDB vault), gate-wrapped tool executor, persona prompt addendum,
+	// and a cleanup callback. Per-agent runtime is what gives a delegated
+	// worker its own MuninnDB tools, skills/connections-derived schemas, and
+	// memory_mode prompt — instead of inheriting only the orchestrator's
+	// global toolset. When nil the legacy toolRegistry/toolExecutor path is
+	// used. Set via SetAgentRuntimePreparer.
+	runtimePreparer AgentRuntimePreparer
+
 	// memberChecker, if set, validates that the AgentID in CreateParams is a
 	// member of the given SpaceID before creating the thread.
 	memberChecker SpaceMembershipChecker
@@ -187,6 +197,46 @@ type ToolRegistryIface interface {
 // gate; future interactive modes can swap in a gate that prompts the user.
 type ToolExecutorFn func(ctx context.Context, name string, args map[string]any) (string, error)
 
+// AgentRuntime is the per-thread execution context produced by an
+// AgentRuntimePreparer. It mirrors what the orchestrator builds for a primary
+// chat session — vault-aware tool schemas, a gate-wrapped tool executor that
+// dispatches against the agent's session-local registry fork, an addendum
+// appended to the persona system prompt (memory_mode + memory_block), and a
+// cleanup callback invoked when the thread completes (closes the MuninnDB
+// MCP client and tears down the toolbelt environment).
+//
+// All fields are optional. A non-nil but otherwise empty AgentRuntime is
+// equivalent to the legacy fallback path (no per-agent schemas/executor).
+type AgentRuntime struct {
+	// Schemas are the LLM tool definitions for this agent run. They replace
+	// the legacy toolRegistry-derived schemas when the runtime is non-nil,
+	// and are appended after the threadmgr-owned finish/request_help schemas.
+	Schemas []backend.Tool
+
+	// ExecuteTool dispatches a tool call against the agent's session-local
+	// tool registry (vault tools + toolbelt providers + local builtins) with
+	// the agent-specific permission gate applied. When non-nil it takes
+	// precedence over the global toolExecutor for this thread.
+	ExecuteTool ToolExecutorFn
+
+	// ExtraSystem is appended to the persona system prompt (the first system
+	// message produced by buildContext). Used to inject memory_mode
+	// instructions and the agent's memory_block when the vault is reachable.
+	ExtraSystem string
+
+	// Cleanup is invoked exactly once when the thread goroutine exits. Use
+	// it to close the per-thread MuninnDB MCP client and release any session
+	// env state. Nil-safe.
+	Cleanup func()
+}
+
+// AgentRuntimePreparer is invoked when a thread spawns to build the agent's
+// per-thread execution context. Returning (nil, nil) opts the thread out of
+// the per-agent path and falls back to the legacy global toolRegistry/
+// toolExecutor wiring. Returning a non-nil error is logged and also falls
+// back to the legacy path so that vault outages do not kill delegation.
+type AgentRuntimePreparer func(ctx context.Context, agentName string) (*AgentRuntime, error)
+
 // SetToolRegistry wires the tool registry used by sub-agent threads to obtain
 // agent-specific tool schemas (bash, read_file, etc.).
 func (tm *ThreadManager) SetToolRegistry(r ToolRegistryIface) {
@@ -202,6 +252,18 @@ func (tm *ThreadManager) SetToolExecutor(fn ToolExecutorFn) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.toolExecutor = fn
+}
+
+// SetAgentRuntimePreparer wires the function invoked once per spawned thread
+// to build the agent's per-thread execution context (vault-aware tool
+// schemas, executor, prompt addendum, cleanup). Pass nil to disable. When
+// disabled, threads use the global toolRegistry/toolExecutor and never see
+// MuninnDB tools — that legacy path is retained for tests and for agents
+// without memory enabled. Thread-safe.
+func (tm *ThreadManager) SetAgentRuntimePreparer(fn AgentRuntimePreparer) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.runtimePreparer = fn
 }
 
 // SetMembershipChecker wires the SpaceMembershipChecker used to validate that

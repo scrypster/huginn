@@ -591,6 +591,225 @@ func TestCreateFromMentions_NoCallerAgent_DelegatesAll(t *testing.T) {
 	}
 }
 
+// TestCreateFromMentions_MarkdownWrappedMentionsSpawnTwoThreads is the E2E
+// regression for issue #3 — orchestrator delegation died.
+//
+// The user's scenario: lead agent "Max" emits a markdown-formatted reply like
+// "Delegating to **@Stacy** and **@Bob**, please collaborate." The mentions
+// must be parsed AND each must spawn a thread that fires a `thread_started`
+// broadcast so the UI shows reply badges.
+//
+// This test wires CreateFromMentions exactly the way main.go does and asserts
+// two threads are created (one per mention) and the broadcast pipeline emits
+// thread_started for each.
+func TestCreateFromMentions_MarkdownWrappedMentionsSpawnTwoThreads(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("e2e-markdown", "/tmp", "claude-haiku-4")
+
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Max", ModelID: "claude-haiku-4"})
+	reg.Register(&agents.Agent{Name: "Stacy", ModelID: "claude-haiku-4"})
+	reg.Register(&agents.Agent{Name: "Bob", ModelID: "claude-haiku-4"})
+
+	_ = store.Append(sess, session.SessionMessage{
+		Role:    "user",
+		Content: "Max, please coordinate the team to investigate the auth bug.",
+	})
+
+	b := &fakeBackend{response: &backend.ChatResponse{
+		Content:    "Done.",
+		DoneReason: "stop",
+	}}
+
+	var bmu sync.Mutex
+	var broadcasts []capturedBroadcast
+	broadcastFn := func(sid, msgType string, payload map[string]any) {
+		bmu.Lock()
+		broadcasts = append(broadcasts, capturedBroadcast{sid, msgType, payload})
+		bmu.Unlock()
+	}
+
+	maxReply := "I'll coordinate. Delegating to **@Stacy** for triage and **@Bob** for the fix."
+
+	CreateFromMentions(
+		context.Background(),
+		sess.ID,
+		maxReply,
+		"parent-msg-1",
+		reg,
+		store,
+		sess,
+		b,
+		broadcastFn,
+		NewCostAccumulator(0),
+		tm,
+		"Max",
+	)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var stacy, bob *Thread
+	for time.Now().Before(deadline) {
+		for _, thr := range tm.ListBySession(sess.ID) {
+			switch thr.AgentID {
+			case "Stacy":
+				stacy = thr
+			case "Bob":
+				bob = thr
+			}
+		}
+		if stacy != nil && bob != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if stacy == nil {
+		t.Error("expected a thread for @Stacy from Max's markdown-wrapped mention")
+	}
+	if bob == nil {
+		t.Error("expected a thread for @Bob from Max's markdown-wrapped mention")
+	}
+
+	// Wait until each agent's thread broadcasts thread_started before counting.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bmu.Lock()
+		startedAgents := map[string]bool{}
+		for _, ev := range broadcasts {
+			if ev.msgType != "thread_started" {
+				continue
+			}
+			if name, ok := ev.payload["agent_id"].(string); ok {
+				startedAgents[name] = true
+			}
+		}
+		bmu.Unlock()
+		if startedAgents["Stacy"] && startedAgents["Bob"] {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bmu.Lock()
+	startedCount := 0
+	startedAgents := map[string]bool{}
+	for _, ev := range broadcasts {
+		if ev.msgType == "thread_started" {
+			startedCount++
+			if name, ok := ev.payload["agent_id"].(string); ok {
+				startedAgents[name] = true
+			}
+		}
+	}
+	bmu.Unlock()
+	if startedCount < 2 {
+		t.Errorf("expected at least 2 thread_started broadcasts, got %d", startedCount)
+	}
+	if !startedAgents["Stacy"] || !startedAgents["Bob"] {
+		t.Errorf("thread_started should fire for both Stacy and Bob, got %v", startedAgents)
+	}
+
+	// Wait for both spawned goroutines to reach a terminal state. Without
+	// this, t.TempDir cleanup races with the spawned threads' jsonl writes
+	// and emits "directory not empty" errors at test shutdown.
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		allDone := true
+		threads := tm.ListBySession(sess.ID)
+		if len(threads) < 2 {
+			allDone = false
+		} else {
+			for _, thr := range threads {
+				if thr.Status != StatusDone && thr.Status != StatusError {
+					allDone = false
+					break
+				}
+			}
+		}
+		if allDone {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestCreateFromMentions_UnknownAgentEmitsDelegationWarning verifies the
+// diagnostic broadcast that surfaces hallucinated agent names to the UI when
+// the orchestrator mentions an agent that doesn't exist in the registry.
+func TestCreateFromMentions_UnknownAgentEmitsDelegationWarning(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("e2e-unknown", "/tmp", "claude-haiku-4")
+
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Stacy", ModelID: "claude-haiku-4"})
+
+	b := &fakeBackend{response: &backend.ChatResponse{
+		Content: "ok", DoneReason: "stop",
+	}}
+	var bmu sync.Mutex
+	var broadcasts []capturedBroadcast
+	broadcastFn := func(sid, msgType string, payload map[string]any) {
+		bmu.Lock()
+		broadcasts = append(broadcasts, capturedBroadcast{sid, msgType, payload})
+		bmu.Unlock()
+	}
+
+	CreateFromMentions(
+		context.Background(),
+		sess.ID,
+		"Delegating to @Stacy and @GhostAgent who doesn't exist.",
+		"",
+		reg,
+		store,
+		sess,
+		b,
+		broadcastFn,
+		NewCostAccumulator(0),
+		tm,
+		"Max",
+	)
+
+	// Wait for the (real) Stacy thread to finish so the goroutine isn't still
+	// writing to TempDir during test cleanup.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		allDone := true
+		for _, thr := range tm.ListBySession(sess.ID) {
+			if thr.Status != StatusDone && thr.Status != StatusError {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bmu.Lock()
+	defer bmu.Unlock()
+	var sawWarning bool
+	for _, ev := range broadcasts {
+		if ev.msgType != "delegation_warning" {
+			continue
+		}
+		unknown, ok := ev.payload["unknown"].([]string)
+		if !ok {
+			continue
+		}
+		for _, name := range unknown {
+			if strings.EqualFold(name, "GhostAgent") {
+				sawWarning = true
+			}
+		}
+	}
+	if !sawWarning {
+		t.Errorf("expected a delegation_warning broadcast naming GhostAgent, got events: %v", broadcasts)
+	}
+}
+
 // TestCreateFromMentions_CaseInsensitiveSelfCheck verifies that the self-delegation
 // guard is case-insensitive (e.g., callerAgent="tom" matches @Tom).
 func TestCreateFromMentions_CaseInsensitiveSelfCheck(t *testing.T) {

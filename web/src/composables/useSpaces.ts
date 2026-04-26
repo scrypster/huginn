@@ -194,7 +194,13 @@ export function useSpaces() {
         member_agents: opts.memberAgents,
       })
       const sp = mapSpace(raw as Record<string, unknown>)
-      spaces.value.unshift(sp)
+      // Upsert by id: the backend broadcasts space_created on the WebSocket
+      // before this HTTP response resolves, so the WS handler may have already
+      // inserted this space. Replace if present (HTTP body is authoritative),
+      // otherwise prepend. Mirrors the pattern in openDM().
+      const idx = spaces.value.findIndex(s => s.id === sp.id)
+      if (idx >= 0) spaces.value[idx] = sp
+      else spaces.value.unshift(sp)
       return sp
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : 'Failed to create channel'

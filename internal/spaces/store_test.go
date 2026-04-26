@@ -280,6 +280,72 @@ func TestSpacesByLeadAgent_EmptyForUnknownAgent(t *testing.T) {
 	}
 }
 
+// TestListSpaceMessages_OrdersBySeqWhenTsIdentical verifies that when two
+// messages have the same `ts` value (e.g. both written within the same
+// second-precision window before the RFC3339Nano upgrade, or any future tie),
+// ListSpaceMessages returns them in monotonic seq order rather than letting
+// the random message ID lexicographically tie-break.
+//
+// Regression context (issue #2: "conversation order flips on refresh"):
+// The user reports a User → Assistant pair appearing correctly during the
+// live stream but reordered after a page reload. Root cause: ts collisions
+// caused the existing `ORDER BY ts DESC, id DESC` to use random UUID id as
+// the tie-break, occasionally swapping the pair. The fix: include seq in the
+// ORDER BY (ts, seq, id).
+func TestListSpaceMessages_OrdersBySeqWhenTsIdentical(t *testing.T) {
+	db := openTestDB(t)
+	store := spaces.NewSQLiteSpaceStore(db)
+	ch, err := store.CreateChannel("Order Test", "atlas", []string{}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sessionID := "sess-order-test"
+	if _, err := db.Write().Exec(
+		`INSERT INTO sessions (id, title, status, version, created_at, updated_at, space_id)
+		 VALUES (?, 'order-test', 'active', 1, '2026-04-26T12:00:00Z', '2026-04-26T12:00:00Z', ?)`,
+		sessionID, ch.ID,
+	); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+
+	// Two messages with IDENTICAL ts. seq encodes true write order (1=user,
+	// 2=assistant). The ID strings are chosen so id-only tie-break would
+	// reverse them: "z..." > "a..." lexicographically, so DESC-by-id puts
+	// "z..." first → after the outer ASC reversal, "a..." comes first → out
+	// of true write-order.
+	tsCommon := "2026-04-26T12:00:00.500Z"
+	if _, err := db.Write().Exec(
+		`INSERT INTO messages (id, container_type, container_id, seq, ts, role, content)
+		 VALUES (?, 'session', ?, 1, ?, 'user', 'first user message')`,
+		"zzz-user-id", sessionID, tsCommon,
+	); err != nil {
+		t.Fatalf("insert user msg: %v", err)
+	}
+	if _, err := db.Write().Exec(
+		`INSERT INTO messages (id, container_type, container_id, seq, ts, role, content)
+		 VALUES (?, 'session', ?, 2, ?, 'assistant', 'second assistant reply')`,
+		"aaa-asst-id", sessionID, tsCommon,
+	); err != nil {
+		t.Fatalf("insert asst msg: %v", err)
+	}
+
+	res, err := store.ListSpaceMessages(ch.ID, nil, 50)
+	if err != nil {
+		t.Fatalf("ListSpaceMessages: %v", err)
+	}
+	if len(res.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(res.Messages))
+	}
+
+	got := []string{res.Messages[0].Role, res.Messages[1].Role}
+	want := []string{"user", "assistant"}
+	if got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("conversation order is wrong: got %v want %v\nfull msgs: %+v",
+			got, want, res.Messages)
+	}
+}
+
 // TestSpacesByLeadAgent_ExcludesArchived verifies that SpacesByLeadAgent
 // does not return archived spaces.
 func TestSpacesByLeadAgent_ExcludesArchived(t *testing.T) {

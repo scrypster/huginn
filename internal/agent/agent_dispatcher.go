@@ -455,8 +455,20 @@ func (o *Orchestrator) TaskWithAgent(
 	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
 		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
 	}
-	// Silently pre-fetch memory orientation and inject into system prompt.
-	if memCtx := o.prefetchMemoryContext(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg); memCtx != "" {
+	// Pre-fetch memory orientation and inject into system prompt. Surface
+	// synthetic tool events so the UI can show that memory recall happened.
+	taskPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
+		if cached {
+			return
+		}
+		if onToolCall != nil {
+			onToolCall(toolName, args)
+		}
+		if onToolDone != nil {
+			onToolDone(toolName, tools.ToolResult{Output: output})
+		}
+	}
+	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, taskPrefetchCallback); memCtx != "" {
 		systemPrompt += memCtx
 	}
 
@@ -636,8 +648,16 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			slog.Info("vault tools available", "agent", ag.Name, "session_id", sessionID, "vault", ag.VaultName)
 			msgs[0].Content += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
 		}
-		// Silently pre-fetch memory orientation and inject into system prompt.
-		if memCtx := o.prefetchMemoryContext(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg); memCtx != "" {
+		// Pre-fetch memory orientation and inject into system prompt. Surface
+		// synthetic tool events so the UI can show that memory recall happened.
+		chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
+			if cached || onToolEvent == nil {
+				return
+			}
+			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
+			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, chatPrefetchCallback); memCtx != "" {
 			msgs[0].Content += memCtx
 		}
 

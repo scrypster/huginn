@@ -443,14 +443,21 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	args := []any{spaceID}
 	cursorClause := ""
 	if before != nil {
-		cursorClause = " AND (m.ts < ? OR (m.ts = ? AND m.id < ?))"
-		args = append(args, before.Ts, before.Ts, before.ID)
+		// Cursor includes seq so identical-ts collisions are tie-broken by the
+		// monotonically assigned sequence number rather than random uuid id.
+		// This mirrors the ORDER BY clause below so pagination is stable.
+		cursorClause = " AND (m.ts < ? OR (m.ts = ? AND m.seq < ?) OR (m.ts = ? AND m.seq = ? AND m.id < ?))"
+		args = append(args, before.Ts, before.Ts, before.Seq, before.Ts, before.Seq, before.ID)
 	}
 	// Fetch limit+1 rows to detect whether older messages exist (hasMore).
 	args = append(args, limit+1)
 
 	// The inner query returns the limit+1 NEWEST messages (DESC) matching the
 	// cursor condition. The outer query reverses them into chronological order.
+	// ORDER BY (ts, seq, id) — seq is the per-session monotonic write counter
+	// and is the authoritative ordering when ts collides (same second/nano).
+	// id is retained as final tie-break for deterministic ordering across
+	// sessions in the same space when ts and seq somehow collide.
 	query := fmt.Sprintf(`
 		SELECT id, session_id, seq, ts, role, content, agent, tool_calls_json FROM (
 			SELECT m.id, m.container_id AS session_id, m.seq, m.ts,
@@ -462,10 +469,10 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 			  AND m.container_type = 'session'
 			  AND m.role IN ('user', 'assistant')
 			  AND (m.parent_message_id IS NULL OR m.parent_message_id = '')%s
-			ORDER BY m.ts DESC, m.id DESC
+			ORDER BY m.ts DESC, m.seq DESC, m.id DESC
 			LIMIT ?
 		) sub
-		ORDER BY ts ASC, id ASC
+		ORDER BY ts ASC, seq ASC, id ASC
 	`, cursorClause)
 
 	rows, err := s.db.Read().Query(query, args...)
@@ -481,10 +488,10 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 					WHERE s.space_id = ?
 					  AND m.container_type = 'session'
 					  AND m.role IN ('user', 'assistant')%s
-					ORDER BY m.ts DESC, m.id DESC
+					ORDER BY m.ts DESC, m.seq DESC, m.id DESC
 					LIMIT ?
 				) sub
-				ORDER BY ts ASC, id ASC
+				ORDER BY ts ASC, seq ASC, id ASC
 			`, cursorClause)
 			rows, err = s.db.Read().Query(query, args...)
 		}
@@ -523,7 +530,7 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	if hasMore && len(msgs) > 0 {
 		// Cursor encodes the oldest message in the result. The next request
 		// with before=cursor will load messages older than msgs[0].
-		nextCursor = EncodeSpaceMsgCursor(msgs[0].Ts, msgs[0].ID)
+		nextCursor = EncodeSpaceMsgCursor(msgs[0].Ts, msgs[0].Seq, msgs[0].ID)
 	}
 
 	if msgs == nil {

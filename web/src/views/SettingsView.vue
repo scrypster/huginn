@@ -289,6 +289,25 @@
             </section>
           </div>
 
+          <!-- ── About ──────────────────────────────────────────────── -->
+          <div v-if="activeTab === 'about'" class="space-y-6" data-testid="settings-about-panel">
+            <p class="text-xs text-huginn-muted">Build information for the running Huginn instance. Useful for confirming an upgrade has taken effect.</p>
+
+            <section class="space-y-3">
+              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Application</h3>
+              <div class="rounded-xl border border-huginn-border bg-huginn-surface/40 divide-y divide-huginn-border">
+                <div class="flex items-center justify-between px-4 py-3">
+                  <span class="text-xs text-huginn-muted">Name</span>
+                  <span class="text-xs text-huginn-text">Huginn</span>
+                </div>
+                <div class="flex items-center justify-between px-4 py-3">
+                  <span class="text-xs text-huginn-muted">Version</span>
+                  <span class="text-xs font-mono text-huginn-text" data-testid="settings-version-value">{{ versionLabel }}</span>
+                </div>
+              </div>
+            </section>
+          </div>
+
         </div>
       </div>
     </div>
@@ -299,8 +318,15 @@
 import { ref, onMounted, defineComponent, h } from 'vue'
 import { api } from '../composables/useApi'
 import { useConfig, type MCPServer } from '../composables/useConfig'
+import { useVersion } from '../composables/useVersion'
 
 const { config, loading, externallyChanged, loadConfig, saveConfig } = useConfig()
+// useVersion returns the build version (cached app-wide). The composable
+// also fires a fetch on App.vue mount, so by the time Settings renders the
+// label is usually already populated; calling loadVersion again here is a
+// safe no-op if the user navigates straight to Settings before App.vue
+// finishes its onMounted hook.
+const { versionLabel, loadVersion } = useVersion()
 
 // ── Sub-components ───────────────────────────────────────────────────
 const FieldRow = defineComponent({
@@ -385,6 +411,11 @@ const IconMCP = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24',
   h('path', { d: 'M8 21h8M12 17v4' }),
   h('path', { d: 'M7 8h3m4 0h3' }),
 ]) })
+const IconAbout = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
+  h('circle', { cx: '12', cy: '12', r: '10' }),
+  h('path', { d: 'M12 16v-4' }),
+  h('path', { d: 'M12 8h.01' }),
+]) })
 
 const tabs = [
   { id: 'general', label: 'General', icon: IconGeneral },
@@ -392,6 +423,7 @@ const tabs = [
   { id: 'webui', label: 'Web UI', icon: IconWebUI },
   { id: 'integrations', label: 'Integrations', icon: IconIntegrations },
   { id: 'mcp', label: 'MCP Servers', icon: IconMCP },
+  { id: 'about', label: 'About', icon: IconAbout },
 ]
 
 const integrationProviders = [
@@ -536,6 +568,9 @@ onMounted(async () => {
   const [cfg] = await Promise.all([
     loadConfig(),
     api.runtime.status().then(s => { runtimeStatus.value = s as unknown as Record<string, unknown> }).catch(() => {}),
+    // Idempotent: useVersion caches across the app, so this is a no-op
+    // when the user enters Settings after App.vue has already loaded.
+    loadVersion(),
   ])
   populateForm(cfg as unknown as Record<string, unknown>)
 })

@@ -146,7 +146,30 @@ func (tm *ThreadManager) SpawnThread(
 		helpResolver := tm.helpResolver
 		completionNotifier := tm.completionNotifier
 		resolveBackend := tm.backendFor
+		preparer := tm.runtimePreparer
 		tm.mu.RUnlock()
+
+		// Build per-agent runtime (toolbelt + MuninnDB vault + memory_mode
+		// prompt). Do this once per thread so we connect the vault and fork
+		// the gate exactly once, then re-use across help-block resume cycles.
+		// On preparer error or nil runtime we fall back to the legacy global
+		// toolRegistry/toolExecutor path — vault outages must not kill
+		// delegation, and tests can opt out by leaving the preparer unset.
+		var runtime *AgentRuntime
+		if preparer != nil {
+			rt, prepErr := preparer(threadCtx, agentID)
+			if prepErr != nil {
+				slog.Warn("threadmgr: AgentRuntimePreparer failed; falling back to global toolset",
+					"thread_id", threadID, "agent", agentID, "err", prepErr)
+			} else if rt != nil {
+				runtime = rt
+				defer func() {
+					if runtime != nil && runtime.Cleanup != nil {
+						runtime.Cleanup()
+					}
+				}()
+			}
+		}
 
 		// Resolve the correct backend for this agent's provider. The raw `b`
 		// passed to SpawnThread is the fallback (often Ollama on localhost).
@@ -177,7 +200,7 @@ func (tm *ThreadManager) SpawnThread(
 		var injectedInput string
 		var tokenCounter int64
 		for {
-			result := tm.runOnce(threadCtx, threadID, agentID, injectedInput, sess, store, reg, agentBackend, broadcast, ca, dagFn, helpResolver, completionNotifier, emitter, &tokenCounter)
+			result := tm.runOnce(threadCtx, threadID, agentID, injectedInput, sess, store, reg, agentBackend, broadcast, ca, dagFn, helpResolver, completionNotifier, emitter, &tokenCounter, runtime)
 			if result.kind == loopDone {
 				return
 			}
@@ -219,6 +242,7 @@ func (tm *ThreadManager) runOnce(
 	completionNotifier *CompletionNotifier,
 	emitter *EventEmitter,
 	tokenCounter *int64,
+	runtime *AgentRuntime,
 ) (result loopResult) {
 	result = loopResult{kind: loopDone} // default: done
 
@@ -350,9 +374,15 @@ func (tm *ThreadManager) runOnce(
 		tt.RequestHelpSchema(),
 	}
 
-	// Append agent-specific local tools based on the agent's local_tools config.
-	// Wildcard ["*"] → all builtin schemas; named list → matching schemas only.
-	if toolReg != nil && reg != nil {
+	// Per-agent runtime path: schemas come from the orchestrator-built
+	// runtime (toolbelt + MuninnDB vault + skills/connections). When unset
+	// or empty, fall back to local_tools resolved against the global
+	// toolRegistry — preserves behaviour for tests and memory-disabled
+	// agents that the runtime preparer chooses not to populate.
+	switch {
+	case runtime != nil && len(runtime.Schemas) > 0:
+		tools = append(tools, runtime.Schemas...)
+	case toolReg != nil && reg != nil:
 		if ag, found := reg.ByName(agentID); found {
 			switch {
 			case len(ag.LocalTools) == 1 && ag.LocalTools[0] == "*":
@@ -362,8 +392,22 @@ func (tm *ThreadManager) runOnce(
 			}
 		}
 	}
+
 	// Build initial context messages.
 	history = buildContext(thread, store, tm, reg)
+
+	// If the runtime supplies a system prompt addendum (memory_mode +
+	// memory_block), append it to the persona system message produced by
+	// buildContext. buildContext always emits a leading system message, but
+	// guard against future changes by prepending a fresh system message
+	// when the head role differs.
+	if runtime != nil && runtime.ExtraSystem != "" {
+		if len(history) > 0 && history[0].Role == "system" {
+			history[0].Content += runtime.ExtraSystem
+		} else {
+			history = append([]backend.Message{{Role: "system", Content: runtime.ExtraSystem}}, history...)
+		}
+	}
 	logger.Info("runOnce: context built", "thread_id", threadID, "history_len", len(history))
 	// Log roles for debugging the "must end with user message" constraint.
 	if len(history) > 0 {
@@ -640,18 +684,29 @@ func (tm *ThreadManager) runOnce(
 				tt.RequestHelp(tc.Function.Arguments)
 				// RequestHelp() panics — execution stops here via defer/recover.
 			default:
-				// Dispatch to the wired tool executor (gate-wrapped). Falls back to
-				// "unknown tool" when no executor is set (e.g. in unit tests without
-				// server wiring). Server mode wires the auto-approve executor.
+				// Dispatch to the per-agent runtime executor when available
+				// (gate-wrapped against the agent's session-local registry,
+				// includes MuninnDB and toolbelt providers). Otherwise fall
+				// back to the global gate-wrapped executor for the legacy
+				// path. When neither is set, return "unknown tool" so unit
+				// tests without server wiring still complete deterministically.
 				var resultContent string
-				if toolExec != nil {
+				switch {
+				case runtime != nil && runtime.ExecuteTool != nil:
+					result, execErr := runtime.ExecuteTool(ctx, tc.Function.Name, tc.Function.Arguments)
+					if execErr != nil {
+						resultContent = fmt.Sprintf("tool error: %v", execErr)
+					} else {
+						resultContent = result
+					}
+				case toolExec != nil:
 					result, execErr := toolExec(ctx, tc.Function.Name, tc.Function.Arguments)
 					if execErr != nil {
 						resultContent = fmt.Sprintf("tool error: %v", execErr)
 					} else {
 						resultContent = result
 					}
-				} else {
+				default:
 					resultContent = fmt.Sprintf("unknown tool: %s", tc.Function.Name)
 				}
 				// Full content goes into LLM history; clipped for persistent store.

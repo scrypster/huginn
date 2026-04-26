@@ -2886,6 +2886,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		tm.SetToolExecutor(func(ctx context.Context, name string, args map[string]any) (string, error) {
 			return toolReg.Execute(ctx, name, args)
 		})
+
+		// Per-agent runtime preparer: gives every spawned worker thread
+		// the same vault-aware toolbelt + memory_mode prompt that the
+		// orchestrator uses for primary chat. Without this hook, delegated
+		// agents (Sam, Stacy, etc. invoked via @mention) inherit only the
+		// global tool list — no muninn_* tools, no MCP connections, no
+		// memory_mode instructions — and run effectively stateless. The
+		// orchestrator owns vault connection, registry forking, gate
+		// forking, and session env setup; threadmgr just consumes the
+		// resulting AgentRuntime.
+		tm.SetAgentRuntimePreparer(orch.PrepareAgentRuntime)
 	}
 
 	// Wire relay config if HuginnCloud is configured.
@@ -2919,6 +2930,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	muninnCfgFilePath := filepath.Join(home, ".config", "huginn", "muninn.json")
 	srv.SetMuninnConfigPath(muninnCfgFilePath)
 	orch.SetMuninnConfigPath(muninnCfgFilePath)
+
+	// Surface the build-time version (set via -ldflags="-X main.version=...")
+	// to /api/v1/health so the frontend can render it in the H-logo tooltip,
+	// the profile popover footer, and Settings → About.
+	srv.SetVersion(version)
 
 	ctx := context.Background()
 	if err := srv.Start(ctx); err != nil {

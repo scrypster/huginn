@@ -113,7 +113,7 @@ func TestRunOnce_WithDagFn(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -145,7 +145,7 @@ func TestRunOnce_UnexpectedPanic(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, &panicBackend{}, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, &panicBackend{}, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone after panic recovery, got %v", result.kind)
 	}
@@ -173,7 +173,7 @@ func TestRunOnce_ContextAlreadyCancelled(t *testing.T) {
 	ca := NewCostAccumulator(0)
 
 	fb := &fakeBackend{response: &backend.ChatResponse{Content: "noop", DoneReason: "stop"}}
-	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, fb, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone for pre-cancelled context, got %v", result.kind)
 	}
@@ -220,7 +220,7 @@ func TestRunOnce_MaxTurns(t *testing.T) {
 	var dagCalled int32
 	dagFn := func() { atomic.AddInt32(&dagCalled, 1) }
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, infiniteBackend, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, infiniteBackend, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone at max turns, got %v", result.kind)
 	}
@@ -338,7 +338,7 @@ func TestRunOnce_BudgetExceeded_WithDagFn(t *testing.T) {
 	dagFn := func() { atomic.AddInt32(&dagCalled, 1) }
 
 	broadcast := func(_, _ string, _ map[string]any) {}
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -366,7 +366,7 @@ func TestRunOnce_LLMError_WithDagFn(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, errBackend, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, errBackend, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -400,7 +400,7 @@ func TestRunOnce_LengthDoneReason_WithDagFn(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -434,7 +434,7 @@ func TestRunOnce_StopReason_WithDagFn(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, fb, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -461,7 +461,7 @@ func TestRunOnce_UnexpectedPanic_WithDagFn(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, &panicBackend{}, broadcast, ca, dagFn, nil, nil, nil, nil)
+	result := tm.runOnce(context.Background(), thread.ID, "", "", sess, store, reg, &panicBackend{}, broadcast, ca, dagFn, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}
@@ -497,7 +497,7 @@ func TestRunOnce_ContextCancelAfterBothRetries(t *testing.T) {
 	broadcast := func(_, _ string, _ map[string]any) {}
 	ca := NewCostAccumulator(0)
 
-	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, cancelAfterFirstBackend, broadcast, ca, nil, nil, nil, nil, nil)
+	result := tm.runOnce(ctx, thread.ID, "", "", sess, store, reg, cancelAfterFirstBackend, broadcast, ca, nil, nil, nil, nil, nil, nil)
 	if result.kind != loopDone {
 		t.Errorf("expected loopDone, got %v", result.kind)
 	}

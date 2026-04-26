@@ -179,6 +179,72 @@ describe('createChannel', () => {
     expect(sp).toBeNull()
     expect(error.value).toBeTruthy()
   })
+
+  // Race-condition regression: backend broadcasts space_created via WebSocket
+  // BEFORE returning the HTTP response body. If the WS event is processed
+  // first, createChannel must still produce exactly one entry — not two.
+  it('WS-first race: space_created arrives before HTTP resolves — yields one entry', async () => {
+    let resolveCreate!: (r: Response) => void
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(
+      new Promise<Response>(r => { resolveCreate = r }),
+    )
+
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+
+    const { createChannel, spaces } = useSpaces()
+    const promise = createChannel({ name: 'Engineering', leadAgent: 'atlas', memberAgents: [] })
+
+    // WS event arrives FIRST (before fetch resolves).
+    ws._emit(makeMsg('space_created', { space: sampleChannel }))
+    expect(spaces.value.filter(s => s.id === 'ch-1')).toHaveLength(1)
+
+    // Now HTTP resolves. createChannel must NOT add a second entry.
+    resolveCreate(okJson(sampleChannel))
+    await promise
+
+    expect(spaces.value.filter(s => s.id === 'ch-1')).toHaveLength(1)
+  })
+
+  it('HTTP-first race: HTTP resolves before space_created — yields one entry', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson(sampleChannel))
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+
+    const { createChannel, spaces } = useSpaces()
+    await createChannel({ name: 'Engineering', leadAgent: 'atlas', memberAgents: [] })
+    expect(spaces.value.filter(s => s.id === 'ch-1')).toHaveLength(1)
+
+    // WS event arrives AFTER. The WS handler already dedups by id, so still one.
+    ws._emit(makeMsg('space_created', { space: sampleChannel }))
+    expect(spaces.value.filter(s => s.id === 'ch-1')).toHaveLength(1)
+  })
+
+  it('WS-first race: HTTP response REPLACES the WS-inserted row (data freshness)', async () => {
+    let resolveCreate!: (r: Response) => void
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(
+      new Promise<Response>(r => { resolveCreate = r }),
+    )
+
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+
+    const { createChannel, spaces } = useSpaces()
+    const promise = createChannel({ name: 'Engineering', leadAgent: 'atlas', memberAgents: [] })
+
+    // WS payload arrives first with stale-ish memberAgents (e.g. before invitee sync).
+    ws._emit(makeMsg('space_created', {
+      space: { ...sampleChannel, member_agents: [] },
+    }))
+    expect(spaces.value.find(s => s.id === 'ch-1')!.memberAgents).toEqual([])
+
+    // HTTP returns the canonical record with the full member set.
+    resolveCreate(okJson({ ...sampleChannel, member_agents: ['bob', 'alice'] }))
+    await promise
+
+    expect(spaces.value.filter(s => s.id === 'ch-1')).toHaveLength(1)
+    expect(spaces.value.find(s => s.id === 'ch-1')!.memberAgents).toEqual(['bob', 'alice'])
+  })
 })
 
 // ── openDM ────────────────────────────────────────────────────────────────────
