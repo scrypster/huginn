@@ -150,7 +150,8 @@ func TestCarryover_NamedLocalTools_MultipleProviders(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Agent with NO tools at all (default-deny) — only vault tools.
+// Test: Agent with NO tools at all (default-deny) — only vault tools + delegation tools.
+// With step 5 injection, delegation tools are always added if registered.
 // ---------------------------------------------------------------------------
 
 func TestCarryover_DefaultDeny_OnlyVaultTools(t *testing.T) {
@@ -160,20 +161,22 @@ func TestCarryover_DefaultDeny_OnlyVaultTools(t *testing.T) {
 	schemas, _ := applyToolbelt(ag, reg, nil)
 	names := schemaNames(schemas)
 
-	// Only vault tools should be present
-	if len(schemas) != 2 {
-		t.Errorf("expected 2 vault tools only, got %d: %v", len(schemas), names)
-	}
+	// Vault tools + delegation tools should be present
 	if !names["muninn_recall"] || !names["muninn_store"] {
 		t.Error("vault tools should be present even for bare agents")
+	}
+	// Delegation tools are now injected at step 5
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("expected delegation tool %q to be injected at step 5, missing", expected)
+		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Test: Delegation tools tagged as "builtin" appear via wildcard,
-// but if an agent has named LocalTools that don't include them,
-// they should NOT appear from applyToolbelt alone.
-// (The auto-injection in ChatWithAgent handles this case separately.)
+// Test: Agents with named LocalTools now receive delegation tools via step 5 injection.
+// Step 5 always injects delegation tools when they are registered, regardless of
+// whether the agent explicitly named them in LocalTools.
 // ---------------------------------------------------------------------------
 
 func TestCarryover_NamedLocalTools_NoDelegationUnlessExplicit(t *testing.T) {
@@ -191,16 +194,18 @@ func TestCarryover_NamedLocalTools_NoDelegationUnlessExplicit(t *testing.T) {
 		t.Error("expected named local tools")
 	}
 
-	// Delegation tools should NOT be in schemas from applyToolbelt
-	// (they would be auto-injected in ChatWithAgent when space context is present)
-	if names["delegate_to_agent"] {
-		t.Error("delegate_to_agent should not appear via named LocalTools unless explicitly named")
+	// Delegation tools ARE injected at step 5 (fix for Bug 2)
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("delegation tool %q should be injected at step 5, missing", expected)
+		}
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Test: Vault tools are included even when toolbelt explicitly lists
 // providers that don't include "muninndb". This was a past bug.
+// Delegation tools are now also injected at step 5.
 // ---------------------------------------------------------------------------
 
 func TestCarryover_VaultToolsBypassToolbeltFiltering(t *testing.T) {
@@ -224,9 +229,16 @@ func TestCarryover_VaultToolsBypassToolbeltFiltering(t *testing.T) {
 		t.Error("vault tools must bypass toolbelt filtering")
 	}
 
-	// Total: 1 aws + 2 vault = 3
-	if len(schemas) != 3 {
-		t.Errorf("expected 3 schemas, got %d: %v", len(schemas), names)
+	// Delegation tools injected at step 5
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("delegation tool %q should be injected at step 5", expected)
+		}
+	}
+
+	// Total: 1 aws + 2 vault + 3 delegation = 6
+	if len(schemas) != 6 {
+		t.Errorf("expected 6 schemas, got %d: %v", len(schemas), names)
 	}
 }
 

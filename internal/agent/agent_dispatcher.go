@@ -82,7 +82,30 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		}
 	}
 
-	// 4. Fork the permission gate so each agent run gets isolated provider maps.
+	// 5. Always inject delegation tools when registered in the registry.
+	// Delegation tools (delegate_to_agent, list_team_status, recall_thread_result)
+	// are tagged "builtin" in main.go so agents with LocalTools:["*"] already get
+	// them via step 1. But agents with a named LocalTools list only get those
+	// explicit names — delegation is excluded, causing the LLM to never call
+	// delegate_to_agent and the loop to exit early (Bug 2 / Bug 1).
+	// reg.Get returns (nil, false) when a tool is not registered, making this
+	// a safe no-op in environments that don't register delegation tools.
+	{
+		delegationNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
+		seenDelegation := make(map[string]bool, len(schemas))
+		for _, s := range schemas {
+			seenDelegation[s.Function.Name] = true
+		}
+		for _, dname := range delegationNames {
+			if !seenDelegation[dname] {
+				if dt, ok := reg.Get(dname); ok {
+					schemas = append(schemas, dt.Schema())
+				}
+			}
+		}
+	}
+
+	// 6. Fork the permission gate so each agent run gets isolated provider maps.
 	// When gate is nil (no permission gate configured), the forked gate is also nil.
 	var agentGate *permissions.Gate
 	if gate != nil {
