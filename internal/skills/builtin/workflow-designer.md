@@ -147,5 +147,10 @@ steps:
   - name: Greet
     position: 0
     agent: Assistant
-    prompt: "Say hello and today's date."
+    prompt: "Say hello and share an interesting fact about today's date."
+
+  - name: Summarize
+    position: 1
+    agent: Assistant
+    prompt: "Summarize this greeting in one sentence: {{prev.output}}"
 ```
