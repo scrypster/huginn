@@ -10,17 +10,6 @@ import (
 	"github.com/scrypster/huginn/internal/session"
 )
 
-// insertTestMessage inserts a message row directly into the messages table
-// for use in thread handler tests. It mirrors the minimal columns needed.
-func insertTestMessage(t *testing.T, db interface {
-	Write() interface{ Exec(string, ...any) (interface{}, error) }
-}, id, containerID string, seq int64, role, content, agent, parentMessageID string, threadReplyCount int) {
-	t.Helper()
-	// We use the SQLiteSessionStore helpers via the store interface instead of
-	// direct SQL to stay independent of the schema migration state.
-	// This helper is intentionally left as a stub — test setup uses AppendToThread.
-}
-
 func TestGetMessageThread_Empty(t *testing.T) {
 	srv := testServer(t)
 	db := openTestSQLiteDB(t)

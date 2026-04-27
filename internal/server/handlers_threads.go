@@ -30,7 +30,9 @@ type threadMessageRow struct {
 }
 
 // MessageThreadResponse is the JSON body returned by GET /api/v1/messages/:id/thread.
-// DelegationChain is always a non-nil slice (empty array in JSON when no delegations).
+// DelegationChain lists the to_agent values of all delegations in the session ordered
+// by created_at ASC. It is session-scoped (not thread-scoped) because the delegations
+// table has no direct FK to the parent thread. Always a non-nil slice.
 type MessageThreadResponse struct {
 	Messages        []threadMessageRow `json:"messages"`
 	ThreadID        string             `json:"thread_id,omitempty"`
@@ -68,7 +70,9 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 	    FROM threads WHERE parent_msg_id = ? LIMIT 1`,
 		messageID,
 	)
-	// Ignore error — thread may not exist yet (in-flight or no-DB case).
+	// Scan errors are intentionally ignored: if the thread row does not exist yet
+	// (in-flight delegation or invalid message ID), threadID and sessionID remain
+	// empty strings. An empty sessionID disables the delegation chain lookup below.
 	_ = threadRow.Scan(&threadID, &sessionID)
 
 	// Query messages that belong to the thread container for this parent message.
