@@ -165,11 +165,8 @@ func (q *DeliveryQueue) attemptDelivery(ctx context.Context, e DeliveryQueueEntr
 		return
 	}
 	if health.CircuitState == "open" {
-		if health.LastProbeAt != nil {
-			sinceProbe := time.Since(*health.LastProbeAt)
-			if sinceProbe < time.Duration(e.RetryWindowS)*time.Second {
-				return // too soon to probe
-			}
+		if health.LastProbeAt != nil && time.Since(*health.LastProbeAt) < time.Duration(e.RetryWindowS)*time.Second {
+			return // too soon to probe; allow the first probe immediately when LastProbeAt is nil
 		}
 		slog.Info("delivery queue: circuit open — probing", "workflow_id", e.WorkflowID, "endpoint", e.Endpoint)
 	}
@@ -190,7 +187,9 @@ func (q *DeliveryQueue) attemptDelivery(ctx context.Context, e DeliveryQueueEntr
 	e.AttemptCount++
 
 	if rec.Status == "sent" {
-		_ = q.store.MarkDelivered(e.ID)
+		if err := q.store.MarkDelivered(e.ID); err != nil {
+			slog.Error("delivery queue: mark delivered", "id", e.ID, "err", err)
+		}
 		health.ConsecutiveFailures = 0
 		health.CircuitState = "closed"
 		health.OpenedAt = nil
@@ -202,18 +201,14 @@ func (q *DeliveryQueue) attemptDelivery(ctx context.Context, e DeliveryQueueEntr
 
 	health.ConsecutiveFailures++
 	health.LastProbeAt = &now
-	if health.CircuitState == "open" {
-		_ = q.store.UpsertHealth(health)
-	} else if health.ConsecutiveFailures >= circuitBreakThreshold {
+	if health.CircuitState != "open" && health.ConsecutiveFailures >= circuitBreakThreshold {
 		health.CircuitState = "open"
 		health.OpenedAt = &now
-		_ = q.store.UpsertHealth(health)
 		slog.Warn("delivery queue: circuit opened",
 			"workflow_id", e.WorkflowID, "endpoint", e.Endpoint,
 			"consecutive_failures", health.ConsecutiveFailures)
-	} else {
-		_ = q.store.UpsertHealth(health)
 	}
+	_ = q.store.UpsertHealth(health)
 
 	if e.AttemptCount >= e.MaxAttempts {
 		_ = q.store.UpdateAttempt(e.ID, "failed", e.AttemptCount, rec.Error, nil)
