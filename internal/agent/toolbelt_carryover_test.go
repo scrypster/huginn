@@ -154,7 +154,7 @@ func TestCarryover_NamedLocalTools_MultipleProviders(t *testing.T) {
 // With step 5 injection, delegation tools are always added if registered.
 // ---------------------------------------------------------------------------
 
-func TestCarryover_DefaultDeny_OnlyVaultTools(t *testing.T) {
+func TestCarryover_DefaultDeny_VaultAndDelegationTools(t *testing.T) {
 	reg := buildCarryoverTestRegistry()
 	ag := &agents.Agent{Name: "Bare"} // no LocalTools, no Toolbelt
 
@@ -179,7 +179,7 @@ func TestCarryover_DefaultDeny_OnlyVaultTools(t *testing.T) {
 // whether the agent explicitly named them in LocalTools.
 // ---------------------------------------------------------------------------
 
-func TestCarryover_NamedLocalTools_NoDelegationUnlessExplicit(t *testing.T) {
+func TestCarryover_NamedLocalTools_AlwaysIncludesDelegationTools(t *testing.T) {
 	reg := buildCarryoverTestRegistry()
 	ag := &agents.Agent{
 		Name:       "Mike",
