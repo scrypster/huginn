@@ -24,6 +24,7 @@ import (
 	"github.com/scrypster/huginn/internal/memory"
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/spaces"
+	"github.com/scrypster/huginn/internal/threadmgr"
 	"github.com/scrypster/huginn/internal/workforce"
 )
 
@@ -929,6 +930,10 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			chatCtx := c.ctx
 			chatCtx = s.InjectSpaceContext(chatCtx, sessionID, ag)
 			chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)
+			// Set calling agent so DelegateFn can record the delegation's FromAgent.
+			if ag != nil {
+				chatCtx = threadmgr.SetCallingAgent(chatCtx, ag.Name)
+			}
 
 			var err error
 			if ag != nil {
