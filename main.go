@@ -2508,6 +2508,22 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		srv.SetWorkflowRunStore(workflowRunStore)
 
 		wfDeliverers := scheduler.NewDelivererRegistry(buildCredentialResolver(connStore, connSecrets))
+
+		// Delivery queue (requires SQLite; falls back to nil = legacy JSONL mode).
+		var deliveryQueue *scheduler.DeliveryQueue
+		if sqlDB != nil {
+			dqStore := scheduler.NewDeliveryQueueStore(sqlDB)
+			if err := scheduler.MigrateDeadLetterToQueue(huginnHome, dqStore); err != nil {
+				logger.Warn("huginn: dead-letter migration", "err", err)
+			}
+			deliveryQueue = scheduler.NewDeliveryQueue(dqStore, wfDeliverers, notifStore,
+				func(eventType string, payload map[string]any) {
+					srv.BroadcastWS(server.WSMessage{Type: eventType, Payload: payload})
+				})
+			sched.SetDeliveryQueue(deliveryQueue)
+			srv.SetDeliveryQueue(deliveryQueue)
+		}
+
 		// Lazy metrics indirection: the stats.Registry for serve mode is
 		// created later (just before srv.Start) once sqlDB is confirmed and
 		// the persister is wired. We hand the workflow runner a collector
@@ -2671,6 +2687,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				}
 				return run.Steps[len(run.Steps)-1].Output, nil
 			}),
+			scheduler.WithDeliveryQueue(deliveryQueue),
 		)
 		sched.SetWorkflowRunner(wfRunner)
 		sched.SetWorkflowRunStore(workflowRunStore)
