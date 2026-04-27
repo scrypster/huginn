@@ -9,7 +9,7 @@ import (
 
 func TestScheduler_StartStop(t *testing.T) {
 	s := New()
-	s.Start()
+	s.Start(context.Background())
 	// Stop should return without blocking when no jobs are running.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -18,7 +18,7 @@ func TestScheduler_StartStop(t *testing.T) {
 
 func TestScheduler_RegisterWorkflow_AddsEntry(t *testing.T) {
 	s := New()
-	s.Start()
+	s.Start(context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

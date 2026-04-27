@@ -14,7 +14,7 @@ import (
 // After the panic, subsequent cron firings must still work.
 func TestScheduler_PanicRecovery_CronJob(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

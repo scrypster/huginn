@@ -33,7 +33,7 @@ func TestWorkflowE2E_CreateTriggerRun(t *testing.T) {
 	// Create a real scheduler wired with a mock runner that immediately marks
 	// the run as complete.
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	var triggeredWorkflowID string

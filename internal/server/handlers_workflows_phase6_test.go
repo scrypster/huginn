@@ -87,7 +87,7 @@ func seedRun(t *testing.T, srv *Server, workflowID, runID string, snap *schedule
 func installCapturingScheduler(t *testing.T, srv *Server) (chan map[string]string, chan struct{}) {
 	t.Helper()
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 	seen := make(chan map[string]string, 4)
 	done := make(chan struct{}, 4)

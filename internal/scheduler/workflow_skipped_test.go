@@ -51,7 +51,7 @@ func TestScheduler_WorkflowSkipped_BroadcastEmitted(t *testing.T) {
 		mu.Unlock()
 	})
 
-	sched.Start()
+	sched.Start(context.Background())
 	defer func() {
 		close(release) // unblock all running workflows before stopping
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -151,7 +151,7 @@ func TestScheduler_WorkflowSkipped_NoBroadcastFnNoPanic(t *testing.T) {
 	})
 	// No broadcast function set — broadcastFn is nil.
 
-	sched.Start()
+	sched.Start(context.Background())
 	defer func() {
 		close(release)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -220,7 +220,7 @@ func TestScheduler_WorkflowSkipped_WorkflowRunsOnNextTick(t *testing.T) {
 		return nil
 	})
 
-	sched.Start()
+	sched.Start(context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
