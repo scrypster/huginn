@@ -38,8 +38,8 @@ type RunLoopConfig struct {
 	Backend            backend.Backend
 	OnToken            func(string)
 	OnEvent            func(backend.StreamEvent) // richer streaming; nil = use OnToken
-	OnToolCall         func(name string, args map[string]any)
-	OnToolDone         func(name string, result tools.ToolResult)
+	OnToolCall         func(callID string, name string, args map[string]any)
+	OnToolDone         func(callID string, name string, result tools.ToolResult)
 	OnPermissionDenied func(name string)
 	// OnBeforeWrite is called before any write_file or edit_file tool executes.
 	// Receives path, old content (nil for new files), new content.
@@ -87,23 +87,41 @@ type LoopResult struct {
 // A deferred recover catches panics from any code path (serial or concurrent),
 // logs them with a full stack trace, and returns a tool error result.
 func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend.ToolCall, writeMu *sync.Mutex) (result dispatchedResult) {
+	// Resolve toolName and callID before the panic defer so the defer
+	// can reference them safely.
+	// tc.ID is the LLM-provider-assigned call ID (e.g. "call_abc123" from OpenAI).
+	// Fall back to a positional ID when the provider omits it (some Ollama models).
+	toolName := tc.Function.Name
+	argsMap := tc.Function.Arguments
+	callID := tc.ID
+	if callID == "" {
+		callID = fmt.Sprintf("tc-%d-%d-%s", time.Now().UnixNano(), idx, toolName)
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("tool: panic in executeSingle",
-				"tool", tc.Function.Name,
+				"tool", toolName,
 				"panic", r,
 				"stack", string(debug.Stack()),
 			)
 			result = dispatchedResult{
 				index:   idx,
 				tc:      tc,
-				content: fmt.Sprintf("error: tool %s panicked: %v", tc.Function.Name, r),
+				content: fmt.Sprintf("error: tool %s panicked: %v", toolName, r),
+			}
+			// Fire OnToolDone so callers can clean up in-flight state (e.g. remove
+			// the entry from their capture map). Without this, a panic would leave
+			// an orphaned map entry for the lifetime of the turn.
+			if cfg.OnToolDone != nil {
+				cfg.OnToolDone(callID, toolName, tools.ToolResult{
+					Output:  fmt.Sprintf("error: tool %s panicked: %v", toolName, r),
+					IsError: true,
+					Error:   fmt.Sprintf("tool %s panicked: %v", toolName, r),
+				})
 			}
 		}
 	}()
-
-	toolName := tc.Function.Name
-	argsMap := tc.Function.Arguments
 
 	makeResult := func(content string) dispatchedResult {
 		return dispatchedResult{index: idx, tc: tc, content: content}
@@ -154,7 +172,7 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 	}
 
 	if cfg.OnToolCall != nil {
-		cfg.OnToolCall(toolName, argsMap)
+		cfg.OnToolCall(callID, toolName, argsMap)
 	}
 
 	// Apply a per-tool deadline only when the caller has not already set a
@@ -198,7 +216,7 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 	}
 
 	if cfg.OnToolDone != nil {
-		cfg.OnToolDone(toolName, toolResult)
+		cfg.OnToolDone(callID, toolName, toolResult)
 	}
 
 	content := toolResult.Output

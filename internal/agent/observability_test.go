@@ -113,7 +113,7 @@ func TestRunLoop_ToolCallCallsOnToolDone(t *testing.T) {
 		Backend:     fb,
 		Tools:       toolReg,
 		ToolSchemas: toolReg.AllSchemas(),
-		OnToolDone: func(name string, _ tools.ToolResult) {
+		OnToolDone: func(_ string, name string, _ tools.ToolResult) {
 			toolsDone = append(toolsDone, name)
 		},
 	})
@@ -143,7 +143,7 @@ func TestRunLoop_ToolErrorCallsOnToolDone(t *testing.T) {
 		Backend:     fb,
 		Tools:       toolReg,
 		ToolSchemas: toolReg.AllSchemas(),
-		OnToolDone: func(_ string, result tools.ToolResult) {
+		OnToolDone: func(_ string, _ string, result tools.ToolResult) {
 			if result.IsError {
 				errorSeen = true
 			}

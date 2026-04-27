@@ -351,8 +351,8 @@ func (o *Orchestrator) Dispatch(
 	ctx context.Context,
 	input string,
 	onToken func(string),
-	onToolCall func(string, map[string]any),
-	onToolDone func(string, tools.ToolResult),
+	onToolCall func(string, string, map[string]any),
+	onToolDone func(string, string, tools.ToolResult),
 	onPermDenied func(string),
 	maxTurnsPtr *int,
 	onEvent func(backend.StreamEvent),
@@ -418,8 +418,8 @@ func (o *Orchestrator) TaskWithAgent(
 	userMsg string,
 	maxTurns int,
 	onToken func(string),
-	onToolCall func(string, map[string]any),
-	onToolDone func(string, tools.ToolResult),
+	onToolCall func(string, string, map[string]any),
+	onToolDone func(string, string, tools.ToolResult),
 	onPermDenied func(string),
 	onEvent func(backend.StreamEvent),
 ) error {
@@ -461,11 +461,12 @@ func (o *Orchestrator) TaskWithAgent(
 		if cached {
 			return
 		}
+		callID := fmt.Sprintf("prefetch-%s-%d", toolName, time.Now().UnixNano())
 		if onToolCall != nil {
-			onToolCall(toolName, args)
+			onToolCall(callID, toolName, args)
 		}
 		if onToolDone != nil {
-			onToolDone(toolName, tools.ToolResult{Output: output})
+			onToolDone(callID, toolName, tools.ToolResult{Output: output})
 		}
 	}
 	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, taskPrefetchCallback); memCtx != "" {
@@ -717,15 +718,10 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		// tool dispatches. dispatchTools spawns one goroutine per tool call, so
 		// OnToolCall/OnToolDone can fire concurrently.
 		var toolArgsMu sync.Mutex
-		// toolArgsCapture stores args keyed by tool name so OnToolDone can include
-		// them in the tool_result event. Last-write-wins when the same tool is called
-		// multiple times in one turn (a known limitation).
-		// TODO(tool-call-id): key by call ID instead of tool name to fix same-tool collision.
+		// toolArgsCapture stores args keyed by callID (the LLM-assigned tool call ID).
+		// Entries are deleted in OnToolDone to prevent unbounded growth per turn.
+		// Keying by callID (not tool name) fixes the same-tool-twice collision.
 		toolArgsCapture := make(map[string]map[string]any)
-		// toolCallIDCapture stores a correlation ID per tool name so that
-		// tool_call and tool_result events carry the same id. The frontend
-		// uses this id to match results back to the pending call chip.
-		toolCallIDCapture := make(map[string]string)
 		loopCfg := RunLoopConfig{
 			MaxTurns:      50,
 			ModelName:     ag.GetModelID(),
@@ -738,35 +734,29 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			OnEvent:          onEvent,
 			VaultWarnOnce:    &sync.Once{},
 			VaultReconnector: vr.reconnector,
-			OnToolCall: func(name string, args map[string]any) {
-				callID := fmt.Sprintf("tc-%d-%s", time.Now().UnixNano(), name)
+			OnToolCall: func(callID string, name string, args map[string]any) {
 				slog.Info("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
 				toolArgsMu.Lock()
-				toolArgsCapture[name] = args
-				toolCallIDCapture[name] = callID
+				toolArgsCapture[callID] = args
 				toolArgsMu.Unlock()
 				if onToolEvent != nil {
 					onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
 				} else if onEvent != nil {
-					// Emit full tool_call event with id+args so the frontend can show
-					// a "running…" chip with context before the result arrives.
 					onEvent(backend.StreamEvent{
 						Type:    backend.StreamToolCall,
 						Payload: map[string]any{"id": callID, "tool": name, "args": args},
 					})
 				}
 			},
-			OnToolDone: func(name string, result tools.ToolResult) {
+			OnToolDone: func(callID string, name string, result tools.ToolResult) {
 				toolArgsMu.Lock()
-				capturedArgs := toolArgsCapture[name]
-				callID := toolCallIDCapture[name]
+				capturedArgs := toolArgsCapture[callID]
+				delete(toolArgsCapture, callID)
 				toolArgsMu.Unlock()
 				slog.Info("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 				if onToolEvent != nil {
 					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})
 				} else if onEvent != nil {
-					// Emit full tool_result event with matching id so the frontend
-					// can attach the result to the correct pending chip.
 					onEvent(backend.StreamEvent{
 						Type: backend.StreamToolResult,
 						Payload: map[string]any{

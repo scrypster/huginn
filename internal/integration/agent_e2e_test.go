@@ -165,10 +165,10 @@ func TestAgentE2E_MultiTurn_ToolCall(t *testing.T) {
 	cfg := buildLoopConfig(b, reg, 10, []backend.Message{
 		{Role: "user", Content: "do something"},
 	})
-	cfg.OnToolCall = func(name string, _ map[string]any) {
+	cfg.OnToolCall = func(_ string, name string, _ map[string]any) {
 		toolCallName = name
 	}
-	cfg.OnToolDone = func(name string, result tools.ToolResult) {
+	cfg.OnToolDone = func(_ string, name string, result tools.ToolResult) {
 		toolDoneName = name
 		toolDoneResult = result
 	}

@@ -285,8 +285,8 @@ func (o *Orchestrator) CodeWithAgent(
 	userMsg string,
 	maxTurns int,
 	onToken func(string),
-	onToolCall func(string, map[string]any),
-	onToolDone func(string, tools.ToolResult),
+	onToolCall func(string, string, map[string]any),
+	onToolDone func(string, string, tools.ToolResult),
 	onPermDenied func(string),
 	onEvent func(backend.StreamEvent),
 ) error {

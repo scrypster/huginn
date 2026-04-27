@@ -415,7 +415,7 @@ func TestOrchestrator_AgentChat_WithRegistry_ToolExecution(t *testing.T) {
 	var toolCalled string
 	err := o.AgentChat(context.Background(), "use echo tool", 5,
 		nil,
-		func(name string, args map[string]any) { toolCalled = name },
+		func(_ string, name string, args map[string]any) { toolCalled = name },
 		nil,
 		nil,
 		nil, nil,
