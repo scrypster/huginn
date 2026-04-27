@@ -34,12 +34,12 @@ func TestGetMessageThread_Empty(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var result []threadMessageRow
+	var result MessageThreadResponse
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(result) != 0 {
-		t.Errorf("expected empty array, got %d items", len(result))
+	if len(result.Messages) != 0 {
+		t.Errorf("expected empty array, got %d items", len(result.Messages))
 	}
 }
 
@@ -106,19 +106,19 @@ func TestGetMessageThread_WithReplies(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var result []threadMessageRow
+	var result MessageThreadResponse
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 replies, got %d", len(result))
+	if len(result.Messages) != 2 {
+		t.Fatalf("expected 2 replies, got %d", len(result.Messages))
 	}
 	// Verify ordering by seq ASC.
-	if result[0].Seq >= result[1].Seq {
-		t.Errorf("expected ascending seq order, got %d then %d", result[0].Seq, result[1].Seq)
+	if result.Messages[0].Seq >= result.Messages[1].Seq {
+		t.Errorf("expected ascending seq order, got %d then %d", result.Messages[0].Seq, result.Messages[1].Seq)
 	}
-	if result[0].Content != "reply 1" {
-		t.Errorf("expected first reply content 'reply 1', got %q", result[0].Content)
+	if result.Messages[0].Content != "reply 1" {
+		t.Errorf("expected first reply content 'reply 1', got %q", result.Messages[0].Content)
 	}
 }
 
@@ -173,10 +173,10 @@ func TestGetMessageThread_NilDB(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 (empty), got %d: %s", w.Code, w.Body.String())
 	}
-	var result []threadMessageRow
+	var result MessageThreadResponse
 	json.NewDecoder(w.Body).Decode(&result) //nolint:errcheck
-	if len(result) != 0 {
-		t.Errorf("expected empty, got %d", len(result))
+	if len(result.Messages) != 0 {
+		t.Errorf("expected empty, got %d", len(result.Messages))
 	}
 }
 
@@ -271,5 +271,32 @@ func TestGetContainerThreads_NilDB(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&result) //nolint:errcheck
 	if len(result) != 0 {
 		t.Errorf("expected empty, got %d", len(result))
+	}
+}
+
+func TestHandleGetMessageThread_ResponseShape(t *testing.T) {
+	// Server with no DB — exercises the nil-DB fast path.
+	srv := testServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/msg-1/thread", nil)
+	req.SetPathValue("id", "msg-1")
+	w := httptest.NewRecorder()
+	srv.handleGetMessageThread(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Messages        []any    `json:"messages"`
+		DelegationChain []string `json:"delegation_chain"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// delegation_chain must be [] not null
+	if resp.DelegationChain == nil {
+		t.Errorf("delegation_chain is nil, want empty array []")
+	}
+	if len(resp.DelegationChain) != 0 {
+		t.Errorf("expected delegation_chain length 0, got %d", len(resp.DelegationChain))
 	}
 }

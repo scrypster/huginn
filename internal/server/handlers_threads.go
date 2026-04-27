@@ -29,6 +29,15 @@ type threadMessageRow struct {
 	ThreadReplyCount    int       `json:"thread_reply_count"`
 }
 
+// MessageThreadResponse is the JSON body returned by GET /api/v1/messages/:id/thread.
+// DelegationChain is always a non-nil slice (empty array in JSON when no delegations).
+type MessageThreadResponse struct {
+	Messages        []threadMessageRow `json:"messages"`
+	ThreadID        string             `json:"thread_id,omitempty"`
+	SessionID       string             `json:"session_id,omitempty"`
+	DelegationChain []string           `json:"delegation_chain"`
+}
+
 // handleGetMessageThread returns all reply messages for a given parent message ID,
 // ordered by seq ASC.
 //
@@ -42,7 +51,7 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 
 	if s.db == nil {
 		// No SQLite DB wired — return empty array (e.g. in tests using file-backed store).
-		jsonOK(w, []threadMessageRow{})
+		jsonOK(w, MessageThreadResponse{Messages: []threadMessageRow{}, DelegationChain: []string{}})
 		return
 	}
 
@@ -51,6 +60,16 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
+
+	// First, resolve the thread_id and session_id for this message.
+	var threadID, sessionID string
+	threadRow := rdb.QueryRowContext(r.Context(), `
+	    SELECT id, CASE WHEN parent_type = 'session' THEN parent_id ELSE '' END
+	    FROM threads WHERE parent_msg_id = ? LIMIT 1`,
+		messageID,
+	)
+	// Ignore error — thread may not exist yet (in-flight or no-DB case).
+	_ = threadRow.Scan(&threadID, &sessionID)
 
 	// Query messages that belong to the thread container for this parent message.
 	// We only return thread-scoped messages (container_type='thread') so that
@@ -84,7 +103,22 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusInternalServerError, "scan thread: "+err.Error())
 		return
 	}
-	jsonOK(w, msgs)
+
+	delegationChain := []string{}
+	if s.delegationStore != nil && sessionID != "" {
+		recs, err2 := s.delegationStore.ListDelegationsBySession(sessionID, 50, 0)
+		if err2 == nil {
+			for _, r := range recs {
+				delegationChain = append(delegationChain, r.ToAgent)
+			}
+		}
+	}
+	jsonOK(w, MessageThreadResponse{
+		Messages:        msgs,
+		ThreadID:        threadID,
+		SessionID:       sessionID,
+		DelegationChain: delegationChain,
+	})
 }
 
 // handleGetContainerThreads returns all root messages in a container that have
