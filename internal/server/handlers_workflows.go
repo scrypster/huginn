@@ -476,73 +476,6 @@ func (s *Server) handleCancelWorkflow(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "cancelling", "workflow_id": id})
 }
 
-// handleRetryDeliveryFailure re-queues a failed webhook delivery.
-// On success, appends a retry marker to the dead-letter log (preserving audit trail).
-//
-//	POST /api/v1/delivery-failures/retry
-func (s *Server) handleRetryDeliveryFailure(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		WorkflowID string `json:"workflow_id"`
-		RunID      string `json:"run_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonError(w, 400, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.WorkflowID == "" || body.RunID == "" {
-		jsonError(w, 400, "workflow_id and run_id are required")
-		return
-	}
-
-	// Find the matching failure record.
-	records, err := scheduler.ReadDeliveryFailures(s.huginnDir, 100)
-	if err != nil {
-		jsonError(w, 500, "read delivery failures: "+err.Error())
-		return
-	}
-	var target *scheduler.DeliveryFailureRecord
-	for i := range records {
-		if records[i].WorkflowID == body.WorkflowID && records[i].RunID == body.RunID {
-			target = &records[i]
-			break
-		}
-	}
-	if target == nil {
-		jsonError(w, 404, "delivery failure record not found (may have been retried already)")
-		return
-	}
-
-	// Re-deliver via a fresh webhook deliverer instance.
-	deliverer := scheduler.NewWebhookDeliverer()
-	n := &notification.Notification{
-		WorkflowID: body.WorkflowID,
-		RunID:      body.RunID,
-		Summary:    "Manual retry",
-	}
-	rec := deliverer.Deliver(r.Context(), n, scheduler.NotificationDelivery{Type: "webhook", To: target.URL})
-	if rec.Status != "sent" {
-		jsonError(w, 502, "retry failed: "+rec.Error)
-		return
-	}
-
-	// Append retry marker (append-only; preserves audit trail).
-	scheduler.MarkDeliveryFailureRetried(s.huginnDir, body.WorkflowID, body.RunID, target.URL)
-	jsonOK(w, map[string]string{"status": "retried", "workflow_id": body.WorkflowID, "run_id": body.RunID})
-}
-
-// handleListDeliveryFailures returns the last 7 days of webhook delivery
-// failures (dead-letter records), limited to 100 entries.
-//
-//	GET /api/v1/delivery-failures
-func (s *Server) handleListDeliveryFailures(w http.ResponseWriter, r *http.Request) {
-	records, err := scheduler.ReadDeliveryFailures(s.huginnDir, 100)
-	if err != nil {
-		jsonError(w, 500, "read delivery failures: "+err.Error())
-		return
-	}
-	jsonOK(w, records)
-}
-
 func (s *Server) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.mu.Lock()
@@ -996,4 +929,88 @@ func (s *Server) handleCronPreview(w http.ResponseWriter, r *http.Request) {
 		NextRuns []time.Time `json:"next_runs"`
 	}{Expr: expr, NextRuns: runs}
 	jsonOK(w, out)
+}
+
+// handleListDeliveryQueue returns actionable (failed) delivery queue entries.
+//
+//	GET /api/v1/delivery-queue
+func (s *Server) handleListDeliveryQueue(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonOK(w, []any{})
+		return
+	}
+	entries, err := q.ListActionable(100)
+	if err != nil {
+		jsonError(w, 500, "list delivery queue: "+err.Error())
+		return
+	}
+	jsonOK(w, entries)
+}
+
+// handleDeliveryQueueBadge returns the badge count for the nav indicator.
+//
+//	GET /api/v1/delivery-queue/badge
+func (s *Server) handleDeliveryQueueBadge(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonOK(w, map[string]int{"count": 0})
+		return
+	}
+	count, err := q.BadgeCount()
+	if err != nil {
+		jsonError(w, 500, "badge count: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]int{"count": count})
+}
+
+// handleRetryDeliveryQueueEntry forces immediate retry of a queue entry.
+//
+//	POST /api/v1/delivery-queue/{id}/retry
+func (s *Server) handleRetryDeliveryQueueEntry(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonError(w, 503, "delivery queue not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, 400, "missing id")
+		return
+	}
+	if err := q.ForceRetry(r.Context(), id); err != nil {
+		jsonError(w, 404, "retry failed: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]string{"status": "retrying", "id": id})
+}
+
+// handleDismissDeliveryQueueEntry removes a failed entry from the queue.
+//
+//	DELETE /api/v1/delivery-queue/{id}
+func (s *Server) handleDismissDeliveryQueueEntry(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonError(w, 503, "delivery queue not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, 400, "missing id")
+		return
+	}
+	if err := q.Dismiss(id); err != nil {
+		jsonError(w, 500, "dismiss: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]string{"status": "dismissed", "id": id})
 }
