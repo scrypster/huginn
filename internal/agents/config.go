@@ -341,18 +341,30 @@ func LoadAgents() (*AgentsConfig, error) {
 
 // LoadAgentsFromBase loads agents from baseDir using per-file format with
 // fallback to legacy agents.json. Reads both *.json and *.yaml files.
+// When both formats exist for the same agent name, YAML wins (preferred).
 // Returns defaults if nothing found.
 func LoadAgentsFromBase(baseDir string) (*AgentsConfig, error) {
 	agentsDir := filepath.Join(baseDir, "agents")
 	jsonFiles, _ := filepath.Glob(filepath.Join(agentsDir, "*.json"))
 	yamlFiles, _ := filepath.Glob(filepath.Join(agentsDir, "*.yaml"))
-	allFiles := append(jsonFiles, yamlFiles...)
 
-	if len(allFiles) > 0 {
+	// Build a name→path map: YAML wins over JSON when both exist for the same agent.
+	nameToPath := make(map[string]string)
+	for _, p := range jsonFiles {
+		base := strings.TrimSuffix(filepath.Base(p), ".json")
+		nameToPath[base] = p
+	}
+	for _, p := range yamlFiles {
+		base := strings.TrimSuffix(filepath.Base(p), ".yaml")
+		nameToPath[base] = p // overwrites .json entry if present
+	}
+
+	if len(nameToPath) > 0 {
 		var agentsList []AgentDef
-		for _, path := range allFiles {
+		for _, path := range nameToPath {
 			// Skip draft files
-			if filepath.Base(path) == ".draft.json" {
+			baseName := filepath.Base(path)
+			if baseName == ".draft.json" || baseName == ".draft.yaml" {
 				continue
 			}
 			data, err := os.ReadFile(path)
@@ -405,7 +417,7 @@ func LoadAgentsFrom(path string) (*AgentsConfig, error) {
 	return &cfg, nil
 }
 
-// SaveAgents writes agents to ~/.huginn/agents/<name>.json (one file per agent).
+// SaveAgents writes agents to ~/.huginn/agents/<name>.yaml (one file per agent).
 // This is the preferred save path; it replaces the old single-file approach.
 func SaveAgents(cfg *AgentsConfig) error {
 	baseDir, err := huginnBaseDir()
@@ -498,7 +510,7 @@ func sanitizeAgentName(name string) string {
 	return sb.String()
 }
 
-// SaveAgentDefault saves a single agent to ~/.huginn/agents/<name>.json.
+// SaveAgentDefault saves a single agent to ~/.huginn/agents/<name>.yaml.
 func SaveAgentDefault(agent AgentDef) error {
 	baseDir, err := huginnBaseDir()
 	if err != nil {

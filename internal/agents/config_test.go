@@ -597,3 +597,30 @@ func TestLoadAgents_RoundTripYAML(t *testing.T) {
 		t.Errorf("Color: want %q, got %q", want.Color, got.Color)
 	}
 }
+
+func TestLoadAgents_DeduplicatesMixedFormats(t *testing.T) {
+	baseDir := t.TempDir()
+	agentsDir := filepath.Join(baseDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Write BOTH hal.json and hal.yaml — YAML should win
+	jsonContent := `{"name":"HAL","model":"claude-haiku-4","system_prompt":"I am JSON HAL."}`
+	if err := os.WriteFile(filepath.Join(agentsDir, "hal.json"), []byte(jsonContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yamlContent := "name: HAL\nmodel: claude-haiku-4\nsystem_prompt: I am YAML HAL.\n"
+	if err := os.WriteFile(filepath.Join(agentsDir, "hal.yaml"), []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := agents.LoadAgentsFromBase(baseDir)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromBase: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("expected 1 agent (deduplication), got %d", len(cfg.Agents))
+	}
+	if cfg.Agents[0].SystemPrompt != "I am YAML HAL." {
+		t.Errorf("expected YAML version to win, got system_prompt=%q", cfg.Agents[0].SystemPrompt)
+	}
+}
