@@ -2,10 +2,10 @@ package agents
 
 // ToolbeltEntry records a connection assigned to an agent's toolbelt.
 type ToolbeltEntry struct {
-	ConnectionID string `json:"connection_id"`
-	Provider     string `json:"provider"`
-	Profile      string `json:"profile,omitempty"`
-	ApprovalGate bool   `json:"approval_gate,omitempty"`
+	ConnectionID string `json:"connection_id" yaml:"connection_id"`
+	Provider     string `json:"provider"      yaml:"provider"`
+	Profile      string `json:"profile,omitempty"       yaml:"profile,omitempty"`
+	ApprovalGate bool   `json:"approval_gate,omitempty" yaml:"approval_gate,omitempty"`
 }
 
 // ToolbeltProviders returns the deduplicated list of provider names

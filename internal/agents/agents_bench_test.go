@@ -35,9 +35,9 @@ func BenchmarkAgentConfigLoad(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cfg, err := loadAgentsFromBase(dir)
+		cfg, err := LoadAgentsFromBase(dir)
 		if err != nil {
-			b.Fatalf("loadAgentsFromBase: %v", err)
+			b.Fatalf("LoadAgentsFromBase: %v", err)
 		}
 		if len(cfg.Agents) != 5 {
 			b.Fatalf("expected 5 agents, got %d", len(cfg.Agents))

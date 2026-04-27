@@ -72,8 +72,8 @@ func TestSaveAgents_DefaultPathViaHOME(t *testing.T) {
 		t.Fatalf("SaveAgents: %v", err)
 	}
 
-	// SaveAgents now writes per-file: ~/.huginn/agents/<name>.json
-	perFilePath := filepath.Join(dir, ".huginn", "agents", "saved.json")
+	// SaveAgents now writes per-file: ~/.huginn/agents/<name>.yaml
+	perFilePath := filepath.Join(dir, ".huginn", "agents", "saved.yaml")
 	if _, err := os.Stat(perFilePath); err != nil {
 		t.Fatalf("expected per-file agent at %q: %v", perFilePath, err)
 	}

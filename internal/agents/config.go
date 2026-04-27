@@ -10,81 +10,82 @@ import (
 	"strings"
 
 	"github.com/scrypster/huginn/internal/modelconfig"
+	"gopkg.in/yaml.v3"
 )
 
 // AgentDef is the on-disk representation of a named agent.
 type AgentDef struct {
-	Name         string `json:"name"`
-	Model        string `json:"model"`
-	SystemPrompt string `json:"system_prompt"`
-	Color        string `json:"color"`
-	Icon         string `json:"icon"`
-	ID           string `json:"id,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	IsDefault    bool   `json:"is_default,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	Endpoint     string `json:"endpoint,omitempty"`
-	APIKey       string `json:"api_key,omitempty"`
+	Name         string `json:"name"          yaml:"name"`
+	Model        string `json:"model"         yaml:"model"`
+	SystemPrompt string `json:"system_prompt" yaml:"system_prompt"`
+	Color        string `json:"color"         yaml:"color"`
+	Icon         string `json:"icon"          yaml:"icon"`
+	ID           string `json:"id,omitempty"           yaml:"id,omitempty"`
+	CreatedAt    string `json:"created_at,omitempty"   yaml:"created_at,omitempty"`
+	IsDefault    bool   `json:"is_default,omitempty"   yaml:"is_default,omitempty"`
+	Provider     string `json:"provider,omitempty"     yaml:"provider,omitempty"`
+	Endpoint     string `json:"endpoint,omitempty"     yaml:"endpoint,omitempty"`
+	APIKey       string `json:"api_key,omitempty"      yaml:"api_key,omitempty"`
 
 	// VaultName is the fully-qualified MuninnDB vault name for this agent.
 	// If empty, defaults to "huginn:agent:<username>:<agentname>".
-	VaultName string `json:"vault_name,omitempty"`
+	VaultName string `json:"vault_name,omitempty"   yaml:"vault_name,omitempty"`
 
 	// Plasticity controls the MuninnDB learning rate preset.
 	// Values: "default", "knowledge-graph", "reference". Empty = "default".
-	Plasticity string `json:"plasticity,omitempty"`
+	Plasticity string `json:"plasticity,omitempty"   yaml:"plasticity,omitempty"`
 
 	// MemoryEnabled controls whether this agent uses memory injection.
 	// nil means inherit from global config.
-	MemoryEnabled *bool `json:"memory_enabled,omitempty"`
+	MemoryEnabled *bool `json:"memory_enabled,omitempty"        yaml:"memory_enabled,omitempty"`
 
 	// ContextNotesEnabled enables the persistent memory file for this agent.
 	// When true, ~/.huginn/agents/{name}.memory.md is read and injected at conversation start,
 	// and the update_memory tool is available for the agent to update the file.
-	ContextNotesEnabled bool `json:"context_notes_enabled,omitempty"`
+	ContextNotesEnabled bool `json:"context_notes_enabled,omitempty" yaml:"context_notes_enabled,omitempty"`
 
 	// MemoryMode controls how aggressively memory tools are used.
 	// Values: "passive" (only when asked), "conversational" (default: proactive recall+write),
 	// "immersive" (maximum: orientation, feedback, hygiene). Empty → "conversational" at runtime.
-	MemoryMode string `json:"memory_mode,omitempty"`
+	MemoryMode string `json:"memory_mode,omitempty"           yaml:"memory_mode,omitempty"`
 
 	// VaultDescription is a human-written description of this agent's memory vault.
 	// Injected into the system prompt to ground the agent in what its memory is for.
-	VaultDescription string `json:"vault_description,omitempty"`
+	VaultDescription string `json:"vault_description,omitempty"     yaml:"vault_description,omitempty"`
 
 	// MemoryType is a transient API-bridge field used by the frontend.
 	// Values: "none", "context", "muninndb". NOT persisted to disk.
 	// On PUT: call ApplyMemoryType() to translate to canonical fields before saving.
 	// On GET: call DeriveMemoryType() to populate from canonical fields for the response.
-	MemoryType string `json:"memory_type,omitempty"`
+	MemoryType string `json:"memory_type,omitempty"           yaml:"-"`
 
 	// Toolbelt is the list of connections assigned to this agent.
 	// Only tools for these providers will be injected into conversation context.
 	// Empty toolbelt = no external tools granted (default-deny).
 	// Use a wildcard entry (Provider: "*") for allow-all behavior.
-	Toolbelt []ToolbeltEntry `json:"toolbelt,omitempty"`
+	Toolbelt []ToolbeltEntry `json:"toolbelt,omitempty"              yaml:"toolbelt,omitempty"`
 
 	// Skills is the list of skill names assigned to this agent.
 	// Only skills in this list will be injected into the agent's system prompt.
 	// If empty, falls back to globally-enabled skills.
-	Skills []string `json:"skills"`
+	Skills []string `json:"skills"                          yaml:"skills,omitempty"`
 
 	// LocalTools is the allowlist of builtin tool names granted to this agent.
 	// Empty/nil = no local tools (default-deny).
 	// ["*"] = all builtin tools (God Mode).
 	// Named list = only those specific tools.
-	LocalTools []string `json:"local_tools,omitempty"`
+	LocalTools []string `json:"local_tools,omitempty"           yaml:"local_tools,omitempty"`
 
 	// Description is a short (max 500 bytes) human-readable summary of what this agent does.
 	// Visible to other agents in channel contexts for intelligent task delegation.
-	Description string `json:"description,omitempty"`
+	Description string `json:"description,omitempty"           yaml:"description,omitempty"`
 
 	// Version is an optimistic-lock counter incremented on every save.
 	// On PUT /api/v1/agents/{name}: if the client sends Version > 0 and it does
 	// not match the stored value, the request is rejected with 409 Conflict.
 	// Clients that do not track versions should omit the field (or send 0) to
 	// skip the conflict check (last-writer-wins semantics).
-	Version int `json:"version,omitempty"`
+	Version int `json:"version,omitempty"               yaml:"version,omitempty"`
 }
 
 // ResolvedVaultName returns the effective vault name for the agent.
@@ -327,7 +328,7 @@ func huginnBaseDir() (string, error) {
 	return dir, nil
 }
 
-// LoadAgents reads agents from ~/.huginn/agents/*.json (per-file format).
+// LoadAgents reads agents from ~/.huginn/agents/*.{json,yaml} (per-file format).
 // Falls back to ~/.huginn/agents.json for backward compatibility.
 // Returns defaults if neither exists.
 func LoadAgents() (*AgentsConfig, error) {
@@ -335,29 +336,41 @@ func LoadAgents() (*AgentsConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return loadAgentsFromBase(baseDir)
+	return LoadAgentsFromBase(baseDir)
 }
 
-// loadAgentsFromBase loads agents from baseDir using per-file format with
-// fallback to legacy agents.json. Returns defaults if nothing found.
-func loadAgentsFromBase(baseDir string) (*AgentsConfig, error) {
-	// First: try per-file format ~/.huginn/agents/*.json
+// LoadAgentsFromBase loads agents from baseDir using per-file format with
+// fallback to legacy agents.json. Reads both *.json and *.yaml files.
+// Returns defaults if nothing found.
+func LoadAgentsFromBase(baseDir string) (*AgentsConfig, error) {
 	agentsDir := filepath.Join(baseDir, "agents")
-	entries, err := filepath.Glob(filepath.Join(agentsDir, "*.json"))
-	if err == nil && len(entries) > 0 {
+	jsonFiles, _ := filepath.Glob(filepath.Join(agentsDir, "*.json"))
+	yamlFiles, _ := filepath.Glob(filepath.Join(agentsDir, "*.yaml"))
+	allFiles := append(jsonFiles, yamlFiles...)
+
+	if len(allFiles) > 0 {
 		var agentsList []AgentDef
-		for _, path := range entries {
+		for _, path := range allFiles {
 			// Skip draft files
 			if filepath.Base(path) == ".draft.json" {
 				continue
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {
-				continue // skip unreadable
+				continue
 			}
 			var agent AgentDef
-			if err := json.Unmarshal(data, &agent); err != nil {
-				continue // skip corrupt
+			switch filepath.Ext(path) {
+			case ".json":
+				if err := json.Unmarshal(data, &agent); err != nil {
+					continue
+				}
+			case ".yaml", ".yml":
+				if err := yaml.Unmarshal(data, &agent); err != nil {
+					continue
+				}
+			default:
+				continue
 			}
 			agentsList = append(agentsList, agent)
 		}
@@ -420,7 +433,7 @@ func SaveAgentsTo(cfg *AgentsConfig, path string) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-// SaveAgent saves a single agent definition to <baseDir>/agents/<name>.json.
+// SaveAgent saves a single agent definition to <baseDir>/agents/<name>.yaml.
 // Creates the directory if it does not exist. Uses an atomic write.
 // Increments agent.Version inside the function so the on-disk counter is
 // always larger than the last-seen client value — safe for optimistic locking.
@@ -434,7 +447,7 @@ func SaveAgent(baseDir string, agent AgentDef) error {
 	// callers never need to manage the counter themselves.
 	agent.Version++
 
-	data, err := json.MarshalIndent(agent, "", "  ")
+	data, err := yaml.Marshal(agent)
 	if err != nil {
 		return fmt.Errorf("marshal agent: %w", err)
 	}
@@ -444,7 +457,7 @@ func SaveAgent(baseDir string, agent AgentDef) error {
 		name = "unnamed"
 	}
 	safe := sanitizeAgentName(name)
-	path := filepath.Join(agentsDir, safe+".json")
+	path := filepath.Join(agentsDir, safe+".yaml")
 
 	// Atomic write via temp file + rename.
 	tmp := path + ".tmp"
@@ -455,14 +468,20 @@ func SaveAgent(baseDir string, agent AgentDef) error {
 }
 
 // DeleteAgent removes an agent's file from <baseDir>/agents/.
+// Tries .yaml first (new format), then .json (legacy format).
 func DeleteAgent(baseDir, name string) error {
 	safe := sanitizeAgentName(name)
-	path := filepath.Join(baseDir, "agents", safe+".json")
-	err := os.Remove(path)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("agent %q not found", name)
+	for _, ext := range []string{".yaml", ".json"} {
+		path := filepath.Join(baseDir, "agents", safe+ext)
+		err := os.Remove(path)
+		if err == nil {
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
 	}
-	return err
+	return fmt.Errorf("agent %q not found", name)
 }
 
 // sanitizeAgentName returns a safe filename component for an agent name.

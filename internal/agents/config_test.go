@@ -9,6 +9,7 @@ import (
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/modelconfig"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadAgents_MissingFile_ReturnsDefaults(t *testing.T) {
@@ -186,15 +187,15 @@ func TestSaveAgent_CreatesPerFileAgentInAgentsDir(t *testing.T) {
 		t.Fatalf("SaveAgent failed: %v", err)
 	}
 
-	// Verify file was created at <dir>/agents/testagent.json
-	expectedPath := filepath.Join(dir, "agents", "testagent.json")
+	// Verify file was created at <dir>/agents/testagent.yaml
+	expectedPath := filepath.Join(dir, "agents", "testagent.yaml")
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatalf("file not created at expected path: %v", err)
 	}
 
 	var loaded agents.AgentDef
-	if err := json.Unmarshal(data, &loaded); err != nil {
+	if err := yaml.Unmarshal(data, &loaded); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 	if loaded.Name != "TestAgent" {
@@ -215,8 +216,8 @@ func TestSaveAgent_UnnamedAgent_UsesDefaultName(t *testing.T) {
 		t.Fatalf("SaveAgent failed: %v", err)
 	}
 
-	// File should exist at <dir>/agents/unnamed.json
-	expectedPath := filepath.Join(dir, "agents", "unnamed.json")
+	// File should exist at <dir>/agents/unnamed.yaml
+	expectedPath := filepath.Join(dir, "agents", "unnamed.yaml")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("file not created at unnamed path: %v", err)
 	}
@@ -232,8 +233,8 @@ func TestSaveAgent_SpecialCharactersInName_Sanitized(t *testing.T) {
 		t.Fatalf("SaveAgent failed: %v", err)
 	}
 
-	// File should exist at <dir>/agents/test_agent_123.json (special chars replaced)
-	expectedPath := filepath.Join(dir, "agents", "test_agent_123.json")
+	// File should exist at <dir>/agents/test_agent_123.yaml (special chars replaced)
+	expectedPath := filepath.Join(dir, "agents", "test_agent_123.yaml")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("sanitized file not created: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestDeleteAgent_RemovesFile(t *testing.T) {
 	}
 
 	// Verify file exists
-	filePath := filepath.Join(dir, "agents", "todelete.json")
+	filePath := filepath.Join(dir, "agents", "todelete.yaml")
 	if _, err := os.Stat(filePath); err != nil {
 		t.Fatalf("file not created: %v", err)
 	}
@@ -337,8 +338,8 @@ func TestMigrateAgents_MigratesFromLegacyFormat(t *testing.T) {
 		t.Fatalf("backup file not created: %v", err)
 	}
 
-	// Verify per-file agents were created
-	agent1Path := filepath.Join(dir, "agents", "agent1.json")
+	// Verify per-file agents were created (as .yaml files now)
+	agent1Path := filepath.Join(dir, "agents", "agent1.yaml")
 	if _, err := os.Stat(agent1Path); err != nil {
 		t.Fatalf("migrated agent file not created: %v", err)
 	}
@@ -499,5 +500,100 @@ func TestFromDefMemoryModeEmpty(t *testing.T) {
 	// Empty mode passes through empty string — defaulting to "conversational" happens at runtime in the prompt builder
 	if a.MemoryMode != "" {
 		t.Fatalf("expected empty string, got %q", a.MemoryMode)
+	}
+}
+
+func TestSaveAgent_WritesYAML(t *testing.T) {
+	baseDir := t.TempDir()
+	def := agents.AgentDef{
+		Name:         "HAL",
+		Model:        "claude-haiku-4",
+		SystemPrompt: "You are HAL.\nI am afraid I cannot do that.",
+	}
+	if err := agents.SaveAgent(baseDir, def); err != nil {
+		t.Fatalf("SaveAgent: %v", err)
+	}
+	yamlPath := filepath.Join(baseDir, "agents", "hal.yaml")
+	if _, err := os.Stat(yamlPath); err != nil {
+		t.Fatalf("expected %s to exist: %v", yamlPath, err)
+	}
+	jsonPath := filepath.Join(baseDir, "agents", "hal.json")
+	if _, err := os.Stat(jsonPath); err == nil {
+		t.Errorf("expected %s NOT to exist", jsonPath)
+	}
+}
+
+func TestLoadAgents_ReadsYAMLFile(t *testing.T) {
+	baseDir := t.TempDir()
+	agentsDir := filepath.Join(baseDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	yamlContent := "name: Tester\nmodel: claude-haiku-4\nsystem_prompt: You are a tester.\n"
+	if err := os.WriteFile(filepath.Join(agentsDir, "tester.yaml"), []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := agents.LoadAgentsFromBase(baseDir)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromBase: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(cfg.Agents))
+	}
+	if cfg.Agents[0].Name != "Tester" {
+		t.Errorf("expected Tester, got %q", cfg.Agents[0].Name)
+	}
+}
+
+func TestLoadAgents_MixedFormats(t *testing.T) {
+	baseDir := t.TempDir()
+	agentsDir := filepath.Join(baseDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	jsonContent := `{"name":"JSON Agent","model":"claude-haiku-4","system_prompt":"I am JSON."}`
+	if err := os.WriteFile(filepath.Join(agentsDir, "json-agent.json"), []byte(jsonContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yamlContent := "name: YAML Agent\nmodel: claude-haiku-4\nsystem_prompt: I am YAML.\n"
+	if err := os.WriteFile(filepath.Join(agentsDir, "yaml-agent.yaml"), []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := agents.LoadAgentsFromBase(baseDir)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromBase: %v", err)
+	}
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(cfg.Agents))
+	}
+}
+
+func TestLoadAgents_RoundTripYAML(t *testing.T) {
+	baseDir := t.TempDir()
+	want := agents.AgentDef{
+		Name:         "Round",
+		Model:        "claude-sonnet-4-6",
+		SystemPrompt: "Line one.\nLine two.\nLine three.",
+		Color:        "#58A6FF",
+	}
+	if err := agents.SaveAgent(baseDir, want); err != nil {
+		t.Fatalf("SaveAgent: %v", err)
+	}
+	cfg, err := agents.LoadAgentsFromBase(baseDir)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromBase: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("expected 1, got %d", len(cfg.Agents))
+	}
+	got := cfg.Agents[0]
+	if got.Name != want.Name {
+		t.Errorf("Name: want %q, got %q", want.Name, got.Name)
+	}
+	if got.SystemPrompt != want.SystemPrompt {
+		t.Errorf("SystemPrompt: want %q, got %q", want.SystemPrompt, got.SystemPrompt)
+	}
+	if got.Color != want.Color {
+		t.Errorf("Color: want %q, got %q", want.Color, got.Color)
 	}
 }
