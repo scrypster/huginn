@@ -51,6 +51,13 @@
           {{ chatDoneCount > 9 ? '9+' : chatDoneCount }}
         </span>
 
+        <!-- Badge overlay for automation (delivery issues) -->
+        <span v-if="item.section === 'automation' && hasIssues"
+          class="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-huginn-red text-white text-[8px] font-bold flex items-center justify-center leading-none"
+          @click.stop="drawerOpen = true">
+          {{ badgeCount > 9 ? '9+' : badgeCount }}
+        </span>
+
         <!-- Icon -->
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path v-if="item.icon === 'chat'" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
@@ -760,6 +767,51 @@
 
       <RouterView v-else />
     </main>
+
+    <!-- Delivery issues drawer -->
+    <Transition name="slide-right">
+      <div v-if="drawerOpen"
+        class="fixed right-0 top-0 h-full w-80 bg-huginn-bg border-l border-huginn-border z-50 flex flex-col shadow-xl">
+        <div class="flex items-center justify-between p-4 border-b border-huginn-border">
+          <span class="text-sm font-semibold text-huginn-text">Delivery Issues</span>
+          <button @click="drawerOpen = false" class="text-huginn-muted hover:text-huginn-text">✕</button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+          <div v-if="actionableEntries.length === 0"
+            class="text-huginn-muted text-xs text-center py-8">
+            No delivery issues
+          </div>
+          <div v-for="entry in actionableEntries" :key="entry.id"
+            class="bg-huginn-surface rounded-lg p-3 border border-huginn-border text-xs">
+            <div class="text-huginn-muted mb-1 truncate">{{ entry.workflow_id }}</div>
+            <div class="font-medium text-huginn-text truncate mb-1">{{ entry.endpoint }}</div>
+            <div class="text-huginn-red mb-2">Failed after {{ entry.attempt_count }} attempts</div>
+            <div v-if="entry.last_error" class="text-huginn-muted truncate mb-2">{{ entry.last_error }}</div>
+            <div class="flex gap-2">
+              <button @click="retryEntry(entry.id)"
+                class="flex-1 py-1 bg-huginn-blue/20 text-huginn-blue rounded hover:bg-huginn-blue/30">
+                Retry
+              </button>
+              <button @click="dismissEntry(entry.id)"
+                class="px-2 py-1 text-huginn-muted hover:text-huginn-text rounded border border-huginn-border">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="p-3 border-t border-huginn-border">
+          <button @click="fetchActionable()"
+            class="w-full text-xs text-huginn-muted hover:text-huginn-text">
+            Refresh
+          </button>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Drawer backdrop -->
+    <div v-if="drawerOpen"
+      class="fixed inset-0 z-40 bg-black/20"
+      @click="drawerOpen = false" />
   </div>
 </template>
 
@@ -781,6 +833,7 @@ import { wireSwarmWS } from './composables/useSwarmStatus'
 import SpaceCreateModal from './components/SpaceCreateModal.vue'
 import { useAgents } from './composables/useAgents'
 import { useThreads } from './composables/useThreads'
+import { useDeliveryQueue } from './composables/useDeliveryQueue'
 
 const route = useRoute()
 const router = useRouter()
@@ -788,6 +841,12 @@ const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages 
 const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } = useNotifications()
 const { wireWS: wireWorkflowsWS } = useWorkflows()
 const { isAgentActive } = useThreads()
+const { badgeCount, actionableEntries, hasIssues, fetchBadge, fetchActionable, retryEntry, dismissEntry, handleBadgeUpdate } = useDeliveryQueue()
+
+const drawerOpen = ref(false)
+watch(drawerOpen, (open) => {
+  if (open) fetchActionable()
+})
 
 // ── Nav structure ────────────────────────────────────────────────────
 const navItems = [
@@ -1047,6 +1106,9 @@ async function initApp() {
         if (!isViewing) markUnseen(msg.session_id)
       }
     })
+    ws.on('delivery_badge_update', (msg) => {
+      handleBadgeUpdate((msg as unknown as { count: number }).count ?? 0)
+    })
   } catch (e: unknown) {
     appError.value = e instanceof Error ? e.message : 'Failed to initialize'
     appLoading.value = false
@@ -1282,6 +1344,7 @@ function handleGlobalAppKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   initApp()
+  fetchBadge()
   // Fire-and-forget: the version is purely informational, no UI flow gates
   // on its arrival, and useVersion swallows errors gracefully.
   void loadVersion()
@@ -1294,3 +1357,14 @@ onUnmounted(() => {
   document.removeEventListener('keydown', handleGlobalAppKeydown)
 })
 </script>
+
+<style>
+.slide-right-enter-active,
+.slide-right-leave-active {
+  transition: transform 0.2s ease;
+}
+.slide-right-enter-from,
+.slide-right-leave-to {
+  transform: translateX(100%);
+}
+</style>
