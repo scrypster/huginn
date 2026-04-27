@@ -896,3 +896,85 @@ describe('useThreadDetail — delegationChain hydration', () => {
     expect(delegationChain.value).toEqual([])
   })
 })
+
+// ── toolCalls mapping ─────────────────────────────────────────────────────────
+
+describe('useThreadDetail — toolCalls mapping', () => {
+  it('maps tool_calls array from API response to toolCalls on ThreadMessage', async () => {
+    const apiMsg = {
+      id: 'msg-1',
+      role: 'assistant',
+      content: 'Hello',
+      agent: 'Atlas',
+      seq: 1,
+      created_at: new Date().toISOString(),
+      tool_calls: [
+        { id: 'tc-1', name: 'bash', args: { cmd: 'echo hi' }, result: 'hi' },
+      ],
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: [apiMsg], delegation_chain: [] }),
+    } as unknown as Response)
+
+    const useThreadDetail = await freshUseThreadDetail()
+    const { messages, open } = useThreadDetail()
+    await open('msg-1')
+
+    expect(messages.value).toHaveLength(1)
+    const msg = messages.value[0]!
+    expect(msg.toolCalls).toBeDefined()
+    expect(msg.toolCalls).toHaveLength(1)
+    expect(msg.toolCalls![0]!.name).toBe('bash')
+    expect(msg.toolCalls![0]!.result).toBe('hi')
+    expect(msg.toolCalls![0]!.done).toBe(true)
+  })
+
+  it('leaves toolCalls undefined when tool_calls is absent from API response', async () => {
+    const apiMsg = {
+      id: 'msg-2',
+      role: 'assistant',
+      content: 'Hello',
+      agent: 'Atlas',
+      seq: 1,
+      created_at: new Date().toISOString(),
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: [apiMsg], delegation_chain: [] }),
+    } as unknown as Response)
+
+    const useThreadDetail = await freshUseThreadDetail()
+    const { messages, open } = useThreadDetail()
+    await open('msg-2')
+
+    expect(messages.value).toHaveLength(1)
+    expect(messages.value[0]!.toolCalls).toBeUndefined()
+  })
+
+  it('leaves toolCalls undefined when tool_calls is empty array', async () => {
+    const apiMsg = {
+      id: 'msg-3',
+      role: 'assistant',
+      content: 'Hello',
+      agent: 'Atlas',
+      seq: 1,
+      created_at: new Date().toISOString(),
+      tool_calls: [],
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: [apiMsg], delegation_chain: [] }),
+    } as unknown as Response)
+
+    const useThreadDetail = await freshUseThreadDetail()
+    const { messages, open } = useThreadDetail()
+    await open('msg-3')
+
+    expect(messages.value).toHaveLength(1)
+    expect(messages.value[0]!.toolCalls).toBeUndefined()
+  })
+})
