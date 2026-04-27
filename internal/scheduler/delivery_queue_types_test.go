@@ -54,3 +54,29 @@ func TestNextRetryDelay(t *testing.T) {
 		})
 	}
 }
+
+func TestEndpointKey(t *testing.T) {
+	tests := []struct {
+		target NotificationDelivery
+		want   string
+	}{
+		{
+			NotificationDelivery{Type: "webhook", To: "https://hooks.slack.com/abc"},
+			"https://hooks.slack.com/abc",
+		},
+		{
+			NotificationDelivery{Type: "email", SMTPUser: "bot", SMTPHost: "smtp.gmail.com"},
+			"smtp://bot@smtp.gmail.com",
+		},
+		{
+			NotificationDelivery{Type: "email", Connection: "my-gmail"},
+			"smtp-connection://my-gmail",
+		},
+	}
+	for _, tc := range tests {
+		got := endpointKey(tc.target)
+		if got != tc.want {
+			t.Errorf("endpointKey(%+v) = %q, want %q", tc.target, got, tc.want)
+		}
+	}
+}
