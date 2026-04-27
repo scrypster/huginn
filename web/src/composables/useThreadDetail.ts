@@ -82,7 +82,7 @@ async function fetchThreadMessages(messageId: string): Promise<MessageThreadAPIR
           }))
         : undefined
     return {
-      ...(msg as ThreadMessage),
+      ...(msg as unknown as ThreadMessage),
       toolCalls,
     }
   })
