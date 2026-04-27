@@ -16,11 +16,9 @@
     <!-- ── Column 1: Icon strip (48px) ─────────────────────────────── -->
     <nav class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
 
-      <!-- Logo mark — tooltip surfaces the build version for update confirmation -->
-      <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none cursor-help"
-        style="background:linear-gradient(135deg,rgba(88,166,255,0.2),rgba(88,166,255,0.05));border:1px solid rgba(88,166,255,0.3)"
-        :title="`Huginn ${versionLabel}`"
-        data-testid="logo-version-tooltip">
+      <!-- Logo mark -->
+      <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none"
+        style="background:linear-gradient(135deg,rgba(88,166,255,0.2),rgba(88,166,255,0.05));border:1px solid rgba(88,166,255,0.3)">
         <span class="text-huginn-blue font-bold text-sm leading-none">H</span>
       </div>
 
