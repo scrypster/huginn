@@ -59,6 +59,26 @@ The `idx` (positional index within the batch) eliminates timestamp collision in 
 
 ---
 
+## Blast Radius — All Files With Signature Changes
+
+The `OnToolCall`/`OnToolDone` signatures thread through more files than just the primary bug sites. The Go compiler will catch all of them, but they are documented here to prevent surprises during review:
+
+| File | Change type |
+|------|-------------|
+| `internal/agent/loop.go` | Struct definition + call sites |
+| `internal/agent/agent_dispatcher.go` | `ChatWithAgent` closures (bug fix), `TaskWithAgent` prefetch, `Dispatch()` method signature |
+| `internal/agent/chat_engine.go` | `ChatForSession` closures (bug fix) |
+| `internal/agent/orchestrator.go` | Passthrough signature update |
+| `internal/agent/mcp_agent_chat.go` | Passthrough signature update |
+| `internal/agent/debug_loop.go` | `DebugLoop` accepts old signatures as params — update |
+| `internal/server/ws.go` | Caller that passes closures — update closure signatures |
+| `internal/tui/stream_handler.go` | Caller that passes closures — update closure signatures |
+| `main.go` | Caller — update closure signatures if any |
+| `init_relay.go` | Caller — update closure signatures if any |
+| Test files (loop_test.go, observability_test.go, agent_e2e_test.go, others) | Update callback signatures |
+
+---
+
 ## File Changes
 
 ### `internal/agent/loop.go`
@@ -216,6 +236,16 @@ onToolDone = func(callID string, name string, result tools.ToolResult) { ... }
 | `internal/agent/loop_test.go` | Add `callID string` first param to `OnToolCall`/`OnToolDone` closures |
 | `internal/agent/observability_test.go` | Same |
 | `internal/integration/agent_e2e_test.go` | Same |
+
+### New test: `TestRunLoop_PanicPath_OnToolDoneStillFires`
+
+**File:** `internal/agent/loop_test.go`
+
+Register a tool that panics. Verify:
+1. `OnToolDone` is still called (panic recovery path)
+2. The `callID` matches what was emitted by `OnToolCall`
+3. The result has `IsError: true` and a message containing "panicked"
+4. No map entry is leaked (capture map is empty after the call)
 
 ### New test: `TestRunLoop_SameToolTwiceInOneTurn`
 
