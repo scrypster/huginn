@@ -695,83 +695,142 @@
                       class="text-[10px] px-2 py-1 rounded border border-huginn-border text-huginn-text hover:border-huginn-blue/40 transition-colors"
                       @click.stop="openDiffModal(run)">Diff vs…</button>
                   </div>
-                  <div v-for="s in run.steps" :key="s.position"
-                    class="px-4 py-2.5 border-b border-huginn-border/40 last:border-b-0">
-                    <div class="flex items-start justify-between gap-2">
-                      <div class="flex items-center gap-2 min-w-0">
-                        <span class="text-[10px] font-mono flex-shrink-0"
-                          :class="{
-                            'text-huginn-green': s.status === 'success',
-                            'text-red-400': s.status === 'failed',
-                            'text-huginn-muted': s.status === 'skipped',
-                          }">
-                          {{ s.status === 'success' ? '✓' : s.status === 'failed' ? '✗' : '–' }}
-                        </span>
-                        <span class="text-xs text-huginn-text truncate">{{ s.slug || `Step ${s.position}` }}</span>
-                      </div>
-                      <div v-if="s.session_id" class="flex items-start gap-1 flex-shrink-0 relative">
-                        <a :href="`/sessions/${s.session_id}`"
-                          @click.stop
-                          class="text-[10px] text-huginn-blue/70 hover:text-huginn-blue flex items-center gap-1 transition-colors"
-                          title="Open session">
-                          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/>
-                          </svg>
-                          session
-                        </a>
-                        <div class="relative">
-                          <button type="button"
-                            data-testid="step-session-artifacts-btn"
-                            class="text-[10px] text-huginn-muted hover:text-huginn-text px-1 py-0.5 rounded border border-huginn-border/60"
-                            title="Artifacts produced in this session"
-                            @click.stop="toggleArtifactPopover(s.session_id!)">
-                            Artifacts
-                          </button>
-                          <div v-if="artifactPopoverSessionId === s.session_id"
-                            class="absolute right-0 z-20 mt-1 w-60 max-h-52 overflow-y-auto rounded-lg border border-huginn-border bg-huginn-surface shadow-xl p-2 text-left">
-                            <div v-if="sessionArtifactsLoading[s.session_id]" class="text-[10px] text-huginn-muted py-1">Loading…</div>
-                            <template v-else>
-                              <p v-if="!(sessionArtifactsById[s.session_id]?.length)" class="text-[10px] text-huginn-muted">No artifacts in this session.</p>
-                              <ul v-else class="space-y-1.5">
-                                <li v-for="a in sessionArtifactsById[s.session_id]" :key="a.id" class="text-[10px] leading-snug">
-                                  <span class="text-huginn-text font-medium">{{ a.title || a.id }}</span>
-                                  <span class="text-huginn-muted/70"> · {{ a.kind }} · {{ a.status }}</span>
-                                </li>
-                              </ul>
-                            </template>
+
+                  <!-- Tab bar -->
+                  <div class="flex gap-4 border-b border-huginn-border px-4 mb-0 text-xs">
+                    <button
+                      @click="runDetailTab = 'steps'"
+                      :class="runDetailTab === 'steps'
+                        ? 'text-huginn-text border-b-2 border-huginn-blue pb-1 pt-1'
+                        : 'text-huginn-muted pb-1 pt-1'"
+                    >Steps</button>
+                    <button
+                      @click="runDetailTab = 'deliveries'"
+                      :class="runDetailTab === 'deliveries'
+                        ? 'text-huginn-text border-b-2 border-huginn-blue pb-1 pt-1'
+                        : 'text-huginn-muted pb-1 pt-1'"
+                    >
+                      Deliveries
+                      <span v-if="runDeliveries.length > 0"
+                        class="ml-1 bg-red-500 text-white text-[8px] font-bold rounded-full px-1">
+                        {{ runDeliveries.length }}
+                      </span>
+                    </button>
+                  </div>
+
+                  <!-- Steps panel -->
+                  <template v-if="runDetailTab === 'steps'">
+                    <div v-for="s in run.steps" :key="s.position"
+                      class="px-4 py-2.5 border-b border-huginn-border/40 last:border-b-0">
+                      <div class="flex items-start justify-between gap-2">
+                        <div class="flex items-center gap-2 min-w-0">
+                          <span class="text-[10px] font-mono flex-shrink-0"
+                            :class="{
+                              'text-huginn-green': s.status === 'success',
+                              'text-red-400': s.status === 'failed',
+                              'text-huginn-muted': s.status === 'skipped',
+                            }">
+                            {{ s.status === 'success' ? '✓' : s.status === 'failed' ? '✗' : '–' }}
+                          </span>
+                          <span class="text-xs text-huginn-text truncate">{{ s.slug || `Step ${s.position}` }}</span>
+                        </div>
+                        <div v-if="s.session_id" class="flex items-start gap-1 flex-shrink-0 relative">
+                          <a :href="`/sessions/${s.session_id}`"
+                            @click.stop
+                            class="text-[10px] text-huginn-blue/70 hover:text-huginn-blue flex items-center gap-1 transition-colors"
+                            title="Open session">
+                            <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/>
+                            </svg>
+                            session
+                          </a>
+                          <div class="relative">
+                            <button type="button"
+                              data-testid="step-session-artifacts-btn"
+                              class="text-[10px] text-huginn-muted hover:text-huginn-text px-1 py-0.5 rounded border border-huginn-border/60"
+                              title="Artifacts produced in this session"
+                              @click.stop="toggleArtifactPopover(s.session_id!)">
+                              Artifacts
+                            </button>
+                            <div v-if="artifactPopoverSessionId === s.session_id"
+                              class="absolute right-0 z-20 mt-1 w-60 max-h-52 overflow-y-auto rounded-lg border border-huginn-border bg-huginn-surface shadow-xl p-2 text-left">
+                              <div v-if="sessionArtifactsLoading[s.session_id]" class="text-[10px] text-huginn-muted py-1">Loading…</div>
+                              <template v-else>
+                                <p v-if="!(sessionArtifactsById[s.session_id]?.length)" class="text-[10px] text-huginn-muted">No artifacts in this session.</p>
+                                <ul v-else class="space-y-1.5">
+                                  <li v-for="a in sessionArtifactsById[s.session_id]" :key="a.id" class="text-[10px] leading-snug">
+                                    <span class="text-huginn-text font-medium">{{ a.title || a.id }}</span>
+                                    <span class="text-huginn-muted/70"> · {{ a.kind }} · {{ a.status }}</span>
+                                  </li>
+                                </ul>
+                              </template>
+                            </div>
                           </div>
                         </div>
                       </div>
+                      <div v-if="stepMetricsLine(s)" class="mt-0.5 text-[10px] font-mono text-huginn-muted/55">
+                        {{ stepMetricsLine(s) }}
+                      </div>
+                      <div v-if="s.status === 'skipped'" class="mt-1 text-[10px] text-huginn-muted/80 break-words">
+                        {{ skipStepTooltip(s) }}
+                      </div>
+                      <div v-if="s.error" class="mt-1 text-[10px] font-mono break-words"
+                        :class="isPlaceholderError(s.error) ? 'text-amber-400/80' : 'text-red-400/80'">
+                        {{ isPlaceholderError(s.error) ? '⚠ unresolved template placeholder' : s.error }}
+                      </div>
+                      <div v-if="s.output" class="mt-1 space-y-1">
+                        <div class="text-[10px] font-mono text-huginn-muted/70 line-clamp-3 break-words">{{ s.output }}</div>
+                        <div class="flex flex-wrap gap-2">
+                          <button type="button"
+                            class="text-[10px] text-huginn-blue hover:text-huginn-blue/80 transition-colors"
+                            @click.stop="stepOutputModal = { title: `${run.id.slice(-12)} · ${s.slug || 'step ' + s.position}`, body: s.output || '' }">
+                            Expand output
+                          </button>
+                          <button type="button"
+                            class="text-[10px] text-huginn-muted hover:text-huginn-text transition-colors"
+                            @click.stop="copyStepOutput(s.output || '')">
+                            Copy full output
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                    <div v-if="stepMetricsLine(s)" class="mt-0.5 text-[10px] font-mono text-huginn-muted/55">
-                      {{ stepMetricsLine(s) }}
+                    <div v-if="run.error" class="px-4 py-2.5 text-[10px] font-mono text-red-400/80 break-words">
+                      {{ run.error }}
                     </div>
-                    <div v-if="s.status === 'skipped'" class="mt-1 text-[10px] text-huginn-muted/80 break-words">
-                      {{ skipStepTooltip(s) }}
+                  </template>
+
+                  <!-- Deliveries panel -->
+                  <div v-else class="flex flex-col gap-2 px-4 py-3">
+                    <div v-if="runDeliveries.length === 0" class="text-huginn-muted text-xs py-4 text-center">
+                      All deliveries successful
                     </div>
-                    <div v-if="s.error" class="mt-1 text-[10px] font-mono break-words"
-                      :class="isPlaceholderError(s.error) ? 'text-amber-400/80' : 'text-red-400/80'">
-                      {{ isPlaceholderError(s.error) ? '⚠ unresolved template placeholder' : s.error }}
-                    </div>
-                    <div v-if="s.output" class="mt-1 space-y-1">
-                      <div class="text-[10px] font-mono text-huginn-muted/70 line-clamp-3 break-words">{{ s.output }}</div>
-                      <div class="flex flex-wrap gap-2">
-                        <button type="button"
-                          class="text-[10px] text-huginn-blue hover:text-huginn-blue/80 transition-colors"
-                          @click.stop="stepOutputModal = { title: `${run.id.slice(-12)} · ${s.slug || 'step ' + s.position}`, body: s.output || '' }">
-                          Expand output
-                        </button>
-                        <button type="button"
-                          class="text-[10px] text-huginn-muted hover:text-huginn-text transition-colors"
-                          @click.stop="copyStepOutput(s.output || '')">
-                          Copy full output
-                        </button>
+                    <div v-for="entry in runDeliveries" :key="entry.id"
+                      class="bg-huginn-surface rounded-lg p-3 border border-huginn-border text-xs">
+                      <div class="flex items-center justify-between gap-2">
+                        <div class="flex items-center gap-2 min-w-0">
+                          <span :class="entry.channel === 'webhook' ? 'text-huginn-blue' : 'text-purple-400'">
+                            {{ entry.channel }}
+                          </span>
+                          <span class="text-huginn-muted truncate">{{ entry.endpoint }}</span>
+                        </div>
+                        <div class="flex items-center gap-2 flex-shrink-0">
+                          <span class="text-red-400">failed after {{ entry.attempt_count }} attempts</span>
+                          <button @click="retryEntry(entry.id)"
+                            class="px-2 py-0.5 bg-huginn-blue/20 text-huginn-blue rounded hover:bg-huginn-blue/30 text-xs">
+                            Retry
+                          </button>
+                          <button @click="dismissEntry(entry.id)"
+                            class="px-2 py-0.5 bg-huginn-surface text-huginn-muted rounded hover:text-huginn-text text-xs">
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      <div v-if="entry.last_error" class="text-huginn-muted mt-1 truncate">
+                        {{ entry.last_error }}
                       </div>
                     </div>
                   </div>
-                  <div v-if="run.error" class="px-4 py-2.5 text-[10px] font-mono text-red-400/80 break-words">
-                    {{ run.error }}
-                  </div>
+
                 </div>
               </div>
             </div>
@@ -916,6 +975,7 @@ import { useRouter } from 'vue-router'
 import { useWorkflows, type Workflow, type WorkflowStep, type WorkflowTemplate, type WorkflowRun, type WorkflowEvent, type WorkflowStepResult, type SessionArtifactSummary } from '../composables/useWorkflows'
 import { getToken } from '../composables/useApi'
 import { useAgents } from '../composables/useAgents'
+import { useDeliveryQueue } from '../composables/useDeliveryQueue'
 import AgentPicker from '../components/AgentPicker.vue'
 import { remapIndex } from '../utils/remapIndex'
 
@@ -924,6 +984,7 @@ const router = useRouter()
 
 const { workflows, loading, liveEvents, fetchWorkflows, fetchTemplates, createWorkflow, updateWorkflow, deleteWorkflow, triggerWorkflow, cancelWorkflow, fetchWorkflowRuns, replayWorkflowRun, forkWorkflowRun, diffWorkflowRuns, fetchSessionArtifacts } = useWorkflows()
 const { agents: agentList } = useAgents()
+const { actionableEntries, retryEntry, dismissEntry } = useDeliveryQueue()
 
 const search = ref('')
 const selectedId = ref<string | null>(props.id || null)
@@ -941,6 +1002,15 @@ const dragOver = ref<number | null>(null)
 const runs = ref<WorkflowRun[]>([])
 const loadingHistory = ref(false)
 const expandedRunId = ref<string | null>(null)
+
+// Tab state for run detail view
+const runDetailTab = ref<'steps' | 'deliveries'>('steps')
+
+// Entries for the currently expanded run
+const runDeliveries = computed(() =>
+  actionableEntries.value.filter(e => e.run_id === expandedRunId.value)
+)
+
 const historyFeedback = ref<{ text: string; err: boolean } | null>(null)
 const showForkModal = ref(false)
 const forkTargetRun = ref<WorkflowRun | null>(null)
