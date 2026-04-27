@@ -88,6 +88,14 @@ steps:
         - type: webhook
           to: https://hooks.example.com/notify
           connection: my-webhook
+        - type: email
+          to: recipient@example.com
+          connection: my-smtp        # named SMTP connection (preferred)
+          # Or configure SMTP inline (legacy, avoid):
+          # smtp_host: smtp.example.com
+          # smtp_port: "587"
+          # smtp_from: noreply@example.com
+          # smtp_user: user
 
   - name: Send Summary
     position: 1
@@ -113,6 +121,10 @@ notification:                         # optional workflow-level notification
   deliver_to:
     - type: inbox
 ```
+
+> **`notification.severity`** accepts any string; common values are `info`, `warning`, `error`.
+
+> **System-managed fields** (`slug`, `version`, `created_at`, `updated_at`) are set automatically. Do not author them in new workflow files; they will be populated by the server on save.
 
 ## Template Variables
 
