@@ -584,17 +584,28 @@ func (s *SQLiteSessionStore) AppendToThread(sessionID, threadID string, msg Sess
 	}
 	seq := maxSeq + 1
 
+	var toolCallsJSON *string
+	if len(msg.ToolCalls) > 0 {
+		b, jsonErr := json.Marshal(msg.ToolCalls)
+		if jsonErr == nil {
+			s := string(b)
+			toolCallsJSON = &s
+		}
+	}
+
 	if _, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages
 			(id, container_type, container_id, seq, ts, role, content,
 			 agent, tool_name, tool_call_id, type,
-			 prompt_tokens, completion_tokens, cost_usd, model)
-		VALUES (?, 'thread', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 prompt_tokens, completion_tokens, cost_usd, model,
+			 tool_calls_json)
+		VALUES (?, 'thread', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, threadID, seq,
 		msg.Ts.UTC().Format(time.RFC3339Nano),
 		roleOrDefault(msg.Role), msg.Content,
 		msg.Agent, msg.ToolName, msg.ToolCallID,
 		msg.Type, msg.PromptTok, msg.CompTok, msg.CostUSD, msg.ModelName,
+		toolCallsJSON,
 	); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("session sqlite: append thread message: %w", err)
