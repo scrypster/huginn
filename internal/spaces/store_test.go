@@ -80,27 +80,6 @@ func TestCreateChannel_And_DM_Returns403(t *testing.T) {
 	}
 }
 
-func TestBuildChannelContext_WithMembers(t *testing.T) {
-	ctx := spaces.BuildChannelContext("atlas", []string{"coder", "reviewer"}, map[string]string{
-		"coder": "writes Go code",
-	})
-	if !strings.Contains(ctx, "coder") {
-		t.Error("expected coder in context")
-	}
-	if !strings.Contains(ctx, "reviewer") {
-		t.Error("expected reviewer in context")
-	}
-	if !strings.Contains(ctx, "Team Context") {
-		t.Error("expected Team Context header")
-	}
-}
-
-func TestBuildChannelContext_Empty(t *testing.T) {
-	ctx := spaces.BuildChannelContext("atlas", nil, nil)
-	if ctx != "" {
-		t.Errorf("expected empty context for no members, got: %q", ctx)
-	}
-}
 
 func TestOpenDM_EmptyAgentName_ReturnsError(t *testing.T) {
 	db := openTestDB(t)

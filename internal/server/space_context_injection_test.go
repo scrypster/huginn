@@ -587,25 +587,3 @@ func TestExtractLeadMention(t *testing.T) {
 	}
 }
 
-// ── Legacy BuildChannelContext integration ───────────────────────────────────
-
-func TestBuildChannelContext_WithDescriptions(t *testing.T) {
-	ctx := spaces.BuildChannelContext("atlas", []string{"coder", "reviewer"}, map[string]string{
-		"coder":    "Writes and refactors code",
-		"reviewer": "Reviews PRs and finds bugs",
-	})
-
-	if !strings.Contains(ctx, "[Team Context]") {
-		t.Errorf("expected [Team Context] header")
-	}
-	if !strings.Contains(ctx, "coder") || !strings.Contains(ctx, "Writes and refactors code") {
-		t.Errorf("expected coder description in context")
-	}
-}
-
-func TestBuildChannelContext_NoMembers_ReturnsEmpty(t *testing.T) {
-	ctx := spaces.BuildChannelContext("atlas", nil, nil)
-	if ctx != "" {
-		t.Errorf("expected empty for no members, got %q", ctx)
-	}
-}
