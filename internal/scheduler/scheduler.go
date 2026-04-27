@@ -41,6 +41,7 @@ type Scheduler struct {
 	workflowCancels  map[string]context.CancelCauseFunc // workflow ID → cancel-cause func for running goroutine
 	sem              chan struct{}                     // global concurrency semaphore
 	broadcastFn      WorkflowBroadcastFunc            // may be nil; emits WS events for skipped/lifecycle events
+	deliveryQueue    *DeliveryQueue                   // optional; started in Start() if set
 }
 
 // New creates a Scheduler.
@@ -112,6 +113,12 @@ func ValidateCronSchedule(schedule string) error {
 // Start begins the cron loop. Non-blocking.
 func (s *Scheduler) Start() {
 	s.cron.Start()
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q != nil {
+		q.StartWorker(context.Background())
+	}
 }
 
 // Stop halts the cron loop, waiting for running jobs to finish.
@@ -148,6 +155,14 @@ func (s *Scheduler) SetBroadcastFunc(fn WorkflowBroadcastFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.broadcastFn = fn
+}
+
+// SetDeliveryQueue wires the durable delivery queue and starts its background
+// worker when Start() is called.
+func (s *Scheduler) SetDeliveryQueue(q *DeliveryQueue) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliveryQueue = q
 }
 
 // RegisterWorkflow adds or replaces a workflow's cron schedule.
