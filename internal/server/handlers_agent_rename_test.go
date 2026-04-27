@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // helpers shared by rename tests ─────────────────────────────────────────────
@@ -32,11 +34,14 @@ func setupAgentsDir(t *testing.T, agents map[string]string) (agentsDir string) {
 // TestHandleUpdateAgent_Rename_DeletesOldFile is the core regression test for
 // the "edit creates duplicate agent" bug.
 // PUT /api/v1/agents/Alice with body {"name":"Charlie",...} must:
-//   - create ~/.huginn/agents/charlie.json
-//   - delete ~/.huginn/agents/alice.json
+//   - create ~/.huginn/agents/charlie.yaml
+//   - delete ~/.huginn/agents/alice.yaml
 func TestHandleUpdateAgent_Rename_DeletesOldFile(t *testing.T) {
 	agentsDir := setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+`,
 	})
 	_, ts := newTestServer(t)
 
@@ -56,12 +61,12 @@ func TestHandleUpdateAgent_Rename_DeletesOldFile(t *testing.T) {
 	}
 
 	// New file must exist.
-	if _, err := os.Stat(filepath.Join(agentsDir, "charlie.json")); os.IsNotExist(err) {
-		t.Error("charlie.json should exist after rename")
+	if _, err := os.Stat(filepath.Join(agentsDir, "charlie.yaml")); os.IsNotExist(err) {
+		t.Error("charlie.yaml should exist after rename")
 	}
 	// Old file must be gone.
-	if _, err := os.Stat(filepath.Join(agentsDir, "alice.json")); !os.IsNotExist(err) {
-		t.Error("alice.json should be deleted after rename but still exists")
+	if _, err := os.Stat(filepath.Join(agentsDir, "alice.yaml")); !os.IsNotExist(err) {
+		t.Error("alice.yaml should be deleted after rename but still exists")
 	}
 }
 
@@ -69,7 +74,11 @@ func TestHandleUpdateAgent_Rename_DeletesOldFile(t *testing.T) {
 // contains the new name and updated fields, not the old ones.
 func TestHandleUpdateAgent_Rename_NewFileHasCorrectContent(t *testing.T) {
 	agentsDir := setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff","system_prompt":"old"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+system_prompt: old
+`,
 	})
 	_, ts := newTestServer(t)
 
@@ -87,12 +96,12 @@ func TestHandleUpdateAgent_Rename_NewFileHasCorrectContent(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	data, err := os.ReadFile(filepath.Join(agentsDir, "charlie.json"))
+	data, err := os.ReadFile(filepath.Join(agentsDir, "charlie.yaml"))
 	if err != nil {
-		t.Fatalf("read charlie.json: %v", err)
+		t.Fatalf("read charlie.yaml: %v", err)
 	}
 	var saved map[string]any
-	if err := json.Unmarshal(data, &saved); err != nil {
+	if err := yaml.Unmarshal(data, &saved); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if saved["name"] != "Charlie" {
@@ -109,7 +118,11 @@ func TestHandleUpdateAgent_Rename_NewFileHasCorrectContent(t *testing.T) {
 // without changing its name produces exactly one file and updates the content.
 func TestHandleUpdateAgent_EditInPlace_NoDuplication(t *testing.T) {
 	agentsDir := setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff","system_prompt":"original"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+system_prompt: original
+`,
 	})
 	_, ts := newTestServer(t)
 
@@ -131,22 +144,22 @@ func TestHandleUpdateAgent_EditInPlace_NoDuplication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read agents dir: %v", err)
 	}
-	var jsonFiles []string
+	var yamlFiles []string
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".json") {
-			jsonFiles = append(jsonFiles, e.Name())
+		if strings.HasSuffix(e.Name(), ".yaml") {
+			yamlFiles = append(yamlFiles, e.Name())
 		}
 	}
-	if len(jsonFiles) != 1 {
-		t.Errorf("expected 1 agent file, got %d: %v", len(jsonFiles), jsonFiles)
+	if len(yamlFiles) != 1 {
+		t.Errorf("expected 1 agent file, got %d: %v", len(yamlFiles), yamlFiles)
 	}
 
-	data, err := os.ReadFile(filepath.Join(agentsDir, "alice.json"))
+	data, err := os.ReadFile(filepath.Join(agentsDir, "alice.yaml"))
 	if err != nil {
-		t.Fatalf("read alice.json: %v", err)
+		t.Fatalf("read alice.yaml: %v", err)
 	}
 	var saved map[string]any
-	json.Unmarshal(data, &saved) //nolint:errcheck
+	yaml.Unmarshal(data, &saved) //nolint:errcheck
 	if saved["system_prompt"] != "updated" {
 		t.Errorf("system_prompt: want 'updated', got %v", saved["system_prompt"])
 	}
@@ -158,7 +171,10 @@ func TestHandleUpdateAgent_EditInPlace_NoDuplication(t *testing.T) {
 // returns the agent even when it was stored as "Alice".
 func TestHandleGetAgent_CaseInsensitive(t *testing.T) {
 	setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+`,
 	})
 	_, ts := newTestServer(t)
 
@@ -189,8 +205,14 @@ func TestHandleGetAgent_CaseInsensitive(t *testing.T) {
 // rename the total agent count stays the same (one removed, one added — net zero).
 func TestHandleUpdateAgent_Rename_ExistingAgentCount(t *testing.T) {
 	agentsDir := setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
-		"bob.json":   `{"name":"Bob","model":"claude-sonnet-4-6","color":"#3fb950"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+`,
+		"bob.yaml": `name: Bob
+model: claude-sonnet-4-6
+color: '#3fb950'
+`,
 	})
 	_, ts := newTestServer(t)
 
@@ -213,24 +235,24 @@ func TestHandleUpdateAgent_Rename_ExistingAgentCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read agents dir: %v", err)
 	}
-	var jsonFiles []string
+	var yamlFiles []string
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".json") {
-			jsonFiles = append(jsonFiles, e.Name())
+		if strings.HasSuffix(e.Name(), ".yaml") {
+			yamlFiles = append(yamlFiles, e.Name())
 		}
 	}
 	// Still 2 agents: Bob + Charlie.
-	if len(jsonFiles) != 2 {
-		t.Errorf("expected 2 agent files after rename, got %d: %v", len(jsonFiles), jsonFiles)
+	if len(yamlFiles) != 2 {
+		t.Errorf("expected 2 agent files after rename, got %d: %v", len(yamlFiles), yamlFiles)
 	}
-	if _, err := os.Stat(filepath.Join(agentsDir, "bob.json")); os.IsNotExist(err) {
-		t.Error("bob.json should still exist")
+	if _, err := os.Stat(filepath.Join(agentsDir, "bob.yaml")); os.IsNotExist(err) {
+		t.Error("bob.yaml should still exist")
 	}
-	if _, err := os.Stat(filepath.Join(agentsDir, "charlie.json")); os.IsNotExist(err) {
-		t.Error("charlie.json should exist")
+	if _, err := os.Stat(filepath.Join(agentsDir, "charlie.yaml")); os.IsNotExist(err) {
+		t.Error("charlie.yaml should exist")
 	}
-	if _, err := os.Stat(filepath.Join(agentsDir, "alice.json")); !os.IsNotExist(err) {
-		t.Error("alice.json should be deleted")
+	if _, err := os.Stat(filepath.Join(agentsDir, "alice.yaml")); !os.IsNotExist(err) {
+		t.Error("alice.yaml should be deleted")
 	}
 }
 
@@ -244,7 +266,10 @@ func TestHandleUpdateAgent_Rename_ExistingAgentCount(t *testing.T) {
 // sets name to "alice" which collides with the existing "Alice".
 func TestHandleUpdateAgent_Create_DuplicateName_CaseInsensitive(t *testing.T) {
 	setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+`,
 	})
 	_, ts := newTestServer(t)
 
@@ -277,7 +302,10 @@ func TestHandleUpdateAgent_Create_DuplicateName_CaseInsensitive(t *testing.T) {
 // agents with different names both succeeds.
 func TestHandleUpdateAgent_Create_DifferentName_Succeeds(t *testing.T) {
 	setupAgentsDir(t, map[string]string{
-		"alice.json": `{"name":"Alice","model":"claude-sonnet-4-6","color":"#58a6ff"}`,
+		"alice.yaml": `name: Alice
+model: claude-sonnet-4-6
+color: '#58a6ff'
+`,
 	})
 	_, ts := newTestServer(t)
 

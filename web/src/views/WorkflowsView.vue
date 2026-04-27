@@ -699,13 +699,13 @@
                   <!-- Tab bar -->
                   <div class="flex gap-4 border-b border-huginn-border px-4 mb-0 text-xs">
                     <button
-                      @click="runDetailTab = 'steps'"
+                      @click.stop="runDetailTab = 'steps'"
                       :class="runDetailTab === 'steps'
                         ? 'text-huginn-text border-b-2 border-huginn-blue pb-1 pt-1'
                         : 'text-huginn-muted pb-1 pt-1'"
                     >Steps</button>
                     <button
-                      @click="runDetailTab = 'deliveries'"
+                      @click.stop="runDetailTab = 'deliveries'"
                       :class="runDetailTab === 'deliveries'
                         ? 'text-huginn-text border-b-2 border-huginn-blue pb-1 pt-1'
                         : 'text-huginn-muted pb-1 pt-1'"

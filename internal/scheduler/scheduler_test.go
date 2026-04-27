@@ -10,7 +10,7 @@ import (
 // the cron to fire and invoke the configured WorkflowRunner.
 func TestScheduler_CronTrigger_InvokesRunner(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	fired := make(chan struct{}, 1)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"gopkg.in/yaml.v3"
 )
 
 func TestMigrateEmptyToolbelt_BackfillsWildcard(t *testing.T) {
@@ -33,15 +34,15 @@ func TestMigrateEmptyToolbelt_BackfillsWildcard(t *testing.T) {
 		t.Fatalf("migration failed: %v", err)
 	}
 
-	// old-agent should now have wildcard toolbelt
-	data3, _ := os.ReadFile(filepath.Join(agentsDir, "old-agent.json"))
+	// old-agent should now have wildcard toolbelt (will be in YAML format after migration)
+	data3, _ := os.ReadFile(filepath.Join(agentsDir, "old-agent.yaml"))
 	var migrated agents.AgentDef
-	json.Unmarshal(data3, &migrated)
+	yaml.Unmarshal(data3, &migrated)
 	if len(migrated.Toolbelt) != 1 || migrated.Toolbelt[0].Provider != "*" {
 		t.Errorf("expected wildcard toolbelt, got %v", migrated.Toolbelt)
 	}
 
-	// conn-agent should be untouched
+	// conn-agent should be untouched (remains in JSON format since it wasn't touched by the migration)
 	data4, _ := os.ReadFile(filepath.Join(agentsDir, "conn-agent.json"))
 	var untouched agents.AgentDef
 	json.Unmarshal(data4, &untouched)

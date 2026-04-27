@@ -971,6 +971,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Workflows API
 	mux.HandleFunc("GET /api/v1/workflows",             api(s.handleListWorkflows))
 	mux.HandleFunc("POST /api/v1/workflows",            api(s.handleCreateWorkflow))
+	mux.HandleFunc("POST /api/v1/workflows/validate",   api(s.handleValidateWorkflow))
 	mux.HandleFunc("GET /api/v1/workflows/templates",   api(s.handleListWorkflowTemplates))
 	mux.HandleFunc("GET /api/v1/workflows/{id}",        api(s.handleGetWorkflow))
 	mux.HandleFunc("PUT /api/v1/workflows/{id}",        api(s.handleUpdateWorkflow))

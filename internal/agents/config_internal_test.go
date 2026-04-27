@@ -45,7 +45,7 @@ func TestSaveAgent_MkdirError(t *testing.T) {
 	}
 }
 
-// TestLoadAgentsFromBase_SkipsUnreadableFile verifies that loadAgentsFromBase
+// TestLoadAgentsFromBase_SkipsUnreadableFile verifies that LoadAgentsFromBase
 // skips individual agent files that cannot be read.
 func TestLoadAgentsFromBase_SkipsUnreadableFile(t *testing.T) {
 	if os.Getuid() == 0 {
@@ -73,9 +73,9 @@ func TestLoadAgentsFromBase_SkipsUnreadableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := loadAgentsFromBase(dir)
+	cfg, err := LoadAgentsFromBase(dir)
 	if err != nil {
-		t.Fatalf("loadAgentsFromBase: %v", err)
+		t.Fatalf("LoadAgentsFromBase: %v", err)
 	}
 	// Should have exactly 1 agent (the readable one).
 	if len(cfg.Agents) != 1 {
@@ -86,7 +86,7 @@ func TestLoadAgentsFromBase_SkipsUnreadableFile(t *testing.T) {
 	}
 }
 
-// TestLoadAgentsFromBase_SkipsDraftFile verifies that loadAgentsFromBase
+// TestLoadAgentsFromBase_SkipsDraftFile verifies that LoadAgentsFromBase
 // skips .draft.json files.
 func TestLoadAgentsFromBase_SkipsDraftFile(t *testing.T) {
 	dir := t.TempDir()
@@ -107,9 +107,9 @@ func TestLoadAgentsFromBase_SkipsDraftFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := loadAgentsFromBase(dir)
+	cfg, err := LoadAgentsFromBase(dir)
 	if err != nil {
-		t.Fatalf("loadAgentsFromBase: %v", err)
+		t.Fatalf("LoadAgentsFromBase: %v", err)
 	}
 	// .draft.json should be skipped; only Valid should be returned.
 	for _, a := range cfg.Agents {
@@ -119,7 +119,7 @@ func TestLoadAgentsFromBase_SkipsDraftFile(t *testing.T) {
 	}
 }
 
-// TestLoadAgentsFromBase_SkipsCorruptFile verifies that loadAgentsFromBase
+// TestLoadAgentsFromBase_SkipsCorruptFile verifies that LoadAgentsFromBase
 // skips individual agent files that contain invalid JSON.
 func TestLoadAgentsFromBase_SkipsCorruptFile(t *testing.T) {
 	dir := t.TempDir()
@@ -140,9 +140,9 @@ func TestLoadAgentsFromBase_SkipsCorruptFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := loadAgentsFromBase(dir)
+	cfg, err := LoadAgentsFromBase(dir)
 	if err != nil {
-		t.Fatalf("loadAgentsFromBase: %v", err)
+		t.Fatalf("LoadAgentsFromBase: %v", err)
 	}
 	if len(cfg.Agents) != 1 {
 		t.Errorf("expected 1 agent (skipping corrupt), got %d", len(cfg.Agents))
@@ -152,7 +152,7 @@ func TestLoadAgentsFromBase_SkipsCorruptFile(t *testing.T) {
 	}
 }
 
-// TestLoadAgentsFromBase_AllFilesCorrupt verifies that loadAgentsFromBase falls
+// TestLoadAgentsFromBase_AllFilesCorrupt verifies that LoadAgentsFromBase falls
 // back to the legacy agents.json path when all per-file agents are unreadable.
 func TestLoadAgentsFromBase_AllFilesCorrupt(t *testing.T) {
 	dir := t.TempDir()
@@ -168,9 +168,9 @@ func TestLoadAgentsFromBase_AllFilesCorrupt(t *testing.T) {
 	}
 
 	// No legacy agents.json either — should return defaults.
-	cfg, err := loadAgentsFromBase(dir)
+	cfg, err := LoadAgentsFromBase(dir)
 	if err != nil {
-		t.Fatalf("loadAgentsFromBase: %v", err)
+		t.Fatalf("LoadAgentsFromBase: %v", err)
 	}
 	// Corrupt files → empty config is fine (blank canvas).
 	if cfg == nil {

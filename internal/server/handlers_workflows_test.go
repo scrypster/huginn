@@ -661,7 +661,7 @@ func TestHandleRunWorkflow_AlreadyRunning_Returns409(t *testing.T) {
 	var runnerCalled sync.Once
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() {
 		close(unblock)                      // unblock the runner goroutine
 		sched.Stop(context.Background())   // wait for cron to drain
@@ -729,7 +729,7 @@ func TestHandleCreateWorkflow_RegisterFail_RollsBackFile(t *testing.T) {
 	// an error ("workflow runner not configured") for any enabled workflow
 	// with a non-empty schedule, triggering the compensating rollback.
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 	// Intentionally do NOT call sched.SetWorkflowRunner — leave it nil.
 

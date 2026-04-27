@@ -42,6 +42,7 @@ type Scheduler struct {
 	sem              chan struct{}                     // global concurrency semaphore
 	broadcastFn      WorkflowBroadcastFunc            // may be nil; emits WS events for skipped/lifecycle events
 	deliveryQueue    *DeliveryQueue                   // optional; started in Start() if set
+	workflowsDir     string                           // optional; enables WorkflowsWatcher when non-empty
 }
 
 // New creates a Scheduler.
@@ -111,13 +112,18 @@ func ValidateCronSchedule(schedule string) error {
 }
 
 // Start begins the cron loop. Non-blocking.
-func (s *Scheduler) Start() {
+func (s *Scheduler) Start(ctx context.Context) {
 	s.cron.Start()
 	s.mu.Lock()
 	q := s.deliveryQueue
+	dir := s.workflowsDir
 	s.mu.Unlock()
 	if q != nil {
-		q.StartWorker(context.Background())
+		q.StartWorker(ctx)
+	}
+	if dir != "" {
+		watcher := NewWorkflowsWatcher(dir, s, nil)
+		go watcher.Start(ctx)
 	}
 }
 
@@ -163,6 +169,15 @@ func (s *Scheduler) SetDeliveryQueue(q *DeliveryQueue) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deliveryQueue = q
+}
+
+// SetWorkflowsDir configures the directory the WorkflowsWatcher polls for
+// workflow YAML file changes. Must be called before Start(). Empty string
+// disables the watcher.
+func (s *Scheduler) SetWorkflowsDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workflowsDir = dir
 }
 
 // RegisterWorkflow adds or replaces a workflow's cron schedule.

@@ -73,7 +73,7 @@ func TestHandleRunWorkflow_WithInputsBody(t *testing.T) {
 		`{"name":"manual-inputs","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	seen := make(chan map[string]string, 1)
@@ -126,7 +126,7 @@ func TestHandleRunWorkflow_NoBody_NoInputs(t *testing.T) {
 		`{"name":"no-body","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	seen := make(chan map[string]string, 1)
@@ -167,7 +167,7 @@ func TestHandleRunWorkflow_MalformedBody_DoesNotReject(t *testing.T) {
 		`{"name":"bad-body","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	seen := make(chan map[string]string, 1)
@@ -208,7 +208,7 @@ func TestHandleTriggerWebhook_FlatPayload(t *testing.T) {
 		`{"name":"webhook-flat","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	seen := make(chan map[string]string, 1)
@@ -261,7 +261,7 @@ func TestHandleTriggerWebhook_NonObjectPayload(t *testing.T) {
 		`{"name":"webhook-array","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	seen := make(chan map[string]string, 1)
@@ -345,7 +345,7 @@ func TestHandleTriggerWebhook_EmptyBody(t *testing.T) {
 		`{"name":"webhook-empty","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
 
 	sched := scheduler.New()
-	sched.Start()
+	sched.Start(context.Background())
 	t.Cleanup(func() { sched.Stop(context.Background()) })
 
 	seen := make(chan map[string]string, 1)

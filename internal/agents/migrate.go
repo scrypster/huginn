@@ -14,6 +14,7 @@ import (
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/sqlitedb"
 	"github.com/scrypster/huginn/internal/storage"
+	"gopkg.in/yaml.v3"
 )
 
 // MigrateAgentMemoryFromPebble migrates agent summaries and delegations
@@ -198,10 +199,10 @@ func migrateIncrementBytes(b []byte) []byte {
 // Safe to call multiple times (idempotent: skips agents that already have entries).
 func MigrateEmptyToolbeltToWildcard(baseDir string) error {
 	agentsDir := filepath.Join(baseDir, "agents")
-	entries, err := filepath.Glob(filepath.Join(agentsDir, "*.json"))
-	if err != nil {
-		return err
-	}
+	jsonEntries, _ := filepath.Glob(filepath.Join(agentsDir, "*.json"))
+	yamlEntries, _ := filepath.Glob(filepath.Join(agentsDir, "*.yaml"))
+	entries := append(jsonEntries, yamlEntries...)
+
 	for _, path := range entries {
 		if filepath.Base(path) == ".draft.json" {
 			continue
@@ -211,7 +212,16 @@ func MigrateEmptyToolbeltToWildcard(baseDir string) error {
 			continue
 		}
 		var def AgentDef
-		if err := json.Unmarshal(data, &def); err != nil {
+		unmarshalErr := error(nil)
+		switch filepath.Ext(path) {
+		case ".json":
+			unmarshalErr = json.Unmarshal(data, &def)
+		case ".yaml", ".yml":
+			unmarshalErr = yaml.Unmarshal(data, &def)
+		default:
+			continue
+		}
+		if unmarshalErr != nil {
 			continue
 		}
 		// Only migrate agents with no toolbelt entries.

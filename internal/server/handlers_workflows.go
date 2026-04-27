@@ -1014,3 +1014,29 @@ func (s *Server) handleDismissDeliveryQueueEntry(w http.ResponseWriter, r *http.
 	}
 	jsonOK(w, map[string]string{"status": "dismissed", "id": id})
 }
+
+// handleValidateWorkflow is a dry-run validation endpoint.
+// It decodes the request body as a Workflow, runs all structural and
+// cross-reference validation, and returns {"valid": true} on success.
+// It does NOT persist the workflow or register any cron entry.
+//
+// POST /api/v1/workflows/validate
+// Response 200: {"valid": true}
+// Response 400: {"error": "invalid JSON: ..."}
+// Response 422: {"error": "invalid workflow: ..."}
+func (s *Server) handleValidateWorkflow(w http.ResponseWriter, r *http.Request) {
+	var wf scheduler.Workflow
+	if err := json.NewDecoder(r.Body).Decode(&wf); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if err := validateWorkflow(&wf); err != nil {
+		jsonError(w, http.StatusUnprocessableEntity, "invalid workflow: "+err.Error())
+		return
+	}
+	if err := s.validateWorkflowAgentsAndConnections(&wf); err != nil {
+		jsonError(w, http.StatusUnprocessableEntity, "invalid workflow: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]bool{"valid": true})
+}

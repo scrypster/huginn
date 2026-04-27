@@ -1,7 +1,6 @@
 package agents_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"gopkg.in/yaml.v3"
 )
 
 // TestSaveAgent_ConcurrentWrites verifies that concurrent SaveAgent calls for
@@ -34,8 +34,8 @@ func TestSaveAgent_ConcurrentWrites(t *testing.T) {
 	}
 	wg.Wait()
 
-	// All n agent files must exist.
-	pattern := filepath.Join(dir, "agents", "*.json")
+	// All n agent files must exist (as .yaml files now).
+	pattern := filepath.Join(dir, "agents", "*.yaml")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		t.Fatalf("Glob: %v", err)
@@ -79,13 +79,13 @@ func TestSaveAgent_OverwriteExisting(t *testing.T) {
 		t.Fatalf("second SaveAgent: %v", err)
 	}
 
-	path := filepath.Join(dir, "agents", "overwrite-me.json")
+	path := filepath.Join(dir, "agents", "overwrite-me.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	var got agents.AgentDef
-	if err := json.Unmarshal(data, &got); err != nil {
+	if err := yaml.Unmarshal(data, &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	if got.Model != "model-v2" {
@@ -108,7 +108,7 @@ func TestSaveAgent_SpecialCharsInName(t *testing.T) {
 	}
 
 	// The agents/ directory must contain exactly one file with a safe name.
-	pattern := filepath.Join(dir, "agents", "*.json")
+	pattern := filepath.Join(dir, "agents", "*.yaml")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		t.Fatalf("Glob: %v", err)
@@ -118,7 +118,7 @@ func TestSaveAgent_SpecialCharsInName(t *testing.T) {
 	}
 
 	// No .tmp file should be left behind.
-	tmpPattern := filepath.Join(dir, "agents", "*.json.tmp")
+	tmpPattern := filepath.Join(dir, "agents", "*.yaml.tmp")
 	tmps, _ := filepath.Glob(tmpPattern)
 	if len(tmps) > 0 {
 		t.Errorf(".tmp files left behind: %v", tmps)
@@ -156,8 +156,8 @@ func TestDeleteAgent_AfterConcurrentSave(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	deletedPath := filepath.Join(dir, "agents", "target-delete.json")
+	deletedPath := filepath.Join(dir, "agents", "target-delete.yaml")
 	if _, err := os.Stat(deletedPath); err == nil {
-		t.Error("expected target-delete.json to be gone after DeleteAgent")
+		t.Error("expected target-delete.yaml to be gone after DeleteAgent")
 	}
 }

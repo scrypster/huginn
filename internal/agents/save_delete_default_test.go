@@ -189,7 +189,7 @@ func TestMemoryStore_NilStore_LoadRecentDelegations95(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// loadAgentsFromBase — per-file format with skip-draft logic
+// LoadAgentsFromBase — per-file format with skip-draft logic
 // ---------------------------------------------------------------------------
 
 func TestLoadAgentsFromBase_PerFileWithDraft95(t *testing.T) {
@@ -207,7 +207,7 @@ func TestLoadAgentsFromBase_PerFileWithDraft95(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentsDir, "testagent95.json"), []byte(agentJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Trigger loadAgentsFromBase indirectly by calling SaveAgent (which writes to agents/).
+	// Trigger LoadAgentsFromBase indirectly by calling SaveAgent (which writes to agents/).
 	def := agents.AgentDef{Name: "TestAgent95", Model: "m"}
 	if err := agents.SaveAgent(dir, def); err != nil {
 		t.Fatalf("SaveAgent: %v", err)

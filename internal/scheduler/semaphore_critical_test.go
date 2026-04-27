@@ -13,7 +13,7 @@ import (
 // are blocked, subsequent triggers don't stall the entire scheduler.
 func TestScheduler_SemaphoreStarvation(t *testing.T) {
 	scheduler := New()
-	scheduler.Start()
+	scheduler.Start(context.Background())
 	defer scheduler.Stop(context.Background())
 
 	// Create a runner that blocks indefinitely
@@ -114,7 +114,7 @@ func TestScheduler_SemaphoreStarvation(t *testing.T) {
 // Stop() closes the shutdown channel which causes semaphore-waiters to bail.
 func TestScheduler_ShutdownRaceWithSemaphore(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 
 	// Fill all semaphore slots via TriggerWorkflow with blocking runners.
 	workflowStarted := make(chan struct{}, maxConcurrentWorkflows)
@@ -155,7 +155,7 @@ func TestScheduler_ShutdownRaceWithSemaphore(t *testing.T) {
 
 	// Verify a fresh scheduler can acquire the semaphore (no leak).
 	sched2 := New()
-	sched2.Start()
+	sched2.Start(context.Background())
 	defer sched2.Stop(context.Background())
 
 	completed := atomic.Bool{}
@@ -184,7 +184,7 @@ func TestScheduler_ShutdownRaceWithSemaphore(t *testing.T) {
 // the provided context deadline and doesn't just wait indefinitely.
 func TestScheduler_StopWithShortDeadline(t *testing.T) {
 	scheduler := New()
-	scheduler.Start()
+	scheduler.Start(context.Background())
 
 	blockingRunner := func(ctx context.Context, w *Workflow) error {
 		<-time.After(10 * time.Second) // Blocks longer than stop timeout
@@ -234,7 +234,7 @@ func TestScheduler_StopWithShortDeadline(t *testing.T) {
 // a workflow that's already executing returns the correct error.
 func TestScheduler_TriggerWorkflowAlreadyRunning(t *testing.T) {
 	scheduler := New()
-	scheduler.Start()
+	scheduler.Start(context.Background())
 	defer scheduler.Stop(context.Background())
 
 	workflowRunning := make(chan struct{})
@@ -280,7 +280,7 @@ func TestScheduler_TriggerWorkflowAlreadyRunning(t *testing.T) {
 // can run concurrently up to the semaphore limit using TriggerWorkflow.
 func TestScheduler_ConcurrentWorkflowExecutions(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	defer sched.Stop(context.Background())
 
 	var completedCount atomic.Int32

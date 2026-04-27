@@ -19,7 +19,7 @@ import (
 // ErrWorkflowAlreadyRunning.
 func TestScheduler_TriggerWorkflow_AlreadyRunning(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	defer sched.Stop(context.Background())
 
 	blocked := make(chan struct{})
@@ -68,7 +68,7 @@ func TestScheduler_TriggerWorkflow_NoRunner(t *testing.T) {
 // is silently skipped (no cron entry, no error).
 func TestScheduler_RegisterWorkflow_DisabledSkipped(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	defer sched.Stop(context.Background())
 
 	runnerCalled := false
@@ -132,7 +132,7 @@ func TestScheduler_RegisterWorkflow_EmptySchedule(t *testing.T) {
 // so it is no longer invoked by cron.
 func TestScheduler_RemoveWorkflow(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	defer sched.Stop(context.Background())
 
 	var callCount atomic.Int32
@@ -191,7 +191,7 @@ func TestScheduler_RemoveWorkflow_NotRegistered(t *testing.T) {
 // in-flight cron jobs complete.
 func TestScheduler_Stop_WaitsForRunningJobs(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 
 	started := make(chan struct{})
 	done := make(chan struct{})
@@ -237,7 +237,7 @@ func TestScheduler_Stop_WaitsForRunningJobs(t *testing.T) {
 // the number of simultaneously executing workflows to maxConcurrentWorkflows.
 func TestScheduler_MaxConcurrentWorkflows(t *testing.T) {
 	sched := New()
-	sched.Start()
+	sched.Start(context.Background())
 	defer sched.Stop(context.Background())
 
 	var (

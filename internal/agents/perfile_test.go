@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"gopkg.in/yaml.v3"
 )
 
 // ---------------------------------------------------------------------------
@@ -25,8 +26,8 @@ func TestSaveAndLoadAgent(t *testing.T) {
 		t.Fatalf("SaveAgent: %v", err)
 	}
 
-	// Verify file exists at expected path (hyphens are preserved by sanitizer).
-	expectedPath := filepath.Join(dir, "agents", "test-agent.json")
+	// Verify file exists at expected path (hyphens are preserved by sanitizer, now .yaml).
+	expectedPath := filepath.Join(dir, "agents", "test-agent.yaml")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("expected file at %s: %v", expectedPath, err)
 	}
@@ -65,8 +66,8 @@ func TestSaveAgent_AtomicWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No .tmp file should remain (hyphens preserved, spaces become underscores).
-	tmpPath := filepath.Join(dir, "agents", "atomic-test.json.tmp")
+	// No .tmp file should remain (hyphens preserved, spaces become underscores, now .yaml).
+	tmpPath := filepath.Join(dir, "agents", "atomic-test.yaml.tmp")
 	if _, err := os.Stat(tmpPath); err == nil {
 		t.Error(".tmp file left behind after SaveAgent")
 	}
@@ -86,7 +87,7 @@ func TestDeleteAgent(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	expectedPath := filepath.Join(dir, "agents", "to-delete.json")
+	expectedPath := filepath.Join(dir, "agents", "to-delete.yaml")
 	if _, err := os.Stat(expectedPath); err == nil {
 		t.Error("expected file to be removed after DeleteAgent")
 	}
@@ -168,7 +169,7 @@ func TestMigrateAgents_AlreadyMigrated(t *testing.T) {
 	}
 
 	// Existing per-file agent should still be intact.
-	path := filepath.Join(dir, "agents", "existing.json")
+	path := filepath.Join(dir, "agents", "existing.yaml")
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("per-file agent missing after MigrateAgents no-op: %v", err)
 	}
@@ -191,14 +192,14 @@ func TestAgentDef_NewFields_RoundTrip(t *testing.T) {
 		t.Fatalf("SaveAgent: %v", err)
 	}
 
-	path := filepath.Join(dir, "agents", "new-fields-agent.json")
+	path := filepath.Join(dir, "agents", "new-fields-agent.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
 
 	var got agents.AgentDef
-	if err := json.Unmarshal(data, &got); err != nil {
+	if err := yaml.Unmarshal(data, &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
@@ -232,14 +233,13 @@ func TestAgentDef_OmitEmptyNewFields(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// loadAgentsFromDir loads per-file agents from <dir>/agents/*.json directly
+// loadAgentsFromDir loads per-file agents from <dir>/agents/*.{json,yaml} directly
 // by reading the directory without relying on LoadAgents (which uses home dir).
 func loadAgentsFromDir(dir string) ([]agents.AgentDef, error) {
-	pattern := filepath.Join(dir, "agents", "*.json")
-	entries, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
+	jsonEntries, _ := filepath.Glob(filepath.Join(dir, "agents", "*.json"))
+	yamlEntries, _ := filepath.Glob(filepath.Join(dir, "agents", "*.yaml"))
+	entries := append(jsonEntries, yamlEntries...)
+
 	var result []agents.AgentDef
 	for _, path := range entries {
 		data, err := os.ReadFile(path)
@@ -247,7 +247,16 @@ func loadAgentsFromDir(dir string) ([]agents.AgentDef, error) {
 			continue
 		}
 		var a agents.AgentDef
-		if err := json.Unmarshal(data, &a); err != nil {
+		var unmarshalErr error
+		switch filepath.Ext(path) {
+		case ".json":
+			unmarshalErr = json.Unmarshal(data, &a)
+		case ".yaml", ".yml":
+			unmarshalErr = yaml.Unmarshal(data, &a)
+		default:
+			continue
+		}
+		if unmarshalErr != nil {
 			continue
 		}
 		result = append(result, a)

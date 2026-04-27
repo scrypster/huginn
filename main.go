@@ -2456,15 +2456,15 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 
 		sched := scheduler.New()
-		sched.Start()
-		cleanupFns = append(cleanupFns, func() { sched.Stop(context.Background()) })
-		srv.SetScheduler(sched)
-
 		// Workflows
 		workflowsDir := filepath.Join(huginnHome, "workflows")
 		if err := os.MkdirAll(workflowsDir, 0755); err != nil {
 			logger.Warn("huginn: create workflows dir", "err", err)
 		}
+		sched.SetWorkflowsDir(workflowsDir)
+		sched.Start(context.Background())
+		cleanupFns = append(cleanupFns, func() { sched.Stop(context.Background()) })
+		srv.SetScheduler(sched)
 		workflowRunsDir := filepath.Join(huginnHome, "workflow-runs")
 
 		// Run one-time routine → workflow migration.
