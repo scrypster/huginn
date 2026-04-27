@@ -211,6 +211,63 @@ func RepairLegacyRoutineSteps(workflowDir, routineBakDir string) (int, error) {
 	return repaired, nil
 }
 
+// MigrateDeadLetterToQueue reads existing JSONL dead-letter files from
+// <huginnDir>/delivery-failures/ and imports unretried records into the
+// SQLite delivery_queue as status=failed (exhausted). This is a one-time
+// migration; files are renamed to .migrated after import.
+// The function is idempotent: already-imported records (matched by ID)
+// are skipped via UNIQUE constraint on the id column.
+func MigrateDeadLetterToQueue(huginnDir string, store *DeliveryQueueStore) error {
+	dir := filepath.Join(huginnDir, "delivery-failures")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to migrate
+		}
+		return fmt.Errorf("migrate dead-letter: read dir: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		recs, err := readFailureFile(path)
+		if err != nil {
+			slog.Warn("migrate dead-letter: skip unreadable file", "path", path, "err", err)
+			continue
+		}
+		for _, rec := range recs {
+			if rec.RetriedAt != "" {
+				continue // already retried; skip
+			}
+			e := DeliveryQueueEntry{
+				ID:           fmt.Sprintf("migrated-%s-%s", rec.WorkflowID, rec.RunID),
+				WorkflowID:   rec.WorkflowID,
+				RunID:        rec.RunID,
+				Endpoint:     rec.URL,
+				Channel:      "webhook",
+				Payload:      `{}`,
+				Status:       "failed",
+				AttemptCount: rec.Attempts,
+				MaxAttempts:  rec.Attempts,
+				RetryWindowS: 3600,
+				NextRetryAt:  time.Now().UTC(),
+				LastError:    rec.LastError,
+			}
+			if insertErr := store.Insert(e); insertErr != nil {
+				// Ignore duplicate key — already migrated on a previous run.
+				if !strings.Contains(insertErr.Error(), "UNIQUE constraint") {
+					slog.Warn("migrate dead-letter: insert entry", "err", insertErr)
+				}
+			}
+		}
+		// Rename file to mark as migrated.
+		_ = os.Rename(path, path+".migrated")
+	}
+	return nil
+}
+
 // findLegacyRoutineBySlug scans routineBakDir for a YAML file whose Slug or
 // derived slug matches the given slug.
 func findLegacyRoutineBySlug(routineBakDir, slug string) (*legacyRoutine, error) {
