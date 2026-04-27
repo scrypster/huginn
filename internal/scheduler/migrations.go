@@ -27,6 +27,7 @@ func migrateV3DeliveryQueue(tx *sql.Tx) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS delivery_queue (
             id              TEXT    NOT NULL PRIMARY KEY,
+            tenant_id       TEXT    NOT NULL DEFAULT '',
             workflow_id     TEXT    NOT NULL,
             run_id          TEXT    NOT NULL,
             endpoint        TEXT    NOT NULL,
@@ -38,7 +39,7 @@ func migrateV3DeliveryQueue(tx *sql.Tx) error {
             max_attempts    INTEGER NOT NULL DEFAULT 5,
             retry_window_s  INTEGER NOT NULL DEFAULT 3600,
             next_retry_at   TEXT    NOT NULL,
-            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             last_attempt_at TEXT,
             last_error      TEXT    NOT NULL DEFAULT ''
         )`,
@@ -50,6 +51,7 @@ func migrateV3DeliveryQueue(tx *sql.Tx) error {
 		`CREATE TABLE IF NOT EXISTS endpoint_health (
             workflow_id          TEXT    NOT NULL,
             endpoint             TEXT    NOT NULL,
+            tenant_id            TEXT    NOT NULL DEFAULT '',
             consecutive_failures INTEGER NOT NULL DEFAULT 0,
             circuit_state        TEXT    NOT NULL DEFAULT 'closed'
                                      CHECK (circuit_state IN ('closed','open')),
