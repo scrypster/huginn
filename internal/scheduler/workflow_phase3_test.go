@@ -70,7 +70,7 @@ func TestDispatchNotification_AgentDM(t *testing.T) {
 	n := &notification.Notification{ID: "n1", Summary: "All clear", Detail: "12 PRs scanned"}
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
 
-	recs := dispatchNotification(n, targets, nil, nil, dm, "Sentinel", "", nil, nil)
+	recs := dispatchNotification(n, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "")
 
 	if got.called != 1 {
 		t.Fatalf("agent DM fn called %d times, want 1", got.called)
@@ -94,7 +94,7 @@ func TestDispatchNotification_AgentDM_FromOverridesStepAgent(t *testing.T) {
 		return nil
 	})
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt", From: "Auditor"}}
-	dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil)
+	dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "")
 	if seen != "Auditor" {
 		t.Fatalf("From override ignored: agent=%q want Auditor", seen)
 	}
@@ -106,7 +106,7 @@ func TestDispatchNotification_AgentDM_FromOverridesStepAgent(t *testing.T) {
 func TestDispatchNotification_AgentDM_NoBindingSkips(t *testing.T) {
 	t.Parallel()
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
-	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, nil, "Sentinel", "", nil, nil)
+	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, nil, "Sentinel", "", nil, nil, nil, "")
 	if len(recs) != 1 || recs[0].Type != "inbox" {
 		t.Fatalf("expected only inbox record without DM binding, got %+v", recs)
 	}
@@ -120,7 +120,7 @@ func TestDispatchNotification_AgentDM_DeliveryError(t *testing.T) {
 		return errors.New("boom")
 	})
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
-	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil)
+	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "")
 	if len(recs) != 2 || recs[1].Status != "failed" || recs[1].Error == "" {
 		t.Fatalf("expected failed record with error, got %+v", recs[1])
 	}

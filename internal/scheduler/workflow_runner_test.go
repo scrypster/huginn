@@ -454,7 +454,7 @@ func TestDispatchNotification_NilTargets(t *testing.T) {
 		ID:      "notif-1",
 		Summary: "test",
 	}
-	records := dispatchNotification(n, nil, nil, nil, nil, "", "", nil, nil)
+	records := dispatchNotification(n, nil, nil, nil, nil, "", "", nil, nil, nil, "")
 
 	if len(records) != 1 {
 		t.Fatalf("expected 1 record (inbox), got %d", len(records))
@@ -475,7 +475,7 @@ func TestDispatchNotification_SpaceDeliveryError(t *testing.T) {
 	spaceErr := errors.New("space unavailable")
 	records := dispatchNotification(n, targets, nil, func(spaceID, summary, detail string) error {
 		return spaceErr
-	}, nil, "", "", nil, nil)
+	}, nil, "", "", nil, nil, nil, "")
 
 	if len(records) != 2 {
 		t.Fatalf("expected 2 records (inbox + space), got %d", len(records))
@@ -743,7 +743,7 @@ func TestDispatchNotification_SpaceDeliverySuccess(t *testing.T) {
 		called = true
 		calledSpace = spaceID
 		return nil
-	}, nil, "", "", nil, nil)
+	}, nil, "", "", nil, nil, nil, "")
 	if !called {
 		t.Error("expected spaceDeliveryFn to be called")
 	}

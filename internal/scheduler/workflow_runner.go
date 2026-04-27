@@ -584,7 +584,7 @@ func MakeWorkflowRunner(
 							// delivery receives "" which is valid, and inbox is always written.
 							n.Detail = body
 						}
-						deliveries := dispatchNotification(n, step.Notify.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, step.Agent, huginnDir, deliverers, onDeliveryFailure)
+						deliveries := dispatchNotification(n, step.Notify.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, step.Agent, huginnDir, deliverers, onDeliveryFailure, cfg.deliveryQueue, w.Schedule)
 						n.Deliveries = deliveries
 						if notifStore != nil {
 							if putErr := notifStore.Put(n); putErr != nil {
@@ -696,7 +696,7 @@ func MakeWorkflowRunner(
 			// Workflow-level notifications have no single agent author — use ""
 			// so the AgentDMDeliveryFunc binding can decide a default
 			// (e.g. the workflow's lead agent).
-			deliveries := dispatchNotification(n, w.Notification.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, "", huginnDir, deliverers, onDeliveryFailure)
+			deliveries := dispatchNotification(n, w.Notification.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, "", huginnDir, deliverers, onDeliveryFailure, cfg.deliveryQueue, w.Schedule)
 			n.Deliveries = deliveries
 			// Persist the run record FIRST — it is the authoritative historical record.
 			// On a crash between these two writes the run still exists and the user
@@ -1002,6 +1002,8 @@ func dispatchNotification(
 	huginnDir string,
 	deliverers *DelivererRegistry,
 	onDeliveryFailure DeliveryFailureFunc,
+	deliveryQueue *DeliveryQueue,
+	schedule string,
 ) []notification.DeliveryRecord {
 	// Inbox is always implicit.
 	records := []notification.DeliveryRecord{
@@ -1075,8 +1077,14 @@ func dispatchNotification(
 				onDeliveryFailure(n.WorkflowID, n.RunID, t.Type, redactTarget(t.To, t.Type), rec.Error)
 			}
 			records = append(records, rec)
-			if rec.Status != "sent" && huginnDir != "" {
-				WriteDeliveryFailure(huginnDir, n.WorkflowID, n.RunID, t.To, 3, rec.Error)
+			if rec.Status != "sent" {
+				if deliveryQueue != nil {
+					if err := deliveryQueue.Enqueue(context.Background(), n.WorkflowID, n.RunID, schedule, n, t); err != nil {
+						slog.Error("scheduler: enqueue delivery failure", "err", err)
+					}
+				} else if huginnDir != "" {
+					WriteDeliveryFailure(huginnDir, n.WorkflowID, n.RunID, t.To, 3, rec.Error)
+				}
 			}
 		default:
 			slog.Warn("scheduler: unrecognised delivery type", "type", t.Type, "workflow_id", n.WorkflowID)

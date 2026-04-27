@@ -13,10 +13,11 @@ import "context"
 // defaults from the existing positional parameters. Defaults are intentionally
 // nil — every consumer is treated as optional unless explicitly wired.
 type runnerConfig struct {
-	agentDM      AgentDMDeliveryFunc
-	chainTrigger ChainTriggerFunc
-	subWorkflow  SubWorkflowFunc
-	metrics      MetricsCollector
+	agentDM       AgentDMDeliveryFunc
+	chainTrigger  ChainTriggerFunc
+	subWorkflow   SubWorkflowFunc
+	metrics       MetricsCollector
+	deliveryQueue *DeliveryQueue
 }
 
 // MetricsCollector is the minimal contract the runner needs to emit
@@ -108,5 +109,14 @@ func WithMetricsCollector(c MetricsCollector) RunnerOption {
 func WithSubWorkflow(fn SubWorkflowFunc) RunnerOption {
 	return func(c *runnerConfig) {
 		c.subWorkflow = fn
+	}
+}
+
+// WithDeliveryQueue wires the durable delivery queue. When set, failed
+// webhook and email deliveries are enqueued for automatic retry instead of
+// being written to the JSONL dead-letter file. Pass nil to disable (default).
+func WithDeliveryQueue(q *DeliveryQueue) RunnerOption {
+	return func(c *runnerConfig) {
+		c.deliveryQueue = q
 	}
 }
