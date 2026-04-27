@@ -587,10 +587,12 @@ func (s *SQLiteSessionStore) AppendToThread(sessionID, threadID string, msg Sess
 	var toolCallsJSON *string
 	if len(msg.ToolCalls) > 0 {
 		b, jsonErr := json.Marshal(msg.ToolCalls)
-		if jsonErr == nil {
-			s := string(b)
-			toolCallsJSON = &s
+		if jsonErr != nil {
+			tx.Rollback()
+			return fmt.Errorf("session sqlite: marshal tool_calls for thread message %s: %w", msg.ID, jsonErr)
 		}
+		raw := string(b)
+		toolCallsJSON = &raw
 	}
 
 	if _, err := tx.Exec(`
