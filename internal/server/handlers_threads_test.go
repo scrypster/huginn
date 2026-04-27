@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -287,5 +288,107 @@ func TestHandleGetMessageThread_ResponseShape(t *testing.T) {
 	}
 	if len(resp.DelegationChain) != 0 {
 		t.Errorf("expected delegation_chain length 0, got %d", len(resp.DelegationChain))
+	}
+}
+
+// stubDelegationStore is a test double for session.DelegationStore.
+type stubDelegationStore struct {
+	listBySession []session.DelegationRecord
+}
+
+func (s *stubDelegationStore) InsertDelegation(d session.DelegationRecord) error {
+	return nil
+}
+
+func (s *stubDelegationStore) GetDelegation(id string) (*session.DelegationRecord, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (s *stubDelegationStore) FindDelegationByThread(threadID string) (*session.DelegationRecord, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (s *stubDelegationStore) ListDelegationsBySession(sessionID string, limit, offset int) ([]session.DelegationRecord, error) {
+	return s.listBySession, nil
+}
+
+func (s *stubDelegationStore) UpdateDelegationStatus(id, status, result string, startedAt, completedAt *time.Time) error {
+	return nil
+}
+
+func (s *stubDelegationStore) ReconcileOrphanDelegations() error {
+	return nil
+}
+
+// TestHandleGetMessageThread_IncludesDelegationChain tests that the delegation chain
+// is correctly resolved from delegations in the session and returned in the response.
+func TestHandleGetMessageThread_IncludesDelegationChain(t *testing.T) {
+	srv := testServer(t)
+	db := openTestSQLiteDB(t)
+	srv.SetDB(db)
+
+	// Wire a stub delegation store with one delegation record.
+	stub := &stubDelegationStore{
+		listBySession: []session.DelegationRecord{
+			{
+				ID:        "del-1",
+				SessionID: "sess-1",
+				ThreadID:  "t-1",
+				FromAgent: "Atlas",
+				ToAgent:   "Coder",
+				Task:      "implement feature",
+				Status:    "completed",
+				Result:    "success",
+				CreatedAt: time.Now().UTC(),
+				StartedAt: time.Now().UTC(),
+			},
+		},
+	}
+	srv.delegationStore = stub
+
+	// Insert a threads row.
+	wdb := db.Write()
+	if wdb == nil {
+		t.Fatal("write db is nil")
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	_, err := wdb.Exec(`
+		INSERT OR IGNORE INTO threads
+			(id, parent_type, parent_id, agent_name, task, status,
+			 parent_msg_id, created_at, files_modified, key_decisions, artifacts)
+		VALUES (?, 'session', ?, 'Atlas', 'test task', 'done',
+		        'msg-1', ?, '[]', '[]', '[]')`,
+		"t-1", "sess-1", ts,
+	)
+	if err != nil {
+		t.Fatalf("insert thread: %v", err)
+	}
+
+	// Call the handler.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/msg-1/thread", nil)
+	req.SetPathValue("id", "msg-1")
+	w := httptest.NewRecorder()
+	srv.handleGetMessageThread(w, req)
+
+	// Assert response.
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp MessageThreadResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.ThreadID != "t-1" {
+		t.Errorf("ThreadID: expected 't-1', got %q", resp.ThreadID)
+	}
+	if resp.SessionID != "sess-1" {
+		t.Errorf("SessionID: expected 'sess-1', got %q", resp.SessionID)
+	}
+	if len(resp.DelegationChain) != 1 {
+		t.Errorf("DelegationChain length: expected 1, got %d", len(resp.DelegationChain))
+	}
+	if len(resp.DelegationChain) > 0 && resp.DelegationChain[0] != "Coder" {
+		t.Errorf("DelegationChain[0]: expected 'Coder', got %q", resp.DelegationChain[0])
 	}
 }
