@@ -1,6 +1,7 @@
 package threadmgr
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -8,6 +9,21 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/session"
 )
+
+type callingAgentKey struct{}
+
+// SetCallingAgent stores the calling agent's name in ctx so that tools
+// (e.g. DelegateToAgentTool) can record which agent initiated the delegation.
+func SetCallingAgent(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, callingAgentKey{}, name)
+}
+
+// GetCallingAgent retrieves the calling agent's name from ctx.
+// Returns "" if not set.
+func GetCallingAgent(ctx context.Context) string {
+	name, _ := ctx.Value(callingAgentKey{}).(string)
+	return name
+}
 
 // ContextBudget controls how many tokens each section of the prompt may use.
 type ContextBudget struct {

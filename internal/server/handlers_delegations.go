@@ -5,7 +5,18 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/scrypster/huginn/internal/session"
 )
+
+// InsertDelegation persists a delegation record via the server's delegation store.
+// It is a no-op when delegationStore is nil (e.g. in-memory / test mode without DB).
+func (s *Server) InsertDelegation(rec session.DelegationRecord) error {
+	if s.delegationStore == nil {
+		return nil
+	}
+	return s.delegationStore.InsertDelegation(rec)
+}
 
 // handleListDelegations returns delegations for a session, newest first.
 //

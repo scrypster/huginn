@@ -693,14 +693,16 @@ func (tm *ThreadManager) runOnce(
 				var resultContent string
 				switch {
 				case runtime != nil && runtime.ExecuteTool != nil:
-					result, execErr := runtime.ExecuteTool(ctx, tc.Function.Name, tc.Function.Arguments)
+					toolCtx := SetCallingAgent(ctx, agentID)
+					result, execErr := runtime.ExecuteTool(toolCtx, tc.Function.Name, tc.Function.Arguments)
 					if execErr != nil {
 						resultContent = fmt.Sprintf("tool error: %v", execErr)
 					} else {
 						resultContent = result
 					}
 				case toolExec != nil:
-					result, execErr := toolExec(ctx, tc.Function.Name, tc.Function.Arguments)
+					toolCtx := SetCallingAgent(ctx, agentID)
+					result, execErr := toolExec(toolCtx, tc.Function.Name, tc.Function.Arguments)
 					if execErr != nil {
 						resultContent = fmt.Sprintf("tool error: %v", execErr)
 					} else {

@@ -1,6 +1,7 @@
 package threadmgr
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -124,5 +125,29 @@ func TestBuildContext_RespectsSnapshotBudget(t *testing.T) {
 	// (certainly not all 20)
 	if snapshotMsgs >= 20 {
 		t.Errorf("expected snapshot trimming, got %d messages (all 20 included)", snapshotMsgs)
+	}
+}
+
+func TestSetGetCallingAgent_RoundTrip(t *testing.T) {
+	ctx := SetCallingAgent(context.Background(), "Atlas")
+	got := GetCallingAgent(ctx)
+	if got != "Atlas" {
+		t.Errorf("want Atlas, got %q", got)
+	}
+}
+
+func TestGetCallingAgent_Empty(t *testing.T) {
+	got := GetCallingAgent(context.Background())
+	if got != "" {
+		t.Errorf("want empty string when not set, got %q", got)
+	}
+}
+
+func TestSetCallingAgent_Overwrite(t *testing.T) {
+	ctx := SetCallingAgent(context.Background(), "Atlas")
+	ctx = SetCallingAgent(ctx, "Coder")
+	got := GetCallingAgent(ctx)
+	if got != "Coder" {
+		t.Errorf("want Coder after overwrite, got %q", got)
 	}
 }
