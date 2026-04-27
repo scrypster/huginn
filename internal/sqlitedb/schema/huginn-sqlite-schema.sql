@@ -901,6 +901,45 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
     WHERE status = 'running';
 
 
+-- delivery_queue: durable retry queue for failed webhook/email deliveries.
+CREATE TABLE IF NOT EXISTS delivery_queue (
+    id              TEXT    NOT NULL PRIMARY KEY,
+    workflow_id     TEXT    NOT NULL,
+    run_id          TEXT    NOT NULL,
+    endpoint        TEXT    NOT NULL,
+    channel         TEXT    NOT NULL CHECK (channel IN ('webhook', 'email')),
+    payload         TEXT    NOT NULL DEFAULT '{}',
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'retrying', 'delivered', 'failed', 'superseded')),
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    max_attempts    INTEGER NOT NULL DEFAULT 5,
+    retry_window_s  INTEGER NOT NULL DEFAULT 3600,
+    next_retry_at   TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    last_attempt_at TEXT,
+    last_error      TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_queue_work
+    ON delivery_queue (status, next_retry_at)
+    WHERE status IN ('pending', 'retrying');
+
+CREATE INDEX IF NOT EXISTS idx_delivery_queue_workflow
+    ON delivery_queue (workflow_id, run_id);
+
+-- endpoint_health: per-(workflow_id, endpoint) circuit breaker state.
+CREATE TABLE IF NOT EXISTS endpoint_health (
+    workflow_id          TEXT    NOT NULL,
+    endpoint             TEXT    NOT NULL,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    circuit_state        TEXT    NOT NULL DEFAULT 'closed'
+                             CHECK (circuit_state IN ('closed', 'open')),
+    opened_at            TEXT,
+    last_probe_at        TEXT,
+    PRIMARY KEY (workflow_id, endpoint)
+);
+
+
 -- =============================================================================
 -- Section 12: Agent Memory
 -- =============================================================================
