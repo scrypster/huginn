@@ -2778,6 +2778,24 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				}
 				logger.Info("delegate_to_agent: thread created", "thread_id", t.ID, "agent", p.AgentName)
 
+				// Record the delegation so delegation_chain is populated for panel-open hydration.
+				fromAgent := threadmgr.GetCallingAgent(ctx)
+				if fromAgent != "" {
+					rec := session.DelegationRecord{
+						ID:        session.NewID(),
+						SessionID: sessionID,
+						ThreadID:  t.ID,
+						FromAgent: fromAgent,
+						ToAgent:   p.AgentName,
+						Task:      p.Task,
+						Status:    "pending",
+					}
+					if err := srv.InsertDelegation(rec); err != nil {
+						logger.Warn("delegate_to_agent: failed to insert delegation record",
+							"err", err, "from", fromAgent, "to", p.AgentName)
+					}
+				}
+
 				tm.ResolveDependencies(t.ID)
 				logger.Info("delegate_to_agent: dependencies resolved", "thread_id", t.ID, "ready", tm.IsReady(t.ID))
 
