@@ -8,6 +8,7 @@ package scheduler
 
 import (
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -53,4 +54,48 @@ func CronPreview(expr string, count int, from time.Time) ([]time.Time, error) {
 		cursor = next
 	}
 	return out, nil
+}
+
+// ComputeRetryWindow returns the retry window in seconds for a workflow's
+// delivery queue. Derived as min(cron_interval × 0.8, 86400).
+// Empty schedule (ad-hoc runs) returns 3600 (1 hour).
+// For irregular expressions the minimum gap between the next 6 fire times is used.
+func ComputeRetryWindow(schedule string) int {
+	const maxWindowS = 86400 // 24 hours
+	if schedule == "" {
+		return 3600
+	}
+	times, err := CronPreview(schedule, 6, time.Now())
+	if err != nil || len(times) < 2 {
+		return 3600
+	}
+	minGap := times[1].Sub(times[0])
+	for i := 2; i < len(times); i++ {
+		if d := times[i].Sub(times[i-1]); d < minGap {
+			minGap = d
+		}
+	}
+	window := time.Duration(float64(minGap) * 0.8)
+	if int(window.Seconds()) > maxWindowS {
+		return maxWindowS
+	}
+	return int(window.Seconds())
+}
+
+// nextRetryDelay returns the delay before attempt number attemptCount
+// (0-indexed) using exponential spacing within the retry window.
+// Attempt 0 returns 0 (fire immediately on next poll tick).
+// Each delay gets ±10% jitter.
+func nextRetryDelay(retryWindowS, attemptCount int) time.Duration {
+	ratios := []float64{0.0, 0.05, 0.15, 0.40, 0.80}
+	if attemptCount >= len(ratios) {
+		attemptCount = len(ratios) - 1
+	}
+	base := time.Duration(float64(retryWindowS) * ratios[attemptCount] * float64(time.Second))
+	if base == 0 {
+		return 0
+	}
+	jitterRange := float64(base) * 0.10
+	offset := time.Duration(rand.Int63n(int64(2*jitterRange+1)) - int64(jitterRange)) //nolint:gosec
+	return base + offset
 }
