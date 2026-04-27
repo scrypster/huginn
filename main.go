@@ -2780,7 +2780,10 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 
 				// Record the delegation so delegation_chain is populated for panel-open hydration.
 				fromAgent := threadmgr.GetCallingAgent(ctx)
-				if fromAgent != "" {
+				if fromAgent == "" {
+					logger.Warn("delegate_to_agent: calling agent not set on context; delegation record skipped",
+						"to", p.AgentName, "session", sessionID, "thread", t.ID)
+				} else {
 					rec := session.DelegationRecord{
 						ID:        session.NewID(),
 						SessionID: sessionID,

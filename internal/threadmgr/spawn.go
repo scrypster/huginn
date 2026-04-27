@@ -701,7 +701,8 @@ func (tm *ThreadManager) runOnce(
 						resultContent = result
 					}
 				case toolExec != nil:
-					result, execErr := toolExec(ctx, tc.Function.Name, tc.Function.Arguments)
+					toolCtx := SetCallingAgent(ctx, agentID)
+					result, execErr := toolExec(toolCtx, tc.Function.Name, tc.Function.Arguments)
 					if execErr != nil {
 						resultContent = fmt.Sprintf("tool error: %v", execErr)
 					} else {
