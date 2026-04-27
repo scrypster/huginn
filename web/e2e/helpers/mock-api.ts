@@ -501,4 +501,16 @@ export async function setupApiMocks(page: Page) {
     }
     return route.continue()
   })
+
+  // 26. Delivery queue badge (default: no issues)
+  await page.route('**/api/v1/delivery-queue/badge', route =>
+    route.fulfill({ json: { count: 0 } })
+  )
+
+  // 27. Delivery queue list (default: empty)
+  await page.route('**/api/v1/delivery-queue', route => {
+    const method = route.request().method()
+    if (method === 'GET') return route.fulfill({ json: [] })
+    return route.continue()
+  })
 }
