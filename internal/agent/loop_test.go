@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -48,10 +49,11 @@ func (m *mockBackend) ContextWindow() int               { return 128_000 }
 
 // mockTool is a test double for tools.Tool.
 type mockTool struct {
-	name      string
-	result    tools.ToolResult
-	callCount int
-	mu        sync.Mutex
+	name        string
+	result      tools.ToolResult
+	callCount   int
+	mu          sync.Mutex
+	shouldPanic bool
 }
 
 func (t *mockTool) Name() string                      { return t.name }
@@ -61,6 +63,9 @@ func (t *mockTool) Schema() backend.Tool {
 	return backend.Tool{Function: backend.ToolFunction{Name: t.name}}
 }
 func (t *mockTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
+	if t.shouldPanic {
+		panic(fmt.Sprintf("mockTool %s intentional panic", t.name))
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.callCount++
@@ -473,10 +478,10 @@ func TestRunLoop_OnToolCallAndDoneCallbacks(t *testing.T) {
 		Backend:  mb,
 		Tools:    reg,
 		Messages: []backend.Message{{Role: "user", Content: "run callback_tool"}},
-		OnToolCall: func(name string, args map[string]any) {
+		OnToolCall: func(callID string, name string, args map[string]any) {
 			calledNames = append(calledNames, name)
 		},
-		OnToolDone: func(name string, result tools.ToolResult) {
+		OnToolDone: func(callID string, name string, result tools.ToolResult) {
 			doneCalled = true
 		},
 	})
@@ -954,5 +959,141 @@ func TestRunLoop_OnBeforeWriteNonWriteTool(t *testing.T) {
 	}
 	if tool.callCount != 1 {
 		t.Errorf("expected tool executed once, got %d", tool.callCount)
+	}
+}
+
+// TestRunLoop_SameToolTwiceInOneTurn verifies that when the LLM returns two calls
+// to the same tool in a single turn, each OnToolCall/OnToolDone pair carries the
+// correct callID and args — no last-write-wins collision.
+func TestRunLoop_SameToolTwiceInOneTurn(t *testing.T) {
+	t.Parallel()
+
+	tool := &mockTool{
+		name:   "echo_tool",
+		result: tools.ToolResult{Output: "echoed"},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_use",
+				ToolCalls: []backend.ToolCall{
+					{ID: "call-aaa", Function: backend.ToolCallFunction{Name: "echo_tool", Arguments: map[string]any{"msg": "first"}}},
+					{ID: "call-bbb", Function: backend.ToolCallFunction{Name: "echo_tool", Arguments: map[string]any{"msg": "second"}}},
+				},
+			},
+			stopResponse("done"),
+		},
+	}
+	reg := newRegistryWith(tool)
+
+	type callPair struct {
+		callID string
+		args   map[string]any
+	}
+	var mu sync.Mutex
+	var calls []callPair
+	var dones []callPair
+
+	_, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    reg,
+		Messages: []backend.Message{{Role: "user", Content: "run echo_tool twice"}},
+		OnToolCall: func(callID string, name string, args map[string]any) {
+			mu.Lock()
+			calls = append(calls, callPair{callID: callID, args: args})
+			mu.Unlock()
+		},
+		OnToolDone: func(callID string, name string, result tools.ToolResult) {
+			mu.Lock()
+			dones = append(dones, callPair{callID: callID})
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 OnToolCall invocations, got %d", len(calls))
+	}
+	if len(dones) != 2 {
+		t.Fatalf("expected 2 OnToolDone invocations, got %d", len(dones))
+	}
+	if calls[0].callID == calls[1].callID {
+		t.Errorf("expected distinct callIDs, both were %q", calls[0].callID)
+	}
+	seenArgs := make(map[string]string)
+	for _, c := range calls {
+		if msg, ok := c.args["msg"].(string); ok {
+			seenArgs[c.callID] = msg
+		}
+	}
+	if seenArgs["call-aaa"] != "first" {
+		t.Errorf("expected call-aaa args msg=first, got %q", seenArgs["call-aaa"])
+	}
+	if seenArgs["call-bbb"] != "second" {
+		t.Errorf("expected call-bbb args msg=second, got %q", seenArgs["call-bbb"])
+	}
+	doneIDs := make(map[string]bool)
+	for _, d := range dones {
+		doneIDs[d.callID] = true
+	}
+	if !doneIDs["call-aaa"] {
+		t.Error("expected OnToolDone for call-aaa")
+	}
+	if !doneIDs["call-bbb"] {
+		t.Error("expected OnToolDone for call-bbb")
+	}
+}
+
+// TestRunLoop_PanicPath_OnToolDoneStillFires verifies that when a tool panics,
+// OnToolDone is still called with an error result and the correct callID.
+func TestRunLoop_PanicPath_OnToolDoneStillFires(t *testing.T) {
+	t.Parallel()
+
+	panicTool := &mockTool{
+		name:        "panic_tool",
+		shouldPanic: true,
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_use",
+				ToolCalls: []backend.ToolCall{
+					{ID: "call-panic-1", Function: backend.ToolCallFunction{Name: "panic_tool", Arguments: map[string]any{}}},
+				},
+			},
+			stopResponse("recovered"),
+		},
+	}
+	reg := newRegistryWith(panicTool)
+
+	var doneCalled bool
+	var doneCallID string
+	var doneIsError bool
+
+	_, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    reg,
+		Messages: []backend.Message{{Role: "user", Content: "trigger panic"}},
+		OnToolCall: func(callID string, name string, args map[string]any) {},
+		OnToolDone: func(callID string, name string, result tools.ToolResult) {
+			doneCalled = true
+			doneCallID = callID
+			doneIsError = result.IsError
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doneCalled {
+		t.Fatal("expected OnToolDone to be called after tool panic")
+	}
+	if doneCallID != "call-panic-1" {
+		t.Errorf("expected doneCallID=call-panic-1, got %q", doneCallID)
+	}
+	if !doneIsError {
+		t.Error("expected OnToolDone result.IsError=true after panic")
 	}
 }

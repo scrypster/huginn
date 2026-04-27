@@ -199,11 +199,11 @@ func (a *App) tryDispatch(ctx context.Context, input string) tea.Cmd {
 		}()
 		handled, err := a.orch.Dispatch(ctx, input,
 			nil, // OnToken: use OnEvent instead (avoids double delivery)
-			func(name string, args map[string]any) {
+			func(_ string, name string, args map[string]any) {
 				slog.Debug("tui: tool call", "tool", name)
 				evCh <- toolCallMsg{name: name, args: args}
 			},
-			func(name string, result tools.ToolResult) {
+			func(_ string, name string, result tools.ToolResult) {
 				start := time.Now()
 				preview := result.Output
 				if len(preview) > 120 {
@@ -288,8 +288,8 @@ func (a *App) streamAgentChat(ctx context.Context, userMsg string) tea.Cmd {
 		}()
 		err := a.orch.AgentChat(ctx, userMsg, maxTurns,
 			nil, // OnToken: use OnEvent instead (avoids double delivery)
-			func(name string, args map[string]any) { evCh <- toolCallMsg{name: name, args: args} },
-			func(name string, result tools.ToolResult) {
+			func(_ string, name string, args map[string]any) { evCh <- toolCallMsg{name: name, args: args} },
+			func(_ string, name string, result tools.ToolResult) {
 				start := time.Now()
 				preview := result.Output
 				if len(preview) > 120 {

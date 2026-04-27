@@ -379,24 +379,6 @@ func TestListSessionsForSpace_NoSessions_ReturnsEmptySlice(t *testing.T) {
 	}
 }
 
-// ── BuildChannelContext edge cases ───────────────────────────────────────────
-
-func TestBuildChannelContext_NilDescriptions(t *testing.T) {
-	ctx := spaces.BuildChannelContext("lead", []string{"bob"}, nil)
-	if !strings.Contains(ctx, "specialist agent") {
-		t.Error("expected default description when map is nil")
-	}
-}
-
-func TestBuildChannelContext_MissingDescription(t *testing.T) {
-	ctx := spaces.BuildChannelContext("lead", []string{"bob"}, map[string]string{
-		"alice": "knows everything",
-	})
-	// bob is not in the map, should get default description.
-	if !strings.Contains(ctx, "bob: specialist agent") {
-		t.Errorf("expected default description for bob, got: %s", ctx)
-	}
-}
 
 // ── Workstream hardening ─────────────────────────────────────────────────────
 

@@ -27,6 +27,13 @@ export interface ThreadArtifact {
   triggering_message_id?: string
 }
 
+interface MessageThreadAPIResponse {
+  messages: ThreadMessage[]
+  thread_id?: string
+  session_id?: string
+  delegation_chain?: string[]
+}
+
 const isOpen = ref(false)
 const threadMessageId = ref<string | null>(null)
 const messages = ref<ThreadMessage[]>([])
@@ -38,7 +45,7 @@ const delegationChain = ref<string[]>([])
 // Debounce timer for WS-triggered refetches.
 let refetchTimer: ReturnType<typeof setTimeout> | null = null
 
-async function fetchThreadMessages(messageId: string): Promise<ThreadMessage[]> {
+async function fetchThreadMessages(messageId: string): Promise<MessageThreadAPIResponse> {
   const res = await fetch(`/api/v1/messages/${encodeURIComponent(messageId)}/thread`, {
     headers: {
       'Content-Type': 'application/json',
@@ -54,10 +61,18 @@ async function fetchThreadMessages(messageId: string): Promise<ThreadMessage[]> 
     throw new Error(`Failed to load thread: ${res.status} ${body}`)
   }
   const data = await res.json()
-  // Server may return { messages: [...] } or a bare array
-  if (Array.isArray(data)) return data as ThreadMessage[]
-  if (Array.isArray(data.messages)) return data.messages as ThreadMessage[]
-  return []
+  // Legacy bare-array shape (old server / some tests):
+  if (Array.isArray(data)) {
+    return { messages: data as ThreadMessage[], delegation_chain: [] }
+  }
+  return {
+    messages: Array.isArray(data.messages) ? (data.messages as ThreadMessage[]) : [],
+    thread_id: data.thread_id as string | undefined,
+    session_id: data.session_id as string | undefined,
+    delegation_chain: Array.isArray(data.delegation_chain)
+      ? (data.delegation_chain as string[])
+      : [],
+  }
 }
 
 async function loadArtifactForThread(agentName: string, messageId: string): Promise<void> {
@@ -121,8 +136,11 @@ function scheduleRefetch(): void {
     const id = threadMessageId.value
     if (!id || !isOpen.value) return
     try {
-      const data = await fetchThreadMessages(id)
-      messages.value = data
+      const result = await fetchThreadMessages(id)
+      messages.value = result.messages
+      if (result.delegation_chain && result.delegation_chain.length > 0) {
+        delegationChain.value = result.delegation_chain
+      }
     } catch {
       // Keep existing messages on failure — non-fatal.
     }
@@ -256,10 +274,11 @@ export function useThreadDetail() {
     delegationChain.value = []
 
     try {
-      const data = await fetchThreadMessages(messageId)
-      messages.value = data
+      const result = await fetchThreadMessages(messageId)
+      messages.value = result.messages
+      delegationChain.value = result.delegation_chain ?? []
       // Try to load artifact for thread
-      const firstAgent = agentName || data.find(m => m.role === 'assistant')?.agent || ''
+      const firstAgent = agentName || result.messages.find(m => m.role === 'assistant')?.agent || ''
       if (firstAgent) {
         await loadArtifactForThread(firstAgent, messageId)
       }

@@ -539,26 +539,6 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	return SpaceMessagesResult{Messages: msgs, NextCursor: nextCursor}, nil
 }
 
-// BuildChannelContext returns a system prompt addendum for the lead agent
-// listing member agents and their purpose, enabling intelligent delegation.
-// Returns empty string for non-channel spaces or spaces with no members.
-func BuildChannelContext(leadAgent string, members []string, agentDescriptions map[string]string) string {
-	if len(members) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("\n\n[Team Context]\nYou are the lead agent in a multi-agent channel. ")
-	sb.WriteString("You can delegate tasks to the following team members:\n")
-	for _, m := range members {
-		desc := agentDescriptions[m]
-		if desc == "" {
-			desc = "specialist agent"
-		}
-		fmt.Fprintf(&sb, "- %s: %s\n", m, desc)
-	}
-	sb.WriteString("\nDelegate specialized subtasks to appropriate team members and synthesize their results.")
-	return sb.String()
-}
 
 // RemoveAgentFromAllSpaces removes an agent from all space membership lists,
 // archives any spaces where the agent is the lead, and returns a

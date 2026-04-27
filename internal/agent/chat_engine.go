@@ -204,12 +204,12 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			OnEvent:          onEvent,
 			VaultWarnOnce:    &sync.Once{},
 			VaultReconnector: vr.reconnector,
-			OnToolCall: func(name string, args map[string]any) {
+			OnToolCall: func(callID string, name string, args map[string]any) {
 				if onToolEvent != nil {
 					onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
 				}
 			},
-			OnToolDone: func(name string, result tools.ToolResult) {
+			OnToolDone: func(callID string, name string, result tools.ToolResult) {
 				if onToolEvent != nil {
 					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})
 				}

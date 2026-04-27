@@ -42,7 +42,7 @@ func TestHandleGetMessageThread_R2_ContentType(t *testing.T) {
 }
 
 func TestHandleGetMessageThread_R2_NilDB_NonNilResult(t *testing.T) {
-	// With nil DB the handler must return a non-nil empty JSON array (not null).
+	// With nil DB the handler must return a MessageThreadResponse with non-nil messages array.
 	srv := testServer(t) // db is nil
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/any-id/thread", nil)
@@ -53,13 +53,16 @@ func TestHandleGetMessageThread_R2_NilDB_NonNilResult(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	raw := strings.TrimSpace(w.Body.String())
-	// Body must be JSON array, not "null".
-	if raw == "null" || raw == "" {
-		t.Errorf("expected [] JSON array, got %q", raw)
+	var result MessageThreadResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	if !strings.HasPrefix(raw, "[") {
-		t.Errorf("expected JSON array start '[', got %q", raw)
+	// Messages must be non-nil empty array, not null.
+	if result.Messages == nil {
+		t.Errorf("expected non-nil messages array, got nil")
+	}
+	if result.DelegationChain == nil {
+		t.Errorf("expected non-nil delegation_chain array, got nil")
 	}
 }
 
@@ -76,10 +79,12 @@ func TestHandleGetMessageThread_R2_WithRealDB_UnknownMsg_ReturnsEmpty(t *testing
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var result []map[string]any
-	json.NewDecoder(w.Body).Decode(&result)
-	if len(result) != 0 {
-		t.Errorf("expected empty, got %d items", len(result))
+	var result MessageThreadResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Messages) != 0 {
+		t.Errorf("expected empty messages, got %d items", len(result.Messages))
 	}
 }
 
@@ -385,12 +390,15 @@ func TestHandleGetMessageThread_R2_ViaHTTP(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body []map[string]any
+	var body MessageThreadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body == nil {
-		t.Error("expected non-nil (empty) array")
+	if body.Messages == nil {
+		t.Error("expected non-nil messages array")
+	}
+	if body.DelegationChain == nil {
+		t.Error("expected non-nil delegation_chain array")
 	}
 }
 
