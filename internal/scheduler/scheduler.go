@@ -35,6 +35,7 @@ type Scheduler struct {
 	cron             *cron.Cron
 	mu               sync.Mutex
 	workflowRunner   WorkflowRunner                   // nil if not configured
+	workflowRunStore WorkflowRunStoreInterface          // optional; used by RunWorkflowSyncWithInputs (Phase 8)
 	workflowRunning  map[string]bool                  // workflow IDs currently executing
 	workflowEntries  map[string]cron.EntryID          // workflow ID → cron entry ID
 	workflowCancels  map[string]context.CancelCauseFunc // workflow ID → cancel-cause func for running goroutine
@@ -127,6 +128,17 @@ func (s *Scheduler) SetWorkflowRunner(wr WorkflowRunner) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowRunner = wr
+}
+
+// SetWorkflowRunStore wires the run store used by RunWorkflowSyncWithInputs
+// to identify the new run a sub-workflow appended. It is OK to leave this
+// nil — sub-workflow steps will then return an empty output and the parent
+// continues. The runner's own persistence path uses its own injected store
+// regardless.
+func (s *Scheduler) SetWorkflowRunStore(store WorkflowRunStoreInterface) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workflowRunStore = store
 }
 
 // SetBroadcastFunc wires the WS broadcast function used to emit workflow
@@ -258,7 +270,83 @@ func (s *Scheduler) LoadWorkflows(dir string) error {
 //
 // The runner's result is logged but not surfaced to the caller because the
 // HTTP handler responds immediately (fire-and-forget).
+// TriggerWorkflowWithInputs is the inputs-aware variant of TriggerWorkflow.
+// inputs is forwarded to the runner via context and used to seed the run's
+// scratchpad so the very first step can reference {{run.scratch.KEY}}.
+//
+// Manual UI triggers and webhook deliveries call this; the scheduler's own
+// cron path keeps using TriggerWorkflow (no inputs).
+func (s *Scheduler) TriggerWorkflowWithInputs(ctx context.Context, w *Workflow, inputs map[string]string) error {
+	if len(inputs) > 0 {
+		ctx = WithInitialInputs(ctx, inputs)
+	}
+	return s.TriggerWorkflow(ctx, w)
+}
+
+// RunWorkflowSyncWithInputs executes a workflow inline (blocking) using the
+// configured runner and returns the persisted WorkflowRun so the caller can
+// inspect step outputs. Phase 8 sub-workflow steps use this so the parent
+// runner can adopt the child's last-step output as its own.
+//
+// Unlike TriggerWorkflow this path:
+//   - does NOT acquire the global concurrency semaphore (the caller already
+//     holds one slot — counting the child would make a sub-workflow chain
+//     trivially deadlock-prone);
+//   - does NOT register a cancel func keyed by workflow id (the parent's
+//     context already governs lifetime);
+//   - does NOT enforce the per-id "already running" gate (a parent workflow
+//     that calls itself recursively is the caller's problem to bound).
+//
+// The returned WorkflowRun is the same value the runner persisted via the
+// run store, so it is safe to read fields off of it.
+func (s *Scheduler) RunWorkflowSyncWithInputs(ctx context.Context, w *Workflow, inputs map[string]string) (*WorkflowRun, error) {
+	s.mu.Lock()
+	wr := s.workflowRunner
+	store := s.workflowRunStore
+	s.mu.Unlock()
+	if wr == nil {
+		return nil, fmt.Errorf("scheduler: workflow runner not configured")
+	}
+	runCtx := ctx
+	if len(inputs) > 0 {
+		runCtx = WithInitialInputs(runCtx, inputs)
+	}
+	// Capture the timestamp BEFORE invoking the runner so we can pick the
+	// just-persisted run out of the store. The runner stamps StartedAt with
+	// time.Now().UTC(), so any run with StartedAt >= startedAtFloor that
+	// matches w.ID is ours. This is robust to other workflows running in
+	// parallel because we filter by workflow ID via store.List.
+	startedAtFloor := time.Now().UTC().Add(-time.Second)
+	if err := wr(runCtx, w); err != nil {
+		return nil, err
+	}
+	if store == nil {
+		return nil, nil
+	}
+	// List returns runs newest-first; pull a small window so we can pick
+	// the freshest entry that was created during this call. 5 is plenty
+	// for the common case while keeping the query cheap.
+	recent, err := store.List(w.ID, 5)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range recent {
+		if r == nil {
+			continue
+		}
+		if !r.StartedAt.Before(startedAtFloor) {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *Scheduler) TriggerWorkflow(ctx context.Context, w *Workflow) error {
+	// Snapshot the inputs from the caller's context BEFORE we hand off to the
+	// goroutine — TriggerWorkflowWithInputs uses ctx as the carrier, but the
+	// goroutine builds its own context.Background() under the hood, so the
+	// inputs would otherwise be lost.
+	triggerInputs := initialInputs(ctx)
 	s.mu.Lock()
 	wr := s.workflowRunner
 	if wr == nil {
@@ -300,6 +388,8 @@ func (s *Scheduler) TriggerWorkflow(ctx context.Context, w *Workflow) error {
 		}()
 		// Two-layer context: outer carries the cancel cause; inner adds timeout.
 		baseCtx, causeCancel := context.WithCancelCause(context.Background())
+		// Forward trigger-supplied inputs onto the goroutine's fresh context.
+		baseCtx = WithInitialInputs(baseCtx, triggerInputs)
 		runCtx, timeoutCancel := context.WithTimeout(baseCtx, workflowTimeout(w))
 		defer timeoutCancel()
 		defer causeCancel(nil) // satisfy resource-release requirement

@@ -677,6 +677,109 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"deleted": true})
 }
 
+// handleCloneAgent (Phase 7) clones an existing agent under a new name and
+// optionally swaps its model. The use case is "Use Haiku for the classifier,
+// Sonnet for the writer, Opus for the auditor": users clone an existing,
+// well-tuned agent and just bump the model.
+//
+//	POST /api/v1/agents/{name}/clone
+//	body: {"new_name": "Bob-Sonnet", "model": "claude-sonnet-4-6", "provider": "anthropic"}
+//
+// Response: 200 + the redacted clone, or 4xx on validation errors. The
+// source agent is never modified. Skills, memory mode, vault description and
+// every other field are copied verbatim — only Name (mandatory) and Model /
+// Provider / Endpoint (optional) are overrideable.
+func (s *Server) handleCloneAgent(w http.ResponseWriter, r *http.Request) {
+	source := r.PathValue("name")
+	if source == "" {
+		jsonError(w, 400, "source agent name is required")
+		return
+	}
+	var body struct {
+		NewName  string `json:"new_name"`
+		Model    string `json:"model"`
+		Provider string `json:"provider"`
+		Endpoint string `json:"endpoint"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(body.NewName) == "" {
+		jsonError(w, 400, "new_name is required")
+		return
+	}
+	if strings.EqualFold(body.NewName, source) {
+		jsonError(w, 400, "new_name must differ from source agent name")
+		return
+	}
+
+	cfg, err := agents.LoadAgents()
+	if err != nil || cfg == nil {
+		cfg = agents.DefaultAgentsConfig()
+	}
+	var src *agents.AgentDef
+	for i := range cfg.Agents {
+		if strings.EqualFold(cfg.Agents[i].Name, source) {
+			src = &cfg.Agents[i]
+			break
+		}
+	}
+	if src == nil {
+		jsonError(w, 404, "source agent not found")
+		return
+	}
+	// Reject target-name collisions early so we don't write a half-baked
+	// agent and then have to undo it.
+	for _, a := range cfg.Agents {
+		if strings.EqualFold(a.Name, body.NewName) {
+			jsonError(w, 409, "agent name already exists")
+			return
+		}
+	}
+
+	clone := *src // shallow copy is fine: AgentDef is value-only, no pointers besides MemoryEnabled.
+	clone.Name = body.NewName
+	clone.ID = ""        // force a fresh id assignment downstream
+	clone.IsDefault = false
+	clone.Version = 0    // version starts at 0 for new agents
+	clone.CreatedAt = "" // SaveAgentDefault stamps it
+	if mb := src.MemoryEnabled; mb != nil { // deep-copy the *bool to break sharing
+		v := *mb
+		clone.MemoryEnabled = &v
+	}
+	if strings.TrimSpace(body.Model) != "" {
+		clone.Model = body.Model
+	}
+	if strings.TrimSpace(body.Provider) != "" {
+		clone.Provider = body.Provider
+	} else if body.Model != "" && body.Provider == "" {
+		// Re-infer provider from the new model when the caller swaps model
+		// but not provider (the most common case).
+		clone.Provider = agents.InferProvider(clone.Model)
+	}
+	if strings.TrimSpace(body.Endpoint) != "" {
+		clone.Endpoint = body.Endpoint
+	}
+	if err := clone.Validate(); err != nil {
+		jsonError(w, 422, "invalid clone: "+err.Error())
+		return
+	}
+	if err := agents.SaveAgentDefault(clone); err != nil {
+		jsonError(w, 500, "save clone: "+err.Error())
+		return
+	}
+	s.BroadcastWS(WSMessage{
+		Type: "agent_changed",
+		Payload: map[string]any{
+			"name":   clone.Name,
+			"action": "created",
+			"source": source,
+		},
+	})
+	jsonOK(w, redactAgentDef(clone))
+}
+
 // stateString converts an agent.State to a human-readable string.
 func stateString(st int) string {
 	switch st {

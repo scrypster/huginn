@@ -27,7 +27,7 @@ func TestResolveInlineVars_MissingKeyLeftUnchanged(t *testing.T) {
 // ── resolveRuntimeVars ───────────────────────────────────────────────────────
 
 func TestResolveRuntimeVars_PrevOutput(t *testing.T) {
-	got := resolveRuntimeVars("Use: {{prev.output}}", nil, nil, "step-1-result")
+	got := resolveRuntimeVars("Use: {{prev.output}}", nil, nil, "step-1-result", nil)
 	if got != "Use: step-1-result" {
 		t.Errorf("got %q", got)
 	}
@@ -36,7 +36,7 @@ func TestResolveRuntimeVars_PrevOutput(t *testing.T) {
 func TestResolveRuntimeVars_NamedInput(t *testing.T) {
 	outputs := map[string]string{"step-1": "summary text"}
 	inputs := []StepInput{{FromStep: "step-1", As: "prev_summary"}}
-	got := resolveRuntimeVars("Summarise: {{inputs.prev_summary}}", inputs, outputs, "")
+	got := resolveRuntimeVars("Summarise: {{inputs.prev_summary}}", inputs, outputs, "", nil)
 	if got != "Summarise: summary text" {
 		t.Errorf("got %q", got)
 	}
@@ -44,7 +44,7 @@ func TestResolveRuntimeVars_NamedInput(t *testing.T) {
 
 func TestResolveRuntimeVars_MissingFromStep_PlaceholderUnchanged(t *testing.T) {
 	inputs := []StepInput{{FromStep: "nonexistent", As: "x"}}
-	got := resolveRuntimeVars("{{inputs.x}}", inputs, map[string]string{}, "")
+	got := resolveRuntimeVars("{{inputs.x}}", inputs, map[string]string{}, "", nil)
 	if got != "{{inputs.x}}" {
 		t.Errorf("expected unchanged placeholder, got %q", got)
 	}
@@ -52,7 +52,7 @@ func TestResolveRuntimeVars_MissingFromStep_PlaceholderUnchanged(t *testing.T) {
 
 func TestResolveRuntimeVars_EmptyAs_Skipped(t *testing.T) {
 	inputs := []StepInput{{FromStep: "step-1", As: ""}}
-	got := resolveRuntimeVars("{{inputs.}}", inputs, map[string]string{"step-1": "value"}, "")
+	got := resolveRuntimeVars("{{inputs.}}", inputs, map[string]string{"step-1": "value"}, "", nil)
 	// With empty As, the replacement key would be "{{inputs.}}" — we expect no substitution.
 	if got != "{{inputs.}}" {
 		t.Errorf("expected unchanged placeholder, got %q", got)

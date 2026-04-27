@@ -92,6 +92,7 @@ vi.mock('../../composables/useWorkflows', () => ({
   useWorkflows: () => ({
     workflows: ref([]),
     fetchWorkflows: mockFetchWorkflows,
+    wireWS: vi.fn(),
   }),
 }))
 

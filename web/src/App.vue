@@ -786,6 +786,7 @@ const route = useRoute()
 const router = useRouter()
 const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages } = useSessions()
 const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } = useNotifications()
+const { wireWS: wireWorkflowsWS } = useWorkflows()
 const { isAgentActive } = useThreads()
 
 // ── Nav structure ────────────────────────────────────────────────────
@@ -1019,6 +1020,7 @@ async function initApp() {
     fetchAgents().catch(() => {})
     fetchCloudStatus().catch(() => {})
     wireWS(ws)
+    wireWorkflowsWS(ws)
     wireThreadDetailWS(ws)
     wireSpaceWS(ws)
     wireSpaceTimelineWS(ws)

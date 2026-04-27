@@ -42,10 +42,31 @@ func (s *SQLiteWorkflowRunStore) Append(workflowID string, run *WorkflowRun) err
 		completedAt = &s
 	}
 
+	// Phase 6: trigger_inputs and workflow_snapshot. Empty values default to
+	// '{}' so SELECT can always Scan into a string. We tolerate nil maps and
+	// nil snapshots — older runs without these fields stay readable.
+	triggerJSON := []byte("{}")
+	if len(run.TriggerInputs) > 0 {
+		var err error
+		triggerJSON, err = json.Marshal(run.TriggerInputs)
+		if err != nil {
+			return fmt.Errorf("sqlite run store: marshal trigger_inputs: %w", err)
+		}
+	}
+	snapshotJSON := []byte("{}")
+	if run.WorkflowSnapshot != nil {
+		var err error
+		snapshotJSON, err = json.Marshal(run.WorkflowSnapshot)
+		if err != nil {
+			return fmt.Errorf("sqlite run store: marshal workflow_snapshot: %w", err)
+		}
+	}
+
 	_, err := s.db.Write().Exec(`
 		INSERT OR IGNORE INTO workflow_runs
-			(id, workflow_id, status, steps, error, started_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			(id, workflow_id, status, steps, error, started_at, completed_at,
+			 trigger_inputs, workflow_snapshot)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID,
 		workflowID,
 		string(run.Status),
@@ -53,6 +74,8 @@ func (s *SQLiteWorkflowRunStore) Append(workflowID string, run *WorkflowRun) err
 		run.Error,
 		startedAt,
 		completedAt,
+		string(triggerJSON),
+		string(snapshotJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite run store: append %q: %w", run.ID, err)
@@ -64,7 +87,8 @@ func (s *SQLiteWorkflowRunStore) Append(workflowID string, run *WorkflowRun) err
 // Returns (nil, nil) when no matching run is found.
 func (s *SQLiteWorkflowRunStore) Get(workflowID, runID string) (*WorkflowRun, error) {
 	rows, err := s.db.Read().Query(`
-		SELECT id, workflow_id, status, steps, error, started_at, completed_at
+		SELECT id, workflow_id, status, steps, error, started_at, completed_at,
+		       trigger_inputs, workflow_snapshot
 		FROM workflow_runs
 		WHERE workflow_id = ? AND id = ?
 		LIMIT 1`,
@@ -89,7 +113,8 @@ func (s *SQLiteWorkflowRunStore) Get(workflowID, runID string) (*WorkflowRun, er
 // Returns an empty slice (not nil) when no runs exist.
 func (s *SQLiteWorkflowRunStore) List(workflowID string, n int) ([]*WorkflowRun, error) {
 	rows, err := s.db.Read().Query(`
-		SELECT id, workflow_id, status, steps, error, started_at, completed_at
+		SELECT id, workflow_id, status, steps, error, started_at, completed_at,
+		       trigger_inputs, workflow_snapshot
 		FROM workflow_runs
 		WHERE workflow_id = ?
 		ORDER BY started_at DESC
@@ -115,6 +140,7 @@ func scanWorkflowRuns(rows *sql.Rows) ([]*WorkflowRun, error) {
 		var run WorkflowRun
 		var statusStr, stepsJSON, startedAtStr string
 		var completedAtStr *string
+		var triggerJSON, snapshotJSON string
 
 		if err := rows.Scan(
 			&run.ID,
@@ -124,6 +150,8 @@ func scanWorkflowRuns(rows *sql.Rows) ([]*WorkflowRun, error) {
 			&run.Error,
 			&startedAtStr,
 			&completedAtStr,
+			&triggerJSON,
+			&snapshotJSON,
 		); err != nil {
 			return nil, err
 		}
@@ -142,6 +170,23 @@ func scanWorkflowRuns(rows *sql.Rows) ([]*WorkflowRun, error) {
 			if t, err := time.Parse(time.RFC3339, *completedAtStr); err == nil {
 				tc := t.UTC()
 				run.CompletedAt = &tc
+			}
+		}
+
+		// Phase 6: best-effort decode of trigger_inputs / workflow_snapshot.
+		// Old rows default to "{}" via the migration so Unmarshal succeeds
+		// and the resulting empty map is normalised back to nil to match
+		// the in-memory shape produced by a fresh run with no inputs.
+		if triggerJSON != "" {
+			var inputs map[string]string
+			if err := json.Unmarshal([]byte(triggerJSON), &inputs); err == nil && len(inputs) > 0 {
+				run.TriggerInputs = inputs
+			}
+		}
+		if snapshotJSON != "" && snapshotJSON != "{}" {
+			var snap Workflow
+			if err := json.Unmarshal([]byte(snapshotJSON), &snap); err == nil && snap.ID != "" {
+				run.WorkflowSnapshot = &snap
 			}
 		}
 

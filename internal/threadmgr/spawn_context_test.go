@@ -2,7 +2,6 @@ package threadmgr
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -139,7 +138,6 @@ func TestSpawnThread_ContextCancellationPropagates(t *testing.T) {
 	})
 
 	// Count how many ChatCompletion calls are made.
-	var mu sync.Mutex
 	callCount := 0
 	blockCh := make(chan struct{})
 
@@ -172,7 +170,6 @@ func TestSpawnThread_ContextCancellationPropagates(t *testing.T) {
 		got, _ := tm.Get(thread.ID)
 		if got != nil && (got.Status == StatusCancelled || got.Status == StatusError || got.Status == StatusDone) {
 			// Success: thread terminated cleanly without hanging.
-			_ = mu // silence unused lint
 			_ = callCount
 			return
 		}

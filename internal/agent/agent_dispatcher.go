@@ -610,6 +610,14 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
 	systemPrompt := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
 
+	// Per-agent skills fragment. Non-default agents (workflow steps, delegated
+	// workers) need their assigned skills appended just like the default agent
+	// does in mcp_agent_chat.go. Without this they execute with no skills,
+	// which is a major parity gap for scheduled workflows.
+	if skillsFrag := o.SkillsFragmentForAgent(ag); skillsFrag != "" {
+		systemPrompt += "\n\n" + skillsFrag
+	}
+
 	// Inject space context (channel/DM metadata) if available.
 	if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
 		systemPrompt += "\n\n" + spaceCtx
@@ -617,6 +625,14 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	// Inject channel-recent summary (channels only, not DMs).
 	if recentCtx := workforce.GetChannelRecent(ctx); recentCtx != "" {
 		systemPrompt += "\n\n" + recentCtx
+	}
+
+	// Inject per-step pre-authorised connection picks (Phase 1.4). When a
+	// workflow step declares `connections: { github: my-personal-gh, ... }`
+	// the runner places that map into ctx via WithStepConnections; surface it
+	// as a system addendum so the agent uses those account labels in tool calls.
+	if connHint := stepConnectionsAddendum(ctx); connHint != "" {
+		systemPrompt += "\n\n" + connHint
 	}
 
 	history := sess.snapshotHistory()

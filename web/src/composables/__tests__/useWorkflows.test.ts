@@ -310,16 +310,207 @@ describe('useWorkflows', () => {
       return { result, unmount: () => app.unmount() }
     }
 
-    it('registers message handler and adds workflow events to liveEvents', () => {
+    /**
+     * makeFakeHuginnWS returns a minimal stand-in for the HuginnWS shape:
+     * tests register handlers via on(type, fn) and trigger them via
+     * fire(type, msg). Mirrors the real HuginnWS pub/sub contract.
+     */
+    function makeFakeHuginnWS() {
+      const handlers: Record<string, Array<(m: any) => void>> = {}
+      return {
+        on(type: string, fn: (m: any) => void) {
+          if (!handlers[type]) handlers[type] = []
+          handlers[type]!.push(fn)
+        },
+        off(type: string, fn: (m: any) => void) {
+          handlers[type] = (handlers[type] ?? []).filter(f => f !== fn)
+        },
+        fire(type: string, msg: any) {
+          for (const fn of handlers[type] ?? []) fn(msg)
+        },
+        handlers,
+      }
+    }
+
+    it('registers message handlers via ws.on() and routes workflow events into liveEvents', () => {
       const { result: { wireWS, liveEvents } } = withSetup(() => useWorkflows())
-      const handlers: Record<string, (e: MessageEvent) => void> = {}
-      const ws = { addEventListener: (ev: string, h: any) => { handlers[ev] = h }, removeEventListener: vi.fn() }
+      const ws = makeFakeHuginnWS()
       wireWS(ws as any)
-      handlers['message']!(new MessageEvent('message', {
-        data: JSON.stringify({ type: 'workflow_started', workflow_id: 'wf-ws-1' }),
-      }))
+
+      ws.fire('workflow_started', { type: 'workflow_started', workflow_id: 'wf-ws-1' })
+
       expect(liveEvents.value['wf-ws-1']).toHaveLength(1)
-      expect(liveEvents.value['wf-ws-1']![0].type).toBe('workflow_started')
+      expect(liveEvents.value['wf-ws-1']![0]!.type).toBe('workflow_started')
+    })
+
+    it('registers handlers for ALL workflow event types', () => {
+      withSetup(() => {
+        const { wireWS } = useWorkflows()
+        const ws = makeFakeHuginnWS()
+        wireWS(ws as any)
+
+        // Every workflow_* event must be subscribed; otherwise the live
+        // execution panel will silently drop events.
+        const expected = [
+          'workflow_started',
+          'workflow_step_started',
+          'workflow_step_token',
+          'workflow_step_complete',
+          'workflow_complete',
+          'workflow_failed',
+          'workflow_partial',
+          'workflow_skipped',
+          'workflow_cancelled',
+        ]
+        for (const t of expected) {
+          expect(ws.handlers[t], `missing handler for ${t}`).toBeDefined()
+          expect(ws.handlers[t]!.length).toBeGreaterThan(0)
+        }
+      })
+    })
+
+    it('ignores messages without a workflow_id (no cross-talk with other event types)', () => {
+      const { result: { wireWS, liveEvents } } = withSetup(() => useWorkflows())
+      const ws = makeFakeHuginnWS()
+      wireWS(ws as any)
+
+      ws.fire('workflow_started', { type: 'workflow_started' /* no workflow_id */ })
+      expect(liveEvents.value).toEqual({})
+    })
+
+    it('clears prior liveEvents for the same workflow on workflow_started (fresh-run hygiene)', async () => {
+      // Stub fetch because workflow_complete triggers a workflows refetch.
+      vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(ok([])))
+      const { result: { wireWS, liveEvents } } = withSetup(() => useWorkflows())
+      const ws = makeFakeHuginnWS()
+      wireWS(ws as any)
+
+      // Simulate events from a completed prior run.
+      ws.fire('workflow_started', { type: 'workflow_started', workflow_id: 'wf-fresh', run_id: 'run-1' })
+      ws.fire('workflow_step_complete', { type: 'workflow_step_complete', workflow_id: 'wf-fresh', run_id: 'run-1', position: 0, status: 'success' })
+      ws.fire('workflow_complete', { type: 'workflow_complete', workflow_id: 'wf-fresh', run_id: 'run-1' })
+      expect(liveEvents.value['wf-fresh']!.length).toBeGreaterThanOrEqual(3)
+
+      // A new run starts: prior events for this workflow are dropped.
+      ws.fire('workflow_started', { type: 'workflow_started', workflow_id: 'wf-fresh', run_id: 'run-2' })
+
+      expect(liveEvents.value['wf-fresh']).toHaveLength(1)
+      expect(liveEvents.value['wf-fresh']![0]!.run_id).toBe('run-2')
+      await Promise.resolve()
+    })
+
+    it('does NOT clear liveEvents for a different workflow on workflow_started', () => {
+      const { result: { wireWS, liveEvents } } = withSetup(() => useWorkflows())
+      const ws = makeFakeHuginnWS()
+      wireWS(ws as any)
+
+      ws.fire('workflow_started', { type: 'workflow_started', workflow_id: 'wf-a', run_id: 'a-1' })
+      ws.fire('workflow_step_complete', { type: 'workflow_step_complete', workflow_id: 'wf-a', run_id: 'a-1', position: 0, status: 'success' })
+      // Now wf-b starts — should not affect wf-a.
+      ws.fire('workflow_started', { type: 'workflow_started', workflow_id: 'wf-b', run_id: 'b-1' })
+
+      expect(liveEvents.value['wf-a']).toHaveLength(2)
+      expect(liveEvents.value['wf-b']).toHaveLength(1)
+    })
+
+    it('caps liveEvents per workflow at 100 entries (oldest dropped)', () => {
+      const { result: { wireWS, liveEvents } } = withSetup(() => useWorkflows())
+      const ws = makeFakeHuginnWS()
+      wireWS(ws as any)
+
+      // workflow_started clears events; we only want to test the cap on
+      // continuing-run events, so use workflow_step_complete only.
+      for (let i = 0; i < 105; i++) {
+        ws.fire('workflow_step_complete', {
+          type: 'workflow_step_complete',
+          workflow_id: 'wf-cap',
+          run_id: `r-${i}`,
+          position: i,
+        })
+      }
+      expect(liveEvents.value['wf-cap']).toHaveLength(100)
+      // Oldest dropped → first remaining is r-5.
+      expect(liveEvents.value['wf-cap']![0]!.run_id).toBe('r-5')
+      expect(liveEvents.value['wf-cap']![99]!.run_id).toBe('r-104')
+    })
+
+    it('refetches workflows on terminal events (complete/failed/partial/cancelled)', async () => {
+      // Each fetch consumes the response body, so we return a fresh Response per call.
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(() => Promise.resolve(ok([])))
+      const { result: { wireWS } } = withSetup(() => useWorkflows())
+      const ws = makeFakeHuginnWS()
+      wireWS(ws as any)
+
+      const before = fetchSpy.mock.calls.length
+      ws.fire('workflow_complete', { type: 'workflow_complete', workflow_id: 'wf-t' })
+      ws.fire('workflow_failed', { type: 'workflow_failed', workflow_id: 'wf-t' })
+      ws.fire('workflow_partial', { type: 'workflow_partial', workflow_id: 'wf-t' })
+      ws.fire('workflow_cancelled', { type: 'workflow_cancelled', workflow_id: 'wf-t' })
+      // workflow_started should NOT trigger a refetch.
+      ws.fire('workflow_started', { type: 'workflow_started', workflow_id: 'wf-t' })
+
+      // Each terminal event triggers exactly one fetch.
+      expect(fetchSpy.mock.calls.length - before).toBe(4)
+      // Drain microtasks so the promise resolutions complete and don't surface
+      // as unhandled rejections in afterEach.
+      await Promise.resolve()
+    })
+  })
+
+  describe('replay / fork / diff', () => {
+    it('replayWorkflowRun POSTs replay endpoint', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ status: 'triggered' }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      )
+      const { replayWorkflowRun } = useWorkflows()
+      const out = await replayWorkflowRun('wf-1', 'run-abc')
+      expect(out.status).toBe('triggered')
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/workflows/wf-1/runs/run-abc/replay',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      fetchSpy.mockRestore()
+    })
+
+    it('forkWorkflowRun POSTs JSON body', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ status: 'triggered' }), { status: 200 }),
+      )
+      const { forkWorkflowRun } = useWorkflows()
+      await forkWorkflowRun('wf-1', 'run-abc', { inputs: { a: '1' }, use_live_definition: true })
+      const [, init] = fetchSpy.mock.calls[0]!
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({ inputs: { a: '1' }, use_live_definition: true })
+      fetchSpy.mockRestore()
+    })
+
+    it('diffWorkflowRuns GETs diff endpoint', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      )
+      const { diffWorkflowRuns } = useWorkflows()
+      const d = await diffWorkflowRuns('wf-1', 'run-a', 'run-b')
+      expect(d).toEqual({ ok: true })
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/workflows/wf-1/runs/run-a/diff/run-b',
+        expect.anything(),
+      )
+      fetchSpy.mockRestore()
+    })
+
+    it('fetchSessionArtifacts GETs session artifacts list', async () => {
+      const rows = [{ id: 'a1', kind: 'file', title: 'out.csv', agent_name: 'x', session_id: 's1', status: 'accepted', created_at: '', updated_at: '' }]
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok(rows))
+      const { fetchSessionArtifacts } = useWorkflows()
+      const got = await fetchSessionArtifacts('sess-1')
+      expect(got).toEqual(rows)
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/sessions/sess-1/artifacts',
+        expect.anything(),
+      )
+      fetchSpy.mockRestore()
     })
   })
 })

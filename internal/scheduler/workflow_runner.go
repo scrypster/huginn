@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scrypster/huginn/internal/notification"
@@ -34,9 +35,28 @@ type RunOptions struct {
 	Prompt      string
 	Workspace   string
 	MaxTokens   int
-	// Connections maps provider name → connection ID for pre-authorised credentials.
-	// Injected into the agent's tool context at run time.
+	// Connections maps provider name → connection account label for
+	// pre-authorised credentials. Injected into the agent's context so the
+	// agent picks the right account when calling integration tools.
 	Connections map[string]string
+	// WorkflowID + StepName + StepPosition let an AgentFunc emit live
+	// streaming events (e.g. token deltas) tagged with the step they belong to.
+	// Optional — populated by the runner; safe to leave empty in tests.
+	WorkflowID   string
+	StepName     string
+	StepPosition int
+	// OnToken, when non-nil, is invoked for every model-emitted token chunk
+	// during step execution. AgentFuncs that support streaming SHOULD call it
+	// so the live UI panel can show progressive output. Nil = silent (legacy
+	// behaviour). The callback MUST be cheap and non-blocking — the runner
+	// sends WS events from inside it.
+	OnToken func(token string)
+
+	// ModelOverride (Phase 7) is the per-step model id the runner wants the
+	// backend to use INSTEAD of the agent's configured Model. Empty string
+	// means "use the agent default". AgentFuncs that honour this MUST NOT
+	// mutate agents.AgentDef — the override is request-scoped only.
+	ModelOverride string
 }
 
 // AgentFunc executes an agent run headlessly and returns the raw output.
@@ -60,6 +80,13 @@ type WorkflowBroadcastFunc func(eventType string, payload map[string]any)
 // SpaceDeliveryFunc posts a notification summary to an internal Huginn Space.
 // Nil means no space delivery.
 type SpaceDeliveryFunc func(spaceID, summary, detail string) error
+
+// AgentDMDeliveryFunc posts a notification as a DM authored by `agentName` to
+// the recipient `user`. The binding (typically wired in main.go) is
+// responsible for resolving (or creating) the DM space, persisting the
+// message with agent authorship, and broadcasting the appropriate WS event.
+// Nil means agent_dm deliveries are silently skipped (no panic, no error).
+type AgentDMDeliveryFunc func(agentName, user, summary, detail string) error
 
 // DeliveryFailureFunc is called on the workflow goroutine when a delivery attempt fails.
 // It MUST be non-blocking (channel send, no I/O). redactedTarget has PII stripped:
@@ -106,14 +133,34 @@ func MakeWorkflowRunner(
 	huginnDir string,
 	deliverers *DelivererRegistry,
 	onDeliveryFailure DeliveryFailureFunc,
+	opts ...RunnerOption,
 ) WorkflowRunner {
+	cfg := defaultRunnerConfig()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return func(ctx context.Context, w *Workflow) error {
 		// Sort steps by Position ascending.
 		steps := make([]WorkflowStep, len(w.Steps))
 		copy(steps, w.Steps)
 		sort.Slice(steps, func(i, j int) bool { return steps[i].Position < steps[j].Position })
+		// Phase 8: apply workflow-level retry defaults BEFORE running so
+		// every step picks up the inherited values. This mutates the local
+		// `steps` slice only — the on-disk YAML is untouched.
+		ApplyRetryDefaults(steps, w.Retry)
 
 		stepOutputs := map[string]string{}
+		// Run scratchpad: a per-run key/value store accessible to all steps via
+		// {{run.scratch.KEY}} placeholders. Populated by the SetScratch tool
+		// (Phase 2) so an agent in step N can stash a value that step M reads.
+		// Lives only for the duration of this run; never persisted.
+		runScratch := map[string]string{}
+		// Phase 5: seed scratch from trigger-supplied inputs so the very first
+		// step can reference {{run.scratch.KEY}} without a predecessor step.
+		// Used by manual runs (POST /run with body) and webhook triggers.
+		for k, v := range initialInputs(ctx) {
+			runScratch[k] = v
+		}
 		var prevOutput string
 		var anyStepFailed bool
 
@@ -123,6 +170,21 @@ func MakeWorkflowRunner(
 			Status:     WorkflowRunStatusRunning,
 			StartedAt:  time.Now().UTC(),
 		}
+		// Phase 6 (run analytics): record the trigger inputs and a workflow
+		// snapshot so the run can be replayed or forked with high fidelity.
+		// We snapshot the FULL definition (steps + chains + notifications)
+		// because future edits to the YAML file shouldn't change "what
+		// already ran". The snapshot is best-effort — a copy via JSON
+		// round-trip — so cycles or unmarshallable fields would fail loudly
+		// at storage time, but Workflow itself is JSON-tagged end-to-end.
+		if inputs := initialInputs(ctx); len(inputs) > 0 {
+			cp := make(map[string]string, len(inputs))
+			for k, v := range inputs {
+				cp[k] = v
+			}
+			run.TriggerInputs = cp
+		}
+		run.WorkflowSnapshot = cloneWorkflow(w)
 
 		if broadcast != nil {
 			broadcast("workflow_started", map[string]any{
@@ -155,6 +217,45 @@ func MakeWorkflowRunner(
 				break
 			}
 
+			// Phase 8: conditional execution. Resolve {{...}} placeholders in
+			// the When expression first, then evaluate truthiness. Skipping
+			// emits a workflow_skipped WS event and persists the step record
+			// with Status="skipped"; downstream steps still execute.
+			if strings.TrimSpace(step.When) != "" {
+				resolvedWhen := resolveInlineVars(step.When, step.Vars)
+				resolvedWhen = resolveRuntimeVars(resolvedWhen, step.Inputs, stepOutputs, prevOutput, runScratch)
+				if !EvaluateWhen(resolvedWhen) {
+					skippedName := step.Name
+					if skippedName == "" {
+						skippedName = fmt.Sprintf("step-%d", step.Position)
+					}
+					stepStartedAt := time.Now().UTC()
+					stepCompletedAt := stepStartedAt
+					skippedResult := WorkflowStepResult{
+						Position:     step.Position,
+						Slug:         skippedName,
+						Status:       "skipped",
+						StartedAt:    stepStartedAt,
+						CompletedAt:  &stepCompletedAt,
+						SkipReason:   "when_false",
+						WhenResolved: resolvedWhen,
+					}
+					run.Steps = append(run.Steps, skippedResult)
+					stepOutputs[skippedName] = "" // skipped → empty so downstream {{inputs.x}} stays well-defined
+					if broadcast != nil {
+						broadcast("workflow_skipped", map[string]any{
+							"workflow_id":   w.ID,
+							"run_id":        run.ID,
+							"position":      step.Position,
+							"slug":          skippedName,
+							"reason":        "when_false",
+							"when_resolved": resolvedWhen,
+						})
+					}
+					continue
+				}
+			}
+
 			var stepResult WorkflowStepResult
 
 			if step.Routine != "" {
@@ -181,10 +282,106 @@ func MakeWorkflowRunner(
 				continue
 			}
 
+			// Phase 8: sub-workflow step. The parent passes its current
+			// scratchpad as the child's initialInputs so {{run.scratch.KEY}}
+			// references survive across the call boundary. The child's
+			// last-step output becomes this step's output, which then flows
+			// to the next sibling via {{prev.output}}.
+			if strings.TrimSpace(step.SubWorkflow) != "" {
+				subID := strings.TrimSpace(step.SubWorkflow)
+				subName := step.Name
+				if subName == "" {
+					subName = fmt.Sprintf("step-%d", step.Position)
+				}
+				stepStartedAt := time.Now().UTC()
+				if cfg.subWorkflow == nil {
+					stepCompletedAt := time.Now().UTC()
+					stepResult = WorkflowStepResult{
+						Position:    step.Position,
+						Slug:        subName,
+						Status:      "failed",
+						Error:       "sub_workflow support not configured",
+						StartedAt:   stepStartedAt,
+						CompletedAt: &stepCompletedAt,
+					}
+					anyStepFailed = true
+					run.Steps = append(run.Steps, stepResult)
+					if broadcast != nil {
+						broadcast("workflow_step_complete", map[string]any{
+							"workflow_id": w.ID, "run_id": run.ID,
+							"position": step.Position, "slug": subName,
+							"status": "failed", "error": stepResult.Error,
+						})
+					}
+					if step.EffectiveOnFailure() == "stop" {
+						aborted = true
+						break
+					}
+					continue
+				}
+				// Snapshot scratch so a child mutation doesn't race the parent map.
+				childInputs := make(map[string]string, len(runScratch))
+				for k, v := range runScratch {
+					childInputs[k] = v
+				}
+				if broadcast != nil {
+					broadcast("workflow_step_started", map[string]any{
+						"workflow_id": w.ID, "run_id": run.ID,
+						"position": step.Position, "slug": subName,
+						"sub_workflow": subID,
+					})
+				}
+				output, subErr := cfg.subWorkflow(ctx, subID, childInputs)
+				stepCompletedAt := time.Now().UTC()
+				if subErr != nil {
+					stepResult = WorkflowStepResult{
+						Position:    step.Position,
+						Slug:        subName,
+						Status:      "failed",
+						Error:       fmt.Sprintf("sub_workflow %s: %v", subID, subErr),
+						StartedAt:   stepStartedAt,
+						CompletedAt: &stepCompletedAt,
+					}
+					anyStepFailed = true
+					run.Steps = append(run.Steps, stepResult)
+					if broadcast != nil {
+						broadcast("workflow_step_complete", map[string]any{
+							"workflow_id": w.ID, "run_id": run.ID,
+							"position": step.Position, "slug": subName,
+							"status": "failed", "error": stepResult.Error,
+						})
+					}
+					if step.EffectiveOnFailure() == "stop" {
+						aborted = true
+						break
+					}
+					continue
+				}
+				stepResult = WorkflowStepResult{
+					Position:    step.Position,
+					Slug:        subName,
+					Status:      "success",
+					Output:      output,
+					StartedAt:   stepStartedAt,
+					CompletedAt: &stepCompletedAt,
+				}
+				stepOutputs[subName] = output
+				prevOutput = output
+				run.Steps = append(run.Steps, stepResult)
+				if broadcast != nil {
+					broadcast("workflow_step_complete", map[string]any{
+						"workflow_id": w.ID, "run_id": run.ID,
+						"position": step.Position, "slug": subName,
+						"status": "success",
+					})
+				}
+				continue
+			}
+
 			if step.Prompt != "" {
 				// Inline step path.
 				resolvedPrompt := resolveInlineVars(step.Prompt, step.Vars)
-				resolvedPrompt = resolveRuntimeVars(resolvedPrompt, step.Inputs, stepOutputs, prevOutput)
+				resolvedPrompt = resolveRuntimeVars(resolvedPrompt, step.Inputs, stepOutputs, prevOutput, runScratch)
 				// Detect any placeholders that were not resolved. Sending a prompt
 				// with literal "{{inputs.result}}" tokens to the agent produces
 				// confusing, garbage-in/garbage-out behaviour. Fail the step
@@ -232,11 +429,58 @@ func MakeWorkflowRunner(
 					stepName = fmt.Sprintf("step-%d", step.Position)
 				}
 				runID := fmt.Sprintf("wf-%s-step-%d-%d", w.ID, step.Position, time.Now().UnixMilli())
+
+				// Token streaming (Phase 1.3). Throttle emission so a long
+				// model output doesn't flood the WS bus: flush whenever the
+				// pending buffer reaches 256 chars OR 100ms have elapsed since
+				// the last flush. The runner pre-builds the closure so each
+				// step gets its own buffer + last-flush timestamp.
+				var (
+					tokBufMu     sync.Mutex
+					tokBuf       strings.Builder
+					tokLastFlush = time.Now()
+				)
+				flushTokens := func(force bool) {
+					tokBufMu.Lock()
+					if tokBuf.Len() == 0 {
+						tokBufMu.Unlock()
+						return
+					}
+					if !force && tokBuf.Len() < 256 && time.Since(tokLastFlush) < 100*time.Millisecond {
+						tokBufMu.Unlock()
+						return
+					}
+					chunk := tokBuf.String()
+					tokBuf.Reset()
+					tokLastFlush = time.Now()
+					tokBufMu.Unlock()
+					if broadcast != nil {
+						broadcast("workflow_step_token", map[string]any{
+							"workflow_id":   w.ID,
+							"run_id":        runID,
+							"step_name":     stepName,
+							"step_position": step.Position,
+							"token":         chunk,
+						})
+					}
+				}
+				onToken := func(t string) {
+					tokBufMu.Lock()
+					tokBuf.WriteString(t)
+					tokBufMu.Unlock()
+					flushTokens(false)
+				}
+
 				opts := RunOptions{
-					RunID:       runID,
-					AgentName:   step.Agent,
-					Prompt:      fullPrompt,
-					Connections: step.Connections,
+					RunID:         runID,
+					AgentName:     step.Agent,
+					Prompt:        fullPrompt,
+					Connections:   step.Connections,
+					WorkflowID:    w.ID,
+					StepName:      stepName,
+					StepPosition:  step.Position,
+					OnToken:       onToken,
+					ModelOverride: step.ModelOverride,
 				}
 				// Apply per-step timeout if set. The step context is always a child
 			// of the workflow context so the workflow-level deadline still wins.
@@ -248,7 +492,23 @@ func MakeWorkflowRunner(
 				defer stepCancel()
 				stepHadOwnTimeout = true
 			}
+			// Plumb a scratchpad writer onto the step context. Tools (e.g.
+			// future set_scratch PromptTool) read this via ScratchSetter and
+			// can mutate the live runScratch map. Mutex-free is safe because
+			// linear workflows execute one step at a time; when fan-out lands
+			// (Phase 8) this needs a sync.Map or per-call mutex.
+			scratchSetter := func(k, v string) error {
+				runScratch[k] = v
+				return nil
+			}
+			stepCtx = WithScratchSetter(stepCtx, scratchSetter)
+			stepStartedAt := time.Now().UTC()
 			output, agentErr := executeStepWithRetry(stepCtx, agentFn, opts, step)
+			stepCompletedAt := time.Now().UTC()
+			stepLatencyMs := stepCompletedAt.Sub(stepStartedAt).Milliseconds()
+			// Final flush: emit any tokens still buffered when the agent
+			// finished so the live UI sees the complete output.
+			flushTokens(true)
 			// Annotate the error so operators know which deadline fired.
 			if agentErr != nil && stepHadOwnTimeout && errors.Is(agentErr, context.DeadlineExceeded) {
 				agentErr = fmt.Errorf("step %q timed out after %s: %w", step.Name, step.TimeoutDuration(), agentErr)
@@ -259,9 +519,12 @@ func MakeWorkflowRunner(
 				}
 				sessionID := runID
 				stepResult = WorkflowStepResult{
-					Position:  step.Position,
-					Slug:      stepName,
-					SessionID: sessionID,
+					Position:    step.Position,
+					Slug:        stepName,
+					SessionID:   sessionID,
+					StartedAt:   stepStartedAt,
+					CompletedAt: &stepCompletedAt,
+					LatencyMs:   stepLatencyMs,
 				}
 				if agentErr != nil {
 					stepResult.Status = "failed"
@@ -284,11 +547,27 @@ func MakeWorkflowRunner(
 					if (stepSucceeded && step.Notify.OnSuccess) || (!stepSucceeded && step.Notify.OnFailure) {
 						sev := parseSeverity(w.Notification.Severity)
 						pos := step.Position
+						// Phase 2: prefer the agent's own one-line {"summary":"..."}
+						// JSON block (which the runner explicitly instructs the agent
+						// to emit) for the notification headline. Falls back to the
+						// generic "[wf] Step N: name" when parseOutput can't find one.
+						headline := fmt.Sprintf("[%s] Step %d: %s", w.Name, step.Position, stepName)
+						body := output
+						if stepSucceeded {
+							if sum, det := parseOutput(output); sum != "" && sum != "(no output)" {
+								headline = fmt.Sprintf("[%s] %s", w.Name, sum)
+								// Use the agent's own narrative as the body when present;
+								// otherwise keep the full output so operators see context.
+								if det != "" {
+									body = det
+								}
+							}
+						}
 						n := &notification.Notification{
 							ID:           notification.NewID(),
 							RunID:        runID,
 							WorkflowID:   w.ID,
-							Summary:      fmt.Sprintf("[%s] Step %d: %s", w.Name, step.Position, stepName),
+							Summary:      headline,
 							Severity:     sev,
 							Status:       notification.StatusPending,
 							StepPosition: &pos,
@@ -303,9 +582,9 @@ func MakeWorkflowRunner(
 							// An empty output (e.g. agent returned nothing) results in an
 							// empty Detail string — handled gracefully downstream: space
 							// delivery receives "" which is valid, and inbox is always written.
-							n.Detail = output
+							n.Detail = body
 						}
-						deliveries := dispatchNotification(n, step.Notify.DeliverTo, notifStore, spaceDeliveryFn, huginnDir, deliverers, onDeliveryFailure)
+						deliveries := dispatchNotification(n, step.Notify.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, step.Agent, huginnDir, deliverers, onDeliveryFailure)
 						n.Deliveries = deliveries
 						if notifStore != nil {
 							if putErr := notifStore.Put(n); putErr != nil {
@@ -323,6 +602,7 @@ func MakeWorkflowRunner(
 						"workflow_id": w.ID, "run_id": run.ID,
 						"position": step.Position, "slug": stepName,
 						"status": stepResult.Status, "session_id": sessionID,
+						"latency_ms": stepLatencyMs,
 					})
 				}
 
@@ -371,6 +651,28 @@ func MakeWorkflowRunner(
 			run.Status = WorkflowRunStatusComplete
 		}
 
+		// Phase 4/observability: emit terminal metrics once the status is
+		// final. We deliberately do this BEFORE persistence and notification
+		// so a slow notification path can't skew the latency histogram.
+		if cfg.metrics != nil {
+			cfg.metrics.Record("huginn.workflow.run.total", 1, "status:"+string(run.Status), "workflow_id:"+w.ID)
+			latencyMs := float64(now.Sub(run.StartedAt).Milliseconds())
+			if latencyMs >= 0 {
+				cfg.metrics.Histogram("huginn.workflow.run.latency_ms", latencyMs, "status:"+string(run.Status), "workflow_id:"+w.ID)
+			}
+			for _, sr := range run.Steps {
+				cfg.metrics.Record("huginn.workflow.step.total", 1, "status:"+sr.Status, "workflow_id:"+w.ID)
+				// Skipped steps have no meaningful latency; exclude them from
+				// the histogram so percentiles describe real work.
+				if sr.Status == "skipped" {
+					continue
+				}
+				if sr.LatencyMs > 0 {
+					cfg.metrics.Histogram("huginn.workflow.step.latency_ms", float64(sr.LatencyMs), "status:"+sr.Status, "workflow_id:"+w.ID)
+				}
+			}
+		}
+
 		// Workflow-level notification.
 		// "succeeded" means all steps passed (complete). Partial and failed
 		// both count as non-success for notification routing purposes.
@@ -391,7 +693,10 @@ func MakeWorkflowRunner(
 				CreatedAt:     time.Now().UTC(),
 				UpdatedAt:     time.Now().UTC(),
 			}
-			deliveries := dispatchNotification(n, w.Notification.DeliverTo, notifStore, spaceDeliveryFn, huginnDir, deliverers, onDeliveryFailure)
+			// Workflow-level notifications have no single agent author — use ""
+			// so the AgentDMDeliveryFunc binding can decide a default
+			// (e.g. the workflow's lead agent).
+			deliveries := dispatchNotification(n, w.Notification.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, "", huginnDir, deliverers, onDeliveryFailure)
 			n.Deliveries = deliveries
 			// Persist the run record FIRST — it is the authoritative historical record.
 			// On a crash between these two writes the run still exists and the user
@@ -439,6 +744,15 @@ func MakeWorkflowRunner(
 			notifyFn(w.Name, msg)
 		}
 
+		// Phase 5: workflow chaining. The hook decides (based on parent.Chain
+		// and run.Status) whether to trigger a downstream workflow. The hook
+		// runs synchronously after persistence + WS broadcast so the
+		// downstream watcher sees the parent transition first; the trigger
+		// call itself dispatches to a goroutine inside the scheduler.
+		if cfg.chainTrigger != nil && !cancelled {
+			cfg.chainTrigger(w, run)
+		}
+
 		return nil
 	}
 }
@@ -454,7 +768,20 @@ func resolveInlineVars(prompt string, vars map[string]string) string {
 
 // resolveRuntimeVars substitutes runtime step outputs into the prompt.
 // Resolution order: static vars first (already done by resolveInlineVars),
-// then named inputs ({{inputs.alias}}), then {{prev.output}}.
+// then JSON field access on named inputs and prev (Phase 2), then plain
+// {{inputs.alias}} / {{prev.output}}, then {{run.scratch.KEY}}.
+//
+// JSON field access semantics (Phase 2):
+//
+//	{{prev.output.field}}       → JSON decode prevOutput, look up "field"
+//	{{inputs.alias.field.sub}}  → JSON decode inputs[alias], walk "field.sub"
+//
+// Decoded field values are rendered back to a string. Strings/numbers/bools
+// render verbatim; objects/arrays re-marshal to compact JSON so downstream
+// steps still get well-formed JSON they can re-parse. When the source isn't
+// valid JSON or the path doesn't exist the placeholder is left intact and a
+// warning is logged — the runner will then trip the unresolved-placeholder
+// check and fail the step rather than feeding garbage to the agent.
 //
 // Edge cases:
 //   - Entries where As == "" are skipped; substituting into "{{inputs.}}" is
@@ -467,8 +794,16 @@ func resolveInlineVars(prompt string, vars map[string]string) string {
 //   - On the first step prevOutput is "" so {{prev.output}} is replaced with an
 //     empty string.  This is intentional: downstream steps should not receive a
 //     literal "{{prev.output}}" token in their prompts.
-func resolveRuntimeVars(prompt string, inputs []StepInput, stepOutputs map[string]string, prevOutput string) string {
-	result := prompt
+//   - scratch may be nil; in that case all {{run.scratch.*}} placeholders are
+//     left unresolved (which causes the step to fail per the unresolved-placeholder
+//     guard, which is the desired behaviour — a missing key is a bug).
+func resolveRuntimeVars(prompt string, inputs []StepInput, stepOutputs map[string]string, prevOutput string, scratch map[string]string) string {
+	// Pre-process JSON field-access placeholders BEFORE the literal substitutions
+	// below. That way a JSON output like '{"items":[1,2]}' with a literal
+	// `{{prev.output}}` placeholder elsewhere in the prompt still gets the raw
+	// JSON inserted, while `{{prev.output.items}}` resolves to the field.
+	result := resolveJSONFieldAccess(prompt, inputs, stepOutputs, prevOutput)
+
 	for _, inp := range inputs {
 		if inp.As == "" {
 			slog.Warn("scheduler: resolveRuntimeVars: skipping input with empty As field",
@@ -488,7 +823,113 @@ func resolveRuntimeVars(prompt string, inputs []StepInput, stepOutputs map[strin
 		}
 	}
 	result = strings.ReplaceAll(result, "{{prev.output}}", prevOutput)
+	// Run scratchpad: {{run.scratch.KEY}} → scratch[KEY]. Missing keys are left
+	// unresolved by design so the placeholder-guard fails the step.
+	if len(scratch) > 0 {
+		for k, v := range scratch {
+			result = strings.ReplaceAll(result, "{{run.scratch."+k+"}}", v)
+		}
+	}
 	return result
+}
+
+// jsonPlaceholderRe matches {{prev.output.PATH}} and {{inputs.ALIAS.PATH}} where
+// PATH is a dotted sequence of identifier characters. The capture groups are:
+//
+//	1: empty for prev, alias name for inputs
+//	2: dotted path (no leading dot)
+var jsonPlaceholderRe = regexp.MustCompile(`\{\{(?:prev\.output|inputs\.([A-Za-z_][A-Za-z0-9_]*))\.([A-Za-z_][A-Za-z0-9_.]*)\}\}`)
+
+// resolveJSONFieldAccess walks every {{prev.output.PATH}} / {{inputs.ALIAS.PATH}}
+// occurrence in prompt and replaces it with the dotted-path lookup result on the
+// JSON-decoded source. Unknown sources / parse failures / missing paths leave the
+// placeholder untouched so downstream guards can fail the step instead of
+// silently producing garbled prompts.
+func resolveJSONFieldAccess(prompt string, inputs []StepInput, stepOutputs map[string]string, prevOutput string) string {
+	aliasToFromStep := make(map[string]string, len(inputs))
+	for _, inp := range inputs {
+		if inp.As != "" && inp.FromStep != "" {
+			aliasToFromStep[inp.As] = inp.FromStep
+		}
+	}
+	return jsonPlaceholderRe.ReplaceAllStringFunc(prompt, func(match string) string {
+		groups := jsonPlaceholderRe.FindStringSubmatch(match)
+		if len(groups) != 3 {
+			return match
+		}
+		alias, path := groups[1], groups[2]
+		var src string
+		if alias == "" {
+			src = prevOutput
+		} else {
+			fromStep, ok := aliasToFromStep[alias]
+			if !ok {
+				slog.Warn("scheduler: JSON field access: unknown alias", "alias", alias)
+				return match
+			}
+			out, ok := stepOutputs[fromStep]
+			if !ok {
+				return match
+			}
+			src = out
+		}
+		val, ok := lookupJSONPath(src, path)
+		if !ok {
+			return match
+		}
+		return val
+	})
+}
+
+// lookupJSONPath JSON-decodes src and walks dotted path. Returns the rendered
+// string and true on success. Strings/numbers/bools render verbatim; objects
+// and arrays re-marshal to compact JSON so downstream steps still see
+// structured data. Returns ("", false) on any decode/lookup error so the
+// caller can leave the placeholder intact.
+func lookupJSONPath(src, path string) (string, bool) {
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return "", false
+	}
+	var root any
+	if err := json.Unmarshal([]byte(src), &root); err != nil {
+		return "", false
+	}
+	cur := root
+	for _, seg := range strings.Split(path, ".") {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		cur, ok = obj[seg]
+		if !ok {
+			return "", false
+		}
+	}
+	switch v := cur.(type) {
+	case string:
+		return v, true
+	case float64:
+		// json.Unmarshal renders all numbers as float64 — render back without
+		// trailing ".0" for integer-valued floats so prompts read naturally.
+		if v == float64(int64(v)) {
+			return fmt.Sprintf("%d", int64(v)), true
+		}
+		return fmt.Sprintf("%g", v), true
+	case bool:
+		if v {
+			return "true", true
+		}
+		return "false", true
+	case nil:
+		return "null", true
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", false
+		}
+		return string(b), true
+	}
 }
 
 // parseOutput extracts summary and detail from agent output.
@@ -543,14 +984,21 @@ func truncate(s string, max int) string {
 }
 
 // dispatchNotification stores the notification in notifStore (inbox) and delivers
-// to any configured targets (space, webhook, email). Returns the delivery records.
-// huginnDir is used for dead-letter JSONL on external delivery failure; pass "" to skip.
-// deliverers may be nil, in which case webhook/email targets are logged and skipped.
+// to any configured targets (space, agent_dm, webhook, email). Returns the
+// delivery records. huginnDir is used for dead-letter JSONL on external
+// delivery failure; pass "" to skip. deliverers may be nil, in which case
+// webhook/email targets are logged and skipped. agentDMFn may be nil, in
+// which case agent_dm targets are skipped with a warning.
+//
+// stepAgent is the name of the agent that produced this notification — used as
+// the default `From` author when a delivery target leaves Author empty.
 func dispatchNotification(
 	n *notification.Notification,
 	targets []NotificationDelivery,
 	notifStore notification.StoreInterface,
 	spaceDeliveryFn SpaceDeliveryFunc,
+	agentDMFn AgentDMDeliveryFunc,
+	stepAgent string,
 	huginnDir string,
 	deliverers *DelivererRegistry,
 	onDeliveryFailure DeliveryFailureFunc,
@@ -560,6 +1008,11 @@ func dispatchNotification(
 		{Type: "inbox", Target: "inbox", Status: "sent", SentAt: time.Now().UTC()},
 	}
 	for _, t := range targets {
+		// Resolve author: per-target From overrides step agent.
+		author := t.From
+		if author == "" {
+			author = stepAgent
+		}
 		switch t.Type {
 		case "space":
 			if t.SpaceID == "" || spaceDeliveryFn == nil {
@@ -571,6 +1024,29 @@ func dispatchNotification(
 				SentAt: time.Now().UTC(),
 			}
 			if err := spaceDeliveryFn(t.SpaceID, n.Summary, n.Detail); err != nil {
+				rec.Status = "failed"
+				rec.Error = err.Error()
+			} else {
+				rec.Status = "sent"
+			}
+			records = append(records, rec)
+		case "agent_dm":
+			if agentDMFn == nil {
+				slog.Warn("scheduler: agent_dm delivery skipped — agent DM binding not configured",
+					"workflow_id", n.WorkflowID, "step", n.StepName)
+				continue
+			}
+			if author == "" {
+				slog.Warn("scheduler: agent_dm delivery skipped — no agent author resolved",
+					"workflow_id", n.WorkflowID, "step", n.StepName)
+				continue
+			}
+			rec := notification.DeliveryRecord{
+				Type:   "agent_dm",
+				Target: author + "→" + t.User,
+				SentAt: time.Now().UTC(),
+			}
+			if err := agentDMFn(author, t.User, n.Summary, n.Detail); err != nil {
 				rec.Status = "failed"
 				rec.Error = err.Error()
 			} else {

@@ -875,15 +875,20 @@ CREATE TRIGGER IF NOT EXISTS spaces_updated_at
 -- always read as a unit. Junction table would add complexity for zero benefit.
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
-    id              TEXT    NOT NULL PRIMARY KEY,   -- ULID (the run_id)
-    tenant_id       TEXT    NOT NULL DEFAULT '',
-    workflow_id     TEXT    NOT NULL,               -- matches Workflow.ID from YAML
-    status          TEXT    NOT NULL DEFAULT 'running'
-                        CHECK (status IN ('running', 'complete', 'partial', 'failed', 'cancelled')),
-    steps           TEXT    NOT NULL DEFAULT '[]',  -- JSON array of WorkflowStepResult
-    error           TEXT    NOT NULL DEFAULT '',    -- error message if failed
-    started_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    completed_at    TEXT                            -- NULL while running
+    id                 TEXT NOT NULL PRIMARY KEY,   -- ULID (the run_id)
+    tenant_id          TEXT NOT NULL DEFAULT '',
+    workflow_id        TEXT NOT NULL,               -- matches Workflow.ID from YAML
+    status             TEXT NOT NULL DEFAULT 'running'
+                            CHECK (status IN ('running', 'complete', 'partial', 'failed', 'cancelled')),
+    steps              TEXT NOT NULL DEFAULT '[]',  -- JSON array of WorkflowStepResult
+    error              TEXT NOT NULL DEFAULT '',    -- error message if failed
+    started_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at       TEXT,                        -- NULL while running
+    -- Phase 6 (run analytics): the seed inputs supplied by the trigger and a
+    -- point-in-time snapshot of the workflow definition. Both are stored as
+    -- JSON; default '{}' so existing rows added before Phase 6 don't NULL.
+    trigger_inputs     TEXT NOT NULL DEFAULT '{}',
+    workflow_snapshot  TEXT NOT NULL DEFAULT '{}'
 );
 
 -- List runs for a workflow (dashboard, pagination)

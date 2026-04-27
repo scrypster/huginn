@@ -37,6 +37,39 @@ type WorkflowStep struct {
 	// Valid range: 1s–24h. Shorter value wins when both step and workflow timeouts are set.
 	Timeout     string            `yaml:"timeout,omitempty"      json:"timeout,omitempty"`
 	Notify      *StepNotifyConfig `yaml:"notify,omitempty"       json:"notify,omitempty"`
+	// ModelOverride (Phase 7) lets a single step run against a different
+	// model than the agent's default. Empty string means "use the agent's
+	// configured model". The runner forwards this to the backend via
+	// RunOptions.ModelOverride; agents.AgentDef.Model is never mutated.
+	//
+	// Use sparingly — the recommended UX is to clone the agent with a
+	// different model. The override is the escape hatch for "Haiku for
+	// classification, Sonnet for writing, Opus for review" pipelines that
+	// don't need three full agents.
+	ModelOverride string `yaml:"model_override,omitempty" json:"model_override,omitempty"`
+
+	// When (Phase 8) is a conditional expression that gates step execution.
+	// After all `{{run.scratch.K}}`, `{{prev.output}}` and `{{inputs.alias}}`
+	// substitutions are applied, the runner trims the result and treats:
+	//
+	//   "", "false", "0", "no", "off" → skip the step
+	//   anything else                 → run the step
+	//
+	// Skipped steps emit a `workflow_skipped` WS event and persist as a
+	// WorkflowStepResult with Status="skipped". They DO NOT count as
+	// failures and do not trigger on_failure handlers.
+	When string `yaml:"when,omitempty" json:"when,omitempty"`
+
+	// SubWorkflow (Phase 8) instructs the runner to invoke another workflow
+	// (by ID) synchronously as the body of this step, in place of the agent
+	// run. The sub-workflow's last-step output becomes this step's output;
+	// its scratchpad is seeded from the parent run's scratchpad so the child
+	// can read `{{run.scratch.KEY}}` at its first step.
+	//
+	// When SubWorkflow is set, Agent and Prompt are ignored. ModelOverride,
+	// Connections and Vars do not propagate to the sub-workflow — those are
+	// authored independently in the child's YAML.
+	SubWorkflow string `yaml:"sub_workflow,omitempty" json:"sub_workflow,omitempty"`
 
 	// retryDelayParsed and timeoutParsed are populated by Validate; not serialised.
 	retryDelayParsed time.Duration
@@ -102,8 +135,16 @@ func (s WorkflowStep) EffectiveOnFailure() string {
 
 // NotificationDelivery configures a delivery target for workflow notifications.
 type NotificationDelivery struct {
-	Type    string `yaml:"type"               json:"type"`               // "inbox" | "space" | "webhook" | "email"
+	Type    string `yaml:"type"               json:"type"`               // "inbox" | "space" | "agent_dm" | "webhook" | "email"
 	SpaceID string `yaml:"space_id,omitempty" json:"space_id,omitempty"` // for type=space
+
+	// Phase 3: DM and authorship.
+	// User is the recipient when type="agent_dm" (the user the agent should DM).
+	// Empty means "the configured Huginn user" — bindings decide.
+	User string `yaml:"user,omitempty" json:"user,omitempty"`
+	// From is the author label that appears on the resulting message in DMs
+	// and channels. When empty, the runner falls back to the step's Agent.
+	From string `yaml:"from,omitempty" json:"from,omitempty"`
 
 	// Webhook / email common fields.
 	To         string `yaml:"to,omitempty"         json:"to,omitempty"`         // webhook URL or email recipient
@@ -141,6 +182,82 @@ type StepNotifyConfig struct {
 	DeliverTo []NotificationDelivery `yaml:"deliver_to,omitempty" json:"deliver_to,omitempty"`
 }
 
+// NotifyMode describes the four notification states the user-facing radio
+// button can render. The runner derives this from OnSuccess/OnFailure rather
+// than persisting a separate field, so existing YAML stays valid.
+type NotifyMode string
+
+const (
+	NotifyModeNone      NotifyMode = "none"       // both false: silent
+	NotifyModeOnSuccess NotifyMode = "on_success" // only on success
+	NotifyModeOnFailure NotifyMode = "on_failure" // only on failure
+	NotifyModeAlways    NotifyMode = "always"     // both: always notify
+)
+
+// Mode returns the four-state notify mode derived from OnSuccess/OnFailure.
+// nil receivers (no Notify config at all) collapse to NotifyModeNone so UI
+// rendering and analytics treat "missing" and "explicitly silent" the same.
+func (c *StepNotifyConfig) Mode() NotifyMode {
+	if c == nil {
+		return NotifyModeNone
+	}
+	switch {
+	case c.OnSuccess && c.OnFailure:
+		return NotifyModeAlways
+	case c.OnSuccess:
+		return NotifyModeOnSuccess
+	case c.OnFailure:
+		return NotifyModeOnFailure
+	default:
+		return NotifyModeNone
+	}
+}
+
+// SetMode is the inverse of Mode: it normalises the OnSuccess/OnFailure
+// booleans from a four-state radio. Useful for UI handlers that surface the
+// modes as a single picker.
+func (c *StepNotifyConfig) SetMode(mode NotifyMode) {
+	if c == nil {
+		return
+	}
+	switch mode {
+	case NotifyModeAlways:
+		c.OnSuccess, c.OnFailure = true, true
+	case NotifyModeOnSuccess:
+		c.OnSuccess, c.OnFailure = true, false
+	case NotifyModeOnFailure:
+		c.OnSuccess, c.OnFailure = false, true
+	default:
+		c.OnSuccess, c.OnFailure = false, false
+	}
+}
+
+// WorkflowChainConfig configures a "trigger downstream workflow on completion"
+// link. The downstream workflow runs with seeded scratchpad inputs derived
+// from the upstream run.
+type WorkflowChainConfig struct {
+	// Next is the workflow ID to trigger when the upstream run finishes.
+	Next string `yaml:"next" json:"next"`
+	// OnSuccess (default true) chains when the upstream run is `complete`.
+	OnSuccess bool `yaml:"on_success,omitempty" json:"on_success,omitempty"`
+	// OnFailure (default false) chains when the upstream run is `failed` or
+	// `partial`. Set true to build alert pipelines that always fire.
+	OnFailure bool `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
+}
+
+// WorkflowRetryConfig declares workflow-level retry defaults. Any step that
+// does NOT set its own MaxRetries / RetryDelay inherits these values. Steps
+// MAY override either field individually; setting MaxRetries=0 explicitly
+// on a step disables inheritance for that step.
+type WorkflowRetryConfig struct {
+	// MaxRetries is the default retry count for steps without an override.
+	// Values outside [0, maxStepRetries] are clamped at validation time.
+	MaxRetries int `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`
+	// Delay is the default retry-delay duration string (e.g. "30s", "2m")
+	// for steps without an override. Empty means "no delay".
+	Delay string `yaml:"delay,omitempty" json:"delay,omitempty"`
+}
+
 // WorkflowNotificationConfig controls whether the Workflow emits a Notification on completion.
 type WorkflowNotificationConfig struct {
 	OnSuccess bool                   `yaml:"on_success,omitempty" json:"on_success,omitempty"`
@@ -160,6 +277,17 @@ type Workflow struct {
 	Schedule     string                     `yaml:"schedule"               json:"schedule"`
 	Steps        []WorkflowStep             `yaml:"steps"                  json:"steps"`
 	Notification WorkflowNotificationConfig `yaml:"notification,omitempty" json:"notification,omitempty"`
+	// Phase 5: workflow chaining. When set, the scheduler will automatically
+	// trigger the next workflow on this run's terminal status (complete,
+	// failed, or both depending on Chain.OnSuccess / Chain.OnFailure). The
+	// downstream workflow receives the upstream run's last-step output as
+	// `{{run.scratch.upstream_output}}`.
+	Chain *WorkflowChainConfig `yaml:"chain,omitempty" json:"chain,omitempty"`
+	// Phase 8: workflow-level retry defaults. When set, the runner uses
+	// these as the implicit MaxRetries / RetryDelay for any step that does
+	// NOT set its own — so users can author "retry every step three times"
+	// once at the top of the YAML.
+	Retry *WorkflowRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
 	FilePath     string                     `yaml:"-"                      json:"file_path,omitempty"`
 	CreatedAt    time.Time                  `yaml:"created_at,omitempty"   json:"created_at,omitempty"`
 	UpdatedAt    time.Time                  `yaml:"updated_at,omitempty"   json:"updated_at,omitempty"`
@@ -190,17 +318,43 @@ const (
 )
 
 // WorkflowStepResult holds the outcome of a single step execution.
+//
+// Phase 4 (observability): Latency is the wall-clock duration of the step
+// from the moment the agent run started to when it returned (or errored). The
+// runner populates it for every step regardless of outcome so per-run
+// dashboards can chart slow steps without conditionally filtering. TokensIn /
+// TokensOut are placeholders for backend token-usage reporting; populated
+// when the underlying backend exposes usage. Cost is derived from tokens and
+// the model's pricing — left at 0 when pricing isn't configured.
 type WorkflowStepResult struct {
-	Position  int    `json:"position"`
-	Slug      string `json:"slug"`
-	RoutineID string `json:"routine_id"`
-	SessionID string `json:"session_id,omitempty"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
-	Output    string `json:"output,omitempty"`
+	Position    int        `json:"position"`
+	Slug        string     `json:"slug"`
+	RoutineID   string     `json:"routine_id"`
+	SessionID   string     `json:"session_id,omitempty"`
+	Status      string     `json:"status"`
+	Error       string     `json:"error,omitempty"`
+	Output      string     `json:"output,omitempty"`
+	StartedAt   time.Time  `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	LatencyMs   int64      `json:"latency_ms,omitempty"`
+	TokensIn    int        `json:"tokens_in,omitempty"`
+	TokensOut   int        `json:"tokens_out,omitempty"`
+	CostUSD     float64    `json:"cost_usd,omitempty"`
+	// SkipReason is set when Status=="skipped" (e.g. "when_false").
+	SkipReason string `json:"skip_reason,omitempty"`
+	// WhenResolved is the post-substitution When expression when SkipReason is "when_false".
+	WhenResolved string `json:"when_resolved,omitempty"`
 }
 
 // WorkflowRun is a single execution record for a Workflow.
+//
+// Phase 6 (run analytics) added two fields:
+//   - TriggerInputs records the seed inputs used to start the run, so a
+//     downstream caller can replay or fork with identical inputs.
+//   - WorkflowSnapshot captures the workflow definition AT THE TIME the run
+//     started. Replays run against the snapshot so a later YAML edit cannot
+//     "rewrite history". Forks default to the snapshot but the API permits
+//     overriding to use the current definition instead.
 type WorkflowRun struct {
 	ID          string               `json:"id"`
 	WorkflowID  string               `json:"workflow_id"`
@@ -209,4 +363,8 @@ type WorkflowRun struct {
 	StartedAt   time.Time            `json:"started_at"`
 	CompletedAt *time.Time           `json:"completed_at,omitempty"`
 	Error       string               `json:"error,omitempty"`
+
+	// Phase 6: replay/fork support.
+	TriggerInputs    map[string]string `json:"trigger_inputs,omitempty"`
+	WorkflowSnapshot *Workflow         `json:"workflow_snapshot,omitempty"`
 }
