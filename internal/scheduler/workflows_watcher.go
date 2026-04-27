@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -16,7 +17,6 @@ const (
 )
 
 // WatcherScheduler is the subset of Scheduler used by WorkflowsWatcher.
-// Using an interface keeps the watcher independently testable.
 type WatcherScheduler interface {
 	RegisterWorkflow(w *Workflow) error
 	RemoveWorkflow(id string)
@@ -37,12 +37,14 @@ type WorkflowsWatcher struct {
 	sched    WatcherScheduler
 	onChange func() // optional; called after each sync (for tests)
 
+	mu       sync.Mutex
 	lastHash uint64
+	debounce *time.Timer
 	known    map[string]string // workflow id → file path
 }
 
-// NewWorkflowsWatcher creates a WorkflowsWatcher. onChange is called synchronously
-// inside the watcher goroutine after each sync where a change was detected.
+// NewWorkflowsWatcher creates a WorkflowsWatcher. onChange is called
+// (in a new goroutine, after the mutex is released) after each sync.
 // Pass nil if you don't need the callback.
 func NewWorkflowsWatcher(dir string, sched WatcherScheduler, onChange func()) *WorkflowsWatcher {
 	return &WorkflowsWatcher{
@@ -54,50 +56,63 @@ func NewWorkflowsWatcher(dir string, sched WatcherScheduler, onChange func()) *W
 }
 
 // Start begins polling. Blocks until ctx is cancelled. Call in a goroutine.
+// Seeds the initial hash and performs an initial sync before polling begins.
 func (w *WorkflowsWatcher) Start(ctx context.Context) {
-	// Seed hash and load initial workflows.
+	// Seed initial state so the first poll doesn't fire spuriously,
+	// and so the delete test can detect removed files correctly.
+	w.mu.Lock()
 	w.lastHash = w.computeHash()
-	w.sync()
+	w.mu.Unlock()
+	w.sync() // register any already-present workflows
 
 	ticker := time.NewTicker(watcherPollInterval)
 	defer ticker.Stop()
 
-	var debounceTimer *time.Timer
-	defer func() {
-		if debounceTimer != nil {
-			debounceTimer.Stop()
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
+			w.mu.Lock()
+			if w.debounce != nil {
+				w.debounce.Stop()
+			}
+			w.mu.Unlock()
 			return
 		case <-ticker.C:
-			current := w.computeHash()
-			if current == w.lastHash {
-				continue
-			}
-			w.lastHash = current
-
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(watcherDebounce, func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("workflows watcher: panic in sync", "panic", r)
-					}
-				}()
-				w.sync()
-				if w.onChange != nil {
-					w.onChange()
-				}
-			})
+			w.check()
 		}
 	}
 }
 
+func (w *WorkflowsWatcher) check() {
+	current := w.computeHash()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if current == w.lastHash {
+		return
+	}
+	w.lastHash = current
+
+	if w.debounce != nil {
+		w.debounce.Stop()
+	}
+	onChange := w.onChange
+	w.debounce = time.AfterFunc(watcherDebounce, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("workflows watcher: panic in sync", "panic", r)
+			}
+		}()
+		w.sync()
+		if onChange != nil {
+			onChange()
+		}
+	})
+}
+
+// sync loads all YAML files from the directory, registers new/changed workflows,
+// and removes stale ones. Serialized by the caller (AfterFunc fires one at a time
+// within the debounce window; initial sync is called before polling begins).
 func (w *WorkflowsWatcher) sync() {
 	workflows, err := LoadWorkflows(w.dir)
 	if err != nil {
@@ -113,15 +128,20 @@ func (w *WorkflowsWatcher) sync() {
 		}
 	}
 
-	for id := range w.known {
+	w.mu.Lock()
+	known := w.known
+	w.known = onDisk
+	w.mu.Unlock()
+
+	for id := range known {
 		if _, stillThere := onDisk[id]; !stillThere {
 			w.sched.RemoveWorkflow(id)
 		}
 	}
-
-	w.known = onDisk
 }
 
+// computeHash walks dir and hashes the name, size, and mtime of every *.yaml file.
+// Must be called without w.mu held (it does not need the lock; it reads only the filesystem).
 func (w *WorkflowsWatcher) computeHash() uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(w.dir))
