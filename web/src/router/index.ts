@@ -26,6 +26,7 @@ export default createRouter({
     { path: '/inbox', component: InboxView },
     { path: '/routines', redirect: '/workflows' },
     { path: '/workflows/:id?', component: WorkflowsView, props: true },
+    { path: '/workflows/:id/runs/:runId', component: WorkflowsView, props: true },
     { path: '/cloud', component: CloudView },
     { path: '/skills/:tab?', component: SkillsView, props: true },
   ],

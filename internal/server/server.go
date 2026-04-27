@@ -111,6 +111,7 @@ type Server struct {
 	notifStore       notification.StoreInterface // nil if notification storage not configured
 	sched            *scheduler.Scheduler       // nil if scheduler not configured
 	workflowRunStore scheduler.WorkflowRunStoreInterface // nil if not configured
+	deliveryQueue    *scheduler.DeliveryQueue   // optional
 
 	satellite *relay.Satellite // nil if not registered with HuginnCloud
 	outbox    *relay.Outbox   // nil if outbox not wired (no store path)
@@ -682,6 +683,13 @@ func (s *Server) SetWorkflowRunStore(store scheduler.WorkflowRunStoreInterface) 
 	s.workflowRunStore = store
 }
 
+// SetDeliveryQueue wires the durable delivery queue for API access.
+func (s *Server) SetDeliveryQueue(q *scheduler.DeliveryQueue) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliveryQueue = q
+}
+
 // SetVersion sets the application version string used in /api/v1/health
 // responses. main.go calls this with the build-time value baked in by
 // `-ldflags "-X main.version=..."`. Pass an empty string in tests or
@@ -893,6 +901,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/agents/{name}", api(s.handleGetAgent))
 	mux.HandleFunc("PUT /api/v1/agents/{name}", api(withMaxBody(1<<20, s.handleUpdateAgent)))
 	mux.HandleFunc("DELETE /api/v1/agents/{name}", api(s.handleDeleteAgent))
+	mux.HandleFunc("POST /api/v1/agents/{name}/clone", api(withMaxBody(1<<20, s.handleCloneAgent)))
 	mux.HandleFunc("POST /api/v1/agents/{name}/vault/test", api(s.handleVaultTest))
 	mux.HandleFunc("GET /api/v1/agents/{name}/vault-status", api(s.handleAgentVaultHealth))
 	mux.HandleFunc("GET /api/v1/models", api(s.handleListModels))
@@ -967,11 +976,18 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/workflows/{id}",        api(s.handleUpdateWorkflow))
 	mux.HandleFunc("DELETE /api/v1/workflows/{id}",     api(s.handleDeleteWorkflow))
 	mux.HandleFunc("POST /api/v1/workflows/{id}/run",    api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.workflowRunLimiter }, s.handleRunWorkflow)))
+	mux.HandleFunc("POST /api/v1/workflows/{id}/webhook", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.workflowRunLimiter }, s.handleTriggerWebhook)))
 	mux.HandleFunc("POST /api/v1/workflows/{id}/cancel", api(s.handleCancelWorkflow))
 	mux.HandleFunc("GET /api/v1/workflows/{id}/runs",           api(s.handleListWorkflowRuns))
 	mux.HandleFunc("GET /api/v1/workflows/{id}/runs/{run_id}", api(s.handleGetWorkflowRun))
-	mux.HandleFunc("GET /api/v1/delivery-failures",      api(s.handleListDeliveryFailures))
-	mux.HandleFunc("POST /api/v1/delivery-failures/retry", api(s.handleRetryDeliveryFailure))
+	mux.HandleFunc("POST /api/v1/workflows/{id}/runs/{run_id}/replay", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.workflowRunLimiter }, s.handleReplayWorkflowRun)))
+	mux.HandleFunc("POST /api/v1/workflows/{id}/runs/{run_id}/fork",   api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.workflowRunLimiter }, s.handleForkWorkflowRun)))
+	mux.HandleFunc("GET /api/v1/workflows/{id}/runs/{run_id}/diff/{other_run_id}", api(s.handleDiffWorkflowRuns))
+	mux.HandleFunc("GET /api/v1/workflows/cron-preview",       api(s.handleCronPreview))
+	mux.HandleFunc("GET /api/v1/delivery-queue",              api(s.handleListDeliveryQueue))
+	mux.HandleFunc("GET /api/v1/delivery-queue/badge",        api(s.handleDeliveryQueueBadge))
+	mux.HandleFunc("POST /api/v1/delivery-queue/{id}/retry",  api(s.handleRetryDeliveryQueueEntry))
+	mux.HandleFunc("DELETE /api/v1/delivery-queue/{id}",      api(s.handleDismissDeliveryQueueEntry))
 
 	// Notifications API
 	mux.HandleFunc("GET /api/v1/notifications",              api(s.handleListNotifications))

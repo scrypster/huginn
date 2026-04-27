@@ -239,15 +239,112 @@ The history is viewable in the web UI on the Workflow detail page. Entries are n
 
 ## Design constraints
 
-These are intentional v1 design decisions.
+The following are still intentional design decisions. Earlier versions of this doc listed "no inter-step data passing", "no nested workflows", and "no conditional branching" as v1 constraints; those have since been lifted by the changes documented under **Advanced features** below. The remaining constraints are:
 
-**No inter-step data passing.** Each step's prompt is defined statically in its Routine YAML. There is no mechanism to pipe one step's output as the next step's input. Steps communicate only through shared side effects — files written, notifications posted, memory stored. This keeps each Routine independently runnable and testable.
+**No fan-out (yet).** Steps still run sequentially. Parallel execution of step branches is on the roadmap but not yet shipped. If you need true concurrency today, use the Swarm orchestrator (see [multi-agent.md](multi-agent.md)).
 
-**No nested Workflows.** A Workflow step must be a Routine. You cannot reference another Workflow as a step. This prevents recursive scheduling and keeps the execution model flat. If you need a more complex dependency graph, use the Swarm orchestrator (see [multi-agent.md](multi-agent.md)).
+**Variable substitution is string replace, not a template engine.** `{{VAR_NAME}}` and `{{run.scratch.K}}` placeholders are replaced with their resolved string values. There are no loops, filters, or recursive expansion. The `when:` field is the one exception — it understands a small set of falsy literals (`""`, `false`, `0`, `no`, `off`) but performs no operator parsing. If you need richer logic, encode it inside a Routine's prompt and emit a single truthy/falsy summary that the next step's `when:` can evaluate.
 
-**No conditional branching.** The only control flow is `on_failure: stop | continue`. There is no `if`, `switch`, or dynamic step selection. If your pipeline needs conditional logic, express it inside a single Routine's prompt rather than in Workflow structure.
+**No nested cron schedules.** A sub-workflow inherits its parent's lifetime; its own `schedule:` field is ignored when invoked via `sub_workflow:`. The child still runs on its own cron when triggered standalone.
 
-**Variable substitution is string replace, not a template engine.** `{{VAR_NAME}}` placeholders are replaced with their resolved string values. There are no loops, conditionals, filters, or nested substitution.
+---
+
+## Advanced features
+
+The list below documents capabilities added after v1. They are all opt-in: existing Workflow YAMLs continue to behave exactly as before unless you add the new fields.
+
+### Inter-step data passing (`{{prev.output}}`, `{{inputs.x}}`, `{{run.scratch.K}}`)
+
+Each step's prompt may reference the previous step's output, an explicit input from any earlier step, or a key/value scratchpad that lives for the duration of the run. JSON-typed outputs support field access via dot notation (`{{prev.output.summary}}`). The scratchpad is seeded by trigger inputs (manual run body, webhook payload) and mutated by agents at runtime via the `set_scratch` tool.
+
+### Per-step model override (`model_override:`)
+
+Run a single step against a different model than the agent's default — Haiku for classification, Sonnet for writing, Opus for review — without cloning the agent. The override is request-scoped: the agent registry is never mutated. Empty string means "use the agent's configured model".
+
+```yaml
+steps:
+  - position: 1
+    name: classifier
+    agent: triage
+    model_override: claude-haiku-4
+    prompt: "Categorise this PR: {{prev.output}}"
+```
+
+### Conditional execution (`when:`)
+
+Skip a step when an expression resolves to a falsy value. After all `{{...}}` substitutions are applied, the trimmed result is interpreted as:
+
+| Value (case-insensitive) | Behaviour |
+|---|---|
+| `""` (empty) | run the step (no condition) |
+| `false`, `0`, `no`, `off` | skip the step |
+| anything else | run the step |
+
+Skipped steps emit a `workflow_skipped` WS event and persist with `status: "skipped"`. They do not count as failures and do not invoke `on_failure` handlers.
+
+```yaml
+steps:
+  - position: 1
+    name: probe
+    agent: a
+    prompt: "Should we deploy? Reply 'yes' or 'no'."
+  - position: 2
+    name: deploy
+    agent: a
+    when: "{{prev.output}}"  # skipped when step 1 says 'no' / 'off' / etc
+    prompt: "Run the deploy."
+```
+
+### Sub-workflows (`sub_workflow:`)
+
+Invoke another workflow synchronously as the body of a step. The parent's scratchpad is passed to the child as initial inputs; the child's last-step output becomes this step's output and flows to the next sibling via `{{prev.output}}`.
+
+```yaml
+steps:
+  - position: 1
+    name: gather
+    sub_workflow: wf-collect-pr-stats   # resolved by id, loaded fresh from disk
+  - position: 2
+    name: report
+    agent: a
+    prompt: "Summarise: {{prev.output}}"
+```
+
+When `sub_workflow:` is set, `agent:`, `prompt:`, `model_override:`, `connections:`, and `vars:` on the same step are ignored — those are authored independently in the child's YAML. A child failure is treated like an agent failure: the parent step records `status: "failed"` and respects `on_failure: stop | continue`.
+
+### Workflow-level retry defaults (`retry:`)
+
+Set retry defaults once at the top of the YAML rather than repeating them on every step. Steps that explicitly set their own `max_retries` or `retry_delay` keep their override.
+
+```yaml
+id: wf-flaky-vendor
+name: Flaky Vendor Pull
+retry:
+  max_retries: 3
+  delay: 30s
+steps:
+  - position: 1
+    name: fetch
+    agent: vendor-bot
+    prompt: "Pull the manifest"
+  - position: 2
+    name: process
+    agent: vendor-bot
+    prompt: "Validate: {{prev.output}}"
+    max_retries: 1   # override: only retry validation once
+```
+
+### Workflow chaining (`chain:`)
+
+Trigger a downstream workflow when this one reaches a terminal status. The chained workflow receives the parent's last-step output as `{{run.scratch.upstream_output}}` along with the parent run id and status. Edits to the chain take effect without restarting the server because workflows are reloaded fresh at chain time.
+
+### Replay, fork, diff (run analytics)
+
+Each run captures `trigger_inputs` and a point-in-time `workflow_snapshot`. The analytics endpoints support:
+
+- **Replay** (`POST /api/v1/workflows/{id}/runs/{run_id}/replay`) — re-run with the original inputs and the original definition. Newer YAML edits do not affect the replay.
+- **Fork** (`POST /api/v1/workflows/{id}/runs/{run_id}/fork`) — start a fresh run from a prior run's inputs, optionally overridden, against either the snapshot or the current definition.
+- **Diff** (`GET /api/v1/workflows/{id}/runs/{run_id}/diff/{other_run_id}`) — structured per-step comparison of two runs (status, output, error, latency).
 
 ---
 
@@ -282,6 +379,16 @@ First, verify that Huginn is running when the scheduled time arrives — Routine
 **Run shows `partial` but steps look correct**
 
 At least one step failed with `on_failure: continue`. Open the Workflow detail view in the web UI and expand the run entry to see the per-step status breakdown. The failing step will show `failed` with an error message. Check that step's Routine YAML and test it independently.
+
+---
+
+## Run history (web UI)
+
+In the Workflows editor, **Run history** lists executions for the **selected workflow only** (`GET /api/v1/workflows/{id}/runs`). There is no global “all workflows, all runs” view in v1. A cross-workflow index would need a dedicated aggregated API (for example `GET /api/v1/workflow-runs` with pagination) plus UI routing if the product wants that in a later release.
+
+When a step row includes a **session** link, **Artifacts** opens a short list from `GET /api/v1/sessions/{id}/artifacts` (title, kind, status). First-class “pass this file blob to the next step” workflow artifacts are not in v1; use scratch text, workspace paths, or session-scoped artifacts today.
+
+**Replay**, **Fork**, and **Diff vs…** call `POST /api/v1/workflows/{id}/runs/{run_id}/replay`, `POST .../fork`, and `GET .../runs/{run_id}/diff/{other_run_id}` respectively (see server workflow handlers for JSON bodies and error codes).
 
 ---
 

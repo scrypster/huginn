@@ -526,6 +526,11 @@ func (s *Server) handleSkillsExecute(w http.ResponseWriter, r *http.Request) {
 // pushes it to the orchestrator. Workspace rules flow through SetSkillsFragment
 // (so they always appear in ctxText). Skills are accessed via SetSkillsRegistry
 // for per-agent resolution; global fallback is handled in the orchestrator.
+//
+// Idempotent: also registers each skill's PromptTools onto the orchestrator's
+// tool registry. tools.Registry.Register overwrites on duplicate names with a
+// warning, so calling reloadSkills repeatedly (boot + every CRUD mutation) is
+// safe and ensures newly-installed skills become invocable without restart.
 func (s *Server) reloadSkills() {
 	if s.orch == nil {
 		return
@@ -550,10 +555,16 @@ func (s *Server) reloadSkills() {
 	// The orchestrator handles global fallback via reg.CombinedPromptFragment().
 	s.orch.SetSkillsRegistry(reg)
 
-	// Re-inject the AgentExecutor into any new PromptTools that were loaded.
-	// Without this, PromptTools added/changed after initial startup would have
-	// a nil executor and silently fail when invoked.
+	// Register PromptTools from every loaded skill onto the active tool
+	// registry. Without this, server-mode startups never see PromptTools and
+	// agents (interactive *and* scheduled) cannot invoke skill-defined tools.
+	// InjectAgentExecutor below re-wires their executor afterwards.
 	if toolReg := s.orch.ToolRegistry(); toolReg != nil {
+		for _, t := range reg.AllTools() {
+			toolReg.Register(t)
+		}
+		// Re-inject the AgentExecutor so newly-registered PromptTools (and any
+		// already-registered ones) execute against the live orchestrator.
 		skills.InjectAgentExecutor(toolReg, s.orch)
 	}
 
@@ -567,4 +578,12 @@ func (s *Server) reloadSkills() {
 	// refresh is required.
 	workspaceRules := loader.LoadRuleFiles(s.orch.WorkspaceRoot())
 	s.orch.SetSkillsFragment(workspaceRules)
+}
+
+// BootstrapSkills loads skills, registers their PromptTools onto the
+// orchestrator's tool registry, and pushes the registry + workspace rules
+// fragment to the orchestrator. It is the boot-time analogue of every CRUD
+// handler that calls reloadSkills(). Safe to call before agents start running.
+func (s *Server) BootstrapSkills() {
+	s.reloadSkills()
 }

@@ -69,7 +69,7 @@ func TestResolveRuntimeVars_MultipleInputsSameAlias(t *testing.T) {
 		"step-b": "output-b",
 	}
 	prompt := "use {{inputs.result}}"
-	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "")
+	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "", nil)
 	// First input (step-a) replaces the placeholder; second input has nothing left to replace.
 	// So the first match wins.
 	if !strings.Contains(result, "output-a") {
@@ -84,7 +84,7 @@ func TestResolveRuntimeVars_MultipleInputsSameAlias(t *testing.T) {
 // the {{prev.output}} placeholder is replaced correctly.
 func TestResolveRuntimeVars_NoPrevOutput(t *testing.T) {
 	prompt := "based on: {{prev.output}}"
-	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "step-one-output")
+	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "step-one-output", nil)
 	want := "based on: step-one-output"
 	if result != want {
 		t.Errorf("expected %q, got %q", want, result)
@@ -95,7 +95,7 @@ func TestResolveRuntimeVars_NoPrevOutput(t *testing.T) {
 // safely — only {{prev.output}} substitution occurs.
 func TestResolveRuntimeVars_NilInputs(t *testing.T) {
 	prompt := "result: {{prev.output}}"
-	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "ok")
+	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "ok", nil)
 	if result != "result: ok" {
 		t.Errorf("expected 'result: ok', got: %q", result)
 	}
@@ -105,7 +105,7 @@ func TestResolveRuntimeVars_NilInputs(t *testing.T) {
 // {{prev.output}} appears in the middle of text.
 func TestResolveRuntimeVars_PrevOutputInMiddle(t *testing.T) {
 	prompt := "start {{prev.output}} end"
-	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "middle")
+	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "middle", nil)
 	if result != "start middle end" {
 		t.Errorf("expected 'start middle end', got: %q", result)
 	}

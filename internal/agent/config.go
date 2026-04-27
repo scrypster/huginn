@@ -282,6 +282,29 @@ func (o *Orchestrator) skillsFragmentFor(agReg *agents.AgentRegistry) string {
 	return skillsReg.FilteredSkillsFragment(agentSkills)
 }
 
+// SkillsFragmentForAgent resolves the per-agent skills prompt fragment for a
+// specific agent (rather than the registry's default agent). Used by the
+// non-default agent chat path (ChatWithAgent) and by scheduled workflow steps
+// so each agent gets its own assigned skills, not the orchestrator's defaults.
+//
+// Semantics match FilteredSkillsFragment: nil Skills field → global fallback;
+// empty/non-nil → no skills fragment; named list → just those skills.
+// Returns "" when no skills registry is configured.
+func (o *Orchestrator) SkillsFragmentForAgent(ag *agents.Agent) string {
+	o.mu.RLock()
+	skillsReg := o.skillsReg
+	o.mu.RUnlock()
+
+	if skillsReg == nil {
+		return ""
+	}
+	var agentSkills []string
+	if ag != nil {
+		agentSkills = ag.Skills
+	}
+	return skillsReg.FilteredSkillsFragment(agentSkills)
+}
+
 // InvalidateSkillsCache marks the orchestrator's per-agent skills fragment as
 // stale so the next AgentChat call will recompute it from the registry.
 // Intended to be passed as the reload callback to SkillRegistry.SetReloadCallback.

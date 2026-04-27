@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -435,7 +436,12 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 503, "scheduler not configured")
 		return
 	}
-	if err := sched.TriggerWorkflow(r.Context(), target); err != nil {
+	// Phase 5: optional `{"inputs": {...}}` body lets manual runs seed the
+	// run scratchpad so the first step can reference {{run.scratch.KEY}}
+	// without a predecessor step. An empty/missing body is the legacy
+	// no-inputs trigger and stays backwards-compatible.
+	inputs := readManualRunInputs(r)
+	if err := sched.TriggerWorkflowWithInputs(r.Context(), target, inputs); err != nil {
 		if errors.Is(err, scheduler.ErrWorkflowAlreadyRunning) {
 			jsonError(w, 409, "workflow is already running")
 			return
@@ -468,73 +474,6 @@ func (s *Server) handleCancelWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"status": "cancelling", "workflow_id": id})
-}
-
-// handleRetryDeliveryFailure re-queues a failed webhook delivery.
-// On success, appends a retry marker to the dead-letter log (preserving audit trail).
-//
-//	POST /api/v1/delivery-failures/retry
-func (s *Server) handleRetryDeliveryFailure(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		WorkflowID string `json:"workflow_id"`
-		RunID      string `json:"run_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonError(w, 400, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.WorkflowID == "" || body.RunID == "" {
-		jsonError(w, 400, "workflow_id and run_id are required")
-		return
-	}
-
-	// Find the matching failure record.
-	records, err := scheduler.ReadDeliveryFailures(s.huginnDir, 100)
-	if err != nil {
-		jsonError(w, 500, "read delivery failures: "+err.Error())
-		return
-	}
-	var target *scheduler.DeliveryFailureRecord
-	for i := range records {
-		if records[i].WorkflowID == body.WorkflowID && records[i].RunID == body.RunID {
-			target = &records[i]
-			break
-		}
-	}
-	if target == nil {
-		jsonError(w, 404, "delivery failure record not found (may have been retried already)")
-		return
-	}
-
-	// Re-deliver via a fresh webhook deliverer instance.
-	deliverer := scheduler.NewWebhookDeliverer()
-	n := &notification.Notification{
-		WorkflowID: body.WorkflowID,
-		RunID:      body.RunID,
-		Summary:    "Manual retry",
-	}
-	rec := deliverer.Deliver(r.Context(), n, scheduler.NotificationDelivery{Type: "webhook", To: target.URL})
-	if rec.Status != "sent" {
-		jsonError(w, 502, "retry failed: "+rec.Error)
-		return
-	}
-
-	// Append retry marker (append-only; preserves audit trail).
-	scheduler.MarkDeliveryFailureRetried(s.huginnDir, body.WorkflowID, body.RunID, target.URL)
-	jsonOK(w, map[string]string{"status": "retried", "workflow_id": body.WorkflowID, "run_id": body.RunID})
-}
-
-// handleListDeliveryFailures returns the last 7 days of webhook delivery
-// failures (dead-letter records), limited to 100 entries.
-//
-//	GET /api/v1/delivery-failures
-func (s *Server) handleListDeliveryFailures(w http.ResponseWriter, r *http.Request) {
-	records, err := scheduler.ReadDeliveryFailures(s.huginnDir, 100)
-	if err != nil {
-		jsonError(w, 500, "read delivery failures: "+err.Error())
-		return
-	}
-	jsonOK(w, records)
 }
 
 func (s *Server) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request) {
@@ -578,4 +517,500 @@ func (s *Server) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, run)
+}
+
+// readManualRunInputs decodes the optional `{"inputs": {...}}` body of a
+// manual workflow trigger. Missing/empty body returns nil. Body that fails to
+// decode also returns nil — manual triggers should never reject on a
+// malformed body, since the simplest UI form may submit no body at all.
+//
+// Inputs are coerced to strings: scalars render verbatim, complex values
+// re-marshal to compact JSON so downstream `{{run.scratch.K}}` substitutions
+// see something well-formed.
+func readManualRunInputs(r *http.Request) map[string]string {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil
+	}
+	var body struct {
+		Inputs map[string]any `json:"inputs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Inputs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(body.Inputs))
+	for k, v := range body.Inputs {
+		switch val := v.(type) {
+		case string:
+			out[k] = val
+		case nil:
+			out[k] = ""
+		default:
+			b, err := json.Marshal(val)
+			if err == nil {
+				out[k] = string(b)
+			}
+		}
+	}
+	return out
+}
+
+// handleTriggerWebhook is a minimal external trigger that lets a third party
+// kick a workflow with a JSON payload. The body is dropped into the run
+// scratchpad as `{{run.scratch.payload}}` (full JSON) plus per-key entries.
+// In production, gate this endpoint behind an auth middleware (the workflow
+// id alone is not a secret); the current wiring relies on the existing
+// rate-limit + auth middleware applied to /api/v1/* routes.
+//
+//	POST /api/v1/workflows/{id}/webhook  body: any JSON
+func (s *Server) handleTriggerWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	dir := filepath.Join(s.huginnDir, "workflows")
+	workflows, err := scheduler.LoadWorkflows(dir)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	var target *scheduler.Workflow
+	for _, wf := range workflows {
+		if wf.ID == id {
+			target = wf
+			break
+		}
+	}
+	if target == nil {
+		jsonError(w, 404, "workflow not found")
+		return
+	}
+	s.mu.Lock()
+	sched := s.sched
+	s.mu.Unlock()
+	if sched == nil {
+		jsonError(w, 503, "scheduler not configured")
+		return
+	}
+
+	inputs := map[string]string{}
+	if r.Body != nil && r.ContentLength != 0 {
+		var raw any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err == nil {
+			b, _ := json.Marshal(raw)
+			inputs["payload"] = string(b)
+			// If the payload is a flat object, also expose its top-level keys
+			// so simple workflows can reference them as {{run.scratch.foo}}
+			// without an unmarshal step.
+			if obj, ok := raw.(map[string]any); ok {
+				for k, v := range obj {
+					switch val := v.(type) {
+					case string:
+						inputs[k] = val
+					case nil:
+						inputs[k] = ""
+					default:
+						vb, err := json.Marshal(val)
+						if err == nil {
+							inputs[k] = string(vb)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if err := sched.TriggerWorkflowWithInputs(r.Context(), target, inputs); err != nil {
+		if errors.Is(err, scheduler.ErrWorkflowAlreadyRunning) {
+			jsonError(w, 409, "workflow is already running")
+			return
+		}
+		if errors.Is(err, scheduler.ErrConcurrencyLimitReached) {
+			w.Header().Set("Retry-After", "60")
+			jsonError(w, http.StatusServiceUnavailable, "max concurrent workflows capacity reached; retry after 60s")
+			return
+		}
+		jsonError(w, 500, err.Error())
+		return
+	}
+	jsonOK(w, map[string]any{"status": "triggered", "workflow_id": id})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 6 — run analytics: replay, fork, diff
+// ─────────────────────────────────────────────────────────────────────────────
+
+// handleReplayWorkflowRun re-runs a prior run with HIGH FIDELITY. It loads the
+// stored WorkflowSnapshot + TriggerInputs and triggers a fresh run against
+// the snapshotted definition (NOT the current YAML). This makes replays
+// deterministic across YAML edits — exactly the behaviour incident-response
+// debugging expects.
+//
+//	POST /api/v1/workflows/{id}/runs/{run_id}/replay   (no body)
+func (s *Server) handleReplayWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	runID := r.PathValue("run_id")
+
+	s.mu.Lock()
+	store := s.workflowRunStore
+	sched := s.sched
+	s.mu.Unlock()
+	if store == nil {
+		jsonError(w, 503, "run store not configured")
+		return
+	}
+	// Look up the run BEFORE the scheduler check so a missing run id
+	// returns 404 rather than masking with a generic 503.
+	prior, err := store.Get(id, runID)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	if prior == nil {
+		jsonError(w, 404, "run not found")
+		return
+	}
+	if sched == nil {
+		jsonError(w, 503, "scheduler not configured")
+		return
+	}
+	if prior.WorkflowSnapshot == nil || prior.WorkflowSnapshot.ID == "" {
+		// Older runs (created before Phase 6) don't carry a snapshot. Fall
+		// back to the live definition with a header so the UI can warn.
+		w.Header().Set("X-Replay-Source", "live-definition")
+		dir := filepath.Join(s.huginnDir, "workflows")
+		workflows, err := scheduler.LoadWorkflows(dir)
+		if err != nil {
+			jsonError(w, 500, err.Error())
+			return
+		}
+		var live *scheduler.Workflow
+		for _, wf := range workflows {
+			if wf.ID == id {
+				live = wf
+				break
+			}
+		}
+		if live == nil {
+			jsonError(w, 404, "workflow not found and no snapshot available")
+			return
+		}
+		if err := triggerWithChainGuard(r, sched, live, prior.TriggerInputs); err != nil {
+			handleTriggerError(w, err)
+			return
+		}
+		jsonOK(w, map[string]any{
+			"status":            "triggered",
+			"replayed_run_id":   runID,
+			"used_snapshot":     false,
+			"used_input_count":  len(prior.TriggerInputs),
+		})
+		return
+	}
+	// Snapshot path — clone so the runner can mutate safely.
+	snap, err := scheduler.CloneWorkflowOrError(prior.WorkflowSnapshot)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	w.Header().Set("X-Replay-Source", "snapshot")
+	if err := triggerWithChainGuard(r, sched, snap, prior.TriggerInputs); err != nil {
+		handleTriggerError(w, err)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"status":           "triggered",
+		"replayed_run_id":  runID,
+		"used_snapshot":    true,
+		"used_input_count": len(prior.TriggerInputs),
+	})
+}
+
+// handleForkWorkflowRun starts a fresh run that uses the prior run's trigger
+// inputs as a baseline, with optional per-key overrides supplied in the body
+// `{"inputs": {...}, "use_live_definition": false}`. By default forks run
+// against the snapshot (deterministic). Setting use_live_definition=true
+// runs against the current YAML definition — useful for "iterate then
+// re-run from yesterday's inputs" workflows.
+//
+//	POST /api/v1/workflows/{id}/runs/{run_id}/fork
+func (s *Server) handleForkWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	runID := r.PathValue("run_id")
+
+	s.mu.Lock()
+	store := s.workflowRunStore
+	sched := s.sched
+	s.mu.Unlock()
+	if store == nil {
+		jsonError(w, 503, "run store not configured")
+		return
+	}
+	prior, err := store.Get(id, runID)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	if prior == nil {
+		jsonError(w, 404, "run not found")
+		return
+	}
+	if sched == nil {
+		jsonError(w, 503, "scheduler not configured")
+		return
+	}
+
+	var body struct {
+		Inputs            map[string]any `json:"inputs"`
+		UseLiveDefinition bool           `json:"use_live_definition"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	overrides := coerceInputsToStringMap(body.Inputs)
+	merged := scheduler.MergeForkInputs(prior.TriggerInputs, overrides)
+
+	// Pick the workflow definition: snapshot (default) or live YAML.
+	var target *scheduler.Workflow
+	source := "snapshot"
+	if body.UseLiveDefinition || prior.WorkflowSnapshot == nil || prior.WorkflowSnapshot.ID == "" {
+		dir := filepath.Join(s.huginnDir, "workflows")
+		workflows, lErr := scheduler.LoadWorkflows(dir)
+		if lErr != nil {
+			jsonError(w, 500, lErr.Error())
+			return
+		}
+		for _, wf := range workflows {
+			if wf.ID == id {
+				target = wf
+				break
+			}
+		}
+		if target == nil {
+			jsonError(w, 404, "workflow not found and no snapshot available")
+			return
+		}
+		source = "live-definition"
+	} else {
+		clone, cErr := scheduler.CloneWorkflowOrError(prior.WorkflowSnapshot)
+		if cErr != nil {
+			jsonError(w, 500, cErr.Error())
+			return
+		}
+		target = clone
+	}
+	w.Header().Set("X-Fork-Source", source)
+
+	if err := triggerWithChainGuard(r, sched, target, merged); err != nil {
+		handleTriggerError(w, err)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"status":              "triggered",
+		"forked_run_id":       runID,
+		"source":              source,
+		"used_input_count":    len(merged),
+		"override_input_count": len(overrides),
+	})
+}
+
+// handleDiffWorkflowRuns returns a structured side-by-side diff of two runs.
+// Both runs MUST belong to the same workflow ID — cross-workflow diffs are a
+// future feature (the WorkflowChanged flag in the diff payload already
+// signals "across versions" of the same workflow).
+//
+//	GET /api/v1/workflows/{id}/runs/{run_id}/diff/{other_run_id}
+func (s *Server) handleDiffWorkflowRuns(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	leftID := r.PathValue("run_id")
+	rightID := r.PathValue("other_run_id")
+
+	s.mu.Lock()
+	store := s.workflowRunStore
+	s.mu.Unlock()
+	if store == nil {
+		jsonError(w, 503, "run store not configured")
+		return
+	}
+	left, err := store.Get(id, leftID)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	if left == nil {
+		jsonError(w, 404, "left run not found")
+		return
+	}
+	right, err := store.Get(id, rightID)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	if right == nil {
+		jsonError(w, 404, "right run not found")
+		return
+	}
+	jsonOK(w, scheduler.DiffRuns(left, right))
+}
+
+// coerceInputsToStringMap normalises a JSON-decoded inputs object into the
+// runner-friendly map[string]string. Nil and empty maps return nil.
+// Mirrors the logic in readManualRunInputs but reusable from fork.
+func coerceInputsToStringMap(in map[string]any) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		switch val := v.(type) {
+		case string:
+			out[k] = val
+		case nil:
+			out[k] = ""
+		default:
+			b, err := json.Marshal(val)
+			if err == nil {
+				out[k] = string(b)
+			}
+		}
+	}
+	return out
+}
+
+// triggerWithChainGuard wraps the scheduler trigger in the same error
+// translation we use for /run and /webhook so replay/fork return 409 / 503
+// for concurrency rather than a generic 500.
+func triggerWithChainGuard(r *http.Request, sched *scheduler.Scheduler, wf *scheduler.Workflow, inputs map[string]string) error {
+	return sched.TriggerWorkflowWithInputs(r.Context(), wf, inputs)
+}
+
+// handleTriggerError translates scheduler trigger errors into the same HTTP
+// codes used by /run and /webhook so replay/fork callers see consistent
+// responses.
+func handleTriggerError(w http.ResponseWriter, err error) {
+	if errors.Is(err, scheduler.ErrWorkflowAlreadyRunning) {
+		jsonError(w, 409, "workflow is already running")
+		return
+	}
+	if errors.Is(err, scheduler.ErrConcurrencyLimitReached) {
+		w.Header().Set("Retry-After", "60")
+		jsonError(w, http.StatusServiceUnavailable, "max concurrent workflows capacity reached; retry after 60s")
+		return
+	}
+	jsonError(w, 500, err.Error())
+}
+
+// handleCronPreview returns the next-N upcoming run times for a cron
+// expression so the workflow editor UI can render a "next runs" preview while
+// the user types. The endpoint is intentionally side-effect-free and
+// idempotent; no scheduling state is mutated.
+//
+//	GET /api/v1/workflows/cron-preview?expr=...&count=5
+//
+// Response: {"expr": "...", "next_runs": ["2026-04-26T18:30:00Z", ...]}
+// Errors:
+//   - 400 when expr is missing or syntactically invalid (parser surfaces the
+//     details; the body wraps them in {"error": "..."}).
+func (s *Server) handleCronPreview(w http.ResponseWriter, r *http.Request) {
+	expr := strings.TrimSpace(r.URL.Query().Get("expr"))
+	if expr == "" {
+		jsonError(w, 400, "expr query parameter is required")
+		return
+	}
+	count := 5
+	if c := r.URL.Query().Get("count"); c != "" {
+		if parsed, err := strconv.Atoi(c); err == nil {
+			count = parsed
+		}
+	}
+	runs, err := scheduler.CronPreview(expr, count, time.Now().UTC())
+	if err != nil {
+		jsonError(w, 400, err.Error())
+		return
+	}
+	out := struct {
+		Expr     string      `json:"expr"`
+		NextRuns []time.Time `json:"next_runs"`
+	}{Expr: expr, NextRuns: runs}
+	jsonOK(w, out)
+}
+
+// handleListDeliveryQueue returns actionable (failed) delivery queue entries.
+//
+//	GET /api/v1/delivery-queue
+func (s *Server) handleListDeliveryQueue(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonOK(w, []any{})
+		return
+	}
+	entries, err := q.ListActionable(100)
+	if err != nil {
+		jsonError(w, 500, "list delivery queue: "+err.Error())
+		return
+	}
+	jsonOK(w, entries)
+}
+
+// handleDeliveryQueueBadge returns the badge count for the nav indicator.
+//
+//	GET /api/v1/delivery-queue/badge
+func (s *Server) handleDeliveryQueueBadge(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonOK(w, map[string]int{"count": 0})
+		return
+	}
+	count, err := q.BadgeCount()
+	if err != nil {
+		jsonError(w, 500, "badge count: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]int{"count": count})
+}
+
+// handleRetryDeliveryQueueEntry forces immediate retry of a queue entry.
+//
+//	POST /api/v1/delivery-queue/{id}/retry
+func (s *Server) handleRetryDeliveryQueueEntry(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonError(w, 503, "delivery queue not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, 400, "missing id")
+		return
+	}
+	if err := q.ForceRetry(r.Context(), id); err != nil {
+		jsonError(w, 404, "retry failed: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]string{"status": "retrying", "id": id})
+}
+
+// handleDismissDeliveryQueueEntry removes a failed entry from the queue.
+//
+//	DELETE /api/v1/delivery-queue/{id}
+func (s *Server) handleDismissDeliveryQueueEntry(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	q := s.deliveryQueue
+	s.mu.Unlock()
+	if q == nil {
+		jsonError(w, 503, "delivery queue not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, 400, "missing id")
+		return
+	}
+	if err := q.Dismiss(id); err != nil {
+		jsonError(w, 500, "dismiss: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]string{"status": "dismissed", "id": id})
 }

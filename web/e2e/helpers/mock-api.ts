@@ -8,11 +8,39 @@ const workflowsFixture = [
     name: 'Daily Report',
     enabled: true,
     schedule: '0 9 * * 1-5',
+    version: 1,
     steps: [
-      { name: 'Gather Data', agent: 'Coder', prompt: 'Collect daily metrics', position: 0, on_failure: 'abort' },
-      { name: 'Send Summary', agent: 'Coder', prompt: 'Summarize and report', position: 1, on_failure: 'abort', inputs: [{ from_step: 'Gather Data', as: 'data' }] },
+      {
+        name: 'Gather Data',
+        agent: 'Coder',
+        prompt: 'Collect daily metrics',
+        position: 0,
+        on_failure: 'stop',
+        model_override: 'claude-haiku-4',
+        when: '',
+        sub_workflow: '',
+      },
+      {
+        name: 'Send Summary',
+        agent: 'Coder',
+        prompt: 'Summarize and report',
+        position: 1,
+        on_failure: 'continue',
+        inputs: [{ from_step: 'Gather Data', as: 'data' }],
+      },
     ],
+    retry: { max_retries: 2, delay: '10s' },
+    chain: { next: '', on_success: true, on_failure: false },
     notification: { on_success: true, on_failure: true, severity: 'info', deliver_to: [] },
+  },
+  {
+    id: 'wf-2',
+    name: 'Downstream',
+    enabled: true,
+    schedule: '',
+    version: 1,
+    steps: [],
+    notification: { on_success: false, on_failure: false, severity: 'info', deliver_to: [] },
   },
 ]
 
@@ -471,6 +499,18 @@ export async function setupApiMocks(page: Page) {
         },
       })
     }
+    return route.continue()
+  })
+
+  // 26. Delivery queue badge (default: no issues)
+  await page.route('**/api/v1/delivery-queue/badge', route =>
+    route.fulfill({ json: { count: 0 } })
+  )
+
+  // 27. Delivery queue list (default: empty)
+  await page.route('**/api/v1/delivery-queue', route => {
+    const method = route.request().method()
+    if (method === 'GET') return route.fulfill({ json: [] })
     return route.continue()
   })
 }

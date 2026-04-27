@@ -177,7 +177,15 @@ func TestSpawnThread_AgentRuntimePreparer_AddsSchemasAndExecutor(t *testing.T) {
 		t.Errorf("expected ExtraSystem text in system prompt, got %q", rb.gotSystem)
 	}
 
-	// Cleanup must run when the thread ends.
+	// Cleanup is called via defer in the SpawnThread goroutine, which runs
+	// after thread_done is broadcast. Poll briefly to avoid a race.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&cleanupCalls) == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if atomic.LoadInt32(&cleanupCalls) != 1 {
 		t.Errorf("expected runtime Cleanup to be called once, got %d", atomic.LoadInt32(&cleanupCalls))
 	}

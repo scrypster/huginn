@@ -2,12 +2,102 @@ package scheduler
 
 import (
 	"database/sql"
+	"strings"
 
 	"github.com/scrypster/huginn/internal/sqlitedb"
 )
 
-// Migrations returns an empty list — all schema is now in the base schema DDL.
+// Migrations returns the scheduler's pending DDL migrations. Each runs inside
+// a transaction. The framework records applied migrations in `_migrations`
+// so they execute exactly once per database file.
 func Migrations() []sqlitedb.Migration {
+	return []sqlitedb.Migration{
+		{
+			Name: "scheduler_v2_workflow_runs_add_replay_columns",
+			Up:   migrateWorkflowRunsV2AddReplayColumns,
+		},
+		{
+			Name: "scheduler_v3_delivery_queue",
+			Up:   migrateV3DeliveryQueue,
+		},
+	}
+}
+
+func migrateV3DeliveryQueue(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS delivery_queue (
+            id              TEXT    NOT NULL PRIMARY KEY,
+            tenant_id       TEXT    NOT NULL DEFAULT '',
+            workflow_id     TEXT    NOT NULL,
+            run_id          TEXT    NOT NULL,
+            endpoint        TEXT    NOT NULL,
+            channel         TEXT    NOT NULL CHECK (channel IN ('webhook','email')),
+            payload         TEXT    NOT NULL DEFAULT '{}',
+            status          TEXT    NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending','retrying','delivered','failed','superseded')),
+            attempt_count   INTEGER NOT NULL DEFAULT 0,
+            max_attempts    INTEGER NOT NULL DEFAULT 5,
+            retry_window_s  INTEGER NOT NULL DEFAULT 3600,
+            next_retry_at   TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            last_attempt_at TEXT,
+            last_error      TEXT    NOT NULL DEFAULT ''
+        )`,
+		`CREATE INDEX IF NOT EXISTS idx_delivery_queue_work
+            ON delivery_queue (status, next_retry_at)
+            WHERE status IN ('pending','retrying')`,
+		`CREATE INDEX IF NOT EXISTS idx_delivery_queue_workflow
+            ON delivery_queue (workflow_id, run_id)`,
+		`CREATE TABLE IF NOT EXISTS endpoint_health (
+            workflow_id          TEXT    NOT NULL,
+            endpoint             TEXT    NOT NULL,
+            tenant_id            TEXT    NOT NULL DEFAULT '',
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            circuit_state        TEXT    NOT NULL DEFAULT 'closed'
+                                     CHECK (circuit_state IN ('closed','open')),
+            opened_at            TEXT,
+            last_probe_at        TEXT,
+            PRIMARY KEY (workflow_id, endpoint)
+        )`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateWorkflowRunsV2AddReplayColumns adds the trigger_inputs and
+// workflow_snapshot columns introduced in Phase 6 (run analytics). Both are
+// JSON-typed TEXT columns with default '{}' so existing rows stay readable.
+//
+// SQLite supports ADD COLUMN but not IF NOT EXISTS for it, so we tolerate
+// "duplicate column" errors — that's the case where a fresh-DB install
+// already created the columns via the base schema and the migration runs
+// only to record the version marker.
+func migrateWorkflowRunsV2AddReplayColumns(tx *sql.Tx) error {
+	addCol := func(name, ddl string) error {
+		_, err := tx.Exec(ddl)
+		if err == nil {
+			return nil
+		}
+		// SQLite returns: "duplicate column name: trigger_inputs". Swallow
+		// that exact case so the migration is idempotent on fresh installs
+		// where the base schema already provisioned the column.
+		if strings.Contains(err.Error(), "duplicate column name") {
+			return nil
+		}
+		return err
+	}
+	if err := addCol("trigger_inputs",
+		`ALTER TABLE workflow_runs ADD COLUMN trigger_inputs TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return err
+	}
+	if err := addCol("workflow_snapshot",
+		`ALTER TABLE workflow_runs ADD COLUMN workflow_snapshot TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return err
+	}
 	return nil
 }
 

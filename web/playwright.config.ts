@@ -22,10 +22,9 @@ export default defineConfig({
     },
   ],
 
-  // Start vite preview before tests.
-  // IMPORTANT: Run `npm run build` before running tests — preview serves from ../internal/server/dist
+  // Dev server serves current source (hash routes, mocks). CI uses `npm run test:e2e:ci` for build + preview if needed.
   webServer: {
-    command: 'npx vite preview --port 4173',
+    command: 'npx vite --port 4173 --strictPort',
     port: 4173,
     reuseExistingServer: !process.env.CI,
   },

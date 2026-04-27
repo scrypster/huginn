@@ -332,7 +332,7 @@ func TestResolveRuntimeVars_EmptyAs(t *testing.T) {
 	stepOutputs := map[string]string{"step-one": "output-value"}
 	prompt := "do something {{inputs.}} here"
 
-	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "")
+	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "", nil)
 
 	// The placeholder must be left intact because As was empty.
 	if result != prompt {
@@ -349,7 +349,7 @@ func TestResolveRuntimeVars_MissingStep(t *testing.T) {
 	stepOutputs := map[string]string{"step-one": "something"}
 	prompt := "based on: {{inputs.result}}"
 
-	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "")
+	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "", nil)
 
 	if result != prompt {
 		t.Errorf("expected placeholder left unreplaced, got: %q", result)
@@ -365,7 +365,7 @@ func TestResolveRuntimeVars_EmptyFromStep(t *testing.T) {
 	stepOutputs := map[string]string{}
 	prompt := "use {{inputs.alias}} here"
 
-	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "")
+	result := resolveRuntimeVars(prompt, inputs, stepOutputs, "", nil)
 
 	if result != prompt {
 		t.Errorf("expected placeholder left unreplaced, got: %q", result)
@@ -377,7 +377,7 @@ func TestResolveRuntimeVars_EmptyFromStep(t *testing.T) {
 // a literal placeholder.
 func TestResolveRuntimeVars_FirstStepPrevOutput(t *testing.T) {
 	prompt := "use this: {{prev.output}} end"
-	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "")
+	result := resolveRuntimeVars(prompt, nil, map[string]string{}, "", nil)
 
 	want := "use this:  end"
 	if result != want {
@@ -454,7 +454,7 @@ func TestDispatchNotification_NilTargets(t *testing.T) {
 		ID:      "notif-1",
 		Summary: "test",
 	}
-	records := dispatchNotification(n, nil, nil, nil, "", nil, nil)
+	records := dispatchNotification(n, nil, nil, nil, nil, "", "", nil, nil, nil, "")
 
 	if len(records) != 1 {
 		t.Fatalf("expected 1 record (inbox), got %d", len(records))
@@ -475,7 +475,7 @@ func TestDispatchNotification_SpaceDeliveryError(t *testing.T) {
 	spaceErr := errors.New("space unavailable")
 	records := dispatchNotification(n, targets, nil, func(spaceID, summary, detail string) error {
 		return spaceErr
-	}, "", nil, nil)
+	}, nil, "", "", nil, nil, nil, "")
 
 	if len(records) != 2 {
 		t.Fatalf("expected 2 records (inbox + space), got %d", len(records))
@@ -743,7 +743,7 @@ func TestDispatchNotification_SpaceDeliverySuccess(t *testing.T) {
 		called = true
 		calledSpace = spaceID
 		return nil
-	}, "", nil, nil)
+	}, nil, "", "", nil, nil, nil, "")
 	if !called {
 		t.Error("expected spaceDeliveryFn to be called")
 	}

@@ -119,6 +119,42 @@ func (a *Agent) SwapModel(modelID string) {
 	a.ModelID = modelID
 }
 
+// WithModelOverride returns a shallow copy of this agent whose ModelID has
+// been replaced. The copy is request-scoped — the shared registry instance
+// is never mutated, so two concurrent workflow steps can run the same agent
+// against different models safely.
+//
+// Returns the receiver unchanged if modelID is empty (no override). Provider
+// and Endpoint are preserved so backend resolution still works.
+func (a *Agent) WithModelOverride(modelID string) *Agent {
+	if strings.TrimSpace(modelID) == "" {
+		return a
+	}
+	a.mu.Lock()
+	cp := Agent{
+		Name:                a.Name,
+		SystemPrompt:        a.SystemPrompt,
+		Color:               a.Color,
+		Icon:                a.Icon,
+		IsDefault:           a.IsDefault,
+		ModelID:             modelID,
+		Provider:            a.Provider,
+		Endpoint:            a.Endpoint,
+		APIKey:              a.APIKey,
+		VaultName:           a.VaultName,
+		Plasticity:          a.Plasticity,
+		MemoryEnabled:       a.MemoryEnabled,
+		ContextNotesEnabled: a.ContextNotesEnabled,
+		MemoryMode:          a.MemoryMode,
+		VaultDescription:    a.VaultDescription,
+		Toolbelt:            a.Toolbelt,
+		Skills:              a.Skills,
+		LocalTools:          a.LocalTools,
+	}
+	a.mu.Unlock()
+	return &cp
+}
+
 // DelegationContext returns the last MaxDelegationHistory messages for use as
 // context when this agent is consulted by another agent.
 func (a *Agent) DelegationContext() []backend.Message {

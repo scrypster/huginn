@@ -43,9 +43,9 @@ func drainToCompletion(t *testing.T, c *wsClient) WSMessage {
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for done or error message from WS handler")
+			return WSMessage{} // unreachable; satisfies compiler
 		}
 	}
-	panic("unreachable")
 }
 
 // newTestServer builds a minimal Server wired with the provided backend.

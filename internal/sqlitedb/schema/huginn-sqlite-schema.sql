@@ -875,15 +875,20 @@ CREATE TRIGGER IF NOT EXISTS spaces_updated_at
 -- always read as a unit. Junction table would add complexity for zero benefit.
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
-    id              TEXT    NOT NULL PRIMARY KEY,   -- ULID (the run_id)
-    tenant_id       TEXT    NOT NULL DEFAULT '',
-    workflow_id     TEXT    NOT NULL,               -- matches Workflow.ID from YAML
-    status          TEXT    NOT NULL DEFAULT 'running'
-                        CHECK (status IN ('running', 'complete', 'partial', 'failed', 'cancelled')),
-    steps           TEXT    NOT NULL DEFAULT '[]',  -- JSON array of WorkflowStepResult
-    error           TEXT    NOT NULL DEFAULT '',    -- error message if failed
-    started_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    completed_at    TEXT                            -- NULL while running
+    id                 TEXT NOT NULL PRIMARY KEY,   -- ULID (the run_id)
+    tenant_id          TEXT NOT NULL DEFAULT '',
+    workflow_id        TEXT NOT NULL,               -- matches Workflow.ID from YAML
+    status             TEXT NOT NULL DEFAULT 'running'
+                            CHECK (status IN ('running', 'complete', 'partial', 'failed', 'cancelled')),
+    steps              TEXT NOT NULL DEFAULT '[]',  -- JSON array of WorkflowStepResult
+    error              TEXT NOT NULL DEFAULT '',    -- error message if failed
+    started_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at       TEXT,                        -- NULL while running
+    -- Phase 6 (run analytics): the seed inputs supplied by the trigger and a
+    -- point-in-time snapshot of the workflow definition. Both are stored as
+    -- JSON; default '{}' so existing rows added before Phase 6 don't NULL.
+    trigger_inputs     TEXT NOT NULL DEFAULT '{}',
+    workflow_snapshot  TEXT NOT NULL DEFAULT '{}'
 );
 
 -- List runs for a workflow (dashboard, pagination)
@@ -894,6 +899,47 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
     ON workflow_runs (tenant_id, status)
     WHERE status = 'running';
+
+
+-- delivery_queue: durable retry queue for failed webhook/email deliveries.
+CREATE TABLE IF NOT EXISTS delivery_queue (
+    id              TEXT    NOT NULL PRIMARY KEY,
+    tenant_id       TEXT    NOT NULL DEFAULT '',
+    workflow_id     TEXT    NOT NULL,
+    run_id          TEXT    NOT NULL,
+    endpoint        TEXT    NOT NULL,
+    channel         TEXT    NOT NULL CHECK (channel IN ('webhook', 'email')),
+    payload         TEXT    NOT NULL DEFAULT '{}',
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'retrying', 'delivered', 'failed', 'superseded')),
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    max_attempts    INTEGER NOT NULL DEFAULT 5,
+    retry_window_s  INTEGER NOT NULL DEFAULT 3600,
+    next_retry_at   TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_attempt_at TEXT,
+    last_error      TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_queue_work
+    ON delivery_queue (status, next_retry_at)
+    WHERE status IN ('pending', 'retrying');
+
+CREATE INDEX IF NOT EXISTS idx_delivery_queue_workflow
+    ON delivery_queue (workflow_id, run_id);
+
+-- endpoint_health: per-(workflow_id, endpoint) circuit breaker state.
+CREATE TABLE IF NOT EXISTS endpoint_health (
+    workflow_id          TEXT    NOT NULL,
+    endpoint             TEXT    NOT NULL,
+    tenant_id            TEXT    NOT NULL DEFAULT '',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    circuit_state        TEXT    NOT NULL DEFAULT 'closed'
+                             CHECK (circuit_state IN ('closed', 'open')),
+    opened_at            TEXT,
+    last_probe_at        TEXT,
+    PRIMARY KEY (workflow_id, endpoint)
+);
 
 
 -- =============================================================================
