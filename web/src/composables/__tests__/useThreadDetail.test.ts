@@ -845,3 +845,54 @@ describe('useThreadDetail — error recovery', () => {
     expect(td.artifact.value!.id).toBe('art-1')
   })
 })
+
+// ── delegationChain hydration ─────────────────────────────────────────────────
+
+describe('useThreadDetail — delegationChain hydration', () => {
+  it('hydrates delegationChain from API response on open', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: [],
+        thread_id: 't-1',
+        session_id: 's-1',
+        delegation_chain: ['Atlas', 'Coder'],
+      }),
+    } as unknown as Response)
+
+    const useThreadDetail = await freshUseThreadDetail()
+    const { delegationChain, open } = useThreadDetail()
+    await open('msg-1')
+
+    expect(delegationChain.value).toEqual(['Atlas', 'Coder'])
+  })
+
+  it('delegationChain is empty when API returns bare array (legacy shape)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    } as unknown as Response)
+
+    const useThreadDetail = await freshUseThreadDetail()
+    const { delegationChain, open } = useThreadDetail()
+    await open('msg-1')
+
+    expect(delegationChain.value).toEqual([])
+  })
+
+  it('delegationChain is empty when API returns object without delegation_chain field', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: [] }),
+    } as unknown as Response)
+
+    const useThreadDetail = await freshUseThreadDetail()
+    const { delegationChain, open } = useThreadDetail()
+    await open('msg-1')
+
+    expect(delegationChain.value).toEqual([])
+  })
+})
