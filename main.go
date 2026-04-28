@@ -3205,6 +3205,19 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	}
 	orch.StartSessionCleanup(ctx)
 
+	// Wire the cross-channel memory replicator. Fans out muninn writes from one
+	// channel member to all other members' vaults in the same space.
+	// The SQLite queue provides durability across restarts.
+	if sqlDB != nil {
+		crossChannelReplicator := agent.NewMemoryReplicator(
+			muninnCfgFilePath,
+			agent.NewSQLiteReplicationQueuer(sqlDB),
+		)
+		orch.SetMemoryReplicator(crossChannelReplicator)
+		go crossChannelReplicator.Start(ctx)
+		defer crossChannelReplicator.Stop()
+	}
+
 	// Now that we know the real address, update the OAuth callback URL.
 	if connMgr != nil {
 		connMgr.SetRedirectURL(fmt.Sprintf("http://%s/oauth/callback", srv.Addr()))
