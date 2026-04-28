@@ -109,13 +109,16 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 	// When gate is nil (no permission gate configured), the forked gate is also nil.
 	var agentGate *permissions.Gate
 	if gate != nil {
-		// Always allow "muninndb" (vault tools) even when the agent has an explicit
-		// toolbelt. The vault schemas are already included in step 3 above; without
-		// adding "muninndb" to allowedProviders, the gate would reject every vault
-		// tool call with "permission denied" for agents that have a non-empty toolbelt.
+		// Always allow "muninndb" (vault tools) and "builtin" (delegation tools and
+		// other builtins) even when the agent has an explicit toolbelt. Without this,
+		// the gate would reject calls to delegate_to_agent (tagged "builtin") and
+		// muninn tools (tagged "muninndb") with "permission denied" for agents that
+		// have a non-empty toolbelt. The schemas are already included by steps 3 and
+		// 4 above; the gate bypass ensures those calls are also permitted at runtime.
 		allowed := agents.AllowedProviders(ag.Toolbelt)
 		if allowed != nil {
 			allowed["muninndb"] = true
+			allowed["builtin"] = true
 		}
 		agentGate = gate.Fork(
 			agents.WatchedProviders(ag.Toolbelt),

@@ -35,9 +35,9 @@ func (t *localTestTool) Execute(_ context.Context, _ map[string]any) tools.ToolR
 	return tools.ToolResult{}
 }
 
-func TestApplyToolbelt_DefaultDenyNoLocalNoExternal(t *testing.T) {
+func TestApplyToolbelt_EmptyConfigNoToolsWhenNoneRegistered(t *testing.T) {
 	reg := buildLocalTestRegistry()
-	ag := &agents.Agent{Name: "test"} // empty LocalTools + empty Toolbelt
+	ag := &agents.Agent{Name: "test"} // empty LocalTools + empty Toolbelt — registry has no delegation tools so step 4 is a no-op
 
 	schemas, _ := applyToolbelt(ag, reg, nil)
 	if len(schemas) != 0 {

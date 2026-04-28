@@ -1470,23 +1470,20 @@ describe('AgentsView', () => {
       skills: [],
       local_tools: [],
     })
-    mockApiAgentsUpdate.mockResolvedValueOnce({})
+    mockApiAgentsUpdate.mockResolvedValue({})
     const w = mountAgent({ agentName: 'Max' })
     await flushPromises()
 
-    // Clear and re-setup the mock to track calls from saveLocalAccessModal
+    const vm = w.vm as unknown as Record<string, unknown>
+    const modalArr = vm.modalLocalTools as string[]
+    modalArr.push('read_file', 'bash')
     mockApiAgentsUpdate.mockClear()
-    mockApiAgentsUpdate.mockResolvedValue({})
-
-    const vm = w.vm as any
-    // Call saveLocalAccessModal - for existing agents, this should call save() which calls api.agents.update
     await (vm.saveLocalAccessModal as () => Promise<void>)()
     await flushPromises()
 
-    // Verify that save() was invoked by checking that api.agents.update was called
     expect(mockApiAgentsUpdate).toHaveBeenCalledWith(
       'Max',
-      expect.objectContaining({ name: 'Max', model: 'claude-3' })
+      expect.objectContaining({ local_tools: ['read_file', 'bash'] })
     )
   })
 
