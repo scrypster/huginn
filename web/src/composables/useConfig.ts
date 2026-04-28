@@ -4,7 +4,7 @@
  * Polls GET /api/v1/config every 30 s and emits a `changed` event
  * when the server-side config differs from the local snapshot.
  */
-import { ref, onUnmounted } from 'vue'
+import { ref, onUnmounted, getCurrentScope } from 'vue'
 import { api } from './useApi'
 
 export interface MCPServer {
@@ -94,13 +94,15 @@ export function useConfig() {
     pollTimer = setInterval(pollForChanges, 30_000)
   }
 
-  onUnmounted(() => {
-    refCount--
-    if (refCount === 0 && pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
-    }
-  })
+  if (getCurrentScope()) {
+    onUnmounted(() => {
+      refCount--
+      if (refCount === 0 && pollTimer) {
+        clearInterval(pollTimer)
+        pollTimer = null
+      }
+    })
+  }
 
   return { config, loading, externallyChanged, loadConfig, saveConfig }
 }

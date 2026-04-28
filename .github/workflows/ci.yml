@@ -39,6 +39,9 @@ jobs:
       - name: Run Go tests
         run: go test -race -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
 
+      - name: Enforce critical package coverage floors
+        run: ./scripts/check_go_coverage.sh
+
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
