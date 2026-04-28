@@ -392,3 +392,79 @@ func TestHandleGetMessageThread_IncludesDelegationChain(t *testing.T) {
 		t.Errorf("DelegationChain[0]: expected 'Coder', got %q", resp.DelegationChain[0])
 	}
 }
+
+func TestGetMessageThread_ReturnsToolCalls(t *testing.T) {
+	srv := testServer(t)
+	db := openTestSQLiteDB(t)
+	srv.SetDB(db)
+
+	sqliteStore := session.NewSQLiteSessionStore(db)
+	sess := sqliteStore.New("tc-test", "/tmp", "model")
+	if err := sqliteStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	parentMsg := session.SessionMessage{
+		ID:      "parent-tc-1",
+		Role:    "user",
+		Content: "do work",
+		Ts:      time.Now().UTC(),
+	}
+	if err := sqliteStore.Append(sess, parentMsg); err != nil {
+		t.Fatalf("append parent: %v", err)
+	}
+
+	wdb := db.Write()
+	if wdb == nil {
+		t.Fatal("write db is nil")
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	_, err := wdb.Exec(`
+		INSERT OR IGNORE INTO threads
+			(id, parent_type, parent_id, agent_name, task, status,
+			 parent_msg_id, created_at, files_modified, key_decisions, artifacts)
+		VALUES (?, 'session', ?, 'Atlas', 'test', 'done',
+		        'parent-tc-1', ?, '[]', '[]', '[]')`,
+		"t-tc-1", sess.ID, ts,
+	)
+	if err != nil {
+		t.Fatalf("insert thread: %v", err)
+	}
+
+	toolCallsJSON := `[{"id":"tc-1","name":"bash","args":{"cmd":"echo hi"},"result":"hi"}]`
+	_, err = wdb.Exec(`
+		INSERT OR IGNORE INTO messages
+			(id, container_type, container_id, seq, ts, role, content,
+			 agent, tool_name, tool_call_id, type,
+			 prompt_tokens, completion_tokens, cost_usd, model,
+			 tool_calls_json)
+		VALUES (?, 'thread', ?, 1, ?, 'assistant', 'I ran bash', 'Atlas',
+		        '', '', '', 0, 0, 0.0, '', ?)`,
+		"reply-tc-1", "t-tc-1", ts, toolCallsJSON,
+	)
+	if err != nil {
+		t.Fatalf("insert reply: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/parent-tc-1/thread", nil)
+	req.SetPathValue("id", "parent-tc-1")
+	w := httptest.NewRecorder()
+	srv.handleGetMessageThread(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result MessageThreadResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result.Messages))
+	}
+	if len(result.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call on message, got %d", len(result.Messages[0].ToolCalls))
+	}
+	if result.Messages[0].ToolCalls[0].Name != "bash" {
+		t.Errorf("expected tool call name 'bash', got %q", result.Messages[0].ToolCalls[0].Name)
+	}
+}

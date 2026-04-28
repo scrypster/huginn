@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { getToken } from './useApi'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
+import type { ToolCallRecord } from './useSessions'
 
 export interface ThreadMessage {
   id: string
@@ -13,6 +14,7 @@ export interface ThreadMessage {
   toolName?: string
   type?: string
   streaming?: boolean // true while tokens are still arriving
+  toolCalls?: ToolCallRecord[]
 }
 
 export interface ThreadArtifact {
@@ -65,8 +67,27 @@ async function fetchThreadMessages(messageId: string): Promise<MessageThreadAPIR
   if (Array.isArray(data)) {
     return { messages: data as ThreadMessage[], delegation_chain: [] }
   }
+  const rawMsgs: unknown[] = Array.isArray(data.messages) ? data.messages : []
+  const messages: ThreadMessage[] = rawMsgs.map((m: unknown) => {
+    const msg = m as Record<string, unknown>
+    const rawToolCalls = Array.isArray(msg['tool_calls']) ? msg['tool_calls'] : undefined
+    const toolCalls: ToolCallRecord[] | undefined =
+      rawToolCalls && rawToolCalls.length > 0
+        ? (rawToolCalls as Record<string, unknown>[]).map(tc => ({
+            id: String(tc['id'] ?? ''),
+            name: String(tc['name'] ?? ''),
+            args: (tc['args'] as Record<string, unknown>) ?? {},
+            result: tc['result'] != null ? String(tc['result']) : undefined,
+            done: true,
+          }))
+        : undefined
+    return {
+      ...(msg as unknown as ThreadMessage),
+      toolCalls,
+    }
+  })
   return {
-    messages: Array.isArray(data.messages) ? (data.messages as ThreadMessage[]) : [],
+    messages,
     thread_id: data.thread_id as string | undefined,
     session_id: data.session_id as string | undefined,
     delegation_chain: Array.isArray(data.delegation_chain)

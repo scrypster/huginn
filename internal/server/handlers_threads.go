@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
@@ -16,17 +17,18 @@ import (
 // (workforce contract endpoints GET /api/v1/messages/:id/thread and
 // GET /api/v1/containers/:id/threads).
 type threadMessageRow struct {
-	ID                  string    `json:"id"`
-	ContainerID         string    `json:"container_id"`
-	Seq                 int64     `json:"seq"`
-	Ts                  time.Time `json:"ts"`
-	Role                string    `json:"role"`
-	Content             string    `json:"content"`
-	Agent               string    `json:"agent"`
-	ToolName            string    `json:"tool_name,omitempty"`
-	ParentMessageID     string    `json:"parent_message_id,omitempty"`
-	TriggeringMessageID string    `json:"triggering_message_id,omitempty"`
-	ThreadReplyCount    int       `json:"thread_reply_count"`
+	ID                  string                      `json:"id"`
+	ContainerID         string                      `json:"container_id"`
+	Seq                 int64                       `json:"seq"`
+	Ts                  time.Time                   `json:"ts"`
+	Role                string                      `json:"role"`
+	Content             string                      `json:"content"`
+	Agent               string                      `json:"agent"`
+	ToolName            string                      `json:"tool_name,omitempty"`
+	ParentMessageID     string                      `json:"parent_message_id,omitempty"`
+	TriggeringMessageID string                      `json:"triggering_message_id,omitempty"`
+	ThreadReplyCount    int                         `json:"thread_reply_count"`
+	ToolCalls           []session.PersistedToolCall `json:"tool_calls,omitempty"`
 }
 
 // MessageThreadResponse is the JSON body returned by GET /api/v1/messages/:id/thread.
@@ -86,7 +88,8 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		       COALESCE(tool_name, ''),
 		       COALESCE(parent_message_id, ''),
 		       COALESCE(triggering_message_id, ''),
-		       COALESCE(thread_reply_count, 0)
+		       COALESCE(thread_reply_count, 0),
+		       COALESCE(tool_calls_json, '')
 		FROM messages
 		WHERE container_type = 'thread'
 		  AND container_id IN (
@@ -157,7 +160,8 @@ func (s *Server) handleGetContainerThreads(w http.ResponseWriter, r *http.Reques
 		       COALESCE(m.tool_name, ''),
 		       COALESCE(m.parent_message_id, ''),
 		       COALESCE(m.triggering_message_id, ''),
-		       COALESCE(m.thread_reply_count, 0)
+		       COALESCE(m.thread_reply_count, 0),
+		       COALESCE(m.tool_calls_json, '')
 		FROM messages m
 		LEFT JOIN threads t ON t.parent_msg_id = m.id
 		WHERE m.container_type = 'session' AND m.container_id = ?
@@ -187,16 +191,20 @@ func scanThreadMessageRows(rows *sql.Rows) ([]threadMessageRow, error) {
 	for rows.Next() {
 		var m threadMessageRow
 		var tsStr string
+		var toolCallsJSON string
 		if err := rows.Scan(
 			&m.ID, &m.ContainerID, &m.Seq, &tsStr,
 			&m.Role, &m.Content, &m.Agent, &m.ToolName,
 			&m.ParentMessageID, &m.TriggeringMessageID,
-			&m.ThreadReplyCount,
+			&m.ThreadReplyCount, &toolCallsJSON,
 		); err != nil {
 			return nil, err
 		}
 		if t, e := time.Parse(time.RFC3339, tsStr); e == nil {
 			m.Ts = t.UTC()
+		}
+		if toolCallsJSON != "" {
+			_ = json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls)
 		}
 		out = append(out, m)
 	}

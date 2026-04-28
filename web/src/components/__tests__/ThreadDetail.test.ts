@@ -430,3 +430,84 @@ describe('ThreadDetail — consult_agent card', () => {
     expect(wrapper.html()).not.toContain('consulted')
   })
 })
+
+// ── Tool call chip (persisted toolCalls) ──────────────────────────────────────
+
+describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
+  function makeToolCallRecord(overrides: Partial<import('../../composables/useSessions').ToolCallRecord> = {}) {
+    return {
+      id: 'tc-1',
+      name: 'bash',
+      args: { cmd: 'echo hi' } as Record<string, unknown>,
+      result: 'hi',
+      done: true,
+      ...overrides,
+    }
+  }
+
+  it('renders chip on assistant message when toolCalls is present', () => {
+    const msg = makeMessage({
+      role: 'assistant',
+      agent: 'Atlas',
+      content: 'I ran some tools',
+      toolCalls: [makeToolCallRecord()],
+    })
+    const wrapper = mountComponent({ messages: [msg] })
+    expect(wrapper.html()).toContain('tool call')
+    expect(wrapper.html()).toContain('done')
+  })
+
+  it('shows correct count for multiple tool calls', () => {
+    const msg = makeMessage({
+      role: 'assistant',
+      toolCalls: [
+        makeToolCallRecord({ id: 'tc-1', name: 'bash' }),
+        makeToolCallRecord({ id: 'tc-2', name: 'read_file' }),
+      ],
+    })
+    const wrapper = mountComponent({ messages: [msg] })
+    expect(wrapper.html()).toContain('2 tool calls')
+  })
+
+  it('does not render chip when toolCalls is undefined', () => {
+    const msg = makeMessage({ role: 'assistant', content: 'No tools' })
+    const wrapper = mountComponent({ messages: [msg] })
+    expect(wrapper.html()).not.toContain('· done')
+  })
+
+  it('does not render chip when toolCalls is empty array', () => {
+    const msg = makeMessage({ role: 'assistant', toolCalls: [] })
+    const wrapper = mountComponent({ messages: [msg] })
+    expect(wrapper.html()).not.toContain('· done')
+  })
+
+  it('expands tool call details when chip is clicked', async () => {
+    const msg = makeMessage({
+      id: 'msg-chip-1',
+      role: 'assistant',
+      toolCalls: [makeToolCallRecord({ name: 'bash', args: { cmd: 'ls' }, result: 'file.txt' })],
+    })
+    const wrapper = mountComponent({ messages: [msg] })
+
+    // Find the chip button — contains "done"
+    const buttons = wrapper.findAll('button')
+    const chipBtn = buttons.find(b => b.text().includes('done'))
+    expect(chipBtn).toBeDefined()
+    await chipBtn!.trigger('click')
+
+    // After expanding, tool name should be visible
+    expect(wrapper.html()).toContain('bash')
+  })
+
+  it('legacy tool_call role rows still render as toolgroup (backward compat)', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({ id: 'm1', role: 'tool_call', content: JSON.stringify({ name: 'read_file' }) }),
+        makeMessage({ id: 'm2', role: 'tool_result', content: 'file contents' }),
+      ],
+    })
+    expect(wrapper.html()).toContain('tool call')
+    // Old toolgroup uses wrench + count but NOT "· done"
+    expect(wrapper.html()).not.toContain('· done')
+  })
+})
