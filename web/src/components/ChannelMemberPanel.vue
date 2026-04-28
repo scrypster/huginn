@@ -7,6 +7,7 @@
       @click="$emit('toggle')"
       class="flex-shrink-0 w-7 flex flex-col items-center justify-center gap-1 py-3 hover:bg-huginn-surface/60 transition-colors"
       :title="open ? 'Collapse member panel' : 'Expand member panel'"
+      :aria-label="open ? 'Collapse member panel' : 'Expand member panel'"
     >
       <svg class="w-3 h-3 text-huginn-muted transition-transform" :class="open ? 'rotate-0' : 'rotate-180'"
            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">

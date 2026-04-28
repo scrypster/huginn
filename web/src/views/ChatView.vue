@@ -184,13 +184,14 @@
             </svg>
           </button>
 
-          <!-- Memory replication chip (channel view only) -->
-          <span v-if="replChipText" :class="['text-[10px] px-2 py-0.5 rounded-full', replChipClass]">
+          <!-- Memory replication chip (channel/space context only) -->
+          <!-- Uses v-if with explicit activeSpace guard; agent picker below uses !activeSpace — mutually exclusive by domain -->
+          <span v-if="replChipText && activeSpace" :class="['text-[10px] px-2 py-0.5 rounded-full', replChipClass]">
             {{ replChipText }}
           </span>
 
-          <!-- Agent picker dropdown (standalone session context) -->
-          <div v-else-if="agentsList.length" class="relative flex-shrink-0">
+          <!-- Agent picker dropdown (standalone session context — no activeSpace) -->
+          <div v-if="!activeSpace && agentsList.length" class="relative flex-shrink-0">
             <button
               @click="agentDropdownOpen = !agentDropdownOpen"
               class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-all duration-150 hover:bg-huginn-surface"
