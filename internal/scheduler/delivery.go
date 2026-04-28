@@ -436,6 +436,12 @@ func (d *sendGridDeliverer) Deliver(ctx context.Context, n *notification.Notific
 		return rec
 	}
 
+	if d.resolver == nil {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: no credential resolver configured"
+		return rec
+	}
+
 	creds, err := d.resolver(ctx, target.Connection)
 	if err != nil {
 		rec.Status = "failed"
@@ -499,7 +505,7 @@ func (d *sendGridDeliverer) Deliver(ctx context.Context, n *notification.Notific
 		if resp.StatusCode == 202 {
 			return nil
 		}
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			return &permanentError{fmt.Errorf("sendgrid: client error %d: %s", resp.StatusCode, respBody)}
 		}

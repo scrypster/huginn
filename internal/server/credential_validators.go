@@ -19,9 +19,11 @@ import (
 // Overridable in tests.
 var sendgridScopesURL = "https://api.sendgrid.com/v3/scopes"
 
-// sendgridHTTPClient is the HTTP client used for SendGrid validation.
-// Overridable in tests to bypass the SSRF-safe dialer.
-var sendgridHTTPClient *http.Client
+// sendgridHTTPClient overrides the HTTP client for testing only.
+// In production this is nil and validateSendGridCredentials falls back to
+// safeHTTPClient(). Tests set this to http.DefaultClient so that requests
+// reach the loopback httptest.Server without being blocked by the SSRF dialer.
+var sendgridHTTPClient *http.Client // test-only override
 
 // buildCredentialValidatorRegistry constructs the process-wide registry that
 // maps catalog provider IDs to their connectivity validators.
