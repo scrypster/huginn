@@ -867,6 +867,31 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 		ctx = workforce.WithSpaceContext(ctx, block)
 	}
 
+	// Attach replication context so OnToolDone can fan out memory writes.
+	// Only wire for channel spaces with multiple members — cfg/cfgErr are already loaded above.
+	if cfgErr == nil && len(sp.Members) > 1 {
+		username := memory.ResolveUsername("")
+		var replMembers []workforce.ReplicationMember
+		for _, memberName := range sp.Members {
+			for _, def := range cfg.Agents {
+				if strings.EqualFold(def.Name, memberName) {
+					replMembers = append(replMembers, workforce.ReplicationMember{
+						AgentName: def.Name,
+						VaultName: def.ResolvedVaultName(username),
+					})
+					break
+				}
+			}
+		}
+		if len(replMembers) > 1 {
+			ctx = workforce.WithReplicationContext(ctx, &workforce.MemReplicationContext{
+				SpaceID:   sp.ID,
+				SpaceName: sp.Name,
+				Members:   replMembers,
+			})
+		}
+	}
+
 	// Build channel-recent summary from the last few messages.
 	if msgResult, msgErr := s.spaceStore.ListSpaceMessages(sp.ID, nil, 15); msgErr == nil && len(msgResult.Messages) > 0 {
 		var recentBuf strings.Builder
