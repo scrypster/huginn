@@ -83,7 +83,7 @@ test.describe('AgentsView — Toolbelt', () => {
   test('new agent button navigates to /agents/new and shows editor form', async ({ page }) => {
     await gotoAgents(page)
 
-    // With no agent selected the empty-state panel renders new-agent-btn
+    // new-agent-btn is present in both the empty-state panel and the card grid
     const newBtn = page.locator('[data-testid="new-agent-btn"]')
     await expect(newBtn).toBeVisible()
 

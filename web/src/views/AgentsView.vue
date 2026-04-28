@@ -2,24 +2,52 @@
   <div class="flex flex-col h-full bg-huginn-bg">
 
     <!-- No agent selected -->
-    <div v-if="!agentName" class="flex flex-col items-center justify-center h-full gap-5 pb-16">
-      <div class="w-16 h-16 rounded-2xl flex items-center justify-center select-none"
-        style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2)">
-        <svg class="w-8 h-8 text-huginn-blue opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <circle cx="12" cy="8" r="4" /><path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" />
-        </svg>
+    <div v-if="!agentName" class="flex-1 overflow-y-auto p-6">
+
+      <!-- Empty state: no agents at all -->
+      <div v-if="agents.length === 0 && !loading" class="flex flex-col items-center justify-center h-full gap-5 pb-16">
+        <div class="w-16 h-16 rounded-2xl flex items-center justify-center select-none"
+          style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2)">
+          <svg class="w-8 h-8 text-huginn-blue opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <circle cx="12" cy="8" r="4" /><path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" />
+          </svg>
+        </div>
+        <div class="text-center space-y-1">
+          <p class="text-huginn-text text-sm font-medium">Select an agent</p>
+          <p class="text-huginn-muted text-xs">Choose from the sidebar or create a new one</p>
+        </div>
+        <button data-testid="new-agent-btn" @click="createNew"
+          class="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-huginn-blue border border-huginn-blue/30 hover:bg-huginn-blue/10 transition-all duration-150 active:scale-95">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          New agent
+        </button>
       </div>
-      <div class="text-center space-y-1">
-        <p class="text-huginn-text text-sm font-medium">Select an agent</p>
-        <p class="text-huginn-muted text-xs">Choose from the sidebar or create a new one</p>
-      </div>
-      <button data-testid="new-agent-btn" @click="createNew"
-        class="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-huginn-blue border border-huginn-blue/30 hover:bg-huginn-blue/10 transition-all duration-150 active:scale-95">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-          <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
-        New agent
-      </button>
+
+      <!-- Card grid: agents exist -->
+      <template v-else>
+        <div class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+          <AgentCard
+            v-for="agent in agents"
+            :key="agent.name"
+            :agent="agent"
+            @click="openDM(agent)"
+            @edit="router.push('/agents/' + agent.name)"
+          />
+        </div>
+
+        <div class="mt-6 flex justify-center">
+          <button data-testid="new-agent-btn" @click="createNew"
+            class="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-huginn-blue border border-huginn-blue/30 hover:bg-huginn-blue/10 transition-all duration-150 active:scale-95">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            New agent
+          </button>
+        </div>
+      </template>
+
     </div>
 
     <!-- Agent editor -->
@@ -1257,14 +1285,24 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, getToken } from '../composables/useApi'
+import { api, apiFetch, getToken } from '../composables/useApi'
 import type { Connection, ToolbeltEntry, SystemToolStatus } from '../composables/useApi'
 import { useInstalledSkills } from '../composables/useSkills'
-import { useAgents } from '../composables/useAgents'
+import { useAgents, type AgentSummary } from '../composables/useAgents'
+import AgentCard from '../components/AgentCard.vue'
 
 const props = defineProps<{ agentName?: string }>()
 const router = useRouter()
-const { updateAgent, removeAgent: removeFromList, fetchAgents } = useAgents()
+const { agents, loading, updateAgent, removeAgent: removeFromList, fetchAgents } = useAgents()
+
+async function openDM(agent: AgentSummary) {
+  try {
+    const space = await apiFetch<{ id: string }>(`/api/v1/spaces/dm/${encodeURIComponent(agent.name)}`)
+    router.push(`/space/${space.id}`)
+  } catch {
+    router.push(`/agents/${agent.name}`)
+  }
+}
 
 // Stale data recovery: when the tab returns from background or the window
 // regains focus, silently re-fetch the current agent after a 500 ms debounce.
