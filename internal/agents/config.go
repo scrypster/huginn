@@ -80,6 +80,14 @@ type AgentDef struct {
 	// Visible to other agents in channel contexts for intelligent task delegation.
 	Description string `json:"description,omitempty"           yaml:"description,omitempty"`
 
+	// HeartbeatEnabled controls whether this agent sends periodic check-in DMs to the user.
+	// When true, a workflow YAML is auto-generated at ~/.huginn/workflows/heartbeat-{name}.yaml.
+	HeartbeatEnabled bool   `json:"heartbeat_enabled,omitempty" yaml:"heartbeat_enabled,omitempty"`
+
+	// HeartbeatCron is the cron schedule for the heartbeat workflow.
+	// Defaults to "0 */4 * * *" (every 4 hours) when empty and HeartbeatEnabled is true.
+	HeartbeatCron    string `json:"heartbeat_cron,omitempty"    yaml:"heartbeat_cron,omitempty"`
+
 	// Version is an optimistic-lock counter incremented on every save.
 	// On PUT /api/v1/agents/{name}: if the client sends Version > 0 and it does
 	// not match the stored value, the request is rejected with 409 Conflict.
