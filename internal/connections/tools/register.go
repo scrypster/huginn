@@ -12,7 +12,7 @@ import (
 // providerToolNames maps each provider to the tool names it registers.
 // Must stay in sync with the registerXxxTools functions.
 var providerToolNames = map[connections.Provider][]string{
-	connections.ProviderGoogle: {"gmail_search", "gmail_read", "gmail_send"},
+	connections.ProviderGoogle: {"gmail_search", "gmail_read", "gmail_send", "calendar_today", "calendar_create", "calendar_find_free"},
 	connections.ProviderGitHub: {
 		"github_list_prs", "github_get_pr", "github_create_issue",
 		"github_search_code", "github_list_issues",
@@ -84,6 +84,8 @@ var providerToolNames = map[connections.Provider][]string{
 		"monday_list_boards", "monday_get_board", "monday_list_items",
 		"monday_create_item", "monday_update_item",
 	},
+	connections.ProviderWeather: {"weather_current", "weather_forecast"},
+	connections.ProviderTodoist: {"tasks_list", "task_create", "task_complete", "tasks_list_projects"},
 	connections.ProviderHomeAssistant: {
 		"ha_states", "ha_call_service", "ha_scene_activate",
 	},
@@ -114,6 +116,9 @@ func RegisterForProvider(reg *tools.Registry, mgr *connections.Manager, provider
 	switch provider {
 	case connections.ProviderGoogle:
 		err = registerGmailTools(reg, mgr, conns)
+		if err == nil {
+			err = registerCalendarTools(reg, mgr, conns)
+		}
 	case connections.ProviderGitHub:
 		err = registerGitHubTools(reg, mgr, conns)
 	case connections.ProviderSlack:
@@ -152,6 +157,10 @@ func RegisterForProvider(reg *tools.Registry, mgr *connections.Manager, provider
 		err = registerAsanaTools(reg, mgr, conns)
 	case connections.ProviderMonday:
 		err = registerMondayTools(reg, mgr, conns)
+	case connections.ProviderWeather:
+		err = registerWeatherTools(reg, mgr, conns)
+	case connections.ProviderTodoist:
+		err = registerTodoistTools(reg, mgr, conns)
 	case connections.ProviderHomeAssistant:
 		err = registerHomeAssistantTools(reg, mgr, conns)
 	}
