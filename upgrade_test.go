@@ -670,6 +670,7 @@ func TestSelfUpdateWithURLs_DownloadAndChecksumOK(t *testing.T) {
 		srv.URL+"/archive.tar.gz",
 		srv.URL+"/checksums.txt",
 		"linux", "amd64",
+		runningState{},
 	)
 	// Expected to fail at verifyHuginnBinary (fake binary can't run `huginn version`).
 	// But must NOT fail with a checksum error.
@@ -709,7 +710,7 @@ func TestSelfUpdateWithURLs_ChecksumMismatch(t *testing.T) {
 		ExePath:     exePath,
 	}
 
-	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64")
+	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64", runningState{})
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Errorf("expected checksum mismatch error, got: %v", err)
 	}
@@ -743,8 +744,115 @@ func TestSelfUpdateWithURLs_ChecksumsFetch404(t *testing.T) {
 		ExePath:     exePath,
 	}
 
-	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64")
+	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64", runningState{})
 	if err == nil {
 		t.Error("expected error on 404 checksums, got nil")
+	}
+}
+
+// ─── Run prompt: daemon awareness ─────────────────────────────────────────────
+
+func TestRun_PromptMentionsRunningDaemons(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		// Both daemons live — PIDIsLiveFn is called twice (serve, tray)
+		PIDIsLiveFn: func(path string) (bool, int) { return true, 42 },
+		StopProcess: noopStop,
+		DetachStart: noopDetach,
+		Stdout:      &out,
+		Stdin:       strings.NewReader("n\n"), // user aborts
+	}
+	_ = u.Run([]string{})
+	got := out.String()
+	if !strings.Contains(got, "server + tray") {
+		t.Errorf("prompt missing 'server + tray':\n%s", got)
+	}
+	if !strings.Contains(got, "will be stopped") {
+		t.Errorf("prompt missing restart warning:\n%s", got)
+	}
+}
+
+func TestRun_PromptOmitsRestartWhenNotRunning(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		StopProcess:   noopStop,
+		DetachStart:   noopDetach,
+		Stdout:        &out,
+		Stdin:         strings.NewReader("n\n"),
+	}
+	_ = u.Run([]string{})
+	got := out.String()
+	if strings.Contains(got, "running") {
+		t.Errorf("prompt should not mention 'running' when no daemons:\n%s", got)
+	}
+}
+
+func TestRun_YesFlagPrintsNoticeWhenRunning(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	// StopProcess returns error so selfUpdateWithURLs bails before network calls.
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return true, 42 },
+		StopProcess:   func(pid int, path string) error { return fmt.Errorf("stop aborted") },
+		Stdout:        &out,
+		Stdin:         strings.NewReader(""), // must NOT be read
+	}
+	_ = u.Run([]string{"--yes"})
+	got := out.String()
+	if !strings.Contains(got, "Note:") {
+		t.Errorf("expected 'Note:' line with --yes + running daemons:\n%s", got)
+	}
+	if !strings.Contains(got, "server + tray") {
+		t.Errorf("notice should mention 'server + tray':\n%s", got)
+	}
+	if strings.Contains(got, "[y/N]") {
+		t.Errorf("should not show interactive prompt with --yes:\n%s", got)
+	}
+}
+
+func TestRun_YesFlagSilentWhenNotRunning(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	// Use a client that can't reach github.com to avoid real network calls.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	u := &Upgrader{
+		HTTPClient:    srv.Client(),
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		StopProcess:   noopStop,
+		DetachStart:   noopDetach,
+		Stdout:        &out,
+		Stdin:         strings.NewReader(""),
+	}
+	_ = u.Run([]string{"--yes"})
+	got := out.String()
+	if strings.Contains(got, "Note:") {
+		t.Errorf("should not print Note: when no daemons running:\n%s", got)
 	}
 }

@@ -35,6 +35,9 @@ type Upgrader struct {
 	ExePath       string                              // if empty, resolved from os.Executable
 	StopProcess   func(pid int, pidPath string) error // platform-specific
 	DetachStart   func(cmd *exec.Cmd) error           // platform-specific
+	Stdout        io.Writer                           // if nil, defaults to os.Stdout
+	Stdin         io.Reader                           // if nil, defaults to os.Stdin
+	IsHomebrewFn  func() bool                        // if nil, defaults to isHomebrewInstall
 }
 
 func defaultUpgrader() *Upgrader {
@@ -45,6 +48,55 @@ func defaultUpgrader() *Upgrader {
 		PIDIsLiveFn:   pidFileIsLive,
 		StopProcess:   platformStopProcess,
 		DetachStart:   platformDetachStart,
+	}
+}
+
+// runningState captures which huginn daemons were live at the start of Run().
+// Detected once to avoid a TOCTOU gap between the prompt and the stop calls.
+type runningState struct {
+	serveRunning bool
+	servePID     int
+	trayRunning  bool
+	trayPID      int
+}
+
+func (u *Upgrader) out() io.Writer {
+	if u.Stdout != nil {
+		return u.Stdout
+	}
+	return os.Stdout
+}
+
+func (u *Upgrader) in() io.Reader {
+	if u.Stdin != nil {
+		return u.Stdin
+	}
+	return os.Stdin
+}
+
+// step prints a labeled upgrade step to u.out(), runs f(), and prints ✓ or ✗.
+// Used by upgradeViaHomebrew. selfUpdateWithURLs uses the package-level upgradeStep.
+func (u *Upgrader) step(label string, f func() error) error {
+	fmt.Fprintf(u.out(), "  %-32s", label)
+	if err := f(); err != nil {
+		fmt.Fprintf(u.out(), " ✗\n  Error: %v\n", err)
+		return err
+	}
+	fmt.Fprintln(u.out(), " ✓")
+	return nil
+}
+
+// daemonDesc returns a human-readable description of running daemons.
+func daemonDesc(state runningState) string {
+	switch {
+	case state.serveRunning && state.trayRunning:
+		return "server + tray"
+	case state.serveRunning:
+		return "server"
+	case state.trayRunning:
+		return "tray"
+	default:
+		return ""
 	}
 }
 
@@ -66,8 +118,8 @@ func (u *Upgrader) Run(args []string) error {
 	}
 
 	current := version
-	fmt.Printf("\n  huginn upgrade\n")
-	fmt.Printf("  current: %s\n\n", current)
+	fmt.Fprintf(u.out(), "\n  huginn upgrade\n")
+	fmt.Fprintf(u.out(), "  current: %s\n\n", current)
 
 	var latest string
 	if *targetVersion != "" {
@@ -76,24 +128,24 @@ func (u *Upgrader) Run(args []string) error {
 			latest = "v" + latest
 		}
 	} else {
-		fmt.Printf("  Checking for updates...")
+		fmt.Fprintf(u.out(), "  Checking for updates...")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		latest = u.LatestRelease(ctx)
 		if latest == "" {
-			fmt.Println(" ✗")
+			fmt.Fprintln(u.out(), " ✗")
 			return fmt.Errorf("could not reach GitHub releases API — check your network connection")
 		}
-		fmt.Println(" ✓")
+		fmt.Fprintln(u.out(), " ✓")
 	}
 
 	if !*force && !newerVersionAvailable(current, latest) {
-		fmt.Printf("\n  huginn is up to date (%s)\n\n", current)
+		fmt.Fprintf(u.out(), "\n  huginn is up to date (%s)\n\n", current)
 		return nil
 	}
 
-	fmt.Printf("\n  Update available: %s → %s\n", current, latest)
-	fmt.Printf("  Release notes: https://github.com/scrypster/huginn/releases/tag/%s\n\n", latest)
+	fmt.Fprintf(u.out(), "\n  Update available: %s → %s\n", current, latest)
+	fmt.Fprintf(u.out(), "  Release notes: https://github.com/scrypster/huginn/releases/tag/%s\n\n", latest)
 
 	if *checkOnly {
 		os.Exit(1) // signals: update available (for CI/scripting)
@@ -102,44 +154,77 @@ func (u *Upgrader) Run(args []string) error {
 	// Windows: cannot self-replace a running executable; open browser instead.
 	if goruntime.GOOS == "windows" {
 		url := fmt.Sprintf("https://github.com/scrypster/huginn/releases/tag/%s", latest)
-		fmt.Printf("  Opening release page: %s\n", url)
+		fmt.Fprintf(u.out(), "  Opening release page: %s\n", url)
 		_ = exec.Command("cmd", "/c", "start", url).Start()
 		return nil
 	}
 
-	// Homebrew install: delegate to brew rather than self-updating.
-	if isHomebrewInstall() {
-		return u.upgradeViaHomebrew()
+	// Detect running daemons once to avoid a TOCTOU gap between the prompt and
+	// the stop calls. Both self-update and Homebrew paths use this state.
+	huginnHome, err := u.HuginnDirFn()
+	if err != nil {
+		return fmt.Errorf("huginn home: %w", err)
+	}
+	servePIDPath := filepath.Join(huginnHome, "serve.pid")
+	trayPIDPath  := filepath.Join(huginnHome, "tray.pid")
+	serveRunning, servePID := u.PIDIsLiveFn(servePIDPath)
+	trayRunning,  trayPID  := u.PIDIsLiveFn(trayPIDPath)
+	state := runningState{
+		serveRunning: serveRunning,
+		servePID:     servePID,
+		trayRunning:  trayRunning,
+		trayPID:      trayPID,
 	}
 
+	// Homebrew install: delegate to brew rather than self-updating.
+	isHB := u.IsHomebrewFn
+	if isHB == nil {
+		isHB = isHomebrewInstall
+	}
+	if isHB() {
+		if *targetVersion != "" || *force {
+			fmt.Fprintf(u.out(), "  --version and --force are not supported with Homebrew installs.\n  Run: brew upgrade scrypster/tap/huginn\n")
+			return fmt.Errorf("--version and --force are not supported with Homebrew installs")
+		}
+		return u.upgradeViaHomebrew(latest, *yes, state)
+	}
+
+	// Self-update path: show prompt with daemon context.
+	desc := daemonDesc(state)
 	if !*yes {
-		fmt.Printf("  Install %s? [y/N] ", latest)
+		if desc != "" {
+			fmt.Fprintf(u.out(), "  huginn %s are running and will be stopped and\n  restarted automatically during the upgrade.\n\n", desc)
+		}
+		fmt.Fprintf(u.out(), "  Upgrade to %s? [y/N] ", latest)
 		var resp string
-		fmt.Scanln(&resp)
+		fmt.Fscanln(u.in(), &resp)
 		if strings.ToLower(strings.TrimSpace(resp)) != "y" {
-			fmt.Println("  Aborted.")
+			fmt.Fprintln(u.out(), "  Aborted.")
 			return nil
 		}
+	} else if desc != "" {
+		fmt.Fprintf(u.out(), "  Note: huginn %s are running and will be stopped and restarted.\n", desc)
 	}
 
-	return u.selfUpdate(latest)
+	return u.selfUpdate(latest, state)
 }
 
 // selfUpdate is a thin wrapper that resolves URLs for the current platform
 // and delegates to selfUpdateWithURLs.
-func (u *Upgrader) selfUpdate(latest string) error {
+func (u *Upgrader) selfUpdate(latest string, state runningState) error {
 	return u.selfUpdateWithURLs(
 		latest,
 		releaseAssetURL(latest, goruntime.GOOS, goruntime.GOARCH),
 		releaseChecksumURL(latest),
 		goruntime.GOOS,
 		goruntime.GOARCH,
+		state,
 	)
 }
 
 // selfUpdateWithURLs is the testable core of selfUpdate. It accepts explicit
 // asset and checksum URLs so tests can point at a mock HTTP server.
-func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarch string) error {
+func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarch string, state runningState) error {
 	huginnHome, err := u.HuginnDirFn()
 	if err != nil {
 		return fmt.Errorf("huginn home: %w", err)
@@ -147,20 +232,18 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 
 	servePIDPath := filepath.Join(huginnHome, "serve.pid")
 	trayPIDPath  := filepath.Join(huginnHome, "tray.pid")
-	serveRunning, servePID := u.PIDIsLiveFn(servePIDPath)
-	trayRunning,  trayPID  := u.PIDIsLiveFn(trayPIDPath)
 
 	// Stop daemons before touching the binary.
-	if serveRunning {
+	if state.serveRunning {
 		if err := upgradeStep("Stopping server...", func() error {
-			return u.StopProcess(servePID, servePIDPath)
+			return u.StopProcess(state.servePID, servePIDPath)
 		}); err != nil {
 			return err
 		}
 	}
-	if trayRunning {
+	if state.trayRunning {
 		if err := upgradeStep("Stopping tray...", func() error {
-			return u.StopProcess(trayPID, trayPIDPath)
+			return u.StopProcess(state.trayPID, trayPIDPath)
 		}); err != nil {
 			return err
 		}
@@ -277,7 +360,7 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 	}
 
 	// Restart daemons — failures are warnings, not fatal.
-	if serveRunning {
+	if state.serveRunning {
 		if err := upgradeStep("Restarting server...", func() error {
 			cmd := exec.Command(exePath, "serve")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
@@ -286,7 +369,7 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 			fmt.Printf("\n  Warning: server did not restart: %v\n  Run: huginn serve\n\n", err)
 		}
 	}
-	if trayRunning {
+	if state.trayRunning {
 		if err := upgradeStep("Restarting tray...", func() error {
 			cmd := exec.Command(exePath, "tray")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
@@ -523,8 +606,8 @@ func isHomebrewInstall() bool {
 	return false
 }
 
-func (u *Upgrader) upgradeViaHomebrew() error {
-	fmt.Println("  Homebrew install detected — running brew upgrade...")
+func (u *Upgrader) upgradeViaHomebrew(latest string, yes bool, state runningState) error {
+	fmt.Fprintf(u.out(), "  Homebrew install detected — running brew upgrade...\n")
 	cmd := exec.Command("brew", "upgrade", "scrypster/tap/huginn")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
