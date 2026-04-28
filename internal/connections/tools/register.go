@@ -84,6 +84,7 @@ var providerToolNames = map[connections.Provider][]string{
 		"monday_list_boards", "monday_get_board", "monday_list_items",
 		"monday_create_item", "monday_update_item",
 	},
+	connections.ProviderWeather: {"weather_current", "weather_forecast"},
 }
 
 // RegisterAll registers integration tools for all providers with at least one connection.
@@ -149,6 +150,8 @@ func RegisterForProvider(reg *tools.Registry, mgr *connections.Manager, provider
 		err = registerAsanaTools(reg, mgr, conns)
 	case connections.ProviderMonday:
 		err = registerMondayTools(reg, mgr, conns)
+	case connections.ProviderWeather:
+		err = registerWeatherTools(reg, mgr, conns)
 	}
 	if err != nil {
 		return err
