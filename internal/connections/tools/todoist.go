@@ -15,6 +15,8 @@ import (
 	"github.com/scrypster/huginn/internal/tools"
 )
 
+var todoistDoFn = todoistDo
+
 // todoistDo performs an authenticated Todoist REST API v2 request.
 func todoistDo(ctx context.Context, method, apiURL, token string, body io.Reader) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, method, apiURL, body)
@@ -105,7 +107,7 @@ func (t *todoistTasksListTool) Execute(ctx context.Context, args map[string]any)
 		return tools.ToolResult{IsError: true, Error: "tasks_list: auth: " + err.Error()}
 	}
 	apiURL := buildTodoistTasksListURL(args)
-	out, err := todoistDo(ctx, http.MethodGet, apiURL, token, nil)
+	out, err := todoistDoFn(ctx, http.MethodGet, apiURL, token, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -160,7 +162,7 @@ func (t *todoistTaskCreateTool) Execute(ctx context.Context, args map[string]any
 		payload["due_string"] = due
 	}
 	bodyBytes, _ := json.Marshal(payload)
-	out, err := todoistDo(ctx, http.MethodPost, "https://api.todoist.com/rest/v2/tasks", token, strings.NewReader(string(bodyBytes)))
+	out, err := todoistDoFn(ctx, http.MethodPost, "https://api.todoist.com/rest/v2/tasks", token, strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -206,7 +208,7 @@ func (t *todoistTaskCompleteTool) Execute(ctx context.Context, args map[string]a
 		return tools.ToolResult{IsError: true, Error: "task_complete: task_id is required"}
 	}
 	apiURL := buildTodoistTaskCompleteURL(taskID)
-	out, err := todoistDo(ctx, http.MethodPost, apiURL, token, nil)
+	out, err := todoistDoFn(ctx, http.MethodPost, apiURL, token, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -242,7 +244,7 @@ func (t *todoistListProjectsTool) Execute(ctx context.Context, args map[string]a
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: "tasks_list_projects: auth: " + err.Error()}
 	}
-	out, err := todoistDo(ctx, http.MethodGet, "https://api.todoist.com/rest/v2/projects", token, nil)
+	out, err := todoistDoFn(ctx, http.MethodGet, "https://api.todoist.com/rest/v2/projects", token, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}

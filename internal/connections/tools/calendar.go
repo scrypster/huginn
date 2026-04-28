@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/connections"
 	"github.com/scrypster/huginn/internal/tools"
 )
+
+var calendarDoFn = calendarDo
 
 // calendarDo performs an authenticated Google Calendar API request using an
 // OAuth HTTP client obtained from mgr.GetHTTPClient (same pattern as gmail.go).
@@ -43,8 +46,8 @@ type calendarTodayTool struct {
 	conns []connections.Connection
 }
 
-func (t *calendarTodayTool) Name() string        { return "calendar_today" }
-func (t *calendarTodayTool) Description() string { return "List Google Calendar events for today." }
+func (t *calendarTodayTool) Name() string                      { return "calendar_today" }
+func (t *calendarTodayTool) Description() string               { return "List Google Calendar events for today." }
 func (t *calendarTodayTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *calendarTodayTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -78,11 +81,11 @@ func (t *calendarTodayTool) Execute(ctx context.Context, args map[string]any) to
 	todayEnd := todayStart.Add(24 * time.Hour)
 	apiURL := fmt.Sprintf(
 		"https://www.googleapis.com/calendar/v3/calendars/%s/events?timeMin=%s&timeMax=%s&singleEvents=true&orderBy=startTime",
-		calendarID,
+		url.PathEscape(calendarID),
 		todayStart.Format(time.RFC3339),
 		todayEnd.Format(time.RFC3339),
 	)
-	out, err := calendarDo(ctx, client, http.MethodGet, apiURL, nil)
+	out, err := calendarDoFn(ctx, client, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -96,8 +99,10 @@ type calendarCreateTool struct {
 	conns []connections.Connection
 }
 
-func (t *calendarCreateTool) Name() string        { return "calendar_create" }
-func (t *calendarCreateTool) Description() string { return "Create a Google Calendar event. Requires user approval." }
+func (t *calendarCreateTool) Name() string { return "calendar_create" }
+func (t *calendarCreateTool) Description() string {
+	return "Create a Google Calendar event. Requires user approval."
+}
 func (t *calendarCreateTool) Permission() tools.PermissionLevel { return tools.PermWrite }
 func (t *calendarCreateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -152,8 +157,8 @@ func (t *calendarCreateTool) Execute(ctx context.Context, args map[string]any) t
 		event["description"] = desc
 	}
 	bodyBytes, _ := json.Marshal(event)
-	apiURL := fmt.Sprintf("https://www.googleapis.com/calendar/v3/calendars/%s/events", calendarID)
-	out, err := calendarDo(ctx, client, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+	apiURL := fmt.Sprintf("https://www.googleapis.com/calendar/v3/calendars/%s/events", url.PathEscape(calendarID))
+	out, err := calendarDoFn(ctx, client, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -167,8 +172,10 @@ type calendarFindFreeTool struct {
 	conns []connections.Connection
 }
 
-func (t *calendarFindFreeTool) Name() string        { return "calendar_find_free" }
-func (t *calendarFindFreeTool) Description() string { return "Find free time slots on a given date using the Google Calendar Freebusy API." }
+func (t *calendarFindFreeTool) Name() string { return "calendar_find_free" }
+func (t *calendarFindFreeTool) Description() string {
+	return "Find free time slots on a given date using the Google Calendar Freebusy API."
+}
 func (t *calendarFindFreeTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *calendarFindFreeTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -228,7 +235,7 @@ func (t *calendarFindFreeTool) Execute(ctx context.Context, args map[string]any)
 		"items":   items,
 	}
 	reqBytes, _ := json.Marshal(freebusyReq)
-	out, err := calendarDo(ctx, client, http.MethodPost,
+	out, err := calendarDoFn(ctx, client, http.MethodPost,
 		"https://www.googleapis.com/calendar/v3/freeBusy",
 		bytes.NewReader(reqBytes))
 	if err != nil {

@@ -13,6 +13,8 @@ import (
 	"github.com/scrypster/huginn/internal/tools"
 )
 
+var weatherDoFn = weatherDo
+
 // weatherDo performs an unauthenticated GET to the OpenWeatherMap API.
 // The API key is embedded in the URL query string as required by the API.
 func weatherDo(ctx context.Context, apiURL string) (string, error) {
@@ -53,8 +55,10 @@ type weatherCurrentTool struct {
 	conns []connections.Connection
 }
 
-func (t *weatherCurrentTool) Name() string        { return "weather_current" }
-func (t *weatherCurrentTool) Description() string { return "Get current weather conditions for any city." }
+func (t *weatherCurrentTool) Name() string { return "weather_current" }
+func (t *weatherCurrentTool) Description() string {
+	return "Get current weather conditions for any city."
+}
 func (t *weatherCurrentTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *weatherCurrentTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -86,7 +90,7 @@ func (t *weatherCurrentTool) Execute(ctx context.Context, args map[string]any) t
 		"https://api.openweathermap.org/data/2.5/weather?q=%s&appid=%s&units=%s",
 		url.QueryEscape(city), apiKey, units,
 	)
-	out, err := weatherDo(ctx, apiURL)
+	out, err := weatherDoFn(ctx, apiURL)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -100,8 +104,10 @@ type weatherForecastTool struct {
 	conns []connections.Connection
 }
 
-func (t *weatherForecastTool) Name() string        { return "weather_forecast" }
-func (t *weatherForecastTool) Description() string { return "Get a multi-day weather forecast for any city (up to 5 days)." }
+func (t *weatherForecastTool) Name() string { return "weather_forecast" }
+func (t *weatherForecastTool) Description() string {
+	return "Get a multi-day weather forecast for any city (up to 5 days)."
+}
 func (t *weatherForecastTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *weatherForecastTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -142,7 +148,7 @@ func (t *weatherForecastTool) Execute(ctx context.Context, args map[string]any) 
 		"https://api.openweathermap.org/data/2.5/forecast?q=%s&cnt=%d&appid=%s&units=%s",
 		url.QueryEscape(city), cnt, apiKey, units,
 	)
-	out, err := weatherDo(ctx, apiURL)
+	out, err := weatherDoFn(ctx, apiURL)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}

@@ -214,3 +214,26 @@ func TestValidateTodoistCredentials_Success(t *testing.T) {
 		t.Errorf("expected nil, got %v", err)
 	}
 }
+
+func TestBuildCredentialValidatorRegistry_RegistersRecentProviders(t *testing.T) {
+	r := buildCredentialValidatorRegistry()
+	for _, tc := range []struct {
+		id        string
+		fields    map[string]string
+		wantInErr string
+	}{
+		{id: "sendgrid", fields: map[string]string{}, wantInErr: "api_key is required"},
+		{id: "weather", fields: map[string]string{}, wantInErr: "api_key is required"},
+		{id: "todoist", fields: map[string]string{}, wantInErr: "api_key is required"},
+		{id: "homeassistant", fields: map[string]string{}, wantInErr: "token is required"},
+	} {
+		v, ok := r.Get(tc.id)
+		if !ok {
+			t.Fatalf("expected validator %q to be registered", tc.id)
+		}
+		err := v.Validate(context.Background(), tc.fields)
+		if err == nil || err.Error() != tc.wantInErr {
+			t.Fatalf("%s validator mismatch, got err=%v want=%q", tc.id, err, tc.wantInErr)
+		}
+	}
+}

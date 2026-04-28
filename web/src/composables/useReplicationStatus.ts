@@ -1,4 +1,4 @@
-import { ref, computed, watch, onScopeDispose } from 'vue'
+import { ref, computed, watch, onScopeDispose, getCurrentScope } from 'vue'
 import type { Ref } from 'vue'
 import { apiFetch } from './useApi'
 
@@ -41,7 +41,9 @@ export function useReplicationStatus(spaceId: Ref<string | undefined>) {
     }
   }, { immediate: true })
 
-  onScopeDispose(stopPolling)
+  if (getCurrentScope()) {
+    onScopeDispose(stopPolling)
+  }
 
   const chipText = computed<string>(() => {
     const s = status.value
