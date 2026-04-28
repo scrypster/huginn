@@ -11,8 +11,8 @@ import (
 
 func TestMigrationsRegistered(t *testing.T) {
 	migs := session.Migrations()
-	if len(migs) == 0 {
-		t.Fatal("Migrations() returned nil — migrations not registered")
+	if len(migs) != 7 {
+		t.Fatalf("expected 7 migrations, got %d", len(migs))
 	}
 }
 
@@ -64,8 +64,13 @@ func TestMemoryReplicationQueueTableCreated(t *testing.T) {
 		var cid, notnull, pk int
 		var name, typ string
 		var dflt sql.NullString
-		_ = rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
 		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration: %v", err)
 	}
 	if len(cols) == 0 {
 		t.Fatal("memory_replication_queue table not created")
