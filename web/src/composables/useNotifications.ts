@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { getToken } from './useApi'
 import type { WSMessage } from './useHuginnWS'
+import { useBrowserNotifications } from './useBrowserNotifications'
 
 export interface Notification {
   id: string
@@ -89,6 +90,12 @@ export function useNotifications() {
     if (!ws) return
     ws.on?.('notification_new', (payload: { notification: Notification }) => {
       notifications.value.unshift(payload.notification)
+      const { notify } = useBrowserNotifications()
+      notify(
+        payload.notification.summary,
+        payload.notification.detail ?? '',
+        `notif-${payload.notification.id}`
+      )
     })
     ws.on?.('notification_update', (payload: { id: string; status: string }) => {
       const n = notifications.value.find((n: Notification) => n.id === payload.id)

@@ -867,8 +867,8 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 		ctx = workforce.WithSpaceContext(ctx, block)
 	}
 
-	// Attach replication context so OnToolDone can fan out memory writes.
-	// Only wire for channel spaces with multiple members — cfg/cfgErr are already loaded above.
+	// Attach replication context so OnToolDone can fan out memory writes to all
+	// channel members' vaults. cfg/cfgErr are already loaded above — reuse them.
 	if cfgErr == nil && len(sp.Members) > 1 {
 		username := memory.ResolveUsername("")
 		var replMembers []workforce.ReplicationMember

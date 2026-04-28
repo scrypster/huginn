@@ -16,11 +16,9 @@
     <!-- ── Column 1: Icon strip (48px) ─────────────────────────────── -->
     <nav class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
 
-      <!-- Logo mark — tooltip surfaces the build version for update confirmation -->
-      <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none cursor-help"
-        style="background:linear-gradient(135deg,rgba(88,166,255,0.2),rgba(88,166,255,0.05));border:1px solid rgba(88,166,255,0.3)"
-        :title="`Huginn ${versionLabel}`"
-        data-testid="logo-version-tooltip">
+      <!-- Logo mark -->
+      <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none"
+        style="background:linear-gradient(135deg,rgba(88,166,255,0.2),rgba(88,166,255,0.05));border:1px solid rgba(88,166,255,0.3)">
         <span class="text-huginn-blue font-bold text-sm leading-none">H</span>
       </div>
 
@@ -93,6 +91,11 @@
             <line x1="18" y1="20" x2="18" y2="10" />
             <line x1="12" y1="20" x2="12" y2="4" />
             <line x1="6" y1="20" x2="6" y2="14" />
+          </g>
+          <!-- Memory icon (database/vault) -->
+          <g v-else-if="item.icon === 'memory'">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M9 3H7a2 2 0 00-2 2v1a3 3 0 000 6v1a2 2 0 002 2h2m6 0h2a2 2 0 002-2v-1a3 3 0 000-6V5a2 2 0 00-2-2h-2M9 3v18M15 3v18M9 9h6M9 15h6" />
           </g>
           <!-- Inbox icon (bell) -->
           <g v-else-if="item.icon === 'inbox'">
@@ -852,6 +855,7 @@ watch(drawerOpen, (open) => {
 const navItems = [
   { section: 'chat',       label: 'Chat',       path: '/chat',       icon: 'chat'       },
   { section: 'agents',     label: 'Agents',     path: '/agents',     icon: 'agents'     },
+  { section: 'memory',     label: 'Memory',     path: '/memory',     icon: 'memory'     },
   { section: 'models',     label: 'Models',     path: '/models',     icon: 'models'     },
   { section: 'automation', label: 'Automation', path: '/workflows',  icon: 'automation' },
   { section: 'connections',label: 'Connections',path: '/connections', icon: 'connections'},

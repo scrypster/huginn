@@ -806,6 +806,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useSpaceTimeline } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
 import { ThreadPanel } from '../components/ThreadPanel'
@@ -826,6 +827,7 @@ import { useMarkdownRenderer } from '../composables/useMarkdownRenderer'
 import { useChatSearch } from '../composables/useChatSearch'
 import { useUnreadTracking } from '../composables/useUnreadTracking'
 import { useChatStreaming } from '../composables/useChatStreaming'
+import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 
 interface Agent {
   name: string
@@ -848,7 +850,7 @@ interface Agent {
 
 const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 
-// const router  = useRouter()
+const router  = useRouter()
 const wsRef   = inject<Ref<HuginnWS | null>>('ws')!
 const markSpaceSeen = inject<(spaceId: string) => void>('markSpaceSeen')
 
@@ -1372,6 +1374,8 @@ async function fetchStatus() {
   } catch { /* ignore */ }
 }
 
+const { notify } = useBrowserNotifications()
+
 // ── WS event handlers ────────────────────────────────────────────────
 // Track registered handlers so we can remove them on unmount (prevents duplicate
 // handlers accumulating across component remounts, e.g. when navigating away and back).
@@ -1484,6 +1488,19 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     }
     scrollToBottom()
     fetchStatus()
+    // Browser notification — only fires when tab is hidden (checked inside notify())
+    if (props.sessionId) {
+      const msgs = getMessages(props.sessionId)
+      const last = msgs.at(-1)
+      const agentName = last?.agent ?? 'Agent'
+      const preview = last?.content?.slice(0, 80) ?? ''
+      notify(
+        agentName,
+        preview || 'Finished responding',
+        `session-done-${props.sessionId}`,
+        () => router.push(`/chat/${props.sessionId}`)
+      )
+    }
   })
 
 registerWS(ws, 'error', (msg: WSMessage) => {
@@ -1712,6 +1729,14 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     }
     msgs.push(fupMsg)
     scrollToBottom()
+    if (props.sessionId) {
+      notify(
+        agentName ?? 'Agent',
+        'Has a follow-up for you',
+        `follow-up-${props.sessionId}`,
+        () => router.push(`/chat/${props.sessionId}`)
+      )
+    }
   })
 
 // follow_up_cancelled: lead agent failed to synthesize (session busy or error).

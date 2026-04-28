@@ -10,6 +10,7 @@ import InboxView from '../views/InboxView.vue'
 import WorkflowsView from '../views/WorkflowsView.vue'
 import CloudView from '../views/CloudView.vue'
 import SkillsView from '../views/SkillsView.vue'
+import MemoryView from '../views/MemoryView.vue'
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -24,6 +25,7 @@ export default createRouter({
     { path: '/logs', component: LogsView },
     { path: '/stats', component: StatsView },
     { path: '/inbox', component: InboxView },
+    { path: '/memory', component: MemoryView },
     { path: '/routines', redirect: '/workflows' },
     { path: '/workflows/:id?', component: WorkflowsView, props: true },
     { path: '/workflows/:id/runs/:runId', component: WorkflowsView, props: true },

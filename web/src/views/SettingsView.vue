@@ -289,6 +289,32 @@
             </section>
           </div>
 
+          <!-- ── Notifications ───────────────────────────────────────────── -->
+          <div v-if="activeTab === 'notifications'" class="space-y-6">
+            <p class="text-xs text-huginn-muted">Control when Huginn sends desktop notifications to your operating system.</p>
+
+            <section class="space-y-3">
+              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Desktop Notifications</h3>
+
+              <div v-if="!notif.isSupported" class="text-xs text-huginn-muted px-1">
+                Browser notifications are not supported in this browser.
+              </div>
+
+              <template v-else>
+                <ToggleRow
+                  :modelValue="notif.enabled.value"
+                  label="Desktop notifications"
+                  hint="Get notified when agents respond or workflows complete, even when this tab is in the background."
+                  @update:modelValue="notif.toggle($event)"
+                />
+
+                <p v-if="notif.permission.value === 'denied'" class="text-[11px] text-amber-400 px-1">
+                  Notifications are blocked in browser settings. To enable, update your browser's site permissions for this page.
+                </p>
+              </template>
+            </section>
+          </div>
+
           <!-- ── About ──────────────────────────────────────────────── -->
           <div v-if="activeTab === 'about'" class="space-y-6" data-testid="settings-about-panel">
             <p class="text-xs text-huginn-muted">Build information for the running Huginn instance. Useful for confirming an upgrade has taken effect.</p>
@@ -319,8 +345,10 @@ import { ref, onMounted, defineComponent, h } from 'vue'
 import { api } from '../composables/useApi'
 import { useConfig, type MCPServer } from '../composables/useConfig'
 import { useVersion } from '../composables/useVersion'
+import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 
 const { config, loading, externallyChanged, loadConfig, saveConfig } = useConfig()
+const notif = useBrowserNotifications()
 // useVersion returns the build version (cached app-wide). The composable
 // also fires a fetch on App.vue mount, so by the time Settings renders the
 // label is usually already populated; calling loadVersion again here is a
@@ -411,6 +439,10 @@ const IconMCP = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24',
   h('path', { d: 'M8 21h8M12 17v4' }),
   h('path', { d: 'M7 8h3m4 0h3' }),
 ]) })
+const IconNotifications = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, [
+  h('path', { d: 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9' }),
+  h('path', { d: 'M13.73 21a2 2 0 0 1-3.46 0' }),
+]) })
 const IconAbout = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
   h('circle', { cx: '12', cy: '12', r: '10' }),
   h('path', { d: 'M12 16v-4' }),
@@ -423,6 +455,7 @@ const tabs = [
   { id: 'webui', label: 'Web UI', icon: IconWebUI },
   { id: 'integrations', label: 'Integrations', icon: IconIntegrations },
   { id: 'mcp', label: 'MCP Servers', icon: IconMCP },
+  { id: 'notifications', label: 'Notifications', icon: IconNotifications },
   { id: 'about', label: 'About', icon: IconAbout },
 ]
 
