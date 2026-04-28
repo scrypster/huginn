@@ -523,34 +523,6 @@ func TestProgressReader(t *testing.T) {
 	}
 }
 
-// ─── upgradeStep ──────────────────────────────────────────────────────────────
-
-func TestUpgradeStep_Success(t *testing.T) {
-	called := false
-	err := upgradeStep("Test step...", func() error {
-		called = true
-		return nil
-	})
-	if err != nil {
-		t.Errorf("expected nil error, got %v", err)
-	}
-	if !called {
-		t.Error("step function was not called")
-	}
-}
-
-func TestUpgradeStep_Failure(t *testing.T) {
-	err := upgradeStep("Failing step...", func() error {
-		return fmt.Errorf("something went wrong")
-	})
-	if err == nil {
-		t.Error("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "something went wrong") {
-		t.Errorf("unexpected error text: %v", err)
-	}
-}
-
 // ─── Upgrader.Run integration ─────────────────────────────────────────────────
 
 func TestUpgraderRun_AlreadyUpToDate(t *testing.T) {
@@ -615,9 +587,10 @@ func TestUpgraderRun_TargetVersionSkipsAPICall(t *testing.T) {
 			apiCalled = true
 			return "v0.3.0"
 		},
-		HuginnDirFn: func() (string, error) { return t.TempDir(), nil },
-		PIDIsLiveFn: func(path string) (bool, int) { return false, 0 },
-		StopProcess: noopStop,
+		HuginnDirFn:  func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:  func(path string) (bool, int) { return false, 0 },
+		StopProcess:  noopStop,
+		IsHomebrewFn: func() bool { return false },
 	}
 	// Expect failure (no real release server) but the API must NOT be called.
 	_ = u.Run([]string{"--version", "v0.3.0", "--yes"})
@@ -670,6 +643,7 @@ func TestSelfUpdateWithURLs_DownloadAndChecksumOK(t *testing.T) {
 		srv.URL+"/archive.tar.gz",
 		srv.URL+"/checksums.txt",
 		"linux", "amd64",
+		runningState{},
 	)
 	// Expected to fail at verifyHuginnBinary (fake binary can't run `huginn version`).
 	// But must NOT fail with a checksum error.
@@ -709,7 +683,7 @@ func TestSelfUpdateWithURLs_ChecksumMismatch(t *testing.T) {
 		ExePath:     exePath,
 	}
 
-	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64")
+	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64", runningState{})
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Errorf("expected checksum mismatch error, got: %v", err)
 	}
@@ -743,8 +717,258 @@ func TestSelfUpdateWithURLs_ChecksumsFetch404(t *testing.T) {
 		ExePath:     exePath,
 	}
 
-	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64")
+	err := u.selfUpdateWithURLs("v0.3.0", srv.URL+"/archive.tar.gz", srv.URL+"/checksums.txt", "linux", "amd64", runningState{})
 	if err == nil {
 		t.Error("expected error on 404 checksums, got nil")
+	}
+}
+
+// ─── Run prompt: daemon awareness ─────────────────────────────────────────────
+
+func TestRun_PromptMentionsRunningDaemons(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		// Both daemons live — PIDIsLiveFn is called twice (serve, tray)
+		PIDIsLiveFn:  func(path string) (bool, int) { return true, 42 },
+		StopProcess:  noopStop,
+		DetachStart:  noopDetach,
+		IsHomebrewFn: func() bool { return false },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("n\n"), // user aborts
+	}
+	_ = u.Run([]string{})
+	got := out.String()
+	if !strings.Contains(got, "server + tray") {
+		t.Errorf("prompt missing 'server + tray':\n%s", got)
+	}
+	if !strings.Contains(got, "will be stopped") {
+		t.Errorf("prompt missing restart warning:\n%s", got)
+	}
+}
+
+func TestRun_PromptOmitsRestartWhenNotRunning(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		StopProcess:   noopStop,
+		DetachStart:   noopDetach,
+		IsHomebrewFn:  func() bool { return false },
+		Stdout:        &out,
+		Stdin:         strings.NewReader("n\n"),
+	}
+	_ = u.Run([]string{})
+	got := out.String()
+	if strings.Contains(got, "running") {
+		t.Errorf("prompt should not mention 'running' when no daemons:\n%s", got)
+	}
+}
+
+func TestRun_YesFlagPrintsNoticeWhenRunning(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	// StopProcess returns error so selfUpdateWithURLs bails before network calls.
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return true, 42 },
+		StopProcess:   func(pid int, path string) error { return fmt.Errorf("stop aborted") },
+		IsHomebrewFn:  func() bool { return false },
+		Stdout:        &out,
+		Stdin:         strings.NewReader(""), // must NOT be read
+	}
+	_ = u.Run([]string{"--yes"})
+	got := out.String()
+	if !strings.Contains(got, "Note:") {
+		t.Errorf("expected 'Note:' line with --yes + running daemons:\n%s", got)
+	}
+	if !strings.Contains(got, "server + tray") {
+		t.Errorf("notice should mention 'server + tray':\n%s", got)
+	}
+	if strings.Contains(got, "[y/N]") {
+		t.Errorf("should not show interactive prompt with --yes:\n%s", got)
+	}
+}
+
+func TestRun_YesFlagSilentWhenNotRunning(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	var out bytes.Buffer
+	// Use a client that can't reach github.com to avoid real network calls.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	u := &Upgrader{
+		HTTPClient:    srv.Client(),
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		StopProcess:   noopStop,
+		DetachStart:   noopDetach,
+		IsHomebrewFn:  func() bool { return false },
+		Stdout:        &out,
+		Stdin:         strings.NewReader(""),
+	}
+	_ = u.Run([]string{"--yes"})
+	got := out.String()
+	if strings.Contains(got, "Note:") {
+		t.Errorf("should not print Note: when no daemons running:\n%s", got)
+	}
+}
+
+// ─── upgradeViaHomebrew ───────────────────────────────────────────────────────
+
+func TestUpgradeViaHomebrew_StopsAndRestartsDaemons(t *testing.T) {
+	stopCalls, restartCalls := 0, 0
+	var out bytes.Buffer
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "huginn")
+	os.WriteFile(exePath, []byte("fake"), 0755)
+
+	u := &Upgrader{
+		HuginnDirFn:  func() (string, error) { return dir, nil },
+		ExePath:      exePath,
+		StopProcess:  func(pid int, path string) error { stopCalls++; return nil },
+		DetachStart:  func(cmd *exec.Cmd) error { restartCalls++; return nil },
+		BrewUpgrade:  func(pkg string) error { return nil },
+		VerifyBinary: func(path, tag string) error { return nil },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("y\n"),
+	}
+
+	state := runningState{serveRunning: true, servePID: 42, trayRunning: true, trayPID: 43}
+	if err := u.upgradeViaHomebrew("v0.3.1", false, state); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stopCalls != 2 {
+		t.Errorf("expected 2 stop calls, got %d", stopCalls)
+	}
+	if restartCalls != 2 {
+		t.Errorf("expected 2 restart calls, got %d", restartCalls)
+	}
+}
+
+func TestUpgradeViaHomebrew_RestartsOnBrewFailure(t *testing.T) {
+	stopCalls, restartCalls := 0, 0
+	var out bytes.Buffer
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "huginn")
+	os.WriteFile(exePath, []byte("fake"), 0755)
+
+	u := &Upgrader{
+		HuginnDirFn:  func() (string, error) { return dir, nil },
+		ExePath:      exePath,
+		StopProcess:  func(pid int, path string) error { stopCalls++; return nil },
+		DetachStart:  func(cmd *exec.Cmd) error { restartCalls++; return nil },
+		BrewUpgrade:  func(pkg string) error { return fmt.Errorf("brew exploded") },
+		VerifyBinary: func(path, tag string) error { return nil },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("y\n"),
+	}
+
+	state := runningState{serveRunning: true, servePID: 42, trayRunning: true, trayPID: 43}
+	err := u.upgradeViaHomebrew("v0.3.1", false, state)
+	if err == nil || !strings.Contains(err.Error(), "brew exploded") {
+		t.Errorf("expected brew error, got: %v", err)
+	}
+	if stopCalls != 2 {
+		t.Errorf("expected 2 stop calls, got %d", stopCalls)
+	}
+	if restartCalls != 2 {
+		t.Errorf("expected 2 restart calls after brew failure, got %d", restartCalls)
+	}
+}
+
+func TestUpgradeViaHomebrew_VersionFlagErrors(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	brewCalled := false
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		IsHomebrewFn:  func() bool { return true },
+		BrewUpgrade:   func(pkg string) error { brewCalled = true; return nil },
+		Stdout:        &out,
+	}
+	err := u.Run([]string{"--version", "v0.3.1"})
+	if err == nil {
+		t.Error("expected error for --version with Homebrew, got nil")
+	}
+	if brewCalled {
+		t.Error("brew must not be called when --version is set for Homebrew install")
+	}
+}
+
+func TestUpgradeViaHomebrew_ForceFlagErrors(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	brewCalled := false
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		IsHomebrewFn:  func() bool { return true },
+		BrewUpgrade:   func(pkg string) error { brewCalled = true; return nil },
+		Stdout:        &out,
+	}
+	err := u.Run([]string{"--force"})
+	if err == nil {
+		t.Error("expected error for --force with Homebrew, got nil")
+	}
+	if brewCalled {
+		t.Error("brew must not be called when --force is set for Homebrew install")
+	}
+}
+
+func TestUpgradeViaHomebrew_VerifiesNewBinary(t *testing.T) {
+	var out bytes.Buffer
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "huginn")
+	os.WriteFile(exePath, []byte("fake"), 0755)
+
+	u := &Upgrader{
+		HuginnDirFn:  func() (string, error) { return dir, nil },
+		ExePath:      exePath,
+		StopProcess:  noopStop,
+		DetachStart:  noopDetach,
+		BrewUpgrade:  func(pkg string) error { return nil },
+		VerifyBinary: func(path, tag string) error { return fmt.Errorf("binary verify failed") },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("y\n"),
+	}
+
+	state := runningState{}
+	err := u.upgradeViaHomebrew("v0.3.1", false, state)
+	// verify failure prints a warning but does NOT return an error
+	if err != nil {
+		t.Errorf("verify failure should not cause error return, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "Warning") {
+		t.Errorf("expected Warning about verify failure:\n%s", out.String())
 	}
 }
