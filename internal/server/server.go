@@ -1047,6 +1047,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/muninn/connect", api(s.handleMuninnConnect))
 	mux.HandleFunc("GET /api/v1/muninn/vaults",   api(s.handleMuninnVaultsList))
 	mux.HandleFunc("POST /api/v1/muninn/vaults",  api(s.handleMuninnVaultCreate))
+	mux.HandleFunc("GET /api/v1/memory/replication-status", api(s.handleMemoryReplicationStatus))
 
 	// Spaces API (authenticated)
 	// NOTE: route ordering matters in Go 1.22+ ServeMux.
