@@ -13,6 +13,10 @@ const mockGetMessages = vi.fn((id: string) => {
 })
 const mockFormatSessionLabel = vi.fn((s: any) => s?.title || s?.id?.slice(0, 8) || '')
 const mockRenameSession = vi.fn()
+const mockGetAgentThinking = vi.fn(() => false)
+const mockGetLastSeenMessageId = vi.fn(() => null)
+const mockSetAgentThinking = vi.fn()
+const mockSetLastSeenMessageId = vi.fn()
 
 vi.mock('../../composables/useSessions', () => {
   const { ref } = require('vue')
@@ -24,6 +28,10 @@ vi.mock('../../composables/useSessions', () => {
       fetchMessages: vi.fn().mockResolvedValue(undefined),
       formatSessionLabel: mockFormatSessionLabel,
       renameSession: mockRenameSession,
+      getAgentThinking: mockGetAgentThinking,
+      getLastSeenMessageId: mockGetLastSeenMessageId,
+      setAgentThinking: mockSetAgentThinking,
+      setLastSeenMessageId: mockSetLastSeenMessageId,
       queueIfHydrating: (_sessionId: string, _handler: () => void) => false,
     }),
   }
