@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -49,6 +50,26 @@ func todoistCreds(mgr *connections.Manager, conn connections.Connection) (string
 	return creds["api_key"], nil
 }
 
+func buildTodoistTasksListURL(args map[string]any) string {
+	baseURL := "https://api.todoist.com/rest/v2/tasks"
+	params := url.Values{}
+	if pid, ok := args["project_id"].(string); ok && pid != "" {
+		params.Set("project_id", pid)
+	}
+	if f, ok := args["filter"].(string); ok && f != "" {
+		params.Set("filter", f)
+	}
+	encoded := params.Encode()
+	if encoded == "" {
+		return baseURL
+	}
+	return baseURL + "?" + encoded
+}
+
+func buildTodoistTaskCompleteURL(taskID string) string {
+	return fmt.Sprintf("https://api.todoist.com/rest/v2/tasks/%s/close", url.PathEscape(taskID))
+}
+
 // --- tasks_list ---
 
 type todoistTasksListTool struct {
@@ -56,8 +77,10 @@ type todoistTasksListTool struct {
 	conns []connections.Connection
 }
 
-func (t *todoistTasksListTool) Name() string        { return "tasks_list" }
-func (t *todoistTasksListTool) Description() string { return "List Todoist tasks, optionally filtered by project or filter string." }
+func (t *todoistTasksListTool) Name() string { return "tasks_list" }
+func (t *todoistTasksListTool) Description() string {
+	return "List Todoist tasks, optionally filtered by project or filter string."
+}
 func (t *todoistTasksListTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *todoistTasksListTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -81,17 +104,7 @@ func (t *todoistTasksListTool) Execute(ctx context.Context, args map[string]any)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: "tasks_list: auth: " + err.Error()}
 	}
-	apiURL := "https://api.todoist.com/rest/v2/tasks"
-	params := []string{}
-	if pid, ok := args["project_id"].(string); ok && pid != "" {
-		params = append(params, "project_id="+pid)
-	}
-	if f, ok := args["filter"].(string); ok && f != "" {
-		params = append(params, "filter="+f)
-	}
-	if len(params) > 0 {
-		apiURL += "?" + strings.Join(params, "&")
-	}
+	apiURL := buildTodoistTasksListURL(args)
 	out, err := todoistDo(ctx, http.MethodGet, apiURL, token, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
@@ -106,8 +119,10 @@ type todoistTaskCreateTool struct {
 	conns []connections.Connection
 }
 
-func (t *todoistTaskCreateTool) Name() string        { return "task_create" }
-func (t *todoistTaskCreateTool) Description() string { return "Create a new Todoist task. Requires user approval." }
+func (t *todoistTaskCreateTool) Name() string { return "task_create" }
+func (t *todoistTaskCreateTool) Description() string {
+	return "Create a new Todoist task. Requires user approval."
+}
 func (t *todoistTaskCreateTool) Permission() tools.PermissionLevel { return tools.PermWrite }
 func (t *todoistTaskCreateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -159,8 +174,10 @@ type todoistTaskCompleteTool struct {
 	conns []connections.Connection
 }
 
-func (t *todoistTaskCompleteTool) Name() string        { return "task_complete" }
-func (t *todoistTaskCompleteTool) Description() string { return "Mark a Todoist task as complete. Requires user approval." }
+func (t *todoistTaskCompleteTool) Name() string { return "task_complete" }
+func (t *todoistTaskCompleteTool) Description() string {
+	return "Mark a Todoist task as complete. Requires user approval."
+}
 func (t *todoistTaskCompleteTool) Permission() tools.PermissionLevel { return tools.PermWrite }
 func (t *todoistTaskCompleteTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -188,7 +205,7 @@ func (t *todoistTaskCompleteTool) Execute(ctx context.Context, args map[string]a
 	if !ok || taskID == "" {
 		return tools.ToolResult{IsError: true, Error: "task_complete: task_id is required"}
 	}
-	apiURL := fmt.Sprintf("https://api.todoist.com/rest/v2/tasks/%s/close", taskID)
+	apiURL := buildTodoistTaskCompleteURL(taskID)
 	out, err := todoistDo(ctx, http.MethodPost, apiURL, token, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
@@ -203,8 +220,8 @@ type todoistListProjectsTool struct {
 	conns []connections.Connection
 }
 
-func (t *todoistListProjectsTool) Name() string        { return "tasks_list_projects" }
-func (t *todoistListProjectsTool) Description() string { return "List all Todoist projects." }
+func (t *todoistListProjectsTool) Name() string                      { return "tasks_list_projects" }
+func (t *todoistListProjectsTool) Description() string               { return "List all Todoist projects." }
 func (t *todoistListProjectsTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *todoistListProjectsTool) Schema() backend.Tool {
 	return backend.Tool{

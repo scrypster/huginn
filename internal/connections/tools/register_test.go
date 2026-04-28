@@ -88,7 +88,10 @@ func TestRegisterAll_WithGoogleConnection(t *testing.T) {
 		t.Fatalf("RegisterAll: %v", err)
 	}
 
-	for _, name := range []string{"gmail_search", "gmail_read", "gmail_send"} {
+	for _, name := range []string{
+		"gmail_search", "gmail_read", "gmail_send",
+		"calendar_today", "calendar_create", "calendar_find_free",
+	} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("%q should be registered when Google connection exists", name)
 		}
@@ -163,6 +166,78 @@ func TestRegisterAll_WithBitbucketConnection(t *testing.T) {
 	for _, name := range []string{"bitbucket_list_prs", "bitbucket_get_pr", "bitbucket_create_pr"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("%q should be registered when Bitbucket connection exists", name)
+		}
+	}
+}
+
+func TestRegisterAll_WithWeatherConnection(t *testing.T) {
+	reg := tools.NewRegistry()
+	store := newTestStore(t)
+	mgr := newTestManager(store)
+
+	if err := store.Add(connections.Connection{
+		ID:           "weather-1",
+		Provider:     connections.ProviderWeather,
+		AccountLabel: "weather-account",
+	}); err != nil {
+		t.Fatalf("store.Add: %v", err)
+	}
+
+	if err := conntools.RegisterAll(reg, mgr, store); err != nil {
+		t.Fatalf("RegisterAll: %v", err)
+	}
+
+	for _, name := range []string{"weather_current", "weather_forecast"} {
+		if _, ok := reg.Get(name); !ok {
+			t.Errorf("%q should be registered when Weather connection exists", name)
+		}
+	}
+}
+
+func TestRegisterAll_WithTodoistConnection(t *testing.T) {
+	reg := tools.NewRegistry()
+	store := newTestStore(t)
+	mgr := newTestManager(store)
+
+	if err := store.Add(connections.Connection{
+		ID:           "todoist-1",
+		Provider:     connections.ProviderTodoist,
+		AccountLabel: "todoist-account",
+	}); err != nil {
+		t.Fatalf("store.Add: %v", err)
+	}
+
+	if err := conntools.RegisterAll(reg, mgr, store); err != nil {
+		t.Fatalf("RegisterAll: %v", err)
+	}
+
+	for _, name := range []string{"tasks_list", "task_create", "task_complete", "tasks_list_projects"} {
+		if _, ok := reg.Get(name); !ok {
+			t.Errorf("%q should be registered when Todoist connection exists", name)
+		}
+	}
+}
+
+func TestRegisterAll_WithHomeAssistantConnection(t *testing.T) {
+	reg := tools.NewRegistry()
+	store := newTestStore(t)
+	mgr := newTestManager(store)
+
+	if err := store.Add(connections.Connection{
+		ID:           "ha-1",
+		Provider:     connections.ProviderHomeAssistant,
+		AccountLabel: "ha-account",
+	}); err != nil {
+		t.Fatalf("store.Add: %v", err)
+	}
+
+	if err := conntools.RegisterAll(reg, mgr, store); err != nil {
+		t.Fatalf("RegisterAll: %v", err)
+	}
+
+	for _, name := range []string{"ha_states", "ha_call_service", "ha_scene_activate"} {
+		if _, ok := reg.Get(name); !ok {
+			t.Errorf("%q should be registered when Home Assistant connection exists", name)
 		}
 	}
 }
