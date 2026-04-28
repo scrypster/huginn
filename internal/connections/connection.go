@@ -25,7 +25,8 @@ const (
 	ProviderHubSpot     Provider = "hubspot"
 	ProviderZendesk     Provider = "zendesk"
 	ProviderAsana       Provider = "asana"
-	ProviderMonday      Provider = "monday"
+	ProviderMonday         Provider = "monday"
+	ProviderHomeAssistant  Provider = "homeassistant"
 )
 
 // ConnectionType identifies what kind of credentials a connection holds.
