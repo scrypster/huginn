@@ -10,10 +10,20 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-// Migrations returns an empty list — all schema is now in the base schema DDL
-// (ApplySchema). No rolling migrations are needed for fresh installations.
+// Migrations returns the list of incremental schema migrations for existing
+// Huginn installations. Fresh installs use the base schema DDL (ApplySchema)
+// and do not run these migrations. Existing installs run them in order on first startup.
+// All migrations are idempotent (IF NOT EXISTS / column-existence guards).
 func Migrations() []sqlitedb.Migration {
-	return nil
+	return []sqlitedb.Migration{
+		{Name: "thread_columns_and_artifacts_v1", Up: migrateThreadColumnsAndArtifacts},
+		{Name: "delegations_session_id_v1",       Up: migrateDelegationsSessionIDV1},
+		{Name: "sessions_space_id_index_v1",      Up: migrateAddSpaceIDIndex},
+		{Name: "sessions_fts_v2",                 Up: migrateSessionsFTSv2},
+		{Name: "memory_replication_queue_v1",     Up: migrateMemoryReplicationQueueV1},
+		{Name: "memory_replication_queue_v2",     Up: migrateMemoryReplicationQueueV2},
+		{Name: "cloud_vault_queue_v1",            Up: migrateCloudVaultQueueV1},
+	}
 }
 
 // migrateDelegationsSessionIDV1 adds a session_id column to the delegations
