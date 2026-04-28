@@ -108,10 +108,10 @@ describe('InboxView', () => {
     expect(mockFetchNotifications).toHaveBeenCalled()
   })
 
-  it('shows "Inbox" heading in the header', async () => {
+  it('shows "Activity Log" heading in the header', async () => {
     const w = mountView()
     await flushPromises()
-    expect(w.text()).toContain('Inbox')
+    expect(w.text()).toContain('Activity Log')
   })
 
   it('shows "Mark all seen" button', async () => {

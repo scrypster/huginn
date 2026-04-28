@@ -850,7 +850,6 @@ watch(drawerOpen, (open) => {
 
 // ── Nav structure ────────────────────────────────────────────────────
 const navItems = [
-  { section: 'inbox',      label: 'Inbox',      path: '/inbox',      icon: 'inbox'      },
   { section: 'chat',       label: 'Chat',       path: '/chat',       icon: 'chat'       },
   { section: 'agents',     label: 'Agents',     path: '/agents',     icon: 'agents'     },
   { section: 'models',     label: 'Models',     path: '/models',     icon: 'models'     },
@@ -860,6 +859,7 @@ const navItems = [
   { section: 'stats',      label: 'Stats',      path: '/stats',      icon: 'stats'      },
   { section: 'settings',   label: 'Settings',   path: '/settings',   icon: 'settings'   },
   { section: 'logs',       label: 'Logs',       path: '/logs',       icon: 'logs'       },
+  { section: 'inbox',      label: 'Activity Log', path: '/inbox',      icon: 'inbox'      },
 ]
 
 const activeSection    = computed(() => {
