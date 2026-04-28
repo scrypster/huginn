@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/scrypster/huginn/internal/agent"
@@ -45,6 +46,10 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	}
 	// Prevent tests from opening real browser windows during handleCloudConnect.
 	srv.openBrowserFn = func(_ string) error { return nil }
+	// Keep background cloud registration goroutines short-lived in tests so they
+	// cannot accumulate and push the package past the global test timeout.
+	srv.cloudRegisterTimeout = 1500 * time.Millisecond
+	srv.cloudRegisterPollInterval = 25 * time.Millisecond
 	// Isolate config writes: use a temp file so tests never corrupt ~/.huginn/config.json.
 	srv.configPath = t.TempDir() + "/config.json"
 	// Isolate keychain writes: no-op storer returns the canonical keyring reference format
@@ -68,9 +73,9 @@ func (s *stubBackend) ChatCompletion(_ context.Context, req backend.ChatRequest)
 	}
 	return &backend.ChatResponse{Content: reply, DoneReason: "stop"}, nil
 }
-func (s *stubBackend) Health(_ context.Context) error            { return nil }
-func (s *stubBackend) Shutdown(_ context.Context) error          { return nil }
-func (s *stubBackend) ContextWindow() int                        { return 4096 }
+func (s *stubBackend) Health(_ context.Context) error   { return nil }
+func (s *stubBackend) Shutdown(_ context.Context) error { return nil }
+func (s *stubBackend) ContextWindow() int               { return 4096 }
 
 // --- Tests ---
 
@@ -308,7 +313,6 @@ func TestServerListAgents(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
-
 
 func TestServerStartStop(t *testing.T) {
 	sessDir := t.TempDir()
