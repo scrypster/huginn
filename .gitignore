@@ -1,3 +1,6 @@
+# git worktrees
+.worktrees/
+
 # compiled binary
 huginn
 huginn-local
