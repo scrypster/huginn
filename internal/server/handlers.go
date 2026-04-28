@@ -412,7 +412,6 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"saved": incoming.Name})
 }
 
-
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// Return the configured models from the config
 	jsonOK(w, map[string]string{
@@ -445,9 +444,9 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 
 	// Built-in llama.cpp managed models.
 	type builtinModel struct {
-		Name    string `json:"name"`
-		Source  string `json:"source"`
-		SizeBytes int64 `json:"size_bytes,omitempty"`
+		Name      string `json:"name"`
+		Source    string `json:"source"`
+		SizeBytes int64  `json:"size_bytes,omitempty"`
 	}
 	var builtinModels []builtinModel
 	if s.modelStore != nil {
@@ -747,10 +746,10 @@ func (s *Server) handleCloneAgent(w http.ResponseWriter, r *http.Request) {
 
 	clone := *src // shallow copy is fine: AgentDef is value-only, no pointers besides MemoryEnabled.
 	clone.Name = body.NewName
-	clone.ID = ""        // force a fresh id assignment downstream
+	clone.ID = "" // force a fresh id assignment downstream
 	clone.IsDefault = false
-	clone.Version = 0    // version starts at 0 for new agents
-	clone.CreatedAt = "" // SaveAgentDefault stamps it
+	clone.Version = 0                       // version starts at 0 for new agents
+	clone.CreatedAt = ""                    // SaveAgentDefault stamps it
 	if mb := src.MemoryEnabled; mb != nil { // deep-copy the *bool to break sharing
 		v := *mb
 		clone.MemoryEnabled = &v
@@ -1176,8 +1175,17 @@ func (s *Server) handleCloudConnect(w http.ResponseWriter, r *http.Request) {
 		if s.openBrowserFn != nil {
 			reg.OpenBrowserFn = s.openBrowserFn
 		}
+		if s.cloudRegisterPollInterval > 0 {
+			reg.PollInterval = s.cloudRegisterPollInterval
+		}
+		regTimeout := s.cloudRegisterTimeout
 		s.mu.Unlock()
 		ctx := context.WithoutCancel(r.Context())
+		if regTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, regTimeout)
+			defer cancel()
+		}
 		if _, err := reg.Register(ctx, hostname); err != nil {
 			slog.Warn("cloud: registration failed", "err", err)
 			return

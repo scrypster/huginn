@@ -167,3 +167,30 @@ func TestHandleCloudConnect_AlreadyRegistering_ReturnsRegistering(t *testing.T) 
 		t.Errorf("second call: want registering, got %v", body2["status"])
 	}
 }
+
+func TestHandleCloudConnect_TestRegistrationContextEventuallyClearsRegistering(t *testing.T) {
+	store := &relay.MemoryTokenStore{}
+	srv, ts := newTestServer(t)
+	srv.SetRelayConfig(store, "")
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/cloud/connect", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/cloud/connect: %v", err)
+	}
+	resp.Body.Close()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.mu.Lock()
+		registering := srv.registering
+		srv.mu.Unlock()
+		if !registering {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	t.Fatal("expected registering flag to clear after bounded test registration timeout")
+}
