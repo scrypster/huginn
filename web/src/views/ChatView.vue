@@ -379,14 +379,25 @@
             </div>
 
             <!-- User message (right-aligned bubble) -->
-            <div v-else-if="msg.role === 'user'" class="flex justify-end" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
+            <div v-else-if="msg.role === 'user'" class="group flex flex-col items-end" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
               <div class="md-content max-w-[75%] px-4 py-3 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words"
                 style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
                 v-html="renderWithMentions(msg.content)" />
+              <p v-if="msg.id === lastSeenMessageId"
+                 class="text-[10px] text-right pr-3 -mt-1"
+                 style="color:#8b949e">
+                Seen
+              </p>
+              <MessageActions
+                class="opacity-0 group-hover:opacity-100 transition-opacity"
+                :msg="msg"
+                :agent-vault-name="''"
+                @retry="handleRetry"
+              />
             </div>
 
             <!-- Assistant message (left-aligned) -->
-            <div v-else-if="msg.role === 'assistant'" class="flex gap-3" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
+            <div v-else-if="msg.role === 'assistant'" class="group flex gap-3" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
               <!-- Agent avatar — visible only on first message of a run; placeholder spacer otherwise -->
               <div class="w-7 flex-shrink-0 mt-0.5">
                 <div v-if="msg.showHeader"
@@ -583,9 +594,25 @@
                     </div>
                   </div>
                 </div>
+              <MessageActions
+                class="mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                :msg="msg"
+                :agent-vault-name="activeAgentVaultName"
+                @save-memory="handleSaveMemory"
+              />
               </div>
             </div>
           </template>
+
+          <!-- Thinking bubble: shown while waiting for first token (agentThinking) -->
+          <div v-if="agentThinking" class="flex items-end gap-2 px-4 py-2">
+            <div class="flex gap-1 px-3 py-2 rounded-2xl rounded-bl-sm" style="background:rgba(255,255,255,0.06)">
+              <span v-for="i in 3" :key="i"
+                class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce"
+                :style="`animation-delay:${(i-1)*150}ms`"
+              />
+            </div>
+          </div>
 
           <!-- Streaming thinking indicator (before first token) -->
           <div v-if="streaming && messages.at(-1)?.role !== 'assistant'" class="flex gap-3">
@@ -815,6 +842,7 @@ import ThreadDetail from '../components/ThreadDetail.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
+import MessageActions from '../components/MessageActions.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread } from '../composables/useSessions'
@@ -913,7 +941,8 @@ const wsSecondsUntilRetry = computed(() => wsRef.value?.secondsUntilRetry?.value
 function wsReconnectNow() { wsRef.value?.reconnectNow?.() }
 function reloadPage() { window.location.reload() }
 
-const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession } = useSessions()
+const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
+  getAgentThinking, setAgentThinking, getLastSeenMessageId, setLastSeenMessageId } = useSessions()
 const { activeSpace } = useSpaces()
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
@@ -1105,6 +1134,21 @@ const messages = computed(() => {
     return adaptSpaceMessages(spMsgs) as ReturnType<typeof getMessages>
   }
   return props.sessionId ? getMessages(props.sessionId) : []
+})
+
+const agentThinking = computed(() =>
+  props.sessionId ? getAgentThinking(props.sessionId) : false
+)
+
+const lastSeenMessageId = computed(() =>
+  props.sessionId ? getLastSeenMessageId(props.sessionId) : null
+)
+
+const activeAgentVaultName = computed(() => {
+  const name = selectedAgentName.value || (activeSpace.value ? spaceAgents.value[0]?.name : '')
+  if (!name) return ''
+  const agent = agentsList.value.find(a => a.name === name)
+  return (agent?.vault_name as string) ?? ''
 })
 
 // enrichedMessages (extracted to useMessageEnrichment)
@@ -1333,11 +1377,47 @@ async function handleEditorSend(markdown: string) {
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true, agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
 
+  if (props.sessionId) setAgentThinking(props.sessionId, true)
+  if (props.sessionId) setLastSeenMessageId(props.sessionId, null)
   ws.send({ type: 'chat', content: markdown, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
   nextTick(() => chatEditorRef.value?.focus())
 }
 
+
+function handleRetry(content: string) {
+  if (!props.sessionId || !wsRef.value) return
+  const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  currentRunId.value = runId
+  streaming.value = true
+  startStreamingWatchdog()
+  const msgs = getMessages(props.sessionId)
+  msgs.push({ id: `u-${Date.now()}`, role: 'user', content })
+  msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true,
+    agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
+  setAgentThinking(props.sessionId, true)
+  setLastSeenMessageId(props.sessionId, null)
+  wsRef.value.send({ type: 'chat', content, session_id: props.sessionId, run_id: runId })
+  scrollToBottom()
+}
+
+async function handleSaveMemory({ vault, content }: { vault: string; content: string }) {
+  if (!vault) return
+  try {
+    await apiFetch('/api/v1/muninn/tool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        vault,
+        tool: 'muninn_remember',
+        args: {
+          concept: content.trim().slice(0, 60),
+          content,
+        },
+      }),
+    })
+  } catch { /* silent */ }
+}
 
 function cancelThread(threadId: string) {
   const ws = wsRef.value
@@ -1395,6 +1475,13 @@ watch(wsRef, (ws) => {
     // switches (props.sessionId can change between WS registration and delivery).
     const sid = msg.session_id || props.sessionId
     if (!sid || sid !== props.sessionId) return // ignore tokens for other sessions
+    if (sid) setAgentThinking(sid, false)
+    // Set lastSeenMessageId to the last user message on first token (if not set)
+    if (sid && !getLastSeenMessageId(sid)) {
+      const msgs = getMessages(sid)
+      const lastUser = [...msgs].reverse().find(m => m.role === 'user')
+      if (lastUser) setLastSeenMessageId(sid, lastUser.id)
+    }
     startStreamingWatchdog() // reset watchdog on each token to detect true inactivity
     const apply = () => {
       // Flush buffered prefetch tool results now that the assistant message exists.
@@ -1455,6 +1542,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     }
     clearStreamingWatchdog()
     streaming.value = false
+    if (props.sessionId) setAgentThinking(props.sessionId, false)
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
     // streaming but whose results haven't been attached yet (e.g. timing edge cases).
@@ -1507,6 +1595,7 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
     if (msg.run_id && msg.run_id !== currentRunId.value) return
+    if (props.sessionId) setAgentThinking(props.sessionId, false)
     clearStreamingWatchdog()
     streaming.value = false
     activeToolCalls.value = []

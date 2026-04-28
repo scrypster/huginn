@@ -36,7 +36,7 @@ func TestHandleReplicationStatusNoDB(t *testing.T) {
 
 func TestHandleMuninnToolRejectsUnknownTool(t *testing.T) {
 	_, ts := newTestServer(t)
-	body := `{"vault":"huginn:agent:user:alice","tool":"muninn_remember","args":{}}`
+	body := `{"vault":"huginn:agent:user:alice","tool":"muninn_evil","args":{}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/muninn/tool",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -65,5 +65,11 @@ func TestHandleMuninnToolRejectsMissingFields(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing fields, got %d", resp.StatusCode)
+	}
+}
+
+func TestAllowedMuninnTools_IncludesMuninnRemember(t *testing.T) {
+	if !allowedMuninnTools["muninn_remember"] {
+		t.Error("allowedMuninnTools must include muninn_remember for user-initiated Save to Memory")
 	}
 }
