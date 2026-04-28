@@ -84,6 +84,9 @@ var providerToolNames = map[connections.Provider][]string{
 		"monday_list_boards", "monday_get_board", "monday_list_items",
 		"monday_create_item", "monday_update_item",
 	},
+	connections.ProviderHomeAssistant: {
+		"ha_states", "ha_call_service", "ha_scene_activate",
+	},
 }
 
 // RegisterAll registers integration tools for all providers with at least one connection.
@@ -149,6 +152,8 @@ func RegisterForProvider(reg *tools.Registry, mgr *connections.Manager, provider
 		err = registerAsanaTools(reg, mgr, conns)
 	case connections.ProviderMonday:
 		err = registerMondayTools(reg, mgr, conns)
+	case connections.ProviderHomeAssistant:
+		err = registerHomeAssistantTools(reg, mgr, conns)
 	}
 	if err != nil {
 		return err
