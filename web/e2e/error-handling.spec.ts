@@ -13,8 +13,8 @@ import { blockWS } from './helpers/mock-ws'
 async function gotoInbox(page: import('@playwright/test').Page) {
   await page.goto('/#/')
   await page.waitForSelector('nav', { timeout: 5000 })
-  await page.click('button[title="Inbox"]')
-  await page.waitForSelector('h1:has-text("Inbox")', { timeout: 5000 })
+  await page.click('button[title="Activity Log"]')
+  await page.waitForSelector('h1:has-text("Activity Log")', { timeout: 5000 })
 }
 
 test.describe('API error states', () => {
@@ -93,7 +93,7 @@ test.describe('API error states', () => {
     await gotoInbox(page)
 
     // The view should still render (no JS crash) with heading visible
-    const heading = page.locator('h1:has-text("Inbox")')
+    const heading = page.locator('h1:has-text("Activity Log")')
     await expect(heading).toBeVisible({ timeout: 5000 })
 
     // There should be no notification items (error path returns empty / skip)
