@@ -68,13 +68,14 @@ func (s *Server) handleMemoryReplicationStatus(w http.ResponseWriter, r *http.Re
 }
 
 // allowedMuninnTools is the whitelist of tools the browser may call via the proxy.
-// Only read + user-initiated write tools are permitted; no autonomous write tools.
+// muninn_remember is allowed for explicit user-initiated "Save to Memory" actions in the UI.
 var allowedMuninnTools = map[string]bool{
 	"muninn_recall":         true,
 	"muninn_read":           true,
 	"muninn_find_by_entity": true,
 	"muninn_entities":       true,
 	"muninn_forget":         true,
+	"muninn_remember":       true, // user-initiated only; not called autonomously via this endpoint
 }
 
 // handleMuninnTool proxies a MuninnDB tool call from the browser to MuninnDB MCP.

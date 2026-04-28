@@ -67,3 +67,9 @@ func TestHandleMuninnToolRejectsMissingFields(t *testing.T) {
 		t.Fatalf("expected 400 for missing fields, got %d", resp.StatusCode)
 	}
 }
+
+func TestAllowedMuninnTools_IncludesMuninnRemember(t *testing.T) {
+	if !allowedMuninnTools["muninn_remember"] {
+		t.Error("allowedMuninnTools must include muninn_remember for user-initiated Save to Memory")
+	}
+}
