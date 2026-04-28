@@ -240,5 +240,26 @@ describe('useNotifications', () => {
       handlers['inbox_badge']!({ pending_count: 5 })
       expect(pendingCount.value).toBe(5)
     })
+
+    it('notification_new fires browser notification when tab hidden', async () => {
+      Object.defineProperty(document, 'hidden', { value: true, writable: true, configurable: true })
+      const instances: any[] = []
+      function MockNotif(title: string, opts: any) { instances.push({ title, opts }) }
+      MockNotif.permission = 'granted'
+      ;(globalThis as any).Notification = MockNotif
+      vi.resetModules()
+      const { setToken } = await import('../useApi')
+      setToken('test-token')
+      const { useBrowserNotifications } = await import('../useBrowserNotifications')
+      const notif = useBrowserNotifications()
+      notif.enabled.value = true
+      notif.permission.value = 'granted'
+      const { useNotifications } = await import('../useNotifications')
+      const { wireWS } = useNotifications()
+      const handlers: Record<string, Function> = {}
+      wireWS({ on: (ev: string, cb: Function) => { handlers[ev] = cb } } as any)
+      handlers['notification_new']!({ notification: { id: 'n1', summary: 'Alert', detail: 'msg' } })
+      expect(instances.some(i => i.title === 'Alert')).toBe(true)
+    })
   })
 })
