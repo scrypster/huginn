@@ -5,8 +5,12 @@
       class="w-4 h-4 rounded text-[10px] font-bold flex items-center justify-center flex-shrink-0 select-none"
       :style="`background:${color}22;color:${color}`"
     >{{ initial }}</span>
-    <!-- Agent name -->
-    <span class="text-xs font-semibold" :style="`color:${color}`">{{ agentName }}</span>
+    <!-- Agent name — title shows description on hover when available -->
+    <span
+      class="text-xs font-semibold"
+      :style="`color:${color}`"
+      :title="agentDescription || undefined"
+    >{{ agentName }}</span>
     <!-- Timestamp -->
     <span class="text-[11px] text-huginn-muted/60">{{ formattedTime }}</span>
   </div>
@@ -26,6 +30,7 @@ function agentColor(name: string): string {
 const props = defineProps<{
   agentName: string
   createdAt?: string
+  agentDescription?: string
 }>()
 
 const color = computed(() => agentColor(props.agentName))
