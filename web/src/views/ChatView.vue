@@ -1394,6 +1394,7 @@ function handleRetry(content: string) {
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true,
     agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
   setAgentThinking(props.sessionId, true)
+  setLastSeenMessageId(props.sessionId, null)
   wsRef.value.send({ type: 'chat', content, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
 }

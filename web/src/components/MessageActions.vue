@@ -33,8 +33,7 @@
         @click="handleSaveMemory"
         class="text-[10px] px-2 py-0.5 rounded transition-colors"
         style="background:rgba(255,255,255,0.06);color:#8b949e"
-        :disabled="saving"
-      >{{ saveLabel }}</button>
+      >Save to Memory</button>
     </template>
   </div>
 </template>
@@ -56,14 +55,6 @@ const emit = defineEmits<{
 }>()
 
 const copied = ref(false)
-const saving = ref(false)
-const saved = ref(false)
-
-const saveLabel = computed(() => {
-  if (saving.value) return 'Saving…'
-  if (saved.value) return 'Saved ✓'
-  return 'Save to Memory'
-})
 
 // True when the agent already called a memory tool during this turn.
 const agentAlreadySaved = computed(() =>

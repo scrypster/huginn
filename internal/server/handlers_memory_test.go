@@ -36,7 +36,7 @@ func TestHandleReplicationStatusNoDB(t *testing.T) {
 
 func TestHandleMuninnToolRejectsUnknownTool(t *testing.T) {
 	_, ts := newTestServer(t)
-	body := `{"vault":"huginn:agent:user:alice","tool":"muninn_remember","args":{}}`
+	body := `{"vault":"huginn:agent:user:alice","tool":"muninn_evil","args":{}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/muninn/tool",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
