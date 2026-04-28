@@ -309,9 +309,10 @@ func TestResolveAgentForSpace_FallsBackWhenNoSpaceStore(t *testing.T) {
 // ── BuildSpaceContextBlock tests ────────────────────────────────────────────
 
 func TestBuildSpaceContextBlock_LeadAgent_ContainsAllElements(t *testing.T) {
+	// Descriptions use capability-card format (as produced by BuildCapabilityCard in ws.go).
 	members := []agent.SpaceMember{
-		{Name: "Sam", Description: "Backend engineer"},
-		{Name: "Dave", Description: "DevOps specialist"},
+		{Name: "Sam", Description: "- Sam [capable, tools: yes]\n  Role: Backend engineer\n  Memory: conversational\n"},
+		{Name: "Dave", Description: "- Dave [capable, tools: yes]\n  Role: DevOps specialist\n  Memory: conversational\n"},
 	}
 	result := agent.BuildSpaceContextBlock("Engineering", "channel", "Tom", "Tom", members)
 
