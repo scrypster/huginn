@@ -51,6 +51,7 @@ export interface Agent {
   vault_name?: string
   memory_mode?: string
   vault_description?: string
+  description?: string          // one-line description shown in member panels and tooltips
   toolbelt?: ToolbeltEntry[]
   local_tools?: string[]   // tool names; ["*"] = all builtins; undefined/[] = none
   skills?: unknown[]
