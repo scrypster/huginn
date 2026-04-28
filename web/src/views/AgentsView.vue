@@ -1824,9 +1824,14 @@ function openLocalAccessModal() {
   showLocalAccessModal.value = true
 }
 
-function saveLocalAccessModal() {
+async function saveLocalAccessModal() {
   form.value.local_tools = [...modalLocalTools.value]
   showLocalAccessModal.value = false
+  if (props.agentName && props.agentName !== 'new') {
+    await save()
+  } else {
+    markDirty()
+  }
 }
 
 function localModalGrant(name: string) {

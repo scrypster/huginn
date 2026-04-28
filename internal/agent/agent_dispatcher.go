@@ -82,17 +82,43 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		}
 	}
 
-	// 4. Fork the permission gate so each agent run gets isolated provider maps.
+	// 4. Always inject delegation tools when registered in the registry.
+	// Delegation tools (delegate_to_agent, list_team_status, recall_thread_result)
+	// are tagged "builtin" in main.go so agents with LocalTools:["*"] already get
+	// them via step 1. But agents with a named LocalTools list only get those
+	// explicit names — delegation is excluded, causing the LLM to never call
+	// delegate_to_agent and the loop to exit early (Bug 2 / Bug 1).
+	// reg.Get returns (nil, false) when a tool is not registered, making this
+	// a safe no-op in environments that don't register delegation tools.
+	{
+		delegationNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
+		seenDelegation := make(map[string]bool, len(schemas))
+		for _, s := range schemas {
+			seenDelegation[s.Function.Name] = true
+		}
+		for _, dname := range delegationNames {
+			if !seenDelegation[dname] {
+				if dt, ok := reg.Get(dname); ok {
+					schemas = append(schemas, dt.Schema())
+				}
+			}
+		}
+	}
+
+	// 5. Fork the permission gate so each agent run gets isolated provider maps.
 	// When gate is nil (no permission gate configured), the forked gate is also nil.
 	var agentGate *permissions.Gate
 	if gate != nil {
-		// Always allow "muninndb" (vault tools) even when the agent has an explicit
-		// toolbelt. The vault schemas are already included in step 3 above; without
-		// adding "muninndb" to allowedProviders, the gate would reject every vault
-		// tool call with "permission denied" for agents that have a non-empty toolbelt.
+		// Always allow "muninndb" (vault tools) and "builtin" (delegation tools and
+		// other builtins) even when the agent has an explicit toolbelt. Without this,
+		// the gate would reject calls to delegate_to_agent (tagged "builtin") and
+		// muninn tools (tagged "muninndb") with "permission denied" for agents that
+		// have a non-empty toolbelt. The schemas are already included by steps 3 and
+		// 4 above; the gate bypass ensures those calls are also permitted at runtime.
 		allowed := agents.AllowedProviders(ag.Toolbelt)
 		if allowed != nil {
 			allowed["muninndb"] = true
+			allowed["builtin"] = true
 		}
 		agentGate = gate.Fork(
 			agents.WatchedProviders(ag.Toolbelt),

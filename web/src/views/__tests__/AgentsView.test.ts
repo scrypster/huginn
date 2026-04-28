@@ -1456,4 +1456,51 @@ describe('AgentsView', () => {
       expect(mockUpdateAgent).toHaveBeenCalledWith('Tom', expect.objectContaining({ name: 'Tom' }))
     })
   })
+
+  // ── saveLocalAccessModal calls save() for existing agent
+  it('saveLocalAccessModal calls save() for existing agent', async () => {
+    mockApiAgentsGet.mockResolvedValueOnce({
+      name: 'Max',
+      model: 'claude-3',
+      system_prompt: '',
+      color: '#3fb950',
+      icon: 'M',
+      memory_type: 'none',
+      toolbelt: [],
+      skills: [],
+      local_tools: [],
+    })
+    mockApiAgentsUpdate.mockResolvedValue({})
+    const w = mountAgent({ agentName: 'Max' })
+    await flushPromises()
+
+    const vm = w.vm as unknown as Record<string, unknown>
+    const modalArr = vm.modalLocalTools as string[]
+    modalArr.push('read_file', 'bash')
+    mockApiAgentsUpdate.mockClear()
+    await (vm.saveLocalAccessModal as () => Promise<void>)()
+    await flushPromises()
+
+    expect(mockApiAgentsUpdate).toHaveBeenCalledWith(
+      'Max',
+      expect.objectContaining({ local_tools: ['read_file', 'bash'] })
+    )
+  })
+
+  it('saveLocalAccessModal marks dirty for new agent (does not call save)', async () => {
+    const w = mountAgent({ agentName: 'new' })
+    await flushPromises()
+
+    const vm = w.vm as unknown as Record<string, unknown>
+    ;(vm.modalLocalTools as { value: string[] }).value = ['bash']
+    // Clear call count from initial mount
+    mockApiAgentsUpdate.mockClear()
+    await (vm.saveLocalAccessModal as () => Promise<void>)()
+    await flushPromises()
+
+    // For new agents, save() is NOT called — markDirty() sets dirty flag instead
+    expect(mockApiAgentsUpdate).not.toHaveBeenCalled()
+    // dirty state means "Unsaved changes" banner is visible
+    expect(w.text()).toContain('Unsaved changes')
+  })
 })

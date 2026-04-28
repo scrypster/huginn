@@ -35,9 +35,9 @@ func (t *localTestTool) Execute(_ context.Context, _ map[string]any) tools.ToolR
 	return tools.ToolResult{}
 }
 
-func TestApplyToolbelt_DefaultDenyNoLocalNoExternal(t *testing.T) {
+func TestApplyToolbelt_EmptyConfigNoToolsWhenNoneRegistered(t *testing.T) {
 	reg := buildLocalTestRegistry()
-	ag := &agents.Agent{Name: "test"} // empty LocalTools + empty Toolbelt
+	ag := &agents.Agent{Name: "test"} // empty LocalTools + empty Toolbelt — registry has no delegation tools so step 4 is a no-op
 
 	schemas, _ := applyToolbelt(ag, reg, nil)
 	if len(schemas) != 0 {
@@ -123,27 +123,33 @@ func TestApplyToolbelt_WildcardIncludesDelegationToolsWhenTaggedBuiltin(t *testi
 	}
 }
 
-// TestApplyToolbelt_DelegationToolsInvisibleWhenUntagged verifies that without
-// the "builtin" tag, delegation tools are NOT visible via LocalTools: ["*"].
-// This was the root cause of delegation not working before the fix.
-func TestApplyToolbelt_DelegationToolsInvisibleWhenUntagged(t *testing.T) {
+// TestApplyToolbelt_DelegationToolsInjectedEvenWhenUntagged verifies that
+// step 5 injection works regardless of tagging. Untagged delegation tools are
+// now injected because they are registered (the tagging only affects step 1).
+// This validates that step 5 is not dependent on the "builtin" tag.
+func TestApplyToolbelt_DelegationToolsInjectedEvenWhenUntagged(t *testing.T) {
 	reg := buildLocalTestRegistry()
-	// Add delegation tools WITHOUT tagging them (pre-fix behavior)
+	// Add delegation tools WITHOUT tagging them
 	for _, name := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
 		reg.Register(&localTestTool{name: name})
 	}
 
-	ag := &agents.Agent{Name: "Tom", LocalTools: []string{"*"}}
+	ag := &agents.Agent{Name: "Tom", LocalTools: []string{"read_file"}}
 	schemas, _ := applyToolbelt(ag, reg, nil)
 
 	names := map[string]bool{}
 	for _, s := range schemas {
 		names[s.Function.Name] = true
 	}
-	for _, notExpected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
-		if names[notExpected] {
-			t.Errorf("untagged %q should NOT appear with LocalTools=[*]; this test validates the pre-fix behavior", notExpected)
+	// Even though they're untagged, step 5 injection should include them
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("untagged delegation tool %q should still be injected at step 5", expected)
 		}
+	}
+	// Original named tool must still be present
+	if !names["read_file"] {
+		t.Errorf("original named tool read_file should be present, got names=%v", names)
 	}
 }
 
@@ -165,5 +171,102 @@ func TestApplyToolbelt_BothLocalAndExternal(t *testing.T) {
 	}
 	if !names["read_file"] || !names["slack_post"] {
 		t.Errorf("expected read_file and slack_post, got %v", names)
+	}
+}
+
+// buildDelegationTestRegistry creates a registry with builtin tools, external tools,
+// AND delegation tools registered and tagged "builtin" — matching main.go wiring.
+func buildDelegationTestRegistry() *tools.Registry {
+	reg := buildLocalTestRegistry() // read_file, bash, git_status (builtin), slack_post (slack)
+	for _, name := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		reg.Register(&localTestTool{name: name})
+	}
+	reg.TagTools([]string{"delegate_to_agent", "list_team_status", "recall_thread_result"}, "builtin")
+	return reg
+}
+
+// TestApplyToolbelt_NamedLocalToolsAlwaysIncludesDelegationTools is the primary
+// regression test for Bug 2: agents with a named LocalTools list must still
+// receive delegation tools so the LLM can call delegate_to_agent.
+func TestApplyToolbelt_NamedLocalToolsAlwaysIncludesDelegationTools(t *testing.T) {
+	reg := buildDelegationTestRegistry()
+	ag := &agents.Agent{Name: "Max", LocalTools: []string{"read_file", "bash"}}
+
+	schemas, _ := applyToolbelt(ag, reg, nil)
+
+	names := map[string]bool{}
+	for _, s := range schemas {
+		names[s.Function.Name] = true
+	}
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("expected delegation tool %q in schemas with named LocalTools, got names=%v", expected, names)
+		}
+	}
+	// Original named tools must still be present
+	if !names["read_file"] || !names["bash"] {
+		t.Errorf("expected original local tools read_file and bash, got names=%v", names)
+	}
+}
+
+// TestApplyToolbelt_EmptyLocalToolsAlwaysIncludesDelegationTools verifies that
+// even agents with NO local tools configured receive delegation tools (Bug 2).
+func TestApplyToolbelt_EmptyLocalToolsAlwaysIncludesDelegationTools(t *testing.T) {
+	reg := buildDelegationTestRegistry()
+	ag := &agents.Agent{Name: "Max"} // empty LocalTools
+
+	schemas, _ := applyToolbelt(ag, reg, nil)
+
+	names := map[string]bool{}
+	for _, s := range schemas {
+		names[s.Function.Name] = true
+	}
+	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if !names[expected] {
+			t.Errorf("expected delegation tool %q even with empty LocalTools, got names=%v", expected, names)
+		}
+	}
+}
+
+// TestApplyToolbelt_DelegationToolsNotInjectedWhenNotRegistered ensures the
+// step 5 injection is a safe no-op when delegation tools are not in the registry
+// (e.g., TUI mode or test environments that don't register them).
+func TestApplyToolbelt_DelegationToolsNotInjectedWhenNotRegistered(t *testing.T) {
+	reg := buildLocalTestRegistry() // no delegation tools registered
+	ag := &agents.Agent{Name: "Max", LocalTools: []string{"read_file"}}
+
+	schemas, _ := applyToolbelt(ag, reg, nil)
+
+	names := map[string]bool{}
+	for _, s := range schemas {
+		names[s.Function.Name] = true
+	}
+	for _, unexpected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if names[unexpected] {
+			t.Errorf("delegation tool %q should NOT be injected when not registered, got names=%v", unexpected, names)
+		}
+	}
+}
+
+// TestApplyToolbelt_WildcardDeduplicatesDelegationTools ensures that when
+// LocalTools=["*"] (which already includes delegation via AllBuiltinSchemas),
+// step 5 does not produce duplicate entries.
+func TestApplyToolbelt_WildcardDeduplicatesDelegationTools(t *testing.T) {
+	reg := buildDelegationTestRegistry()
+	ag := &agents.Agent{Name: "Max", LocalTools: []string{"*"}}
+
+	schemas, _ := applyToolbelt(ag, reg, nil)
+
+	seen := map[string]int{}
+	for _, s := range schemas {
+		seen[s.Function.Name]++
+	}
+	for _, name := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
+		if seen[name] > 1 {
+			t.Errorf("delegation tool %q appears %d times in schemas, want exactly 1", name, seen[name])
+		}
+		if seen[name] == 0 {
+			t.Errorf("delegation tool %q missing from wildcard schemas (want exactly 1)", name)
+		}
 	}
 }
