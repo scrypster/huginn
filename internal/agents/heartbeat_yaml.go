@@ -90,10 +90,7 @@ func SyncHeartbeatYAMLDefault(def AgentDef) error {
 		return err
 	}
 	path := HeartbeatYAMLPath(baseDir, def.Name)
-	_, statErr := os.Stat(path)
-	fileExists := statErr == nil
-
-	if def.HeartbeatEnabled || (fileExists && IsManaged(path)) {
+	if def.HeartbeatEnabled || IsManaged(path) {
 		return writeHeartbeatYAML(baseDir, def)
 	}
 	return nil
@@ -123,7 +120,10 @@ func RenameHeartbeatYAMLDefault(oldName string, newDef AgentDef) error {
 	if err != nil {
 		return err
 	}
-	// Remove old managed file (best effort)
+	// Remove old managed file. Best effort: if the remove fails, the new file is still
+	// written successfully. Surfacing this error would leave the rename half-done with
+	// no clear recovery path, so we intentionally discard it (unlike DeleteHeartbeatYAMLDefault
+	// which operates standalone and can safely propagate errors).
 	oldPath := HeartbeatYAMLPath(baseDir, oldName)
 	if IsManaged(oldPath) {
 		_ = os.Remove(oldPath)
