@@ -22,19 +22,20 @@ These three are coupled: heartbeat agents need capability cards to delegate prop
 
 ### Problem
 
-Two codepaths currently describe an agent to other agents:
-- `BuildRoster()` uses the first 60 characters of `SystemPrompt`
-- `BuildSpaceContextBlock()` uses the `Description` field
+Three codepaths currently describe an agent to other agents:
+- `BuildRoster()` in `internal/agents/roster.go` uses the first 60 characters of `SystemPrompt` via `extractPersonaBlurb()`
+- `BuildSpaceContextBlock()` in `internal/agent/context.go` uses the `Description` field
+- `BuildDMCrossSpaceContextBlock()` in `internal/agent/context.go` also formats member descriptions for DM-based cross-space awareness
 
-They diverge. Neither includes tools or connections. This is a maintenance landmine.
+All three diverge. None includes tools or connections. This is a maintenance landmine that gets worse as the agent count grows.
 
 ### Design
 
-**`BuildCapabilityCard(agent AgentDef) string`** — a new function that generates a deterministic, runtime capability card from live `AgentDef` state.
+**`BuildCapabilityCard(agent AgentDef) string`** — a new function in `internal/agents/capability_card.go` (package `agents`) that generates a deterministic, runtime capability card from live `AgentDef` state.
 
 Format:
 ```
-[Agent Name]
+[Agent Name] [capable, tools: yes]
 Role: <first sentence of SystemPrompt, truncated at 200 chars>
 Tools: filesystem, web_search, github (local) | browser, code_interpreter (toolbelt)
 Skills: daily-briefing, git-monitor, pr-reviewer
@@ -43,16 +44,24 @@ Memory: conversational
 ```
 
 Rules:
-- If the user has set a non-empty `Description` override on the agent, use it as the Role line instead of the SystemPrompt extraction
-- Connections are derived from Toolbelt provider names — provider names only, no credentials or tokens
-- Tools lists are split: local tools (registered via `LocalTools`) vs toolbelt providers
-- Skills list comes from the `Skills` field on `AgentDef`
-- Memory mode comes from `MemoryMode` field
-- Generated at runtime from live state — cannot go stale
+- **Model tier and tool support** are preserved from the existing roster format — `[capable, tools: yes]` / `[medium, tools: yes]` / `[low, tools: no]`. These are load-bearing for the lead agent's delegation decisions (don't assign complex reasoning to a low-tier model; don't assign tool-dependent tasks to a tools:no agent). The `ModelInfoFn` parameter from `BuildRoster()` is passed through to `BuildCapabilityCard()`.
+- If the user has set a non-empty `Description` override on the agent, use it as the Role line instead of the SystemPrompt extraction.
+- Connections are derived from Toolbelt provider names. Provider slugs (e.g. `"github"`) are title-cased for display (`"GitHub"`). A simple lookup map handles common providers; unknown providers use the slug as-is.
+- Tools list is split: local tools (from `LocalTools`) labeled `(local)` vs toolbelt providers labeled `(toolbelt)`.
+- Skills list from `Skills` field on `AgentDef`.
+- Memory mode from `MemoryMode` field. The lead agent uses this to know whether a sub-agent retains context: `passive` = stateless, `conversational` = recent context, `immersive` = deep persistent memory. This affects whether the lead agent needs to supply explicit context vs letting the sub-agent recall on its own.
+- Generated at runtime from live state — cannot go stale.
+
+**Package placement:** `BuildCapabilityCard()` lives in `internal/agents/` (same package as `BuildRoster()`). Placing it in `internal/agent/` would create an import cycle (`agents` → `agent` → `agents`).
 
 **Refactoring:**
 
-Both `BuildRoster()` and `BuildSpaceContextBlock()` are refactored to call `BuildCapabilityCard()`. One function, one source of truth.
+All three functions are refactored to call `BuildCapabilityCard()`:
+- `BuildRoster()` in `internal/agents/roster.go`
+- `BuildSpaceContextBlock()` in `internal/agent/context.go`
+- `BuildDMCrossSpaceContextBlock()` in `internal/agent/context.go`
+
+One function, one source of truth.
 
 **Who sees capability cards:**
 
@@ -77,7 +86,7 @@ Kept as-is. Becomes an optional user override. When empty (the default for all e
 
 ```go
 HeartbeatEnabled bool   `json:"heartbeat_enabled,omitempty" yaml:"heartbeat_enabled,omitempty"`
-HeartbeatCron    string `json:"heartbeat_cron,omitempty" yaml:"heartbeat_cron,omitempty"`
+HeartbeatCron    string `json:"heartbeat_cron,omitempty"    yaml:"heartbeat_cron,omitempty"`
 ```
 
 - `HeartbeatEnabled`: default `false`
@@ -86,48 +95,64 @@ HeartbeatCron    string `json:"heartbeat_cron,omitempty" yaml:"heartbeat_cron,om
 **Workflow YAML auto-generation:**
 
 When `HeartbeatEnabled` is set to `true` on agent save, the server writes:
-`~/.huginn/workflows/heartbeat-{agent-name}.yaml`
+`~/.huginn/workflows/heartbeat-{sanitized-agent-name}.yaml`
 
 WorkflowsWatcher polls every 2 seconds and picks it up automatically. No new engine. No new scheduler. A standard workflow YAML that the existing engine runs.
 
-When `HeartbeatEnabled` is set to `false`, the workflow is **disabled** (not deleted). The file persists so a custom cron is not lost on re-enable.
+When `HeartbeatEnabled` is set to `false`, the `enabled` field in the YAML is set to `false`. The file is not deleted — custom cron settings are preserved for re-enable.
+
+**Generated YAML structure:**
+
+```yaml
+# MANAGED BY HUGINN — changes to cron/enabled will be overwritten by the UI.
+# To customize fully: copy to a new filename (e.g. my-ares-heartbeat.yaml) and Huginn will stop managing it.
+name: "Heartbeat: Ares"
+description: "Auto-generated heartbeat for Ares"
+enabled: true
+schedule: "0 */4 * * *"
+notification:
+  on_success: true
+  on_failure: true
+  severity: info
+  deliver_to:
+    - type: agent_dm
+      from: "Ares"
+steps:
+  - name: "Check in"
+    agent: "Ares"
+    prompt: |
+      You are checking in with your user. Use your tools and memory to assess whether
+      anything warrants their attention right now.
+
+      Respond as you would in a direct message to a colleague — conversational, direct, 2-4 sentences.
+      Do not use bullet points, markdown tables, headers, or report formatting.
+      Do not say "Heartbeat:" or "Status update:" or anything that sounds like a log entry.
+      If there is nothing to report, say so in one sentence and stop.
+
+      Good: "Nothing unusual in your repos today. The PR you opened yesterday is still waiting on review."
+      Bad: "**Heartbeat Report**\n- Repos: OK\n- PRs: 1 open\n- Actions: None required"
+    position: 0
+    on_failure: stop
+```
+
+Key decisions in this YAML:
+- `on_success: true` — the DM is always delivered, including nothing-to-report runs.
+- `on_failure: true` — failure also delivers a DM so the user knows the agent couldn't check in.
+- `deliver_to: [{type: agent_dm, from: "Ares"}]` — delivery goes to the agent's DM space only. No `inbox` entry is created. Heartbeat runs do **not** appear in the Activity Log.
+- The prompt is the step's `prompt` field — it layers on top of the agent's existing SystemPrompt persona. The agent reads its own persona first, then the heartbeat instruction. This means a strongly-conditioned SystemPrompt ("always respond with structured output") could fight the heartbeat instruction. The heartbeat prompt is injected last so it takes precedence at inference time. If an agent's SystemPrompt contains explicit formatting instructions that conflict, this is a configuration problem to document, not to silently override.
 
 **Managed file pattern:**
 
-The generated YAML has a header comment:
-```yaml
-# MANAGED BY HUGINN - changes to cron/enabled will be overwritten by the UI.
-# To customize fully: copy to a new filename (e.g. my-ares-heartbeat.yaml) and Huginn will stop managing it.
-```
+The YAML has a `# MANAGED BY HUGINN` header. Huginn overwrites the file (updating `enabled` and `schedule`) when the user changes settings in the UI. If the user renames the file (or copies it to a new filename), Huginn stops managing it — the user owns it entirely and the UI shows it as a custom workflow.
 
-Huginn updates the managed file when the user changes the cron in the UI. If the user copies it to a new filename, Huginn stops touching it — the user owns it entirely.
+**Heartbeat YAML lifecycle:**
 
-**Heartbeat prompt design:**
+- **Agent rename:** The server detects that the agent name changed (compare old vs new name on save). It renames `heartbeat-{old-name}.yaml` to `heartbeat-{new-name}.yaml` and updates the internal `name`, `agent`, and `from` fields. The old file is not left behind.
+- **Agent deletion:** Agent deletion removes `heartbeat-{name}.yaml` if it exists and is still marked `# MANAGED BY HUGINN`. User-customized files (renamed) are not touched.
 
-The workflow step runs the agent with an injected instruction block:
+**Nothing-to-report DMs:**
 
-```
-You are checking in with your user. Use your tools and memory to assess whether anything
-warrants their attention right now.
-
-Respond as you would in a direct message to a colleague — conversational, direct, 2-4 sentences.
-Do not use bullet points, markdown tables, headers, or report formatting.
-Do not say "Heartbeat:" or "Status update:" or anything that sounds like a log entry.
-If there is nothing to report, say so in one sentence and stop.
-
-Good: "Nothing unusual in your repos today. The PR you opened yesterday is still waiting on review."
-Bad: "**Heartbeat Report**\n- Repos: OK\n- PRs: 1 open\n- Actions: None required"
-```
-
-The agent has full access to its tools and memory — it can actually check things, not just echo.
-
-**Delivery:**
-
-`deliver_to: agent_dm` — result is delivered to the agent's DM space. The user sees a message from the agent (e.g., Ares), not a workflow notification entry. DM space is created automatically if it does not exist (existing behavior).
-
-**Notification fatigue:**
-
-Nothing-to-report cases are delivered as a single short sentence — the channel stays alive without flooding. Phase 3 can add quiet mode (suppress after N consecutive nothing-to-report messages) if needed.
+A nothing-to-report message is delivered as a normal DM — it increments the unread count in the agent DM space. This is intentional: the user should see "Quiet day." in their DM list, not receive silence. If users find this noisy at 4-hour intervals, Phase 3 adds a quiet mode toggle that suppresses nothing-to-report messages after N consecutive ones. The default cadence (every 4 hours) is the user's choice — the UI presets go down to Daily and Weekly for users who want lower volume.
 
 **Web UI — agent editor:**
 
@@ -147,13 +172,13 @@ Nothing-to-report cases are delivered as a single short sentence — the channel
 **Navigation:** Moved to secondary navigation. Not the first thing you see. Accessible but not primary.
 
 **What lives in the Activity Log:**
-- Workflow run results (success/failure/output)
+- Workflow run results (success/failure/output) — for workflows that deliver to `inbox`
 - Workflow errors and retries
 - System-level notifications (agent errors, vault health issues, connection failures)
 - `severity: urgent` alerts that require acknowledgment
 
 **What does not live in the Activity Log:**
-- Heartbeat outputs (→ agent DMs)
+- Heartbeat outputs — heartbeat workflows deliver to `agent_dm` only, not `inbox`. They do not appear here.
 - General agent-to-user communication (→ agent DMs or spaces)
 - Conversational thread results (→ threads)
 
@@ -172,9 +197,9 @@ Nothing-to-report cases are delivered as a single short sentence — the channel
 | File | Change |
 |------|--------|
 | `internal/agents/config.go` | Add `HeartbeatEnabled`, `HeartbeatCron` to `AgentDef` |
-| `internal/agent/agent_dispatcher.go` | Refactor `BuildRoster()` to use `BuildCapabilityCard()` |
-| `internal/workforce/space_context.go` (or equivalent) | Refactor `BuildSpaceContextBlock()` to use `BuildCapabilityCard()` |
-| `internal/server/handlers.go` (or new `handlers_heartbeat.go`) | On agent save: generate/update/disable heartbeat YAML |
+| `internal/agents/roster.go` | Refactor `BuildRoster()` to call `BuildCapabilityCard()` |
+| `internal/agent/context.go` | Refactor `BuildSpaceContextBlock()` and `BuildDMCrossSpaceContextBlock()` to call `BuildCapabilityCard()` |
+| `internal/server/handlers.go` (or new `handlers_heartbeat.go`) | On agent save: generate/update/disable/rename/delete heartbeat YAML |
 | `web/src/views/AgentsView.vue` | Add heartbeat toggle + cron presets to agent editor |
 | `web/src/` (nav) | Rename Inbox → Activity Log, move to secondary nav |
 
@@ -182,7 +207,7 @@ Nothing-to-report cases are delivered as a single short sentence — the channel
 
 | File | Purpose |
 |------|---------|
-| `internal/agent/capability_card.go` | `BuildCapabilityCard()` function |
+| `internal/agents/capability_card.go` | `BuildCapabilityCard()` function (package `agents`) |
 | `~/.huginn/workflows/heartbeat-{name}.yaml` | Auto-generated per-agent heartbeat workflow (runtime, not in repo) |
 
 ---
@@ -192,15 +217,17 @@ Nothing-to-report cases are delivered as a single short sentence — the channel
 **Heartbeat execution:**
 ```
 UI toggle on → server writes heartbeat-{name}.yaml → WorkflowsWatcher picks up (≤2s)
-→ cron fires → workflow runner calls agent with heartbeat prompt
-→ agent uses tools/memory → workflow runner calls dispatchNotification(deliver_to: agent_dm)
-→ DM space receives message → user sees message from agent
+→ cron fires → workflow runner calls agent with heartbeat prompt (appended after system prompt)
+→ agent uses tools/memory → workflow completes
+→ dispatchNotification(type: agent_dm, from: agent name) → DM space receives message
+→ user sees DM from agent (no Activity Log entry)
 ```
 
 **Delegation with capability cards:**
 ```
 Lead agent starts orchestration → BuildRoster() calls BuildCapabilityCard() for each channel member
-→ lead agent sees team directory → delegates task to sub-agent with "Why You Were Chosen" rationale
+→ lead agent sees team directory (names, tiers, tools, connections, memory modes)
+→ delegates task to sub-agent with "Why You Were Chosen" rationale
 → sub-agent executes with its own system prompt + task context (no card about itself)
 ```
 
@@ -210,17 +237,21 @@ Lead agent starts orchestration → BuildRoster() calls BuildCapabilityCard() fo
 
 1. **Capability card staleness:** Cannot happen — cards are generated at runtime from live AgentDef. If an agent's tools change, the next delegation sees the updated card immediately.
 
-2. **Heartbeat notification fatigue:** Mitigated by conversational prompt design (short, natural DMs) and explicit nothing-to-report path. Phase 3 adds quiet mode if needed.
+2. **Heartbeat notification fatigue:** Mitigated by conversational prompt design (short natural DMs), explicit nothing-to-report path, and user-selectable cadence presets. Phase 3 adds quiet mode if needed.
 
-3. **Roster/channel context divergence:** Eliminated by unifying both codepaths to `BuildCapabilityCard()`. The maintenance landmine is removed.
+3. **Roster/channel context divergence:** Eliminated by unifying all three codepaths (`BuildRoster`, `BuildSpaceContextBlock`, `BuildDMCrossSpaceContextBlock`) to `BuildCapabilityCard()`. The maintenance landmine is removed.
 
-4. **Managed YAML conflict:** If user edits a managed file manually, Huginn overwrites their changes on next UI save. The header comment warns them. The escape hatch (copy to new filename) is the explicit path for full ownership.
+4. **Managed YAML conflict:** If the user edits a managed file manually, Huginn overwrites their changes on next UI save. The header comment warns them. The escape hatch (copy/rename to a new filename) is the explicit path for full ownership.
+
+5. **Heartbeat prompt vs SystemPrompt conflict:** If an agent's SystemPrompt contains explicit formatting instructions that conflict with the heartbeat prompt, the heartbeat instruction takes precedence (injected last). Persistent conflicts are a configuration issue — document in user-facing notes that heartbeat works best with conversational agents.
+
+6. **Agent rename/delete lifecycle:** Addressed explicitly — rename migrates the YAML, delete removes it. Managed-file check prevents accidental removal of user-customized heartbeat workflows.
 
 ---
 
 ## Out of Scope (Phase 1)
 
-- Push notifications (FCM/APNS) — Phase 1 backend only; Ionic wiring is separate work
+- Push notifications (FCM/APNS) — Phase 1 backend only; Ionic wiring is separate work. Note: without push, heartbeat DMs on mobile are only visible when the user opens the app. The "proactive and alive" feeling is desktop-first until FCM/APNS is wired.
 - Memory Inspector UI — Phase 2
 - Cross-agent memory model changes — MemoryReplicator already handles lead-agent fan-out; sub-agent fan-out is a Phase 2 decision
 - Heartbeat quiet mode — Phase 3
