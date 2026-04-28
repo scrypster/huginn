@@ -491,12 +491,18 @@ if cfgErr == nil {
             Toolbelt:     def.Toolbelt,
             Skills:       def.Skills,
             MemoryMode:   def.MemoryMode,
-        }, nil) // no model tier resolver at this call site
+        }, nil) // intentional: no ModelInfoFn at this call site. Tier/tools annotations
+                // are omitted from DM and channel context cards. The roster (BuildRoster)
+                // still includes tier annotations because it has the full Agent registry +
+                // infoFn. This is an acceptable gap — the lead agent sees tier info in its
+                // own session prompt via BuildRoster, which is the primary delegation path.
     }
 }
 ```
 
 Then replace all occurrences of `descMap[` with `cardMap[` in the same function.
+
+**Note on `nil` infoFn:** This is intentional. The `InjectSpaceContext` call site loads `AgentDef` records (not runtime `*Agent` instances), and does not have access to the model registry `infoFn`. Cards in channel/DM context will show role, tools, connections, skills, and memory mode but not the `[capable, tools: yes]` tier annotation. The lead agent's roster (injected via `BuildRoster` at orchestration time) does include tier annotations. This is sufficient for delegation quality.
 
 - [ ] **Step 3.2: Run server tests**
 
@@ -656,7 +662,7 @@ func TestSyncHeartbeatYAML_CreatesFile(t *testing.T) {
 	}
 
 	home := os.Getenv("HUGINN_HOME")
-	path := filepath.Join(home, "workflows", "heartbeat-ares.yaml")
+	path := filepath.Join(home, ".huginn", "workflows", "heartbeat-ares.yaml")
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("expected file at %s: %v", path, err)
@@ -700,7 +706,7 @@ func TestSyncHeartbeatYAML_DisablesExistingFile(t *testing.T) {
 	}
 
 	home := os.Getenv("HUGINN_HOME")
-	path := filepath.Join(home, "workflows", "heartbeat-ares.yaml")
+	path := filepath.Join(home, ".huginn", "workflows", "heartbeat-ares.yaml")
 	content, _ := os.ReadFile(path)
 	if !strings.Contains(string(content), "enabled: false") {
 		t.Errorf("expected enabled: false after disable, got:\n%s", content)
@@ -720,7 +726,7 @@ func TestSyncHeartbeatYAML_NoFileWhenDisabledAndNoExisting(t *testing.T) {
 	}
 
 	home := os.Getenv("HUGINN_HOME")
-	path := filepath.Join(home, "workflows", "heartbeat-ghost.yaml")
+	path := filepath.Join(home, ".huginn", "workflows", "heartbeat-ghost.yaml")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("no file should be created when disabled and no existing file")
 	}
@@ -737,7 +743,7 @@ func TestDeleteHeartbeatYAML_RemovesManagedFile(t *testing.T) {
 	}
 
 	home := os.Getenv("HUGINN_HOME")
-	path := filepath.Join(home, "workflows", "heartbeat-ares.yaml")
+	path := filepath.Join(home, ".huginn", "workflows", "heartbeat-ares.yaml")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("managed file should be deleted")
 	}
@@ -747,8 +753,8 @@ func TestDeleteHeartbeatYAML_DoesNotRemoveUserFile(t *testing.T) {
 	t.Setenv("HUGINN_HOME", t.TempDir())
 
 	home := os.Getenv("HUGINN_HOME")
-	_ = os.MkdirAll(filepath.Join(home, "workflows"), 0o750)
-	userFile := filepath.Join(home, "workflows", "heartbeat-ares.yaml")
+	_ = os.MkdirAll(filepath.Join(home, ".huginn", "workflows"), 0o750)
+	userFile := filepath.Join(home, ".huginn", "workflows", "heartbeat-ares.yaml")
 	// User-customized file does NOT start with managed header
 	_ = os.WriteFile(userFile, []byte("# My custom heartbeat\nname: custom\n"), 0o600)
 
@@ -773,8 +779,8 @@ func TestRenameHeartbeatYAML_MovesFile(t *testing.T) {
 	}
 
 	home := os.Getenv("HUGINN_HOME")
-	oldPath := filepath.Join(home, "workflows", "heartbeat-ares.yaml")
-	newPath := filepath.Join(home, "workflows", "heartbeat-aries.yaml")
+	oldPath := filepath.Join(home, ".huginn", "workflows", "heartbeat-ares.yaml")
+	newPath := filepath.Join(home, ".huginn", "workflows", "heartbeat-aries.yaml")
 
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Error("old heartbeat file should be removed")
@@ -826,7 +832,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 const managedHeader = "# MANAGED BY HUGINN"
@@ -965,13 +970,6 @@ func HeartbeatCronOrDefault(def AgentDef) string {
 	}
 	return defaultHeartbeatCron
 }
-
-// heartbeatDisableString replaces "enabled: true" with "enabled: false" in YAML content.
-// Used to disable a heartbeat workflow without regenerating the entire file
-// (preserves any manual edits the user made while ignoring the managed header).
-func heartbeatDisableString(content string) string {
-	return strings.Replace(content, "enabled: true", "enabled: false", 1)
-}
 ```
 
 - [ ] **Step 5.4: Run heartbeat YAML tests**
@@ -1007,14 +1005,15 @@ git commit -m "feat(agents): heartbeat YAML lifecycle — sync, delete, rename m
 
 - [ ] **Step 6.1: Write failing test**
 
+The test file must use `package server` (not `package server_test`) to access the unexported `newTestServer` helper and call unexported methods on `*Server`. This is the established pattern in `internal/server/builtin_handlers_ws_test.go`.
+
 ```go
 // internal/server/handlers_heartbeat_test.go
-package server_test
+package server
 
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1023,21 +1022,20 @@ import (
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
-	"github.com/scrypster/huginn/internal/server"
 )
 
 func TestHandleUpdateAgent_CreatesHeartbeatYAML(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HUGINN_HOME", tmp)
 
-	// Pre-create the agent
+	// Pre-create the agent so the PUT is an update (not creation)
 	existing := agents.AgentDef{Name: "HeartbeatTestAgent", Model: "claude-sonnet-4-6"}
 	_ = agents.SaveAgentDefault(existing)
 
-	srv, _ := server.NewTestServer(t)
+	srv, _ := newTestServer(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/v1/agents/{name}", func(w http.ResponseWriter, r *http.Request) {
-		srv.HandleUpdateAgent(w, r)
+		srv.handleUpdateAgent(w, r)
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -1060,7 +1058,8 @@ func TestHandleUpdateAgent_CreatesHeartbeatYAML(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	yamlPath := filepath.Join(tmp, "workflows", "heartbeat-heartbeattestagent.yaml")
+	// huginnBaseDir() returns filepath.Join(HUGINN_HOME, ".huginn")
+	yamlPath := filepath.Join(tmp, ".huginn", "workflows", "heartbeat-heartbeattestagent.yaml")
 	content, err := os.ReadFile(yamlPath)
 	if err != nil {
 		t.Fatalf("expected heartbeat YAML at %s: %v", yamlPath, err)
@@ -1077,16 +1076,16 @@ func TestHandleDeleteAgent_RemovesHeartbeatYAML(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HUGINN_HOME", tmp)
 
-	// Pre-create two agents (can't delete the last one)
+	// Pre-create two agents (cannot delete the last agent)
 	_ = agents.SaveAgentDefault(agents.AgentDef{Name: "AgentA", Model: "claude-sonnet-4-6"})
 	target := agents.AgentDef{Name: "HeartbeatDeleteTarget", Model: "claude-sonnet-4-6", HeartbeatEnabled: true}
 	_ = agents.SaveAgentDefault(target)
 	_ = agents.SyncHeartbeatYAMLDefault(target)
 
-	srv, _ := server.NewTestServer(t)
+	srv, _ := newTestServer(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/v1/agents/{name}", func(w http.ResponseWriter, r *http.Request) {
-		srv.HandleDeleteAgent(w, r)
+		srv.handleDeleteAgent(w, r)
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -1101,14 +1100,13 @@ func TestHandleDeleteAgent_RemovesHeartbeatYAML(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	yamlPath := filepath.Join(tmp, "workflows", "heartbeat-heartbeatdeletetarget.yaml")
+	// huginnBaseDir() returns filepath.Join(HUGINN_HOME, ".huginn")
+	yamlPath := filepath.Join(tmp, ".huginn", "workflows", "heartbeat-heartbeatdeletetarget.yaml")
 	if _, err := os.Stat(yamlPath); !os.IsNotExist(err) {
 		t.Error("heartbeat YAML should be removed on agent deletion")
 	}
 }
 ```
-
-Note: `server.NewTestServer`, `srv.HandleUpdateAgent`, and `srv.HandleDeleteAgent` are test-exported helpers. Check if the test package already has `newTestServer` and unexported method references — adjust to use whatever pattern is already established in `internal/server/builtin_handlers_ws_test.go`. The test in that file uses `srv.handleUpdateAgent` (lowercase) as an unexported method call from `package server_test` via closure — copy that pattern exactly.
 
 - [ ] **Step 6.2: Add heartbeat sync to `handleUpdateAgent` in `internal/server/handlers.go`**
 
