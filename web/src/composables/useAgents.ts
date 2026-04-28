@@ -7,6 +7,9 @@ export interface AgentSummary {
   icon: string
   model: string
   is_default?: boolean
+  description?: string          // agent's one-line description
+  heartbeat_enabled?: boolean   // whether a heartbeat cron is active
+  vault_name?: string           // MuninnDB vault name if memory is configured
   [key: string]: unknown
 }
 
