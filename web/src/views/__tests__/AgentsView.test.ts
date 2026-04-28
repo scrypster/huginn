@@ -25,9 +25,33 @@ vi.mock('../../composables/useAgents', () => {
 // Stub apiFetch used by openDM
 vi.mock('../../composables/useApi', async (importOriginal) => {
   const orig = await importOriginal<any>()
+  const mockedApiFetch = vi.fn().mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
+    return {}
+  })
   return {
     ...orig,
-    apiFetch: vi.fn().mockResolvedValue({ id: 'space-123' }),
+    apiFetch: mockedApiFetch,
+    api: {
+      ...orig.api,
+      connections: {
+        ...orig.api.connections,
+        list: vi.fn().mockResolvedValue([]),
+      },
+      system: {
+        ...orig.api.system,
+        tools: vi.fn().mockResolvedValue([]),
+      },
+      muninn: {
+        ...orig.api.muninn,
+        status: vi.fn().mockResolvedValue({ connected: false }),
+        vaults: vi.fn().mockResolvedValue({ vaults: [] }),
+      },
+      models: {
+        ...orig.api.models,
+        available: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
+      },
+    },
   }
 })
 
@@ -41,9 +65,15 @@ const router = createRouter({ history: createMemoryHistory(), routes: [
 ] })
 
 describe('AgentsView', () => {
-  beforeEach(() => {
-    ((_useAgents() as any).agents as any).value = []
+  beforeEach(async () => {
+    await router.push('/agents')
+    await router.isReady()
+    ;((_useAgents() as any).agents as any).value = []
     ;((_useAgents() as any).loading as any).value = false
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
+      return {}
+    })
   })
 
   it('shows empty state when agents list is empty and not loading', async () => {
