@@ -1456,4 +1456,54 @@ describe('AgentsView', () => {
       expect(mockUpdateAgent).toHaveBeenCalledWith('Tom', expect.objectContaining({ name: 'Tom' }))
     })
   })
+
+  // ── saveLocalAccessModal calls save() for existing agent
+  it('saveLocalAccessModal calls save() for existing agent', async () => {
+    mockApiAgentsGet.mockResolvedValueOnce({
+      name: 'Max',
+      model: 'claude-3',
+      system_prompt: '',
+      color: '#3fb950',
+      icon: 'M',
+      memory_type: 'none',
+      toolbelt: [],
+      skills: [],
+      local_tools: [],
+    })
+    mockApiAgentsUpdate.mockResolvedValueOnce({})
+    const w = mountAgent({ agentName: 'Max' })
+    await flushPromises()
+
+    // Clear and re-setup the mock to track calls from saveLocalAccessModal
+    mockApiAgentsUpdate.mockClear()
+    mockApiAgentsUpdate.mockResolvedValue({})
+
+    const vm = w.vm as any
+    // Call saveLocalAccessModal - for existing agents, this should call save() which calls api.agents.update
+    await (vm.saveLocalAccessModal as () => Promise<void>)()
+    await flushPromises()
+
+    // Verify that save() was invoked by checking that api.agents.update was called
+    expect(mockApiAgentsUpdate).toHaveBeenCalledWith(
+      'Max',
+      expect.objectContaining({ name: 'Max', model: 'claude-3' })
+    )
+  })
+
+  it('saveLocalAccessModal marks dirty for new agent (does not call save)', async () => {
+    const w = mountAgent({ agentName: 'new' })
+    await flushPromises()
+
+    const vm = w.vm as unknown as Record<string, unknown>
+    ;(vm.modalLocalTools as { value: string[] }).value = ['bash']
+    // Clear call count from initial mount
+    mockApiAgentsUpdate.mockClear()
+    await (vm.saveLocalAccessModal as () => Promise<void>)()
+    await flushPromises()
+
+    // For new agents, save() is NOT called — markDirty() sets dirty flag instead
+    expect(mockApiAgentsUpdate).not.toHaveBeenCalled()
+    // dirty state means "Unsaved changes" banner is visible
+    expect(w.text()).toContain('Unsaved changes')
+  })
 })
