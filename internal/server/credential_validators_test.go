@@ -60,6 +60,47 @@ func TestValidateSendGridCredentials_Success(t *testing.T) {
 	}
 }
 
+// ── Home Assistant validator tests ────────────────────────────────────────────
+
+func TestValidateHomeAssistantCredentials_MissingToken(t *testing.T) {
+	err := validateHomeAssistantCredentials(context.Background(), "http://localhost:8123", "")
+	if err == nil {
+		t.Fatal("expected error for empty token")
+	}
+	if err.Error() != "token is required" {
+		t.Errorf("unexpected error: %q", err)
+	}
+}
+
+func TestValidateHomeAssistantCredentials_InvalidToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/" {
+			t.Errorf("expected /api/, got %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer badtoken" {
+			t.Errorf("expected Bearer badtoken, got %q", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := validateHomeAssistantCredentials(context.Background(), srv.URL, "badtoken")
+	if err == nil || err.Error() != "invalid token or cannot reach Home Assistant" {
+		t.Errorf("expected 'invalid token or cannot reach Home Assistant', got %v", err)
+	}
+}
+
+func TestValidateHomeAssistantCredentials_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	err := validateHomeAssistantCredentials(context.Background(), srv.URL, "goodtoken")
+	if err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+}
 
 // ── OpenWeatherMap validator tests ────────────────────────────────────────────
 

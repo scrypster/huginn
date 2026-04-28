@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/scrypster/huginn/internal/connections/catalog"
 	"github.com/scrypster/huginn/internal/memory"
@@ -75,6 +76,10 @@ func buildCredentialValidatorRegistry() *catalog.Registry {
 
 	r.Register("weather", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
 		return validateWeatherCredentials(ctx, f["api_key"])
+	}))
+
+	r.Register("homeassistant", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateHomeAssistantCredentials(ctx, f["base_url"], f["token"])
 	}))
 
 	// ── Observability ─────────────────────────────────────────────────────────
@@ -775,6 +780,34 @@ func validateMuninnCredentials(ctx context.Context, endpoint, username, password
 	return nil
 }
 
+func validateHomeAssistantCredentials(ctx context.Context, baseURL, token string) error {
+	if token == "" {
+		return errors.New("token is required")
+	}
+	if baseURL == "" {
+		baseURL = "http://homeassistant.local:8123"
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("homeassistant: validation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return errors.New("invalid token or cannot reach Home Assistant")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("homeassistant: validation returned %d", resp.StatusCode)
+	}
+	return nil
+}
 
 func validateWeatherCredentials(ctx context.Context, apiKey string) error {
 	if apiKey == "" {

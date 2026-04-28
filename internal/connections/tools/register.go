@@ -86,6 +86,9 @@ var providerToolNames = map[connections.Provider][]string{
 	},
 	connections.ProviderWeather: {"weather_current", "weather_forecast"},
 	connections.ProviderTodoist: {"tasks_list", "task_create", "task_complete", "tasks_list_projects"},
+	connections.ProviderHomeAssistant: {
+		"ha_states", "ha_call_service", "ha_scene_activate",
+	},
 }
 
 // RegisterAll registers integration tools for all providers with at least one connection.
@@ -158,6 +161,8 @@ func RegisterForProvider(reg *tools.Registry, mgr *connections.Manager, provider
 		err = registerWeatherTools(reg, mgr, conns)
 	case connections.ProviderTodoist:
 		err = registerTodoistTools(reg, mgr, conns)
+	case connections.ProviderHomeAssistant:
+		err = registerHomeAssistantTools(reg, mgr, conns)
 	}
 	if err != nil {
 		return err
