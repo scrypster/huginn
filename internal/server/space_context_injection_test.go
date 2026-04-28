@@ -225,7 +225,10 @@ func TestInjectSpaceContext_MissingDescriptions_FallsBackToSpecialist(t *testing
 		t.Fatalf("save manifest: %v", err)
 	}
 
-	// No descriptions configured.
+	// No descriptions configured — agents have only a name.
+	// BuildCapabilityCard still produces a minimal card (name + memory mode),
+	// so "specialist agent" fallback no longer appears; instead each agent is
+	// listed by name with at least their memory mode.
 	srv.agentLoader = func() (*agents.AgentsConfig, error) {
 		return &agents.AgentsConfig{
 			Agents: []agents.AgentDef{
@@ -240,8 +243,12 @@ func TestInjectSpaceContext_MissingDescriptions_FallsBackToSpecialist(t *testing
 	enrichedCtx := srv.InjectSpaceContext(ctx, sess.ID, ag)
 
 	spaceCtx := workforce.GetSpaceContext(enrichedCtx)
-	if !strings.Contains(spaceCtx, "specialist agent") {
-		t.Errorf("expected 'specialist agent' fallback for missing description, got:\n%s", spaceCtx)
+	if !strings.Contains(spaceCtx, "Tom") || !strings.Contains(spaceCtx, "Sam") {
+		t.Errorf("expected both agents to appear in space context, got:\n%s", spaceCtx)
+	}
+	// Minimal capability card always includes memory mode even with no description.
+	if !strings.Contains(spaceCtx, "Memory:") {
+		t.Errorf("expected capability card memory mode annotation in space context, got:\n%s", spaceCtx)
 	}
 }
 

@@ -758,12 +758,23 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 					loader = agents.LoadAgents
 				}
 				cfg, cfgErr := loader()
-				descMap := make(map[string]string)
+				cardMap := make(map[string]string)
 				if cfgErr == nil {
 					for _, def := range cfg.Agents {
-						if def.Description != "" {
-							descMap[def.Name] = def.Description
-						}
+						cardMap[def.Name] = agents.BuildCapabilityCard(agents.CapabilityCardInput{
+							Name:         def.Name,
+							SystemPrompt: def.SystemPrompt,
+							Description:  def.Description,
+							ModelID:      def.Model,
+							LocalTools:   def.LocalTools,
+							Toolbelt:     def.Toolbelt,
+							Skills:       def.Skills,
+							MemoryMode:   def.MemoryMode,
+						}, nil) // intentional: no ModelInfoFn at this call site. Tier/tools annotations
+						// are omitted from DM and channel context cards. The roster (BuildRoster)
+						// still includes tier annotations because it has the full Agent registry +
+						// infoFn. This is an acceptable gap — the lead agent sees tier info in its
+						// own session prompt via BuildRoster, which is the primary delegation path.
 					}
 				}
 				var rosters []agent.ChannelRoster
@@ -771,12 +782,12 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 					var members []agent.SpaceMember
 					// Include lead agent
 					members = append(members, agent.SpaceMember{
-						Name: ch.LeadAgent, Description: descMap[ch.LeadAgent],
+						Name: ch.LeadAgent, Description: cardMap[ch.LeadAgent],
 					})
 					for _, m := range ch.Members {
 						if !strings.EqualFold(m, ch.LeadAgent) {
 							members = append(members, agent.SpaceMember{
-								Name: m, Description: descMap[m],
+								Name: m, Description: cardMap[m],
 							})
 						}
 					}
@@ -804,12 +815,23 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 		loader = agents.LoadAgents
 	}
 	cfg, cfgErr := loader()
-	descMap := make(map[string]string)
+	cardMap := make(map[string]string)
 	if cfgErr == nil {
 		for _, def := range cfg.Agents {
-			if def.Description != "" {
-				descMap[def.Name] = def.Description
-			}
+			cardMap[def.Name] = agents.BuildCapabilityCard(agents.CapabilityCardInput{
+				Name:         def.Name,
+				SystemPrompt: def.SystemPrompt,
+				Description:  def.Description,
+				ModelID:      def.Model,
+				LocalTools:   def.LocalTools,
+				Toolbelt:     def.Toolbelt,
+				Skills:       def.Skills,
+				MemoryMode:   def.MemoryMode,
+			}, nil) // intentional: no ModelInfoFn at this call site. Tier/tools annotations
+			// are omitted from DM and channel context cards. The roster (BuildRoster)
+			// still includes tier annotations because it has the full Agent registry +
+			// infoFn. This is an acceptable gap — the lead agent sees tier info in its
+			// own session prompt via BuildRoster, which is the primary delegation path.
 		}
 	}
 
@@ -822,7 +844,7 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	for _, m := range sp.Members {
 		members = append(members, agent.SpaceMember{
 			Name:        m,
-			Description: descMap[m],
+			Description: cardMap[m],
 		})
 	}
 	// Include lead agent if not already in members list.
@@ -836,7 +858,7 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	if !leadInMembers {
 		members = append([]agent.SpaceMember{{
 			Name:        sp.LeadAgent,
-			Description: descMap[sp.LeadAgent],
+			Description: cardMap[sp.LeadAgent],
 		}}, members...)
 	}
 
