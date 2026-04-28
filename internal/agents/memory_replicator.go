@@ -30,11 +30,11 @@ type ReplicationQueueEntry struct {
 	CreatedAt    time.Time
 }
 
-// MemoryReplicator manages replication of agent memories to the HuginnCloud vault.
+// CloudVaultReplicator manages replication of agent memories to the HuginnCloud vault.
 // It drains a SQLite queue (cloud_vault_queue) and pushes entries via CloudVaultClient.
 // When no vaultClient is wired (WithVaultClient not called), the replicator runs in
 // no-op mode: entries are acknowledged as completed immediately (local-only mode).
-type MemoryReplicator struct {
+type CloudVaultReplicator struct {
 	db          *sqlitedb.DB
 	machineID   string
 	vaultClient CloudVaultClient // nil = local-only, no cloud push
@@ -44,10 +44,10 @@ type MemoryReplicator struct {
 	cancel      context.CancelFunc
 }
 
-// NewMemoryReplicator creates a new MemoryReplicator backed by the given DB.
-func NewMemoryReplicator(db *sqlitedb.DB) *MemoryReplicator {
+// NewCloudVaultReplicator creates a new CloudVaultReplicator backed by the given DB.
+func NewCloudVaultReplicator(db *sqlitedb.DB) *CloudVaultReplicator {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &MemoryReplicator{
+	return &CloudVaultReplicator{
 		db:     db,
 		done:   make(chan struct{}),
 		ctx:    ctx,
@@ -57,7 +57,7 @@ func NewMemoryReplicator(db *sqlitedb.DB) *MemoryReplicator {
 
 // WithVaultClient wires a CloudVaultClient for pushing memories to HuginnCloud.
 // Must be called before Start(). Without this, the replicator runs in no-op mode.
-func (mr *MemoryReplicator) WithVaultClient(client CloudVaultClient, machineID string) *MemoryReplicator {
+func (mr *CloudVaultReplicator) WithVaultClient(client CloudVaultClient, machineID string) *CloudVaultReplicator {
 	mr.vaultClient = client
 	mr.machineID = machineID
 	return mr
@@ -65,19 +65,19 @@ func (mr *MemoryReplicator) WithVaultClient(client CloudVaultClient, machineID s
 
 // Start begins processing the cloud vault replication queue in a background goroutine.
 // Call Stop() to shut down cleanly.
-func (mr *MemoryReplicator) Start() {
+func (mr *CloudVaultReplicator) Start() {
 	go mr.processQueueLoop()
 }
 
 // Stop gracefully shuts down the replicator and waits for the background goroutine.
-func (mr *MemoryReplicator) Stop() {
+func (mr *CloudVaultReplicator) Stop() {
 	mr.cancel()
 	<-mr.done
 }
 
 // processQueueLoop polls for pending queue entries on a 5-second tick.
 // 5 seconds is sufficient for async cloud sync; avoids unnecessary DB churn.
-func (mr *MemoryReplicator) processQueueLoop() {
+func (mr *CloudVaultReplicator) processQueueLoop() {
 	defer close(mr.done)
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -94,7 +94,7 @@ func (mr *MemoryReplicator) processQueueLoop() {
 }
 
 // processBatch fetches and processes a batch of pending entries, then purges stale rows.
-func (mr *MemoryReplicator) processBatch(ctx context.Context) {
+func (mr *CloudVaultReplicator) processBatch(ctx context.Context) {
 	mr.mu.Lock()
 	defer mr.mu.Unlock()
 
@@ -112,7 +112,7 @@ func (mr *MemoryReplicator) processBatch(ctx context.Context) {
 }
 
 // fetchPendingEntries retrieves up to limit due queue entries ordered by creation time.
-func (mr *MemoryReplicator) fetchPendingEntries(ctx context.Context, limit int) ([]ReplicationQueueEntry, error) {
+func (mr *CloudVaultReplicator) fetchPendingEntries(ctx context.Context, limit int) ([]ReplicationQueueEntry, error) {
 	now := time.Now().Unix()
 	rows, err := mr.db.Read().QueryContext(ctx, `
 		SELECT id, session_id, agent_id, vault_name, operation, memory_id, concept,
@@ -152,7 +152,7 @@ func (mr *MemoryReplicator) fetchPendingEntries(ctx context.Context, limit int) 
 // On transient failure the entry is rescheduled with exponential backoff.
 // After MaxAttempts failures the entry is marked "dead" (preserved for diagnostics,
 // purged after 7 days by purgeDeadEntries).
-func (mr *MemoryReplicator) processEntry(ctx context.Context, entry ReplicationQueueEntry) {
+func (mr *CloudVaultReplicator) processEntry(ctx context.Context, entry ReplicationQueueEntry) {
 	if err := mr.updateEntryStatus(ctx, entry.ID, "in_progress", ""); err != nil {
 		slog.Error("cloud vault replicator: mark in_progress", "entry_id", entry.ID, "err", err)
 		return
@@ -217,7 +217,7 @@ func cloudVaultBackoff(attempts int) time.Duration {
 }
 
 // updateEntryStatus updates a queue entry's status and clears the error message.
-func (mr *MemoryReplicator) updateEntryStatus(ctx context.Context, id, status, errorMsg string) error {
+func (mr *CloudVaultReplicator) updateEntryStatus(ctx context.Context, id, status, errorMsg string) error {
 	_, err := mr.db.Write().ExecContext(ctx, `
 		UPDATE cloud_vault_queue
 		SET status = ?, error_message = ?, updated_at = unixepoch()
@@ -227,7 +227,7 @@ func (mr *MemoryReplicator) updateEntryStatus(ctx context.Context, id, status, e
 }
 
 // updateEntryBackoff updates attempts, status, error, and next_retry_at for a failed entry.
-func (mr *MemoryReplicator) updateEntryBackoff(ctx context.Context, id, status, errorMsg string, attempts int, nextRetryAt int64) error {
+func (mr *CloudVaultReplicator) updateEntryBackoff(ctx context.Context, id, status, errorMsg string, attempts int, nextRetryAt int64) error {
 	_, err := mr.db.Write().ExecContext(ctx, `
 		UPDATE cloud_vault_queue
 		SET status = ?, error_message = ?, attempts = ?, next_retry_at = ?, updated_at = unixepoch()
@@ -240,7 +240,7 @@ func (mr *MemoryReplicator) updateEntryBackoff(ctx context.Context, id, status, 
 // Callers: muninn tool interceptor, memory write paths.
 // Uses INSERT OR REPLACE semantics (UNIQUE on vault_name+memory_id) so a more
 // recent write to the same memory overwrites a queued-but-unsent earlier write.
-func (mr *MemoryReplicator) EnqueueMemoryOperation(ctx context.Context, sessionID, agentID, vaultName, operation, memoryID, concept, memoryContent string) error {
+func (mr *CloudVaultReplicator) EnqueueMemoryOperation(ctx context.Context, sessionID, agentID, vaultName, operation, memoryID, concept, memoryContent string) error {
 	if sessionID == "" || agentID == "" || vaultName == "" || operation == "" || memoryID == "" {
 		return errors.New("missing required parameters")
 	}
@@ -263,7 +263,7 @@ func (mr *MemoryReplicator) EnqueueMemoryOperation(ctx context.Context, sessionI
 }
 
 // PendingCount returns the number of pending cloud vault replication entries.
-func (mr *MemoryReplicator) PendingCount(ctx context.Context) (int, error) {
+func (mr *CloudVaultReplicator) PendingCount(ctx context.Context) (int, error) {
 	var count int
 	err := mr.db.Read().QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM cloud_vault_queue WHERE status = 'pending'
@@ -272,7 +272,7 @@ func (mr *MemoryReplicator) PendingCount(ctx context.Context) (int, error) {
 }
 
 // purgeDeadEntries removes completed and dead rows older than 7 days.
-func (mr *MemoryReplicator) purgeDeadEntries(ctx context.Context) {
+func (mr *CloudVaultReplicator) purgeDeadEntries(ctx context.Context) {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour).Unix()
 	_, err := mr.db.Write().ExecContext(ctx, `
 		DELETE FROM cloud_vault_queue

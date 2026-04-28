@@ -264,7 +264,7 @@ func migrateMemoryReplicationQueueV2(tx *sql.Tx) error {
 }
 
 // migrateCloudVaultQueueV1 creates the cloud_vault_queue table used by the
-// agents.MemoryReplicator to push memory operations to HuginnCloud.
+// agents.CloudVaultReplicator to push memory operations to HuginnCloud.
 // Separate from memory_replication_queue (channel-member replication) to avoid
 // schema conflicts. UNIQUE(vault_name, memory_id) enables idempotent upserts.
 func migrateCloudVaultQueueV1(tx *sql.Tx) error {

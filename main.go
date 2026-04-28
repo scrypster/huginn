@@ -1636,13 +1636,13 @@ func cmdRuntime(args []string) error {
 	}
 }
 
-// wireMemoryReplicator creates and configures a MemoryReplicator backed by sqlDB.
+// wireMemoryReplicator creates and configures a CloudVaultReplicator backed by sqlDB.
 // If HUGINN_CLOUD_URL is set and the machine is registered with HuginnCloud,
 // the replicator is wired with an HTTPVaultClient so agent memory writes are
 // replicated to the cloud vault. The caller must call Start() and arrange for
 // Stop() to be called on shutdown.
-func wireMemoryReplicator(sqlDB *sqlitedb.DB) *agentslib.MemoryReplicator {
-	mr := agentslib.NewMemoryReplicator(sqlDB)
+func wireMemoryReplicator(sqlDB *sqlitedb.DB) *agentslib.CloudVaultReplicator {
+	mr := agentslib.NewCloudVaultReplicator(sqlDB)
 	tokenStore := relay.NewTokenStore()
 	if cloudURL := os.Getenv("HUGINN_CLOUD_URL"); cloudURL != "" && tokenStore.IsRegistered() {
 		mr.WithVaultClient(agentslib.NewHTTPVaultClient(cloudURL, func() string {
