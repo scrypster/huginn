@@ -121,6 +121,12 @@ func (s *Server) handleMuninnTool(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	defer client.Close()
 
+	// MCP requires an initialize handshake before any tool calls.
+	if initErr := client.Initialize(ctx); initErr != nil {
+		jsonError(w, http.StatusBadGateway, "MCP initialize failed: "+initErr.Error())
+		return
+	}
+
 	result, callErr := client.CallTool(ctx, req.Tool, req.Args)
 	if callErr != nil {
 		jsonError(w, http.StatusBadGateway, "tool call failed: "+callErr.Error())
