@@ -656,6 +656,50 @@
     }
   },
   {
+    "id": "sendgrid",
+    "name": "SendGrid",
+    "description": "Transactional email via SendGrid API v3. Used by agents to send email notifications and reports.",
+    "category": "communication",
+    "icon": "SG",
+    "icon_color": "#1a82e2",
+    "type": "credentials",
+    "default_label": "SendGrid",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "API Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "SG.xxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Create a key with 'Mail Send' permission at app.sendgrid.com → Settings → API Keys."
+      },
+      {
+        "key": "from",
+        "label": "From address",
+        "type": "email",
+        "required": true,
+        "stored_in": "metadata",
+        "placeholder": "agent@example.com",
+        "help_text": "Must be a verified sender in your SendGrid account."
+      },
+      {
+        "key": "from_name",
+        "label": "From name",
+        "type": "text",
+        "required": false,
+        "stored_in": "metadata",
+        "placeholder": "Huginn",
+        "help_text": "Display name shown in the recipient's email client."
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Sends a test API call to verify the key is valid and has Mail Send permission."
+    }
+  },
+  {
     "id": "vercel",
     "name": "Vercel",
     "description": "Deployments, domains, environment variables",
