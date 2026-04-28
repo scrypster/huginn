@@ -1,25 +1,20 @@
 <template>
   <div class="flex h-full bg-huginn-bg">
-
-    <!-- ── Left sidebar nav ──────────────────────────────────────────── -->
     <div class="w-48 flex-shrink-0 flex flex-col border-r border-huginn-border"
       style="background:rgba(22,27,34,0.6)">
-      <!-- Sidebar header -->
       <div class="flex items-center px-4 h-11 border-b border-huginn-border flex-shrink-0">
         <span class="text-xs font-semibold text-huginn-muted uppercase tracking-widest">Settings</span>
       </div>
-      <!-- Nav items -->
       <nav class="flex-1 overflow-y-auto py-2">
         <button v-for="t in tabs" :key="t.id" @click="activeTab = t.id"
           class="w-full flex items-center gap-2.5 px-4 py-2 text-sm transition-colors duration-100 text-left"
           :class="activeTab === t.id
             ? 'text-huginn-text bg-huginn-surface/60'
             : 'text-huginn-muted hover:text-huginn-text hover:bg-huginn-surface/30'">
-          <component :is="t.icon" class="w-4 h-4 flex-shrink-0" />
+          <SettingsTabIcon :icon="t.icon" />
           {{ t.label }}
         </button>
       </nav>
-      <!-- Unsaved indicator at bottom of sidebar -->
       <div v-if="dirty" class="px-4 py-3 border-t border-huginn-border flex-shrink-0">
         <div class="text-[11px] text-huginn-yellow mb-2">Unsaved changes</div>
         <div class="flex gap-1.5">
@@ -31,10 +26,7 @@
       </div>
     </div>
 
-    <!-- ── Main content ──────────────────────────────────────────────── -->
     <div class="flex-1 flex flex-col min-w-0">
-
-      <!-- Config changed banner -->
       <div v-if="externallyChanged" class="mx-4 mt-3 flex-shrink-0">
         <div class="flex items-center gap-3 px-4 py-2.5 rounded-xl border border-huginn-yellow/40 text-huginn-yellow text-xs"
           style="background:rgba(210,153,34,0.07)">
@@ -52,287 +44,62 @@
 
       <div v-else class="flex-1 overflow-y-auto">
         <div class="max-w-2xl mx-auto px-6 py-6 space-y-6">
-
-          <!-- Save feedback -->
           <div v-if="saveMsg" class="px-4 py-2.5 rounded-xl border text-xs"
             :class="saveError ? 'border-huginn-red/40 text-huginn-red bg-huginn-red/8' : 'border-huginn-green/40 text-huginn-green bg-huginn-green/8'">
             {{ saveMsg }}
           </div>
 
-          <!-- ── General ───────────────────────────────────────────── -->
-          <div v-if="activeTab === 'general'" class="space-y-6">
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">General</h3>
-              <FieldRow label="Workspace Path" hint="Default working directory for new sessions">
-                <input v-model="form.workspace_path" @input="dirty = true" placeholder="~/projects or /absolute/path"
-                  class="field-input" />
-              </FieldRow>
-              <FieldRow label="Max Turns" hint="Max agentic loop iterations (default 50)">
-                <input v-model.number="form.max_turns" @input="dirty = true" type="number" min="1" max="500"
-                  class="field-input w-24" />
-              </FieldRow>
-              <FieldRow label="Bash Timeout" hint="Seconds before a shell command times out">
-                <div class="flex items-center gap-2">
-                  <input v-model.number="form.bash_timeout_secs" @input="dirty = true" type="number" min="5" max="3600"
-                    class="field-input w-24" />
-                  <span class="text-xs text-huginn-muted">seconds</span>
-                </div>
-              </FieldRow>
-              <FieldRow label="Context Limit" hint="Max context window in kilobytes">
-                <div class="flex items-center gap-2">
-                  <input v-model.number="form.context_limit_kb" @input="dirty = true" type="number" min="1" max="2048"
-                    class="field-input w-24" />
-                  <span class="text-xs text-huginn-muted">KB</span>
-                </div>
-              </FieldRow>
-              <FieldRow label="Diff Review Mode" hint="When to pause and show a diff for approval">
-                <div class="relative">
-                  <select v-model="form.diff_review_mode" @change="dirty = true" class="field-select">
-                    <option value="auto">Auto</option>
-                    <option value="always">Always</option>
-                    <option value="never">Never</option>
-                  </select>
-                  <svg class="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-huginn-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9" /></svg>
-                </div>
-              </FieldRow>
-              <FieldRow label="Compact Mode" hint="Auto-compact conversation history">
-                <div class="relative">
-                  <select v-model="form.compact_mode" @change="dirty = true" class="field-select">
-                    <option value="auto">Auto</option>
-                    <option value="always">Always</option>
-                    <option value="never">Never</option>
-                  </select>
-                  <svg class="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-huginn-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9" /></svg>
-                </div>
-              </FieldRow>
-            </section>
-            <div class="border-t border-huginn-border" />
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Behavior Flags</h3>
-              <ToggleRow :modelValue="!!form.git_stage_on_write" @update:modelValue="v => { form.git_stage_on_write = v; dirty = true }"
-                label="Git stage on write" hint="Auto-stage files after each write" />
-              <ToggleRow :modelValue="!!form.notepads_enabled" @update:modelValue="v => { form.notepads_enabled = v; dirty = true }"
-                label="Notepads" hint="Enable persistent note-taking tools" />
-              <ToggleRow :modelValue="!!form.vision_enabled" @update:modelValue="v => { form.vision_enabled = v; dirty = true }"
-                label="Vision" hint="Enable image understanding in prompts" />
-              <ToggleRow :modelValue="!!form.semantic_search" @update:modelValue="v => { form.semantic_search = v; dirty = true }"
-                label="Semantic search" hint="Use embeddings for smarter file search" />
-            </section>
-          </div>
+          <SettingsGeneralTab
+            v-if="activeTab === 'general'"
+            :form="form"
+            @mark-dirty="markDirty"
+          />
 
-          <!-- ── Tools ────────────────────────────────────────────── -->
-          <div v-if="activeTab === 'tools'" class="space-y-6">
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Tool Access</h3>
-              <ToggleRow :modelValue="!!form.tools_enabled" @update:modelValue="v => { form.tools_enabled = v; dirty = true }"
-                label="Tools enabled" hint="Allow huginn to use tools (file read/write, bash, etc.)" />
-            </section>
-            <div class="border-t border-huginn-border" />
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Allowed Tools</h3>
-              <p class="text-xs text-huginn-muted">Whitelist — empty means all tools allowed. One tool name per line.</p>
-              <textarea v-model="allowedToolsText" @input="dirty = true; syncToolsFromText()"
-                placeholder="read_file&#10;write_file&#10;bash"
-                rows="6"
-                class="w-full bg-huginn-surface border border-huginn-border rounded-xl px-4 py-3 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors resize-y"
-              />
-            </section>
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Disallowed Tools</h3>
-              <p class="text-xs text-huginn-muted">Blacklist — tools that are always blocked.</p>
-              <textarea v-model="disallowedToolsText" @input="dirty = true; syncToolsFromText()"
-                placeholder="bash&#10;web_search"
-                rows="4"
-                class="w-full bg-huginn-surface border border-huginn-border rounded-xl px-4 py-3 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors resize-y"
-              />
-            </section>
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Web Search</h3>
-              <FieldRow label="Brave API Key" hint="Required for web_search tool">
-                <div class="relative">
-                  <input v-model="form.brave_api_key" @input="dirty = true"
-                    :type="showBraveKey ? 'text' : 'password'"
-                    placeholder="BSA..."
-                    class="field-input pr-10 font-mono" />
-                  <button @click="showBraveKey = !showBraveKey"
-                    class="absolute right-2.5 top-1/2 -translate-y-1/2 text-huginn-muted hover:text-huginn-text transition-colors">
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                      <path v-if="!showBraveKey" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle v-if="!showBraveKey" cx="12" cy="12" r="3" />
-                      <path v-if="showBraveKey" d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" />
-                      <line v-if="showBraveKey" x1="1" y1="1" x2="23" y2="23" />
-                    </svg>
-                  </button>
-                </div>
-              </FieldRow>
-            </section>
-          </div>
+          <SettingsToolsTab
+            v-if="activeTab === 'tools'"
+            :form="form"
+            :allowed-tools-text="allowedToolsText"
+            :disallowed-tools-text="disallowedToolsText"
+            :show-brave-key="showBraveKey"
+            @update:allowed-tools-text="allowedToolsText = $event"
+            @update:disallowed-tools-text="disallowedToolsText = $event"
+            @update:show-brave-key="showBraveKey = $event"
+            @mark-dirty="markDirty"
+            @sync-tools="syncToolsFromText"
+          />
 
-          <!-- ── Web UI ─────────────────────────────────────────── -->
-          <div v-if="activeTab === 'webui'" class="space-y-6">
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Web UI</h3>
-              <ToggleRow :modelValue="!!form.web_ui_enabled" @update:modelValue="v => { form.web_ui_enabled = v; dirty = true }"
-                label="Enabled" hint="Start the web server with 'huginn serve'" />
-              <FieldRow label="Port" hint="0 = dynamic (random available port)">
-                <input v-model.number="form.web_ui_port" @input="dirty = true" type="number" min="0" max="65535"
-                  class="field-input w-24" placeholder="0" />
-              </FieldRow>
-              <FieldRow label="Bind address" hint="Loopback only recommended">
-                <input v-model="form.web_ui_bind" @input="dirty = true"
-                  class="field-input w-40 font-mono" placeholder="127.0.0.1" />
-              </FieldRow>
-              <ToggleRow :modelValue="!!form.web_ui_auto_open" @update:modelValue="v => { form.web_ui_auto_open = v; dirty = true }"
-                label="Auto-open browser" hint="Open browser when server starts" />
-            </section>
-            <div class="border-t border-huginn-border" />
-            <section class="space-y-3">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Runtime Status</h3>
-              <div class="space-y-2">
-                <div v-for="(val, key) in runtimeStatus" :key="key"
-                  class="flex items-center gap-3 px-3 py-2 rounded-lg bg-huginn-surface/50 border border-huginn-border">
-                  <span class="text-xs text-huginn-muted w-28 flex-shrink-0">{{ key }}</span>
-                  <span class="text-xs text-huginn-text font-mono truncate">{{ val }}</span>
-                </div>
-              </div>
-            </section>
-          </div>
+          <SettingsWebUITab
+            v-if="activeTab === 'webui'"
+            :form="form"
+            :runtime-status="runtimeStatus"
+            @mark-dirty="markDirty"
+          />
 
-          <!-- ── Integrations ──────────────────────────────────── -->
-          <div v-if="activeTab === 'integrations'" class="space-y-6">
-            <p class="text-xs text-huginn-muted">OAuth credentials for external service integrations. Leave blank to disable.</p>
-            <section v-for="p in integrationProviders" :key="p.key" class="space-y-3">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">{{ p.label }}</h3>
-              <div class="grid grid-cols-2 gap-3">
-                <FieldRow label="Client ID" compact>
-                  <input v-model="form[`${p.key}_client_id` as keyof typeof form]" @input="dirty = true"
-                    :placeholder="p.key + '-client-id'" class="field-input font-mono text-xs" />
-                </FieldRow>
-                <FieldRow label="Client Secret" compact>
-                  <input v-model="form[`${p.key}_client_secret` as keyof typeof form]" @input="dirty = true"
-                    type="password" placeholder="••••••••" class="field-input font-mono text-xs" />
-                </FieldRow>
-              </div>
-            </section>
-          </div>
+          <SettingsIntegrationsTab
+            v-if="activeTab === 'integrations'"
+            :form="form"
+            :integration-providers="integrationProviders"
+            @mark-dirty="markDirty"
+          />
 
-          <!-- ── MCP Servers ────────────────────────────────────── -->
-          <div v-if="activeTab === 'mcp'" class="space-y-6">
-            <p class="text-xs text-huginn-muted">Model Context Protocol servers provide external tools and data to your agents.</p>
+          <SettingsMcpTab
+            v-if="activeTab === 'mcp'"
+            :mcp-servers="mcpServers"
+            :new-mcp="newMcp"
+            :mcp-add-error="mcpAddError"
+            @add-mcp-server="addMcpServer"
+            @remove-mcp-server="removeMcpServer"
+          />
 
-            <!-- Existing servers -->
-            <section v-if="mcpServers.length > 0" class="space-y-3">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Configured Servers</h3>
-              <div class="space-y-2">
-                <div v-for="(srv, idx) in mcpServers" :key="srv.name"
-                  class="px-4 py-3 rounded-xl border border-huginn-border bg-huginn-surface/50">
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="flex-1 min-w-0 space-y-0.5">
-                      <p class="text-xs font-medium text-huginn-text font-mono">{{ srv.name }}</p>
-                      <p class="text-[11px] text-huginn-muted">
-                        <span class="px-1.5 py-0.5 rounded border border-huginn-border text-[10px]">{{ srv.transport }}</span>
-                        <span class="ml-2 font-mono truncate">{{ srv.command || srv.url || '' }}</span>
-                      </p>
-                      <div v-if="srv.env && Object.keys(srv.env).length > 0" class="text-[10px] text-huginn-muted/70 font-mono space-y-0.5 mt-1">
-                        <div v-for="(val, key) in srv.env" :key="key">{{ key }}={{ val }}</div>
-                      </div>
-                    </div>
-                    <button @click="removeMcpServer(idx)"
-                      class="px-2 py-1 text-[10px] font-medium rounded border border-huginn-red/30 text-huginn-red hover:bg-huginn-red/10 transition-colors flex-shrink-0">
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </section>
+          <SettingsNotificationsTab
+            v-if="activeTab === 'notifications'"
+            :notif="notif"
+          />
 
-            <div v-if="mcpServers.length === 0" class="py-4 text-center">
-              <p class="text-huginn-muted text-xs">No MCP servers configured.</p>
-            </div>
-
-            <div class="border-t border-huginn-border" />
-
-            <!-- Add server form -->
-            <section class="space-y-4">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Add Server</h3>
-              <FieldRow label="Name" hint="Unique identifier">
-                <input v-model="newMcp.name" placeholder="my-mcp-server" class="field-input font-mono text-xs" />
-              </FieldRow>
-              <FieldRow label="Transport" hint="Connection method">
-                <div class="relative">
-                  <select v-model="newMcp.transport" class="field-select">
-                    <option value="stdio">stdio (subprocess)</option>
-                    <option value="sse">sse (HTTP Server-Sent Events)</option>
-                    <option value="http">http (streamable HTTP)</option>
-                  </select>
-                  <svg class="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-huginn-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9" /></svg>
-                </div>
-              </FieldRow>
-              <FieldRow v-if="newMcp.transport === 'stdio'" label="Command" hint="Executable path">
-                <input v-model="newMcp.command" placeholder="/usr/local/bin/mcp-server" class="field-input font-mono text-xs" />
-              </FieldRow>
-              <FieldRow v-if="newMcp.transport === 'stdio'" label="Args" hint="One arg per line">
-                <textarea v-model="newMcp.argsText" rows="3" placeholder="--port&#10;8080"
-                  class="w-full bg-huginn-surface border border-huginn-border rounded-xl px-4 py-3 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors resize-y" />
-              </FieldRow>
-              <FieldRow v-if="newMcp.transport !== 'stdio'" label="URL" hint="Server URL (https://)">
-                <input v-model="newMcp.url" placeholder="https://my-mcp-server.example.com" class="field-input font-mono text-xs" />
-              </FieldRow>
-              <FieldRow label="Environment variables" hint="KEY=VALUE pairs, one per line. Secret values are redacted in display.">
-                <textarea v-model="newMcp.envText" rows="4" placeholder="MY_API_TOKEN=sk-...&#10;BASE_URL=https://api.example.com"
-                  class="w-full bg-huginn-surface border border-huginn-border rounded-xl px-4 py-3 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors resize-y" />
-              </FieldRow>
-              <p v-if="mcpAddError" class="text-xs text-huginn-red">{{ mcpAddError }}</p>
-              <button @click="addMcpServer"
-                class="px-4 py-2 rounded-lg text-xs font-medium border border-huginn-green/30 text-huginn-green hover:bg-huginn-green/10 transition-all">
-                Add server
-              </button>
-            </section>
-          </div>
-
-          <!-- ── Notifications ───────────────────────────────────────────── -->
-          <div v-if="activeTab === 'notifications'" class="space-y-6">
-            <p class="text-xs text-huginn-muted">Control when Huginn sends desktop notifications to your operating system.</p>
-
-            <section class="space-y-3">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Desktop Notifications</h3>
-
-              <div v-if="!notif.isSupported" class="text-xs text-huginn-muted px-1">
-                Browser notifications are not supported in this browser.
-              </div>
-
-              <template v-else>
-                <ToggleRow
-                  :modelValue="notif.enabled.value"
-                  label="Desktop notifications"
-                  hint="Get notified when agents respond or workflows complete, even when this tab is in the background."
-                  @update:modelValue="notif.toggle($event)"
-                />
-
-                <p v-if="notif.permission.value === 'denied'" class="text-[11px] text-amber-400 px-1">
-                  Notifications are blocked in browser settings. To enable, update your browser's site permissions for this page.
-                </p>
-              </template>
-            </section>
-          </div>
-
-          <!-- ── About ──────────────────────────────────────────────── -->
-          <div v-if="activeTab === 'about'" class="space-y-6" data-testid="settings-about-panel">
-            <p class="text-xs text-huginn-muted">Build information for the running Huginn instance. Useful for confirming an upgrade has taken effect.</p>
-
-            <section class="space-y-3">
-              <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Application</h3>
-              <div class="rounded-xl border border-huginn-border bg-huginn-surface/40 divide-y divide-huginn-border">
-                <div class="flex items-center justify-between px-4 py-3">
-                  <span class="text-xs text-huginn-muted">Name</span>
-                  <span class="text-xs text-huginn-text">Huginn</span>
-                </div>
-                <div class="flex items-center justify-between px-4 py-3">
-                  <span class="text-xs text-huginn-muted">Version</span>
-                  <span class="text-xs font-mono text-huginn-text" data-testid="settings-version-value">{{ versionLabel }}</span>
-                </div>
-              </div>
-            </section>
-          </div>
+          <SettingsAboutTab
+            v-if="activeTab === 'about'"
+            :version-label="versionLabel"
+          />
 
         </div>
       </div>
@@ -341,11 +108,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, defineComponent, h } from 'vue'
+import { ref, onMounted } from 'vue'
 import { api } from '../composables/useApi'
 import { useConfig, type MCPServer } from '../composables/useConfig'
 import { useVersion } from '../composables/useVersion'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
+import SettingsTabIcon from '../components/settings/SettingsTabIcon.vue'
+import SettingsGeneralTab from '../components/settings/SettingsGeneralTab.vue'
+import SettingsToolsTab from '../components/settings/SettingsToolsTab.vue'
+import SettingsWebUITab from '../components/settings/SettingsWebUITab.vue'
+import SettingsIntegrationsTab from '../components/settings/SettingsIntegrationsTab.vue'
+import SettingsMcpTab from '../components/settings/SettingsMcpTab.vue'
+import SettingsNotificationsTab from '../components/settings/SettingsNotificationsTab.vue'
+import SettingsAboutTab from '../components/settings/SettingsAboutTab.vue'
 
 const { config, loading, externallyChanged, loadConfig, saveConfig } = useConfig()
 const notif = useBrowserNotifications()
@@ -356,43 +131,12 @@ const notif = useBrowserNotifications()
 // finishes its onMounted hook.
 const { versionLabel, loadVersion } = useVersion()
 
-// ── Sub-components ───────────────────────────────────────────────────
-const FieldRow = defineComponent({
-  props: { label: String, hint: String, compact: Boolean },
-  setup(props, { slots }) {
-    return () => h('div', { class: props.compact ? 'space-y-1' : 'space-y-1.5' }, [
-      h('div', { class: 'flex items-center justify-between' }, [
-        h('label', { class: 'text-xs text-huginn-muted' }, props.label),
-        props.hint ? h('span', { class: 'text-[11px] text-huginn-muted/60 max-w-xs text-right' }, props.hint) : null,
-      ]),
-      slots.default?.(),
-    ])
-  },
-})
-
-const ToggleRow = defineComponent({
-  props: { modelValue: Boolean, label: String, hint: String },
-  emits: ['update:modelValue', 'change'],
-  setup(props, { emit }) {
-    return () => h('div', { class: 'flex items-center justify-between' }, [
-      h('div', [
-        h('p', { class: 'text-xs text-huginn-text' }, props.label),
-        props.hint ? h('p', { class: 'text-[11px] text-huginn-muted mt-0.5' }, props.hint) : null,
-      ]),
-      h('button', {
-        onClick: () => { emit('update:modelValue', !props.modelValue); emit('change') },
-        class: `relative w-9 h-5 rounded-full transition-colors duration-200 ${props.modelValue ? 'bg-huginn-blue' : 'bg-huginn-border'}`,
-      }, [
-        h('div', {
-          class: `absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 ${props.modelValue ? 'translate-x-4' : 'translate-x-0.5'}`,
-        }),
-      ]),
-    ])
-  },
-})
-
 // ── State ─────────────────────────────────────────────────────────────
-const activeTab = ref('general')
+type SettingsTabID = 'general' | 'tools' | 'webui' | 'integrations' | 'mcp' | 'notifications' | 'about'
+type SettingsTabIconName = SettingsTabID
+type SettingsTab = { id: SettingsTabID; label: string; icon: SettingsTabIconName }
+
+const activeTab = ref<SettingsTabID>('general')
 const dirty = ref(false)
 const saving = ref(false)
 const saveMsg = ref('')
@@ -417,46 +161,14 @@ const form = ref<Record<FormKey, unknown>>({
 })
 let originalForm = ''
 
-// Simple inline SVG icon components for the sidebar
-const IconGeneral = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
-  h('circle', { cx: '12', cy: '12', r: '3' }),
-  h('path', { d: 'M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14' }),
-]) })
-const IconTools = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
-  h('path', { d: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z' }),
-]) })
-const IconWebUI = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
-  h('rect', { x: '3', y: '3', width: '18', height: '18', rx: '2' }),
-  h('path', { d: 'M3 9h18' }),
-  h('path', { d: 'M9 21V9' }),
-]) })
-const IconIntegrations = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
-  h('path', { d: 'M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71' }),
-  h('path', { d: 'M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71' }),
-]) })
-const IconMCP = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
-  h('rect', { x: '2', y: '3', width: '20', height: '14', rx: '2' }),
-  h('path', { d: 'M8 21h8M12 17v4' }),
-  h('path', { d: 'M7 8h3m4 0h3' }),
-]) })
-const IconNotifications = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, [
-  h('path', { d: 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9' }),
-  h('path', { d: 'M13.73 21a2 2 0 0 1-3.46 0' }),
-]) })
-const IconAbout = defineComponent({ render: () => h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' }, [
-  h('circle', { cx: '12', cy: '12', r: '10' }),
-  h('path', { d: 'M12 16v-4' }),
-  h('path', { d: 'M12 8h.01' }),
-]) })
-
-const tabs = [
-  { id: 'general', label: 'General', icon: IconGeneral },
-  { id: 'tools', label: 'Tools', icon: IconTools },
-  { id: 'webui', label: 'Web UI', icon: IconWebUI },
-  { id: 'integrations', label: 'Integrations', icon: IconIntegrations },
-  { id: 'mcp', label: 'MCP Servers', icon: IconMCP },
-  { id: 'notifications', label: 'Notifications', icon: IconNotifications },
-  { id: 'about', label: 'About', icon: IconAbout },
+const tabs: SettingsTab[] = [
+  { id: 'general', label: 'General', icon: 'general' },
+  { id: 'tools', label: 'Tools', icon: 'tools' },
+  { id: 'webui', label: 'Web UI', icon: 'webui' },
+  { id: 'integrations', label: 'Integrations', icon: 'integrations' },
+  { id: 'mcp', label: 'MCP Servers', icon: 'mcp' },
+  { id: 'notifications', label: 'Notifications', icon: 'notifications' },
+  { id: 'about', label: 'About', icon: 'about' },
 ]
 
 const integrationProviders = [
@@ -509,6 +221,10 @@ function removeMcpServer(idx: number) {
 function syncToolsFromText() {
   form.value.allowed_tools = allowedToolsText.value.split('\n').map(s => s.trim()).filter(Boolean)
   form.value.disallowed_tools = disallowedToolsText.value.split('\n').map(s => s.trim()).filter(Boolean)
+}
+
+function markDirty() {
+  dirty.value = true
 }
 
 function populateForm(cfg: Record<string, unknown>) {
@@ -608,12 +324,3 @@ onMounted(async () => {
   populateForm(cfg as unknown as Record<string, unknown>)
 })
 </script>
-
-<style scoped>
-.field-input {
-  @apply w-full bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 text-sm text-huginn-text outline-none focus:border-huginn-blue/50 transition-colors;
-}
-.field-select {
-  @apply w-full appearance-none bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 pr-8 text-sm text-huginn-text outline-none focus:border-huginn-blue/50 transition-colors cursor-pointer;
-}
-</style>
