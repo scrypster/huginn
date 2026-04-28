@@ -12,15 +12,20 @@
       {{ error }}
     </div>
 
+    <!-- Loading -->
+    <div v-if="loading" class="flex-1 flex items-center justify-center">
+      <p class="text-xs text-[var(--color-text-muted)]">Loading…</p>
+    </div>
+
     <!-- No MuninnDB configured -->
-    <div v-if="!connected && !loading" class="flex-1 flex items-center justify-center">
+    <div v-else-if="!connected" class="flex-1 flex items-center justify-center">
       <div class="text-center text-[var(--color-text-muted)]">
         <p class="text-sm">MuninnDB not connected</p>
         <p class="text-xs mt-1">Configure in <router-link to="/connections" class="underline">Connections</router-link></p>
       </div>
     </div>
 
-    <template v-else-if="connected">
+    <template v-else>
       <!-- Vault selector + search row -->
       <div class="flex-shrink-0 px-4 pt-3 pb-2 flex gap-2 items-center">
         <select
@@ -128,7 +133,7 @@ interface RawMemory {
   memory_id?: string
   concept?: string
   name?: string
-  content?: string | unknown
+  content?: unknown
   entities?: string[]
   decay_score?: number
   [key: string]: unknown
@@ -208,6 +213,7 @@ function selectMemory(mem: Memory) {
 
 async function forgetMemory() {
   if (!selectedMemory.value || !selectedVault.value) return
+  if (!window.confirm(`Forget "${selectedMemory.value.concept || selectedMemory.value.id}"? This cannot be undone.`)) return
   const toForget = selectedMemory.value
   forgetLoading.value = true
   error.value = ''
