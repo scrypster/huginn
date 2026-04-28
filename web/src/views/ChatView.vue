@@ -160,7 +160,7 @@
 
           <!-- Agents chip (space context) -->
           <button v-if="activeSpace"
-            @click="rosterOpen = true"
+            @click="toggleMemberPanel()"
             class="flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs transition-all duration-150 hover:bg-huginn-surface active:scale-95"
             style="border:1px solid rgba(255,255,255,0.08)"
             title="Manage agents"
@@ -184,8 +184,14 @@
             </svg>
           </button>
 
-          <!-- Agent picker dropdown (standalone session context) -->
-          <div v-else-if="agentsList.length" class="relative flex-shrink-0">
+          <!-- Memory replication chip (channel/space context only) -->
+          <!-- Uses v-if with explicit activeSpace guard; agent picker below uses !activeSpace — mutually exclusive by domain -->
+          <span v-if="replChipText && activeSpace" :class="['text-[10px] px-2 py-0.5 rounded-full', replChipClass]">
+            {{ replChipText }}
+          </span>
+
+          <!-- Agent picker dropdown (standalone session context — no activeSpace) -->
+          <div v-if="!activeSpace && agentsList.length" class="relative flex-shrink-0">
             <button
               @click="agentDropdownOpen = !agentDropdownOpen"
               class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-all duration-150 hover:bg-huginn-surface"
@@ -421,6 +427,7 @@
                   v-if="msg.showHeader && msg.agent"
                   :agent-name="msg.agent"
                   :created-at="msg.createdAt"
+                  :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
                 <!-- Message text -->
                 <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
@@ -766,6 +773,14 @@
         @reject-artifact="threadDetail.handleRejectArtifact"
         @inject="handleThreadDetailInject"
       />
+
+      <!-- Member panel (channel view only, right side) -->
+      <ChannelMemberPanel
+        v-if="activeSpace"
+        :members="spaceMemberCards"
+        :open="memberPanelOpen"
+        @toggle="toggleMemberPanel"
+      />
       </div><!-- end flex row -->
     </template>
 
@@ -856,6 +871,8 @@ import { useChatSearch } from '../composables/useChatSearch'
 import { useUnreadTracking } from '../composables/useUnreadTracking'
 import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
+import { useReplicationStatus } from '../composables/useReplicationStatus'
+import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 
 interface Agent {
   name: string
@@ -1237,6 +1254,62 @@ const spaceAgents = computed(() => {
 })
 
 const spaceAgentPreviews = computed(() => spaceAgents.value.slice(0, 3))
+
+interface SpaceMemberCard {
+  name: string
+  description: string
+  vaultName: string
+  isLead: boolean
+  color: string
+}
+
+const spaceMemberCards = computed<SpaceMemberCard[]>(() => {
+  const space = activeSpace.value
+  if (!space) return []
+  const leadName = space.leadAgent
+  const names = [leadName, ...space.memberAgents]
+  return names.map(n => {
+    const agent = agentsList.value.find(a => a.name === n)
+    return {
+      name: n,
+      description: agent?.description ?? '',
+      vaultName: (agent?.vault_name as string) ?? '',
+      isLead: n === leadName,
+      color: agentColorMap.value[n] ?? '#58a6ff',
+    }
+  })
+})
+
+// Member panel (channel view right sidebar)
+const memberPanelOpen = ref(false)
+const memberPanelStoredState = ref(false) // preserves state during thread panel override
+
+// Initialize from localStorage keyed by spaceId
+watch(() => props.spaceId, (id) => {
+  if (id) {
+    memberPanelOpen.value = localStorage.getItem(`huginn:memberPanel:${id}`) === 'true'
+  }
+}, { immediate: true })
+
+function toggleMemberPanel() {
+  if (!props.spaceId) return
+  memberPanelOpen.value = !memberPanelOpen.value
+  localStorage.setItem(`huginn:memberPanel:${props.spaceId}`, String(memberPanelOpen.value))
+}
+
+// When thread panel opens, collapse member panel; restore when it closes.
+watch(threadPanelOpen, (open) => {
+  if (open) {
+    memberPanelStoredState.value = memberPanelOpen.value
+    memberPanelOpen.value = false
+  } else {
+    memberPanelOpen.value = memberPanelStoredState.value
+  }
+})
+
+// Replication status chip
+const spaceIdRef = computed(() => props.spaceId)
+const { chipText: replChipText, chipClass: replChipClass } = useReplicationStatus(spaceIdRef)
 
 // Auto-show panel when threads appear; auto-hide 4s after all finish (unless pinned)
 watch(activeThreadCount, (count) => {
