@@ -38,6 +38,8 @@ type Upgrader struct {
 	Stdout        io.Writer                           // if nil, defaults to os.Stdout
 	Stdin         io.Reader                           // if nil, defaults to os.Stdin
 	IsHomebrewFn  func() bool                        // if nil, defaults to isHomebrewInstall
+	BrewUpgrade   func(pkg string) error             // if nil, runs exec.Command("brew", "upgrade", pkg)
+	VerifyBinary  func(path, tag string) error       // if nil, defaults to verifyHuginnBinary
 }
 
 func defaultUpgrader() *Upgrader {
@@ -606,11 +608,101 @@ func isHomebrewInstall() bool {
 }
 
 func (u *Upgrader) upgradeViaHomebrew(latest string, yes bool, state runningState) error {
-	fmt.Fprintf(u.out(), "  Homebrew install detected — running brew upgrade...\n")
-	cmd := exec.Command("brew", "upgrade", "scrypster/tap/huginn")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	fmt.Fprintf(u.out(), "  Homebrew install detected.\n")
+
+	desc := daemonDesc(state)
+	if !yes {
+		if desc != "" {
+			fmt.Fprintf(u.out(), "  huginn %s are running and will be stopped\n  and restarted automatically during the upgrade.\n\n", desc)
+		}
+		fmt.Fprintf(u.out(), "  Upgrade to %s? [y/N] ", latest)
+		var resp string
+		fmt.Fscanln(u.in(), &resp)
+		if strings.ToLower(strings.TrimSpace(resp)) != "y" {
+			fmt.Fprintln(u.out(), "  Aborted.")
+			return nil
+		}
+	} else if desc != "" {
+		fmt.Fprintf(u.out(), "  Note: huginn %s are running and will be stopped and restarted.\n", desc)
+	}
+
+	// Resolve PID paths for stop/restart calls.
+	huginnHome, _ := u.HuginnDirFn()
+	servePIDPath := filepath.Join(huginnHome, "serve.pid")
+	trayPIDPath  := filepath.Join(huginnHome, "tray.pid")
+
+	if state.serveRunning {
+		if err := u.step("Stopping server...", func() error {
+			return u.StopProcess(state.servePID, servePIDPath)
+		}); err != nil {
+			return err
+		}
+	}
+	if state.trayRunning {
+		if err := u.step("Stopping tray...", func() error {
+			return u.StopProcess(state.trayPID, trayPIDPath)
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Run brew upgrade.
+	brew := u.BrewUpgrade
+	if brew == nil {
+		brew = func(pkg string) error {
+			cmd := exec.Command("brew", "upgrade", pkg)
+			cmd.Stdout = u.out()
+			cmd.Stderr = u.out()
+			return cmd.Run()
+		}
+	}
+	brewErr := brew("scrypster/tap/huginn")
+
+	// Resolve exe path for verification and restart.
+	exePath := u.ExePath
+	if exePath == "" {
+		if exe, err := os.Executable(); err == nil {
+			exePath, _ = filepath.EvalSymlinks(exe)
+		}
+	}
+
+	// Verify the new binary only when brew succeeded.
+	if brewErr == nil && exePath != "" {
+		verify := u.VerifyBinary
+		if verify == nil {
+			verify = verifyHuginnBinary
+		}
+		if err := verify(exePath, latest); err != nil {
+			fmt.Fprintf(u.out(), "  Warning: new binary failed verification.\n  Run: brew reinstall scrypster/tap/huginn\n")
+		}
+	}
+
+	// Restart daemons — best-effort even when brew failed.
+	if state.serveRunning {
+		if err := u.step("Restarting server...", func() error {
+			cmd := exec.Command(exePath, "serve")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+			return u.DetachStart(cmd)
+		}); err != nil {
+			fmt.Fprintf(u.out(), "\n  Warning: server did not restart: %v\n  Run: huginn serve\n\n", err)
+		}
+	}
+	if state.trayRunning {
+		if err := u.step("Restarting tray...", func() error {
+			cmd := exec.Command(exePath, "tray")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+			return u.DetachStart(cmd)
+		}); err != nil {
+			fmt.Fprintf(u.out(), "\n  Warning: tray did not restart: %v\n  Run: huginn tray\n\n", err)
+		}
+	}
+
+	if brewErr != nil {
+		return brewErr
+	}
+
+	fmt.Fprintf(u.out(), "\n  huginn updated to %s\n\n", latest)
+	return nil
 }
 
 // verifyHuginnBinary runs `<path> version` and confirms it contains the expected

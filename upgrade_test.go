@@ -833,3 +833,142 @@ func TestRun_YesFlagSilentWhenNotRunning(t *testing.T) {
 		t.Errorf("should not print Note: when no daemons running:\n%s", got)
 	}
 }
+
+// ─── upgradeViaHomebrew ───────────────────────────────────────────────────────
+
+func TestUpgradeViaHomebrew_StopsAndRestartsDaemons(t *testing.T) {
+	stopCalls, restartCalls := 0, 0
+	var out bytes.Buffer
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "huginn")
+	os.WriteFile(exePath, []byte("fake"), 0755)
+
+	u := &Upgrader{
+		HuginnDirFn:  func() (string, error) { return dir, nil },
+		ExePath:      exePath,
+		StopProcess:  func(pid int, path string) error { stopCalls++; return nil },
+		DetachStart:  func(cmd *exec.Cmd) error { restartCalls++; return nil },
+		BrewUpgrade:  func(pkg string) error { return nil },
+		VerifyBinary: func(path, tag string) error { return nil },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("y\n"),
+	}
+
+	state := runningState{serveRunning: true, servePID: 42, trayRunning: true, trayPID: 43}
+	if err := u.upgradeViaHomebrew("v0.3.1", false, state); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stopCalls != 2 {
+		t.Errorf("expected 2 stop calls, got %d", stopCalls)
+	}
+	if restartCalls != 2 {
+		t.Errorf("expected 2 restart calls, got %d", restartCalls)
+	}
+}
+
+func TestUpgradeViaHomebrew_RestartsOnBrewFailure(t *testing.T) {
+	stopCalls, restartCalls := 0, 0
+	var out bytes.Buffer
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "huginn")
+	os.WriteFile(exePath, []byte("fake"), 0755)
+
+	u := &Upgrader{
+		HuginnDirFn:  func() (string, error) { return dir, nil },
+		ExePath:      exePath,
+		StopProcess:  func(pid int, path string) error { stopCalls++; return nil },
+		DetachStart:  func(cmd *exec.Cmd) error { restartCalls++; return nil },
+		BrewUpgrade:  func(pkg string) error { return fmt.Errorf("brew exploded") },
+		VerifyBinary: func(path, tag string) error { return nil },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("y\n"),
+	}
+
+	state := runningState{serveRunning: true, servePID: 42, trayRunning: true, trayPID: 43}
+	err := u.upgradeViaHomebrew("v0.3.1", false, state)
+	if err == nil || !strings.Contains(err.Error(), "brew exploded") {
+		t.Errorf("expected brew error, got: %v", err)
+	}
+	if stopCalls != 2 {
+		t.Errorf("expected 2 stop calls, got %d", stopCalls)
+	}
+	if restartCalls != 2 {
+		t.Errorf("expected 2 restart calls after brew failure, got %d", restartCalls)
+	}
+}
+
+func TestUpgradeViaHomebrew_VersionFlagErrors(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	brewCalled := false
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		IsHomebrewFn:  func() bool { return true },
+		BrewUpgrade:   func(pkg string) error { brewCalled = true; return nil },
+		Stdout:        &out,
+	}
+	err := u.Run([]string{"--version", "v0.3.1"})
+	if err == nil {
+		t.Error("expected error for --version with Homebrew, got nil")
+	}
+	if brewCalled {
+		t.Error("brew must not be called when --version is set for Homebrew install")
+	}
+}
+
+func TestUpgradeViaHomebrew_ForceFlagErrors(t *testing.T) {
+	savedVersion := version
+	version = "0.3.0"
+	defer func() { version = savedVersion }()
+
+	brewCalled := false
+	var out bytes.Buffer
+	u := &Upgrader{
+		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
+		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
+		IsHomebrewFn:  func() bool { return true },
+		BrewUpgrade:   func(pkg string) error { brewCalled = true; return nil },
+		Stdout:        &out,
+	}
+	err := u.Run([]string{"--force"})
+	if err == nil {
+		t.Error("expected error for --force with Homebrew, got nil")
+	}
+	if brewCalled {
+		t.Error("brew must not be called when --force is set for Homebrew install")
+	}
+}
+
+func TestUpgradeViaHomebrew_VerifiesNewBinary(t *testing.T) {
+	var out bytes.Buffer
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "huginn")
+	os.WriteFile(exePath, []byte("fake"), 0755)
+
+	u := &Upgrader{
+		HuginnDirFn:  func() (string, error) { return dir, nil },
+		ExePath:      exePath,
+		StopProcess:  noopStop,
+		DetachStart:  noopDetach,
+		BrewUpgrade:  func(pkg string) error { return nil },
+		VerifyBinary: func(path, tag string) error { return fmt.Errorf("binary verify failed") },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("y\n"),
+	}
+
+	state := runningState{}
+	err := u.upgradeViaHomebrew("v0.3.1", false, state)
+	// verify failure prints a warning but does NOT return an error
+	if err != nil {
+		t.Errorf("verify failure should not cause error return, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "Warning") {
+		t.Errorf("expected Warning about verify failure:\n%s", out.String())
+	}
+}
