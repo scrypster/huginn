@@ -872,6 +872,7 @@ import { useUnreadTracking } from '../composables/useUnreadTracking'
 import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
+import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 
 interface Agent {
@@ -987,30 +988,6 @@ const sessionSwitching = ref(false)
 
 // ── Unread tracking (extracted to useUnreadTracking) ─────────────────
 // Initialized after messagesEl + messages are declared (see below).
-
-// ── Header inline rename ─────────────────────────────────────────────
-const headerEditing   = ref(false)
-const headerEditValue = ref('')
-const headerInputEl   = ref<HTMLInputElement | null>(null)
-
-async function startHeaderEdit() {
-  const s = sessions.value.find(s => s.id === props.sessionId)
-  headerEditValue.value = s?.title ?? ''
-  headerEditing.value   = true
-  await nextTick()
-  headerInputEl.value?.focus()
-  headerInputEl.value?.select()
-}
-
-function commitHeaderEdit() {
-  if (!headerEditing.value) return
-  headerEditing.value = false
-  if (props.sessionId) renameSession(props.sessionId, headerEditValue.value.trim())
-}
-
-function cancelHeaderEdit() {
-  headerEditing.value = false
-}
 
 // ── Streaming state (extracted to useChatStreaming) ──────────────────
 const {
@@ -1186,14 +1163,38 @@ const {
   atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
 } = useUnreadTracking(sessionIdRef, messages as any, messagesEl)
 
-const sessionLabel = computed(() => {
-  const s = sessions.value.find(s => s.id === props.sessionId)
-  return s ? formatSessionLabel(s) : (props.sessionId?.slice(0, 8) ?? '')
-})
-
 const selectedAgent = computed(() =>
   agentsList.value.find(a => a.name === selectedAgentName.value) ?? null
 )
+
+const {
+  headerEditing,
+  headerEditValue,
+  headerInputEl,
+  startHeaderEdit,
+  commitHeaderEdit,
+  cancelHeaderEdit,
+  sessionLabel,
+  spaceAgents,
+  spaceAgentPreviews,
+  spaceMemberCards,
+  displayAgent,
+  memberPanelOpen,
+  toggleMemberPanel,
+} = useChatViewHeaderAndMembers({
+  sessions: sessions as Ref<Array<{ id: string; title?: string }>>,
+  sessionId: computed(() => props.sessionId),
+  spaceId: computed(() => props.spaceId),
+  formatSessionLabel: formatSessionLabel as (s: { id: string; title?: string }) => string,
+  renameSession,
+  activeSpace: activeSpace as Ref<{ leadAgent: string; memberAgents: string[] } | null>,
+  agentsList: agentsList as Ref<Array<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string }>>,
+  selectedAgentName,
+  threadPanelOpen,
+  selectedAgent: selectedAgent as Ref<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string } | null>,
+})
+// vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
+void (headerInputEl satisfies unknown)
 
 function exportSession() {
   if (!messages.value.length) return
@@ -1215,12 +1216,6 @@ function exportSession() {
   a.click()
   URL.revokeObjectURL(url)
 }
-
-// In a space context, the display agent is the space's lead agent (for avatar, icon, etc.)
-// When not in a space, fall back to the picker's selectedAgent.
-const displayAgent = computed(() =>
-  (activeSpace.value ? spaceAgents.value[0] : null) ?? selectedAgent.value ?? null
-)
 
 const sessionThreads = computed(() =>
   props.sessionId ? getSessionThreads(props.sessionId) : []
@@ -1245,66 +1240,6 @@ const agentIconMap = computed(() => {
   const m: Record<string, string> = {}
   for (const ag of agentsList.value) m[ag.name] = ag.icon
   return m
-})
-
-const spaceAgents = computed(() => {
-  if (!activeSpace.value) return []
-  const names = [activeSpace.value.leadAgent, ...activeSpace.value.memberAgents.filter(m => m !== activeSpace.value!.leadAgent)]
-  return names.map(n => agentsList.value.find(a => a.name === n)).filter((a): a is Agent => !!a)
-})
-
-const spaceAgentPreviews = computed(() => spaceAgents.value.slice(0, 3))
-
-interface SpaceMemberCard {
-  name: string
-  description: string
-  vaultName: string
-  isLead: boolean
-  color: string
-}
-
-const spaceMemberCards = computed<SpaceMemberCard[]>(() => {
-  const space = activeSpace.value
-  if (!space) return []
-  const leadName = space.leadAgent
-  const names = [leadName, ...space.memberAgents]
-  return names.map(n => {
-    const agent = agentsList.value.find(a => a.name === n)
-    return {
-      name: n,
-      description: agent?.description ?? '',
-      vaultName: (agent?.vault_name as string) ?? '',
-      isLead: n === leadName,
-      color: agentColorMap.value[n] ?? '#58a6ff',
-    }
-  })
-})
-
-// Member panel (channel view right sidebar)
-const memberPanelOpen = ref(false)
-const memberPanelStoredState = ref(false) // preserves state during thread panel override
-
-// Initialize from localStorage keyed by spaceId
-watch(() => props.spaceId, (id) => {
-  if (id) {
-    memberPanelOpen.value = localStorage.getItem(`huginn:memberPanel:${id}`) === 'true'
-  }
-}, { immediate: true })
-
-function toggleMemberPanel() {
-  if (!props.spaceId) return
-  memberPanelOpen.value = !memberPanelOpen.value
-  localStorage.setItem(`huginn:memberPanel:${props.spaceId}`, String(memberPanelOpen.value))
-}
-
-// When thread panel opens, collapse member panel; restore when it closes.
-watch(threadPanelOpen, (open) => {
-  if (open) {
-    memberPanelStoredState.value = memberPanelOpen.value
-    memberPanelOpen.value = false
-  } else {
-    memberPanelOpen.value = memberPanelStoredState.value
-  }
 })
 
 // Replication status chip
