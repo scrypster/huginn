@@ -386,6 +386,43 @@
                 </svg>
                 Manage skills
               </button>
+
+              <!-- Heartbeat -->
+              <div class="mt-4 border-t border-huginn-border/20 pt-4">
+                <div class="flex items-center justify-between mb-2">
+                  <div>
+                    <div class="text-[11px] font-medium text-huginn-text">Send me regular updates</div>
+                    <div class="text-[10px] text-huginn-muted/60 mt-0.5">Agent checks in via DM on a schedule</div>
+                  </div>
+                  <button
+                    type="button"
+                    @click="() => { form.heartbeat_enabled = !form.heartbeat_enabled; markDirty() }"
+                    :class="form.heartbeat_enabled
+                      ? 'bg-huginn-blue'
+                      : 'bg-huginn-muted/20'"
+                    class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none">
+                    <span
+                      :class="form.heartbeat_enabled ? 'translate-x-4' : 'translate-x-0'"
+                      class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" />
+                  </button>
+                </div>
+
+                <div v-if="form.heartbeat_enabled" class="mt-2">
+                  <label class="text-[10px] text-huginn-muted/60 font-medium uppercase tracking-wide block mb-1">Frequency</label>
+                  <select
+                    v-model="form.heartbeat_cron"
+                    @change="markDirty"
+                    class="w-full bg-huginn-bg/50 border border-huginn-border/30 rounded px-2 py-1 text-[11px] text-huginn-text focus:outline-none focus:border-huginn-blue/50">
+                    <option value="">Every 4 hours (default)</option>
+                    <option value="0 */12 * * *">Twice daily</option>
+                    <option value="0 8 * * *">Daily at 8am</option>
+                    <option value="0 8 * * 1">Weekly (Monday 8am)</option>
+                  </select>
+                  <div class="mt-1 text-[10px] text-huginn-muted/40">
+                    Cron: {{ form.heartbeat_cron || '0 */4 * * *' }}
+                  </div>
+                </div>
+              </div>
             </section>
 
           </div>
@@ -1289,9 +1326,11 @@ interface AgentForm {
   toolbelt: ToolbeltEntry[]
   skills: string[]
   local_tools: string[]
+  heartbeat_enabled: boolean
+  heartbeat_cron: string
 }
 
-const form = ref<AgentForm>({ name: '', model: '', system_prompt: '', color: '#58a6ff', icon: '', memory_type: 'none', memory_enabled: false, context_notes_enabled: false, vault_name: '', memory_mode: 'conversational', vault_description: '', toolbelt: [], skills: [], local_tools: [] })
+const form = ref<AgentForm>({ name: '', model: '', system_prompt: '', color: '#58a6ff', icon: '', memory_type: 'none', memory_enabled: false, context_notes_enabled: false, vault_name: '', memory_mode: 'conversational', vault_description: '', toolbelt: [], skills: [], local_tools: [], heartbeat_enabled: false, heartbeat_cron: '' })
 const original = ref('')
 const dirty = ref(false)
 const saving = ref(false)
@@ -1932,6 +1971,8 @@ async function loadAgent(name: string) {
       toolbelt: (data as any).toolbelt || [],
       skills: (data as any).skills || [],
       local_tools: (data as any).local_tools ?? [],
+      heartbeat_enabled: (data as any).heartbeat_enabled ?? false,
+      heartbeat_cron: (data as any).heartbeat_cron ?? '',
     }
     original.value = JSON.stringify(form.value)
     dirty.value = false
@@ -2047,7 +2088,7 @@ watch(() => props.agentName, (name) => {
   } else {
     stopVaultHealthPolling()
     if (name === 'new') {
-      form.value = { name: '', model: '', system_prompt: '', color: '#58a6ff', icon: '', memory_type: 'none', memory_enabled: false, context_notes_enabled: false, vault_name: '', memory_mode: 'conversational', vault_description: '', toolbelt: [], skills: [], local_tools: [] }
+      form.value = { name: '', model: '', system_prompt: '', color: '#58a6ff', icon: '', memory_type: 'none', memory_enabled: false, context_notes_enabled: false, vault_name: '', memory_mode: 'conversational', vault_description: '', toolbelt: [], skills: [], local_tools: [], heartbeat_enabled: false, heartbeat_cron: '' }
       original.value = ''
       dirty.value = true
     }

@@ -2,7 +2,7 @@
   <div class="h-full flex flex-col">
     <div class="flex items-center justify-between px-6 py-4 border-b border-huginn-border flex-shrink-0">
       <div class="flex items-center gap-3">
-        <h1 class="text-sm font-semibold text-huginn-text uppercase tracking-widest">Inbox</h1>
+        <h1 class="text-sm font-semibold text-huginn-text uppercase tracking-widest">Activity Log</h1>
         <span v-if="pendingCount > 0"
           class="text-[10px] px-1.5 py-0.5 rounded-full bg-huginn-blue text-white font-medium">
           {{ pendingCount }}

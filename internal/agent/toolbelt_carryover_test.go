@@ -333,11 +333,13 @@ func TestCarryover_ToolbeltPreserved(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCarryover_SpaceContextIncludesTeamDescriptions(t *testing.T) {
+	// Descriptions use capability-card format (as produced by BuildCapabilityCard in ws.go).
+	// The card already includes the agent name in the header line.
 	members := []SpaceMember{
-		{Name: "Tom", Description: "Team Lead and orchestrator"},
-		{Name: "Sam", Description: "Principal Engineer & Architect"},
-		{Name: "Mike", Description: "Developer, hands-on implementation"},
-		{Name: "Adam", Description: "Testing Expert"},
+		{Name: "Tom", Description: "- Tom [capable, tools: yes]\n  Role: Team Lead and orchestrator\n  Memory: conversational\n"},
+		{Name: "Sam", Description: "- Sam [capable, tools: yes]\n  Role: Principal Engineer & Architect\n  Memory: conversational\n"},
+		{Name: "Mike", Description: "- Mike [capable, tools: yes]\n  Role: Developer, hands-on implementation\n  Memory: conversational\n"},
+		{Name: "Adam", Description: "- Adam [capable, tools: yes]\n  Role: Testing Expert\n  Memory: conversational\n"},
 	}
 
 	block := BuildSpaceContextBlock("Engineering", "channel", "Tom", "Tom", members)
@@ -369,9 +371,10 @@ func TestCarryover_SpaceContextIncludesTeamDescriptions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCarryover_MemberAgentContextDiffers(t *testing.T) {
+	// Descriptions use capability-card format (as produced by BuildCapabilityCard in ws.go).
 	members := []SpaceMember{
-		{Name: "Tom", Description: "Team Lead"},
-		{Name: "Sam", Description: "Architect"},
+		{Name: "Tom", Description: "- Tom [capable, tools: yes]\n  Role: Team Lead\n  Memory: conversational\n"},
+		{Name: "Sam", Description: "- Sam [capable, tools: yes]\n  Role: Architect\n  Memory: conversational\n"},
 	}
 
 	leadBlock := BuildSpaceContextBlock("Engineering", "channel", "Tom", "Tom", members)

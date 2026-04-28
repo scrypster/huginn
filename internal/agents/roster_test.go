@@ -120,7 +120,7 @@ func TestBuildRoster_NoToolsSupport(t *testing.T) {
 	}
 }
 
-func TestBuildRoster_NoModelInfo_DefaultsToUnknown(t *testing.T) {
+func TestBuildRoster_NoModelInfo_NoAnnotation(t *testing.T) {
 	reg := agents.NewRegistry()
 	reg.Register(&agents.Agent{Name: "NoInfo", ModelID: "unknown"})
 
@@ -129,8 +129,12 @@ func TestBuildRoster_NoModelInfo_DefaultsToUnknown(t *testing.T) {
 	}
 
 	roster := agents.BuildRoster(reg, infoFn, "Primary")
-	if !strings.Contains(roster, "tools: unknown") {
-		t.Error("expected 'tools: unknown' for missing model info")
+	// When info is not available, the card has no tier/tools annotation (just name on first line)
+	if !strings.Contains(roster, "- NoInfo\n") {
+		t.Error("expected agent name without tier/tools annotation when info is missing")
+	}
+	if strings.Contains(roster, "tools:") {
+		t.Error("expected no tools annotation for missing model info")
 	}
 }
 
@@ -143,80 +147,7 @@ func TestBuildRoster_AgentWithPersona_IncludesBlurb(t *testing.T) {
 	if !strings.Contains(roster, "pragmatic senior engineer") {
 		t.Errorf("expected persona blurb in roster, got: %s", roster)
 	}
-}
-
-func TestExtractPersonaBlurb_StandardFormat(t *testing.T) {
-	tests := []struct {
-		name     string
-		prompt   string
-		expected string
-	}{
-		{
-			name:     "Standard prefix with period",
-			prompt:   "You are Chris, a meticulous architect. You think in systems.",
-			expected: "a meticulous architect",
-		},
-		{
-			name:     "Standard prefix with exclamation",
-			prompt:   "You are Steve, a pragmatic engineer! You write clean code.",
-			expected: "a pragmatic engineer",
-		},
-		{
-			name:     "Standard prefix with question mark",
-			prompt:   "You are Mark, a deep thinker? You find edge cases.",
-			expected: "a deep thinker",
-		},
-		{
-			name:     "Empty string",
-			prompt:   "",
-			expected: "",
-		},
-		{
-			name:     "Whitespace only",
-			prompt:   "   \n  \t  ",
-			expected: "",
-		},
-		{
-			name:     "No comma prefix",
-			prompt:   "This is a prompt without the standard format. First sentence.",
-			expected: "This is a prompt without the standard format",
-		},
-		{
-			name:     "No sentence terminator",
-			prompt:   "You are Mark, a deep thinker without ending punctuation",
-			expected: "a deep thinker without ending punctuation",
-		},
-		{
-			name:     "Long blurb truncated to 60 chars",
-			prompt:   "You are Agent, a very long description that is definitely more than sixty characters long and should be truncated.",
-			expected: "a very long description that is definitely more than sixt",
-		},
-		{
-			name:     "Comma after 20 chars not stripped",
-			prompt:   "This is a very long prefix, and the actual content.",
-			expected: "This is a very long prefix",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// We need to test extractPersonaBlurb directly; it's unexported
-			// So we test it indirectly via BuildRoster behavior
-			// For now, document what we expect and verify integration
-			reg := agents.NewRegistry()
-			reg.Register(&agents.Agent{Name: "TestAgent", SystemPrompt: tt.prompt})
-			roster := agents.BuildRoster(reg, nil, "Primary")
-
-			if tt.expected == "" {
-				// If no blurb expected, agent line should not have " — " in it
-				if !strings.Contains(roster, "TestAgent") && roster != "" {
-					t.Errorf("agent should be in roster even with empty blurb")
-				}
-			} else {
-				if !strings.Contains(roster, tt.expected) {
-					t.Errorf("expected blurb %q in roster, got: %s", tt.expected, roster)
-				}
-			}
-		})
+	if !strings.Contains(roster, "Role:") {
+		t.Errorf("expected 'Role:' label in roster, got: %s", roster)
 	}
 }

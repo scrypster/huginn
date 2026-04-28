@@ -10,11 +10,11 @@ import { blockWS } from './helpers/mock-ws'
  * guarantees the override wins over the default mock.
  */
 
-async function gotoInbox(page: import('@playwright/test').Page) {
+async function gotoActivityLog(page: import('@playwright/test').Page) {
   await page.goto('/#/')
   await page.waitForSelector('nav', { timeout: 5000 })
-  await page.click('button[title="Inbox"]')
-  await page.waitForSelector('h1:has-text("Inbox")', { timeout: 5000 })
+  await page.click('button[title="Activity Log"]')
+  await page.waitForSelector('h1:has-text("Activity Log")', { timeout: 5000 })
 }
 
 test.describe('API error states', () => {
@@ -28,7 +28,7 @@ test.describe('API error states', () => {
     // Override action endpoint to return 500 for POST requests
     await page.route('**/api/v1/notifications/*/action', createMethodErrorHandler('POST', 500))
 
-    await gotoInbox(page)
+    await gotoActivityLog(page)
 
     const btn = page.locator('[data-testid="mark-all-seen-btn"]')
     await expect(btn).toBeVisible({ timeout: 5000 })
@@ -42,7 +42,7 @@ test.describe('API error states', () => {
   test('dismiss all API error shows inbox-error-banner', async ({ page }) => {
     await page.route('**/api/v1/notifications/*/action', createMethodErrorHandler('POST', 500))
 
-    await gotoInbox(page)
+    await gotoActivityLog(page)
 
     const btn = page.locator('[data-testid="dismiss-all-btn"]')
     await expect(btn).toBeVisible({ timeout: 5000 })
@@ -56,7 +56,7 @@ test.describe('API error states', () => {
   test('inbox-error-banner dismisses on close click', async ({ page }) => {
     await page.route('**/api/v1/notifications/*/action', createMethodErrorHandler('POST', 500))
 
-    await gotoInbox(page)
+    await gotoActivityLog(page)
     const btn = page.locator('[data-testid="mark-all-seen-btn"]')
     await expect(btn).toBeVisible({ timeout: 5000 })
     await btn.click()
@@ -90,10 +90,10 @@ test.describe('API error states', () => {
   test('notifications list 500 does not crash the view', async ({ page }) => {
     await setupRouteError(page, '**/api/v1/notifications', 500, { error: 'db error' }, { method: 'GET' })
 
-    await gotoInbox(page)
+    await gotoActivityLog(page)
 
     // The view should still render (no JS crash) with heading visible
-    const heading = page.locator('h1:has-text("Inbox")')
+    const heading = page.locator('h1:has-text("Activity Log")')
     await expect(heading).toBeVisible({ timeout: 5000 })
 
     // There should be no notification items (error path returns empty / skip)
@@ -112,7 +112,7 @@ test.describe('API error states', () => {
     )
     await page.route('**/api/v1/notifications/*/action', handler)
 
-    await gotoInbox(page)
+    await gotoActivityLog(page)
 
     const btn = page.locator('[data-testid="mark-all-seen-btn"]')
     await expect(btn).toBeVisible({ timeout: 5000 })

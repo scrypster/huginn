@@ -391,6 +391,12 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if isRename {
 		_ = agents.DeleteAgentDefault(name) // best effort; ignore error
 	}
+	// Heartbeat lifecycle: sync or remove the managed workflow YAML.
+	if isRename {
+		_ = agents.RenameHeartbeatYAMLDefault(name, incoming) // best effort
+	} else {
+		_ = agents.SyncHeartbeatYAMLDefault(incoming) // best effort
+	}
 	// Broadcast so all connected frontends refresh their agent list.
 	action := "updated"
 	if existingAgent == nil {
@@ -666,6 +672,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, err.Error())
 		return
 	}
+	_ = agents.DeleteHeartbeatYAMLDefault(name) // best effort; ignore error
 	// Broadcast so all connected frontends remove the deleted agent.
 	s.BroadcastWS(WSMessage{
 		Type: "agent_changed",

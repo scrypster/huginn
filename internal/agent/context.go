@@ -287,11 +287,15 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 		sb.WriteString("\n\n**Team members:**\n")
 	}
 	for _, m := range members {
-		desc := m.Description
-		if desc == "" {
-			desc = "specialist agent"
+		if m.Description != "" {
+			// Description is a pre-formatted capability card — output directly.
+			sb.WriteString(m.Description)
+			if !strings.HasSuffix(m.Description, "\n") {
+				sb.WriteString("\n")
+			}
+		} else {
+			fmt.Fprintf(&sb, "- **%s**: specialist agent\n", m.Name)
 		}
-		fmt.Fprintf(&sb, "- **%s**: %s\n", m.Name, desc)
 	}
 	return sb.String()
 }
@@ -324,11 +328,15 @@ func BuildDMCrossSpaceContextBlock(selfName string, channels []ChannelRoster) st
 		}
 		sb.WriteString("\n")
 		for _, m := range ch.Members {
-			desc := m.Description
-			if desc == "" {
-				desc = "specialist agent"
+			if m.Description != "" {
+				// Description is a pre-formatted capability card — output directly.
+				sb.WriteString(m.Description)
+				if !strings.HasSuffix(m.Description, "\n") {
+					sb.WriteString("\n")
+				}
+			} else {
+				fmt.Fprintf(&sb, "  - **%s**: specialist agent\n", m.Name)
 			}
-			fmt.Fprintf(&sb, "  - **%s**: %s\n", m.Name, desc)
 		}
 		sb.WriteString("\n")
 	}
