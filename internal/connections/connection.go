@@ -26,6 +26,7 @@ const (
 	ProviderZendesk     Provider = "zendesk"
 	ProviderAsana       Provider = "asana"
 	ProviderMonday      Provider = "monday"
+	ProviderWeather     Provider = "weather"
 )
 
 // ConnectionType identifies what kind of credentials a connection holds.

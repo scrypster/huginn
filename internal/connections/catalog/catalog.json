@@ -700,6 +700,46 @@
     }
   },
   {
+    "id": "weather",
+    "name": "OpenWeatherMap",
+    "description": "Current weather and forecasts for any city worldwide",
+    "category": "personal",
+    "icon": "WX",
+    "icon_color": "#e96e0f",
+    "type": "credentials",
+    "default_label": "OpenWeatherMap",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "API Key",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Free API key from openweathermap.org/api"
+      },
+      {
+        "key": "units",
+        "label": "Units",
+        "type": "select",
+        "required": false,
+        "stored_in": "metadata",
+        "default": "metric",
+        "options": [
+          {"label": "Metric (°C, m/s)", "value": "metric"},
+          {"label": "Imperial (°F, mph)", "value": "imperial"},
+          {"label": "Standard (K, m/s)", "value": "standard"}
+        ],
+        "help_text": "Unit system for temperature and wind speed"
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls current weather for London to verify the API key."
+    }
+  },
+  {
     "id": "vercel",
     "name": "Vercel",
     "description": "Deployments, domains, environment variables",

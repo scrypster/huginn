@@ -25,6 +25,16 @@ var sendgridScopesURL = "https://api.sendgrid.com/v3/scopes"
 // reach the loopback httptest.Server without being blocked by the SSRF dialer.
 var sendgridHTTPClient *http.Client // test-only override
 
+// weatherValidationURL is the OpenWeatherMap endpoint used to validate API keys.
+// Overridable in tests.
+var weatherValidationURL = "https://api.openweathermap.org/data/2.5/weather"
+
+// weatherHTTPClient overrides the HTTP client for testing only.
+// In production this is nil and validateWeatherCredentials falls back to
+// safeHTTPClient(). Tests set this to http.DefaultClient so that requests
+// reach the loopback httptest.Server without being blocked by the SSRF dialer.
+var weatherHTTPClient *http.Client // test-only override
+
 // buildCredentialValidatorRegistry constructs the process-wide registry that
 // maps catalog provider IDs to their connectivity validators.
 //
@@ -50,6 +60,12 @@ func buildCredentialValidatorRegistry() *catalog.Registry {
 
 	r.Register("sendgrid", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
 		return validateSendGridCredentials(ctx, f["api_key"])
+	}))
+
+	// ── Personal ──────────────────────────────────────────────────────────────
+
+	r.Register("weather", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateWeatherCredentials(ctx, f["api_key"])
 	}))
 
 	// ── Observability ─────────────────────────────────────────────────────────
@@ -742,6 +758,33 @@ func validateMuninnCredentials(ctx context.Context, endpoint, username, password
 	_, err := memory.NewMuninnSetupClient(endpoint).Login(username, password)
 	if err != nil {
 		return fmt.Errorf("muninn: login failed: %w", err)
+	}
+	return nil
+}
+
+func validateWeatherCredentials(ctx context.Context, apiKey string) error {
+	if apiKey == "" {
+		return errors.New("api_key is required")
+	}
+	reqURL := fmt.Sprintf("%s?q=London&appid=%s", weatherValidationURL, apiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return err
+	}
+	client := weatherHTTPClient
+	if client == nil {
+		client = safeHTTPClient()
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("weather: validation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusNotFound {
+		return errors.New("invalid API key")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("weather: validation returned %d", resp.StatusCode)
 	}
 	return nil
 }
