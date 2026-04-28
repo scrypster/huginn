@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -26,7 +27,7 @@ func (s *Server) handleMemoryReplicationStatus(w http.ResponseWriter, r *http.Re
 	}
 
 	rows, err := s.db.Read().QueryContext(
-		context.Background(),
+		r.Context(),
 		`SELECT status, COUNT(*) FROM memory_replication_queue GROUP BY status`,
 	)
 	if err != nil {
@@ -53,6 +54,9 @@ func (s *Server) handleMemoryReplicationStatus(w http.ResponseWriter, r *http.Re
 				result[status] = count
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("replication-status: row iteration error", "err", err)
 	}
 
 	jsonOK(w, map[string]any{
