@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -633,4 +634,159 @@ func TestEmailDeliverer_SMTPUnreachable_DescriptiveError(t *testing.T) {
 	if !strings.Contains(rec.Error, "credentials") && !strings.Contains(rec.Error, "connection") && !strings.Contains(rec.Error, "smtp_host") {
 		t.Logf("error message should mention missing credentials: %s", rec.Error)
 	}
+}
+
+// ── SendGrid deliverer tests ──────────────────────────────────────────────────
+
+func TestSendGridDeliverer_MissingTo(t *testing.T) {
+	d := newSendGridDeliverer(nil)
+	rec := d.Deliver(context.Background(), &notification.Notification{}, NotificationDelivery{})
+	if rec.Status != "failed" {
+		t.Errorf("expected failed, got %q", rec.Status)
+	}
+	if !strings.Contains(rec.Error, "missing 'to'") {
+		t.Errorf("unexpected error: %q", rec.Error)
+	}
+}
+
+func TestSendGridDeliverer_MissingAPIKey(t *testing.T) {
+	resolver := func(ctx context.Context, conn string) (map[string]string, error) {
+		return map[string]string{"from": "sender@example.com"}, nil
+	}
+	d := newSendGridDeliverer(resolver)
+	rec := d.Deliver(context.Background(),
+		&notification.Notification{Summary: "hi"},
+		NotificationDelivery{To: "dst@example.com", Connection: "test-conn"})
+	if rec.Status != "failed" {
+		t.Errorf("expected failed, got %q", rec.Status)
+	}
+	if !strings.Contains(rec.Error, "api_key") {
+		t.Errorf("unexpected error: %q", rec.Error)
+	}
+}
+
+func TestSendGridDeliverer_MissingFrom(t *testing.T) {
+	resolver := func(ctx context.Context, conn string) (map[string]string, error) {
+		return map[string]string{"api_key": "SG.key"}, nil
+	}
+	d := newSendGridDeliverer(resolver)
+	rec := d.Deliver(context.Background(),
+		&notification.Notification{Summary: "hi"},
+		NotificationDelivery{To: "dst@example.com", Connection: "test-conn"})
+	if rec.Status != "failed" {
+		t.Errorf("expected failed, got %q", rec.Status)
+	}
+	if !strings.Contains(rec.Error, "from address") {
+		t.Errorf("unexpected error: %q", rec.Error)
+	}
+}
+
+func TestSendGridDeliverer_SuccessOn202(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.Header.Get("Authorization") != "Bearer SG.testkey" {
+			t.Errorf("expected Bearer auth, got %q", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusAccepted) // 202
+	}))
+	defer srv.Close()
+
+	resolver := func(ctx context.Context, conn string) (map[string]string, error) {
+		return map[string]string{
+			"api_key": "SG.testkey",
+			"from":    "sender@example.com",
+		}, nil
+	}
+	d := newSendGridDeliverer(resolver)
+	// Override the sendgrid URL to point at our test server.
+	d.client = &http.Client{
+		Transport: rewriteHostTransport{base: http.DefaultTransport, target: srv.URL},
+		Timeout:   5 * time.Second,
+	}
+	rec := d.Deliver(context.Background(),
+		&notification.Notification{Summary: "Test", Detail: "body"},
+		NotificationDelivery{To: "dst@example.com", Connection: "conn"})
+	if rec.Status != "sent" {
+		t.Errorf("expected sent, got %q (err=%s)", rec.Status, rec.Error)
+	}
+}
+
+func TestSendGridDeliverer_PermanentOn4xx(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest) // 400
+	}))
+	defer srv.Close()
+
+	resolver := func(ctx context.Context, conn string) (map[string]string, error) {
+		return map[string]string{"api_key": "SG.key", "from": "s@ex.com"}, nil
+	}
+	d := newSendGridDeliverer(resolver)
+	d.client = &http.Client{
+		Transport: rewriteHostTransport{base: http.DefaultTransport, target: srv.URL},
+		Timeout:   5 * time.Second,
+	}
+	rec := d.Deliver(context.Background(),
+		&notification.Notification{Summary: "hi"},
+		NotificationDelivery{To: "dst@ex.com", Connection: "c"})
+	if rec.Status != "failed" {
+		t.Errorf("expected failed, got %q", rec.Status)
+	}
+	// 4xx should NOT retry — exactly 1 attempt
+	if calls != 1 {
+		t.Errorf("expected 1 attempt for 4xx, got %d", calls)
+	}
+}
+
+func TestSendGridDeliverer_RetriesOn5xx(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable) // 503
+			return
+		}
+		w.WriteHeader(http.StatusAccepted) // 202 on 3rd try
+	}))
+	defer srv.Close()
+
+	resolver := func(ctx context.Context, conn string) (map[string]string, error) {
+		return map[string]string{"api_key": "SG.key", "from": "s@ex.com"}, nil
+	}
+	d := newSendGridDeliverer(resolver)
+	d.client = &http.Client{
+		Transport: rewriteHostTransport{base: http.DefaultTransport, target: srv.URL},
+		Timeout:   5 * time.Second,
+	}
+	// Use zero-duration backoff so the test runs fast
+	origBackoff := sendgridBackoff
+	sendgridBackoff = []time.Duration{0, 0, 0}
+	defer func() { sendgridBackoff = origBackoff }()
+
+	rec := d.Deliver(context.Background(),
+		&notification.Notification{Summary: "hi"},
+		NotificationDelivery{To: "dst@ex.com", Connection: "c"})
+	if rec.Status != "sent" {
+		t.Errorf("expected sent after retry, got %q (err=%s)", rec.Status, rec.Error)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 attempts, got %d", calls)
+	}
+}
+
+// rewriteHostTransport rewrites all requests to point at a test server URL.
+type rewriteHostTransport struct {
+	base   http.RoundTripper
+	target string
+}
+
+func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	target, _ := url.Parse(t.target)
+	req2 := req.Clone(req.Context())
+	req2.URL.Scheme = target.Scheme
+	req2.URL.Host = target.Host
+	return t.base.RoundTrip(req2)
 }

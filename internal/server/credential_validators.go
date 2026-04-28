@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,16 @@ import (
 	"github.com/scrypster/huginn/internal/connections/catalog"
 	"github.com/scrypster/huginn/internal/memory"
 )
+
+// sendgridScopesURL is the endpoint used to validate SendGrid API keys.
+// Overridable in tests.
+var sendgridScopesURL = "https://api.sendgrid.com/v3/scopes"
+
+// sendgridHTTPClient overrides the HTTP client for testing only.
+// In production this is nil and validateSendGridCredentials falls back to
+// safeHTTPClient(). Tests set this to http.DefaultClient so that requests
+// reach the loopback httptest.Server without being blocked by the SSRF dialer.
+var sendgridHTTPClient *http.Client // test-only override
 
 // buildCredentialValidatorRegistry constructs the process-wide registry that
 // maps catalog provider IDs to their connectivity validators.
@@ -35,6 +46,10 @@ func buildCredentialValidatorRegistry() *catalog.Registry {
 
 	r.Register("discord", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
 		return validateDiscordCredentials(ctx, f["bot_token"])
+	}))
+
+	r.Register("sendgrid", catalog.ValidatorFunc(func(ctx context.Context, f map[string]string) error {
+		return validateSendGridCredentials(ctx, f["api_key"])
 	}))
 
 	// ── Observability ─────────────────────────────────────────────────────────
@@ -686,6 +701,33 @@ func validateStripeCredentials(ctx context.Context, apiKey string) error {
 			"status", resp.StatusCode,
 			"body_preview", string(body[:min(len(body), 200)]))
 		return fmt.Errorf("validation failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func validateSendGridCredentials(ctx context.Context, apiKey string) error {
+	if apiKey == "" {
+		return errors.New("api_key is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sendgridScopesURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	client := sendgridHTTPClient
+	if client == nil {
+		client = safeHTTPClient()
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sendgrid: validation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return errors.New("invalid API key")
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("sendgrid: validation returned %d", resp.StatusCode)
 	}
 	return nil
 }

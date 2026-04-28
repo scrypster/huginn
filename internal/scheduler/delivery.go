@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -406,6 +407,120 @@ func buildEmailBody(n *notification.Notification) string {
 	return sb.String()
 }
 
+// --- SendGrid deliverer ---
+
+var sendgridBackoff = []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}
+
+// sendGridDeliverer sends email via SendGrid API v3.
+type sendGridDeliverer struct {
+	resolver CredentialResolver
+	client   *http.Client
+}
+
+func newSendGridDeliverer(resolver CredentialResolver) *sendGridDeliverer {
+	return &sendGridDeliverer{
+		resolver: resolver,
+		client:   &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+func (d *sendGridDeliverer) Deliver(ctx context.Context, n *notification.Notification, target NotificationDelivery) notification.DeliveryRecord {
+	rec := notification.DeliveryRecord{
+		Type:   "email",
+		Target: target.To,
+		SentAt: time.Now().UTC(),
+	}
+	if target.To == "" {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: missing 'to' address"
+		return rec
+	}
+
+	if d.resolver == nil {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: no credential resolver configured"
+		return rec
+	}
+
+	creds, err := d.resolver(ctx, target.Connection)
+	if err != nil {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: resolve credentials: " + err.Error()
+		return rec
+	}
+
+	apiKey := creds["api_key"]
+	from := creds["from"]
+	fromName := creds["from_name"]
+
+	if apiKey == "" {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: missing api_key credential"
+		return rec
+	}
+	if from == "" {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: missing from address credential"
+		return rec
+	}
+
+	subject := n.Summary
+	if subject == "" {
+		subject = "Huginn notification"
+	}
+
+	payload := map[string]any{
+		"personalizations": []map[string]any{
+			{"to": []map[string]string{{"email": target.To}}},
+		},
+		"from":    map[string]string{"email": from, "name": fromName},
+		"subject": subject,
+		"content": []map[string]string{
+			{"type": "text/plain", "value": n.Detail},
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		rec.Status = "failed"
+		rec.Error = "sendgrid: marshal payload: " + err.Error()
+		return rec
+	}
+
+	err = deliverWithRetry(ctx, sendgridBackoff, func() error {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost,
+			"https://api.sendgrid.com/v3/mail/send", bytes.NewReader(body))
+		if reqErr != nil {
+			return &permanentError{reqErr}
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, doErr := d.client.Do(req)
+		if doErr != nil {
+			return doErr
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 202 {
+			return nil
+		}
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return &permanentError{fmt.Errorf("sendgrid: client error %d: %s", resp.StatusCode, respBody)}
+		}
+		return fmt.Errorf("sendgrid: unexpected status %d: %s", resp.StatusCode, respBody)
+	})
+
+	if err != nil {
+		rec.Status = "failed"
+		rec.Error = err.Error()
+	} else {
+		rec.Status = "sent"
+	}
+	return rec
+}
+
 // --- Deliverer registry ---
 
 // DelivererRegistry maps notification delivery type → Deliverer implementation.
@@ -420,8 +535,9 @@ type DelivererRegistry struct {
 func NewDelivererRegistry(resolver CredentialResolver) *DelivererRegistry {
 	return &DelivererRegistry{
 		m: map[string]Deliverer{
-			"webhook": newWebhookDeliverer(),
-			"email":   newEmailDeliverer(resolver),
+			"webhook":  newWebhookDeliverer(),
+			"email":    newEmailDeliverer(resolver),
+			"sendgrid": newSendGridDeliverer(resolver),
 		},
 	}
 }
