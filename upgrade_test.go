@@ -523,34 +523,6 @@ func TestProgressReader(t *testing.T) {
 	}
 }
 
-// ─── upgradeStep ──────────────────────────────────────────────────────────────
-
-func TestUpgradeStep_Success(t *testing.T) {
-	called := false
-	err := upgradeStep("Test step...", func() error {
-		called = true
-		return nil
-	})
-	if err != nil {
-		t.Errorf("expected nil error, got %v", err)
-	}
-	if !called {
-		t.Error("step function was not called")
-	}
-}
-
-func TestUpgradeStep_Failure(t *testing.T) {
-	err := upgradeStep("Failing step...", func() error {
-		return fmt.Errorf("something went wrong")
-	})
-	if err == nil {
-		t.Error("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "something went wrong") {
-		t.Errorf("unexpected error text: %v", err)
-	}
-}
-
 // ─── Upgrader.Run integration ─────────────────────────────────────────────────
 
 func TestUpgraderRun_AlreadyUpToDate(t *testing.T) {
@@ -615,9 +587,10 @@ func TestUpgraderRun_TargetVersionSkipsAPICall(t *testing.T) {
 			apiCalled = true
 			return "v0.3.0"
 		},
-		HuginnDirFn: func() (string, error) { return t.TempDir(), nil },
-		PIDIsLiveFn: func(path string) (bool, int) { return false, 0 },
-		StopProcess: noopStop,
+		HuginnDirFn:  func() (string, error) { return t.TempDir(), nil },
+		PIDIsLiveFn:  func(path string) (bool, int) { return false, 0 },
+		StopProcess:  noopStop,
+		IsHomebrewFn: func() bool { return false },
 	}
 	// Expect failure (no real release server) but the API must NOT be called.
 	_ = u.Run([]string{"--version", "v0.3.0", "--yes"})
@@ -762,11 +735,12 @@ func TestRun_PromptMentionsRunningDaemons(t *testing.T) {
 		LatestRelease: func(ctx context.Context) string { return "v0.3.1" },
 		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
 		// Both daemons live — PIDIsLiveFn is called twice (serve, tray)
-		PIDIsLiveFn: func(path string) (bool, int) { return true, 42 },
-		StopProcess: noopStop,
-		DetachStart: noopDetach,
-		Stdout:      &out,
-		Stdin:       strings.NewReader("n\n"), // user aborts
+		PIDIsLiveFn:  func(path string) (bool, int) { return true, 42 },
+		StopProcess:  noopStop,
+		DetachStart:  noopDetach,
+		IsHomebrewFn: func() bool { return false },
+		Stdout:       &out,
+		Stdin:        strings.NewReader("n\n"), // user aborts
 	}
 	_ = u.Run([]string{})
 	got := out.String()
@@ -790,6 +764,7 @@ func TestRun_PromptOmitsRestartWhenNotRunning(t *testing.T) {
 		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
 		StopProcess:   noopStop,
 		DetachStart:   noopDetach,
+		IsHomebrewFn:  func() bool { return false },
 		Stdout:        &out,
 		Stdin:         strings.NewReader("n\n"),
 	}
@@ -812,6 +787,7 @@ func TestRun_YesFlagPrintsNoticeWhenRunning(t *testing.T) {
 		HuginnDirFn:   func() (string, error) { return t.TempDir(), nil },
 		PIDIsLiveFn:   func(path string) (bool, int) { return true, 42 },
 		StopProcess:   func(pid int, path string) error { return fmt.Errorf("stop aborted") },
+		IsHomebrewFn:  func() bool { return false },
 		Stdout:        &out,
 		Stdin:         strings.NewReader(""), // must NOT be read
 	}
@@ -847,6 +823,7 @@ func TestRun_YesFlagSilentWhenNotRunning(t *testing.T) {
 		PIDIsLiveFn:   func(path string) (bool, int) { return false, 0 },
 		StopProcess:   noopStop,
 		DetachStart:   noopDetach,
+		IsHomebrewFn:  func() bool { return false },
 		Stdout:        &out,
 		Stdin:         strings.NewReader(""),
 	}

@@ -654,17 +654,6 @@ func copyFile(src, dst string) error {
 	return os.Rename(out.Name(), dst)
 }
 
-// upgradeStep prints a labeled step, runs f(), and prints ✓ or ✗.
-func upgradeStep(label string, f func() error) error {
-	fmt.Printf("  %-32s", label)
-	if err := f(); err != nil {
-		fmt.Printf(" ✗\n  Error: %v\n", err)
-		return err
-	}
-	fmt.Println(" ✓")
-	return nil
-}
-
 // newerVersionAvailable returns true when latest is newer than current.
 // A stable release is considered newer than the same version with a pre-release suffix
 // (e.g. v0.3.0 is "newer" than v0.3.0-rc.1).
