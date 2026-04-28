@@ -265,5 +265,8 @@ func TestApplyToolbelt_WildcardDeduplicatesDelegationTools(t *testing.T) {
 		if seen[name] > 1 {
 			t.Errorf("delegation tool %q appears %d times in schemas, want exactly 1", name, seen[name])
 		}
+		if seen[name] == 0 {
+			t.Errorf("delegation tool %q missing from wildcard schemas (want exactly 1)", name)
+		}
 	}
 }

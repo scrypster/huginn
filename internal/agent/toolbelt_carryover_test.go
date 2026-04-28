@@ -151,7 +151,7 @@ func TestCarryover_NamedLocalTools_MultipleProviders(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Test: Agent with NO tools at all (default-deny) — only vault tools + delegation tools.
-// With step 5 injection, delegation tools are always added if registered.
+// With step 4 injection, delegation tools are always added if registered.
 // ---------------------------------------------------------------------------
 
 func TestCarryover_DefaultDeny_VaultAndDelegationTools(t *testing.T) {
@@ -165,17 +165,17 @@ func TestCarryover_DefaultDeny_VaultAndDelegationTools(t *testing.T) {
 	if !names["muninn_recall"] || !names["muninn_store"] {
 		t.Error("vault tools should be present even for bare agents")
 	}
-	// Delegation tools are now injected at step 5
+	// Delegation tools are now injected at step 4
 	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
 		if !names[expected] {
-			t.Errorf("expected delegation tool %q to be injected at step 5, missing", expected)
+			t.Errorf("expected delegation tool %q to be injected at step 4, missing", expected)
 		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Test: Agents with named LocalTools now receive delegation tools via step 5 injection.
-// Step 5 always injects delegation tools when they are registered, regardless of
+// Test: Agents with named LocalTools now receive delegation tools via step 4 injection.
+// Step 4 always injects delegation tools when they are registered, regardless of
 // whether the agent explicitly named them in LocalTools.
 // ---------------------------------------------------------------------------
 
@@ -194,10 +194,10 @@ func TestCarryover_NamedLocalTools_AlwaysIncludesDelegationTools(t *testing.T) {
 		t.Error("expected named local tools")
 	}
 
-	// Delegation tools ARE injected at step 5 (fix for Bug 2)
+	// Delegation tools ARE injected at step 4 (fix for Bug 2)
 	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
 		if !names[expected] {
-			t.Errorf("delegation tool %q should be injected at step 5, missing", expected)
+			t.Errorf("delegation tool %q should be injected at step 4, missing", expected)
 		}
 	}
 }
@@ -205,7 +205,7 @@ func TestCarryover_NamedLocalTools_AlwaysIncludesDelegationTools(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test: Vault tools are included even when toolbelt explicitly lists
 // providers that don't include "muninndb". This was a past bug.
-// Delegation tools are now also injected at step 5.
+// Delegation tools are now also injected at step 4.
 // ---------------------------------------------------------------------------
 
 func TestCarryover_VaultToolsBypassToolbeltFiltering(t *testing.T) {
@@ -229,10 +229,10 @@ func TestCarryover_VaultToolsBypassToolbeltFiltering(t *testing.T) {
 		t.Error("vault tools must bypass toolbelt filtering")
 	}
 
-	// Delegation tools injected at step 5
+	// Delegation tools injected at step 4
 	for _, expected := range []string{"delegate_to_agent", "list_team_status", "recall_thread_result"} {
 		if !names[expected] {
-			t.Errorf("delegation tool %q should be injected at step 5", expected)
+			t.Errorf("delegation tool %q should be injected at step 4", expected)
 		}
 	}
 
