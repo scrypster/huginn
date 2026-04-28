@@ -94,6 +94,11 @@
             <line x1="12" y1="20" x2="12" y2="4" />
             <line x1="6" y1="20" x2="6" y2="14" />
           </g>
+          <!-- Memory icon (database/vault) -->
+          <g v-else-if="item.icon === 'memory'">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M9 3H7a2 2 0 00-2 2v1a3 3 0 000 6v1a2 2 0 002 2h2m6 0h2a2 2 0 002-2v-1a3 3 0 000-6V5a2 2 0 00-2-2h-2M9 3v18M15 3v18M9 9h6M9 15h6" />
+          </g>
           <!-- Inbox icon (bell) -->
           <g v-else-if="item.icon === 'inbox'">
             <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" />
@@ -852,6 +857,7 @@ watch(drawerOpen, (open) => {
 const navItems = [
   { section: 'chat',       label: 'Chat',       path: '/chat',       icon: 'chat'       },
   { section: 'agents',     label: 'Agents',     path: '/agents',     icon: 'agents'     },
+  { section: 'memory',     label: 'Memory',     path: '/memory',     icon: 'memory'     },
   { section: 'models',     label: 'Models',     path: '/models',     icon: 'models'     },
   { section: 'automation', label: 'Automation', path: '/workflows',  icon: 'automation' },
   { section: 'connections',label: 'Connections',path: '/connections', icon: 'connections'},
