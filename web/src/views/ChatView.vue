@@ -1729,12 +1729,14 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     }
     msgs.push(fupMsg)
     scrollToBottom()
-    notify(
-      agentName ?? 'Agent',
-      'Has a follow-up for you',
-      `follow-up-${props.sessionId}`,
-      () => router.push(`/chat/${props.sessionId}`)
-    )
+    if (props.sessionId) {
+      notify(
+        agentName ?? 'Agent',
+        'Has a follow-up for you',
+        `follow-up-${props.sessionId}`,
+        () => router.push(`/chat/${props.sessionId}`)
+      )
+    }
   })
 
 // follow_up_cancelled: lead agent failed to synthesize (session busy or error).
