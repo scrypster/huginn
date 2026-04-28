@@ -434,6 +434,16 @@ func TestDelivererRegistry_GetEmail(t *testing.T) {
 	}
 }
 
+// TestDelivererRegistry_GetSendGrid verifies that the registry returns a
+// SendGrid deliverer for type "sendgrid".
+func TestDelivererRegistry_GetSendGrid(t *testing.T) {
+	reg := NewDelivererRegistry(nil)
+	d := reg.get("sendgrid")
+	if d == nil {
+		t.Error("expected non-nil sendgrid deliverer")
+	}
+}
+
 // TestDelivererRegistry_GetUnknown verifies that an unknown type returns nil.
 func TestDelivererRegistry_GetUnknown(t *testing.T) {
 	reg := NewDelivererRegistry(nil)

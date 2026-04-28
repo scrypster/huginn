@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/scrypster/huginn/internal/connections"
 	"github.com/scrypster/huginn/internal/tools"
 )
+
+var haDoFn = haDo
 
 func haDo(ctx context.Context, method, apiURL, token string, body io.Reader) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, method, apiURL, body)
@@ -54,8 +57,10 @@ type haStatesTool struct {
 	conns []connections.Connection
 }
 
-func (t *haStatesTool) Name() string        { return "ha_states" }
-func (t *haStatesTool) Description() string { return "Get Home Assistant entity states. Omit entity_id to list all states." }
+func (t *haStatesTool) Name() string { return "ha_states" }
+func (t *haStatesTool) Description() string {
+	return "Get Home Assistant entity states. Omit entity_id to list all states."
+}
 func (t *haStatesTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *haStatesTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -80,9 +85,9 @@ func (t *haStatesTool) Execute(ctx context.Context, args map[string]any) tools.T
 	}
 	apiURL := baseURL + "/api/states"
 	if entityID, ok := args["entity_id"].(string); ok && entityID != "" {
-		apiURL = fmt.Sprintf("%s/api/states/%s", baseURL, entityID)
+		apiURL = fmt.Sprintf("%s/api/states/%s", baseURL, url.PathEscape(entityID))
 	}
-	out, err := haDo(ctx, http.MethodGet, apiURL, token, nil)
+	out, err := haDoFn(ctx, http.MethodGet, apiURL, token, nil)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -94,8 +99,10 @@ type haCallServiceTool struct {
 	conns []connections.Connection
 }
 
-func (t *haCallServiceTool) Name() string        { return "ha_call_service" }
-func (t *haCallServiceTool) Description() string { return "Call a Home Assistant service (e.g. turn on a light). Requires user approval." }
+func (t *haCallServiceTool) Name() string { return "ha_call_service" }
+func (t *haCallServiceTool) Description() string {
+	return "Call a Home Assistant service (e.g. turn on a light). Requires user approval."
+}
 func (t *haCallServiceTool) Permission() tools.PermissionLevel { return tools.PermWrite }
 func (t *haCallServiceTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -141,7 +148,7 @@ func (t *haCallServiceTool) Execute(ctx context.Context, args map[string]any) to
 	}
 	bodyBytes, _ := json.Marshal(payload)
 	apiURL := fmt.Sprintf("%s/api/services/%s/%s", baseURL, domain, service)
-	out, err := haDo(ctx, http.MethodPost, apiURL, token, strings.NewReader(string(bodyBytes)))
+	out, err := haDoFn(ctx, http.MethodPost, apiURL, token, strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
@@ -153,8 +160,10 @@ type haSceneActivateTool struct {
 	conns []connections.Connection
 }
 
-func (t *haSceneActivateTool) Name() string        { return "ha_scene_activate" }
-func (t *haSceneActivateTool) Description() string { return "Activate a Home Assistant scene. Requires user approval." }
+func (t *haSceneActivateTool) Name() string { return "ha_scene_activate" }
+func (t *haSceneActivateTool) Description() string {
+	return "Activate a Home Assistant scene. Requires user approval."
+}
 func (t *haSceneActivateTool) Permission() tools.PermissionLevel { return tools.PermWrite }
 func (t *haSceneActivateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -185,7 +194,7 @@ func (t *haSceneActivateTool) Execute(ctx context.Context, args map[string]any) 
 	payload := map[string]any{"entity_id": sceneID}
 	bodyBytes, _ := json.Marshal(payload)
 	apiURL := fmt.Sprintf("%s/api/services/scene/turn_on", baseURL)
-	out, err := haDo(ctx, http.MethodPost, apiURL, token, strings.NewReader(string(bodyBytes)))
+	out, err := haDoFn(ctx, http.MethodPost, apiURL, token, strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
