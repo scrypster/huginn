@@ -3215,7 +3215,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		)
 		orch.SetMemoryReplicator(crossChannelReplicator)
 		go crossChannelReplicator.Start(ctx)
-		defer crossChannelReplicator.Stop()
+		cleanupFns = append(cleanupFns, crossChannelReplicator.Stop)
 	}
 
 	// Now that we know the real address, update the OAuth callback URL.
