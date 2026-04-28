@@ -1,4 +1,42 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+async function fresh() {
+  vi.resetModules()
+  const mod = await import('../useSessions')
+  return mod.useSessions
+}
+
+describe('useSessions — agentThinking', () => {
+  it('agentThinking starts false for a new session', async () => {
+    const useSessions = await fresh()
+    const { getAgentThinking } = useSessions()
+    expect(getAgentThinking('sess-1')).toBe(false)
+  })
+
+  it('setAgentThinking sets and clears thinking state', async () => {
+    const useSessions = await fresh()
+    const { setAgentThinking, getAgentThinking } = useSessions()
+    setAgentThinking('sess-1', true)
+    expect(getAgentThinking('sess-1')).toBe(true)
+    setAgentThinking('sess-1', false)
+    expect(getAgentThinking('sess-1')).toBe(false)
+  })
+})
+
+describe('useSessions — lastSeenMessageId', () => {
+  it('lastSeenMessageId starts null', async () => {
+    const useSessions = await fresh()
+    const { getLastSeenMessageId } = useSessions()
+    expect(getLastSeenMessageId('sess-1')).toBeNull()
+  })
+
+  it('setLastSeenMessageId stores and returns the id', async () => {
+    const useSessions = await fresh()
+    const { setLastSeenMessageId, getLastSeenMessageId } = useSessions()
+    setLastSeenMessageId('sess-1', 'msg-42')
+    expect(getLastSeenMessageId('sess-1')).toBe('msg-42')
+  })
+})
 import { flushPromises } from '@vue/test-utils'
 
 // Mock useApi before importing useSessions

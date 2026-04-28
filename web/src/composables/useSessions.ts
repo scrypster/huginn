@@ -57,6 +57,10 @@ export interface ChatMessage {
 const sessions = ref<Session[]>([])
 const loading = ref(false)
 const messagesBySession = ref<Record<string, ChatMessage[]>>({})
+// agentThinking: true from message send until first token/status/done/error
+const agentThinkingBySession = ref<Record<string, boolean>>({})
+// lastSeenMessageId: set when agent starts streaming to mark the last user message as "seen"
+const lastSeenMessageIdBySession = ref<Record<string, string | null>>({})
 
 // Hydration pattern: "hydrate-then-subscribe"
 //
@@ -247,6 +251,22 @@ export function useSessions() {
     })
   }
 
+  function getAgentThinking(sessionId: string): boolean {
+    return agentThinkingBySession.value[sessionId] ?? false
+  }
+
+  function setAgentThinking(sessionId: string, value: boolean) {
+    agentThinkingBySession.value[sessionId] = value
+  }
+
+  function getLastSeenMessageId(sessionId: string): string | null {
+    return lastSeenMessageIdBySession.value[sessionId] ?? null
+  }
+
+  function setLastSeenMessageId(sessionId: string, id: string | null) {
+    lastSeenMessageIdBySession.value[sessionId] = id
+  }
+
   return {
     sessions,
     loading,
@@ -258,5 +278,9 @@ export function useSessions() {
     fetchMessages,
     queueIfHydrating,
     formatSessionLabel,
+    getAgentThinking,
+    setAgentThinking,
+    getLastSeenMessageId,
+    setLastSeenMessageId,
   }
 }
