@@ -970,5 +970,31 @@
     "multi_account": false,
     "fields": [],
     "validation": { "available": false }
+  },
+  {
+    "id": "todoist",
+    "name": "Todoist",
+    "description": "Tasks, projects, and productivity management",
+    "category": "personal",
+    "icon": "TD",
+    "icon_color": "#e44332",
+    "type": "credentials",
+    "default_label": "Todoist",
+    "multi_account": false,
+    "fields": [
+      {
+        "key": "api_key",
+        "label": "API Token",
+        "type": "password",
+        "required": true,
+        "stored_in": "creds",
+        "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "help_text": "Found under Todoist Settings → Integrations → Developer → API token"
+      }
+    ],
+    "validation": {
+      "available": true,
+      "description": "Calls GET /rest/v2/projects to verify the API token."
+    }
   }
 ]

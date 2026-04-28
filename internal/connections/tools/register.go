@@ -85,6 +85,7 @@ var providerToolNames = map[connections.Provider][]string{
 		"monday_create_item", "monday_update_item",
 	},
 	connections.ProviderWeather: {"weather_current", "weather_forecast"},
+	connections.ProviderTodoist: {"tasks_list", "task_create", "task_complete", "tasks_list_projects"},
 }
 
 // RegisterAll registers integration tools for all providers with at least one connection.
@@ -152,6 +153,8 @@ func RegisterForProvider(reg *tools.Registry, mgr *connections.Manager, provider
 		err = registerMondayTools(reg, mgr, conns)
 	case connections.ProviderWeather:
 		err = registerWeatherTools(reg, mgr, conns)
+	case connections.ProviderTodoist:
+		err = registerTodoistTools(reg, mgr, conns)
 	}
 	if err != nil {
 		return err
