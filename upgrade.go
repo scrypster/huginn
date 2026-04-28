@@ -75,7 +75,6 @@ func (u *Upgrader) in() io.Reader {
 }
 
 // step prints a labeled upgrade step to u.out(), runs f(), and prints ✓ or ✗.
-// Used by upgradeViaHomebrew. selfUpdateWithURLs uses the package-level upgradeStep.
 func (u *Upgrader) step(label string, f func() error) error {
 	fmt.Fprintf(u.out(), "  %-32s", label)
 	if err := f(); err != nil {
@@ -235,14 +234,14 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 
 	// Stop daemons before touching the binary.
 	if state.serveRunning {
-		if err := upgradeStep("Stopping server...", func() error {
+		if err := u.step("Stopping server...", func() error {
 			return u.StopProcess(state.servePID, servePIDPath)
 		}); err != nil {
 			return err
 		}
 	}
 	if state.trayRunning {
-		if err := upgradeStep("Stopping tray...", func() error {
+		if err := u.step("Stopping tray...", func() error {
 			return u.StopProcess(state.trayPID, trayPIDPath)
 		}); err != nil {
 			return err
@@ -268,7 +267,7 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 	// matching checksum for a malicious binary. A future improvement is to add
 	// cosign or GPG signing via goreleaser. Tracked as a follow-up.
 	var expectedSHA string
-	if err := upgradeStep("Fetching checksums...", func() error {
+	if err := u.step("Fetching checksums...", func() error {
 		var e error
 		expectedSHA, e = u.fetchExpectedSHA(checksumURL, latest, goos, goarch)
 		return e
@@ -279,24 +278,24 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 	// Download archive with inline progress.
 	var archivePath string
 	label := fmt.Sprintf("Downloading %s...", latest)
-	fmt.Printf("  %-32s", label)
+	fmt.Fprintf(u.out(), "  %-32s", label)
 	archivePath, err = u.downloadArchive(assetURL, func(dl, total int64) {
 		if total > 0 {
-			fmt.Printf("\r  %-32s%.1f / %.1f MB", label,
+			fmt.Fprintf(u.out(), "\r  %-32s%.1f / %.1f MB", label,
 				float64(dl)/1024/1024, float64(total)/1024/1024)
 		}
 	})
 	if err != nil {
-		fmt.Println(" ✗")
+		fmt.Fprintln(u.out(), " ✗")
 		return err
 	}
-	fmt.Println(" ✓")
+	fmt.Fprintln(u.out(), " ✓")
 	defer os.Remove(archivePath) // always remove the archive temp file
 
 	// SHA256 check on the archive BEFORE extracting (primary integrity gate).
 	// The checksums file contains hashes of the compressed archives, not the
 	// extracted binaries — so we must verify the archive, not the binary.
-	if err := upgradeStep("Verifying checksum...", func() error {
+	if err := u.step("Verifying checksum...", func() error {
 		return verifySHA256(archivePath, expectedSHA)
 	}); err != nil {
 		return err
@@ -304,7 +303,7 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 
 	// Extract the binary from the verified archive.
 	var tmpPath string
-	if err := upgradeStep("Extracting binary...", func() error {
+	if err := u.step("Extracting binary...", func() error {
 		var e error
 		tmpPath, e = extractBinary(archivePath, exePath)
 		return e
@@ -321,7 +320,7 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 	}()
 
 	// Secondary sanity check: run `huginn version` to confirm it starts.
-	if err := upgradeStep("Verifying binary...", func() error {
+	if err := u.step("Verifying binary...", func() error {
 		if err := os.Chmod(tmpPath, 0755); err != nil {
 			return err
 		}
@@ -336,7 +335,7 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 	_ = copyFile(exePath, backupPath) // best-effort; ignore error if exePath doesn't exist yet
 
 	// Atomic install — rename with cross-device fallback.
-	if err := upgradeStep("Installing...", func() error {
+	if err := u.step("Installing...", func() error {
 		return atomicReplace(tmpPath, exePath)
 	}); err != nil {
 		return err
@@ -354,32 +353,32 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 
 	// macOS: re-sign the new binary so the next launch doesn't need to re-exec.
 	if goos == "darwin" {
-		_ = upgradeStep("Signing binary (macOS)...", func() error {
+		_ = u.step("Signing binary (macOS)...", func() error {
 			return exec.Command("codesign", "--force", "--sign", "-", exePath).Run()
 		})
 	}
 
 	// Restart daemons — failures are warnings, not fatal.
 	if state.serveRunning {
-		if err := upgradeStep("Restarting server...", func() error {
+		if err := u.step("Restarting server...", func() error {
 			cmd := exec.Command(exePath, "serve")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 			return u.DetachStart(cmd)
 		}); err != nil {
-			fmt.Printf("\n  Warning: server did not restart: %v\n  Run: huginn serve\n\n", err)
+			fmt.Fprintf(u.out(), "\n  Warning: server did not restart: %v\n  Run: huginn serve\n\n", err)
 		}
 	}
 	if state.trayRunning {
-		if err := upgradeStep("Restarting tray...", func() error {
+		if err := u.step("Restarting tray...", func() error {
 			cmd := exec.Command(exePath, "tray")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 			return u.DetachStart(cmd)
 		}); err != nil {
-			fmt.Printf("\n  Warning: tray did not restart: %v\n  Run: huginn tray\n\n", err)
+			fmt.Fprintf(u.out(), "\n  Warning: tray did not restart: %v\n  Run: huginn tray\n\n", err)
 		}
 	}
 
-	fmt.Printf("\n  huginn updated to %s\n\n", latest)
+	fmt.Fprintf(u.out(), "\n  huginn updated to %s\n\n", latest)
 	return nil
 }
 
