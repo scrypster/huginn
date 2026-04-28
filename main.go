@@ -453,9 +453,9 @@ func main() {
 	// Wire cloud vault memory replicator — pushes agent memory writes to HuginnCloud
 	// so they persist across sessions and are available from all connected browsers.
 	if sqlDB != nil {
-		tuiMemReplicator := wireMemoryReplicator(sqlDB)
-		tuiMemReplicator.Start()
-		defer tuiMemReplicator.Stop()
+		tuiVaultReplicator := wireCloudVaultReplicator(sqlDB)
+		tuiVaultReplicator.Start()
+		defer tuiVaultReplicator.Stop()
 	}
 
 	// 5. Stats registry
@@ -1636,13 +1636,13 @@ func cmdRuntime(args []string) error {
 	}
 }
 
-// wireMemoryReplicator creates and configures a MemoryReplicator backed by sqlDB.
+// wireCloudVaultReplicator creates and configures a CloudVaultReplicator backed by sqlDB.
 // If HUGINN_CLOUD_URL is set and the machine is registered with HuginnCloud,
 // the replicator is wired with an HTTPVaultClient so agent memory writes are
 // replicated to the cloud vault. The caller must call Start() and arrange for
 // Stop() to be called on shutdown.
-func wireMemoryReplicator(sqlDB *sqlitedb.DB) *agentslib.MemoryReplicator {
-	mr := agentslib.NewMemoryReplicator(sqlDB)
+func wireCloudVaultReplicator(sqlDB *sqlitedb.DB) *agentslib.CloudVaultReplicator {
+	mr := agentslib.NewCloudVaultReplicator(sqlDB)
 	tokenStore := relay.NewTokenStore()
 	if cloudURL := os.Getenv("HUGINN_CLOUD_URL"); cloudURL != "" && tokenStore.IsRegistered() {
 		mr.WithVaultClient(agentslib.NewHTTPVaultClient(cloudURL, func() string {
@@ -2382,9 +2382,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// Wire cloud vault memory replicator — drains cloud_vault_queue and pushes agent
 	// memory writes to HuginnCloud so they persist across sessions and devices.
 	if sqlDB != nil {
-		srvMemReplicator := wireMemoryReplicator(sqlDB)
-		srvMemReplicator.Start()
-		cleanupFns = append(cleanupFns, srvMemReplicator.Stop)
+		srvVaultReplicator := wireCloudVaultReplicator(sqlDB)
+		srvVaultReplicator.Start()
+		cleanupFns = append(cleanupFns, srvVaultReplicator.Stop)
 	}
 
 	// Run one-time Pebble → SQLite migration if SQLite is available.
@@ -3204,6 +3204,19 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		return nil, "", nil, fmt.Errorf("server start: %w", err)
 	}
 	orch.StartSessionCleanup(ctx)
+
+	// Wire the cross-channel memory replicator. Fans out muninn writes from one
+	// channel member to all other members' vaults in the same space.
+	// The SQLite queue provides durability across restarts.
+	if sqlDB != nil {
+		crossChannelReplicator := agent.NewMemoryReplicator(
+			muninnCfgFilePath,
+			agent.NewSQLiteReplicationQueuer(sqlDB),
+		)
+		orch.SetMemoryReplicator(crossChannelReplicator)
+		go crossChannelReplicator.Start(ctx)
+		cleanupFns = append(cleanupFns, crossChannelReplicator.Stop)
+	}
 
 	// Now that we know the real address, update the OAuth callback URL.
 	if connMgr != nil {

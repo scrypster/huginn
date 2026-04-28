@@ -779,6 +779,12 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 				capturedArgs := toolArgsCapture[callID]
 				delete(toolArgsCapture, callID)
 				toolArgsMu.Unlock()
+				// Replicate memory writes to other channel members' vaults.
+				if o.memoryReplicator != nil && isMemoryToolName(name) && !result.IsError {
+					if replCtx := workforce.GetReplicationContext(ctx); replCtx != nil {
+						o.memoryReplicator.Intercept(ctx, name, capturedArgs, result, ag.Name, replCtx)
+					}
+				}
 				slog.Info("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 				if onToolEvent != nil {
 					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})

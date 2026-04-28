@@ -101,9 +101,9 @@ func openReplicatorDB(t *testing.T) *sqlitedb.DB {
 	return db
 }
 
-func newMR(t *testing.T, db *sqlitedb.DB, client agents.CloudVaultClient) *agents.MemoryReplicator {
+func newMR(t *testing.T, db *sqlitedb.DB, client agents.CloudVaultClient) *agents.CloudVaultReplicator {
 	t.Helper()
-	mr := agents.NewMemoryReplicator(db)
+	mr := agents.NewCloudVaultReplicator(db)
 	if client != nil {
 		mr.WithVaultClient(client, "test-machine-01")
 	}
@@ -124,7 +124,7 @@ func waitCond(t *testing.T, maxWait time.Duration, cond func() bool) bool {
 
 // ---- tests ----
 
-func TestMemoryReplicator_NoOpWithoutVaultClient(t *testing.T) {
+func TestCloudVaultReplicator_NoOpWithoutVaultClient(t *testing.T) {
 	db := openReplicatorDB(t)
 	mr := newMR(t, db, nil) // local-only mode
 	mr.Start()
@@ -144,7 +144,7 @@ func TestMemoryReplicator_NoOpWithoutVaultClient(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_PushesSetOnInsert(t *testing.T) {
+func TestCloudVaultReplicator_PushesSetOnInsert(t *testing.T) {
 	db := openReplicatorDB(t)
 	client := &mockVaultClient{}
 	mr := newMR(t, db, client)
@@ -189,7 +189,7 @@ func TestMemoryReplicator_PushesSetOnInsert(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_PushesDeleteOnDelete(t *testing.T) {
+func TestCloudVaultReplicator_PushesDeleteOnDelete(t *testing.T) {
 	db := openReplicatorDB(t)
 	client := &mockVaultClient{}
 	mr := newMR(t, db, client)
@@ -215,7 +215,7 @@ func TestMemoryReplicator_PushesDeleteOnDelete(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_IdempotentUpsert(t *testing.T) {
+func TestCloudVaultReplicator_IdempotentUpsert(t *testing.T) {
 	// Enqueue the same (vault_name, memory_id) pair twice — UNIQUE constraint should
 	// collapse them into one row, and the vault client should see only one push.
 	db := openReplicatorDB(t)
@@ -248,7 +248,7 @@ func TestMemoryReplicator_IdempotentUpsert(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_ValidationRejectsMissingFields(t *testing.T) {
+func TestCloudVaultReplicator_ValidationRejectsMissingFields(t *testing.T) {
 	db := openReplicatorDB(t)
 	mr := newMR(t, db, nil)
 	ctx := context.Background()
@@ -274,7 +274,7 @@ func TestMemoryReplicator_ValidationRejectsMissingFields(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_RetryOnTransientError(t *testing.T) {
+func TestCloudVaultReplicator_RetryOnTransientError(t *testing.T) {
 	db := openReplicatorDB(t)
 	client := &mockVaultClient{}
 	client.setErr(errors.New("transient network error"))
@@ -303,7 +303,7 @@ func TestMemoryReplicator_RetryOnTransientError(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_ConcurrentEnqueue(t *testing.T) {
+func TestCloudVaultReplicator_ConcurrentEnqueue(t *testing.T) {
 	db := openReplicatorDB(t)
 	client := &mockVaultClient{}
 	mr := newMR(t, db, client)
@@ -354,7 +354,7 @@ func TestMemoryReplicator_ConcurrentEnqueue(t *testing.T) {
 	}
 }
 
-func TestMemoryReplicator_StopIsClean(t *testing.T) {
+func TestCloudVaultReplicator_StopIsClean(t *testing.T) {
 	db := openReplicatorDB(t)
 	mr := newMR(t, db, nil)
 	mr.Start()
