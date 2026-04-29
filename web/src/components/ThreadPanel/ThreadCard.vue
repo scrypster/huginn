@@ -121,6 +121,24 @@
         </div>
       </div>
 
+      <!-- Team coordination timeline -->
+      <div v-if="collaborationTimeline.length" data-testid="thread-team-coordination" class="space-y-1.5">
+        <p class="text-[10px] uppercase tracking-wider text-huginn-muted/50 font-medium">Team coordination</p>
+        <div class="space-y-1">
+          <div
+            v-for="event in collaborationTimeline"
+            :key="event.id"
+            class="rounded-lg border px-2.5 py-1.5 text-[11px]"
+            :class="coordinationToneClass(event.tone)"
+          >
+            <div class="flex items-center gap-1.5">
+              <span class="font-medium">{{ event.title }}</span>
+            </div>
+            <p v-if="event.detail" class="mt-0.5 text-[10px] text-huginn-muted/70">{{ event.detail }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Summary / completion output -->
       <div v-if="thread.Summary?.Summary && !isRunning" class="space-y-1.5">
         <p class="text-[10px] uppercase tracking-wider text-huginn-muted/50 font-medium">Summary</p>
@@ -201,6 +219,14 @@ const isExpanded = ref(true)
 const toolsExpanded = ref(false)
 const injectInput = ref('')
 
+type CoordinationTone = 'info' | 'success' | 'warning' | 'critical'
+interface CoordinationEvent {
+  id: string
+  title: string
+  detail?: string
+  tone: CoordinationTone
+}
+
 // ── Computed ────────────────────────────────────────────────────────────────
 const isRunning = computed(() => !TERMINAL_STATUSES.has(props.thread.Status))
 const hasRunningTools = computed(() => props.thread.toolCalls.some(tc => !tc.done))
@@ -264,6 +290,62 @@ const elapsedLabel = computed(() => {
   return `${Math.floor(s / 60)}m ${s % 60}s`
 })
 
+const collaborationTimeline = computed<CoordinationEvent[]>(() => {
+  const events: CoordinationEvent[] = []
+  props.thread.toolCalls.forEach((tc, idx) => {
+    const args = (tc.args ?? {}) as Record<string, unknown>
+    const resultSummary = (tc.resultSummary ?? '').trim()
+    const resultLower = resultSummary.toLowerCase()
+
+    if (tc.tool === 'propose_action') {
+      events.push({
+        id: `proposal-${idx}`,
+        title: 'Proposal submitted',
+        detail: formatProposalDetail(args),
+        tone: 'info',
+      })
+      if (resultLower.includes('awaiting lead approval token')) {
+        events.push({
+          id: `proposal-awaiting-${idx}`,
+          title: 'Awaiting lead approval',
+          detail: formatProposalDetail(args),
+          tone: 'warning',
+        })
+      }
+    }
+
+    if (resultLower.includes('approval token required')) {
+      events.push({
+        id: `approval-required-${idx}`,
+        title: 'Lead approval required',
+        detail: tc.tool.replaceAll('_', ' '),
+        tone: 'warning',
+      })
+    }
+
+    if (resultLower.includes('scope mismatch')) {
+      events.push({
+        id: `approval-scope-mismatch-${idx}`,
+        title: 'Lead intervention needed',
+        detail: 'Approval token scope does not match this action.',
+        tone: 'critical',
+      })
+    }
+
+    const hasApprovalToken = typeof args._approval_token === 'string' && args._approval_token.trim() !== ''
+    const toolErrored = resultLower.startsWith('tool error')
+    if (hasApprovalToken && tc.done && !toolErrored) {
+      events.push({
+        id: `approved-execution-${idx}`,
+        title: 'Lead-approved action executed',
+        detail: tc.tool.replaceAll('_', ' '),
+        tone: 'success',
+      })
+    }
+  })
+  return events
+})
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 // Strip tool-call JSON that leaks into thread summaries when LLM outputs
 // { "name": "request_help", "arguments": { "message": "..." } } as text.
@@ -276,6 +358,26 @@ function parseSummary(summary: string): string {
     }
   } catch { /* not JSON */ }
   return summary
+}
+
+function formatProposalDetail(args: Record<string, unknown>): string {
+  const provider = typeof args.provider === 'string' ? args.provider : 'unknown-provider'
+  const action = typeof args.action === 'string' ? args.action : 'unknown-action'
+  const risk = typeof args.risk === 'string' ? args.risk : 'elevated'
+  return `${provider}/${action} (${risk})`
+}
+
+function coordinationToneClass(tone: CoordinationTone): string {
+  switch (tone) {
+    case 'success':
+      return 'border-huginn-green/25 bg-huginn-green/8 text-huginn-green/90'
+    case 'warning':
+      return 'border-huginn-yellow/25 bg-huginn-yellow/8 text-huginn-yellow/95'
+    case 'critical':
+      return 'border-huginn-red/25 bg-huginn-red/8 text-huginn-red/90'
+    default:
+      return 'border-huginn-blue/25 bg-huginn-blue/8 text-huginn-blue/90'
+  }
 }
 
 // ── Actions ──────────────────────────────────────────────────────────────────
