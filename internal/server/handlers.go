@@ -383,6 +383,19 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 422, "invalid agent: "+err.Error())
 		return
 	}
+	toolbeltResult, err := s.evaluateToolbelt(incoming.Toolbelt)
+	if err != nil {
+		jsonError(w, 500, "validate toolbelt: "+err.Error())
+		return
+	}
+	if !toolbeltResult.Valid {
+		if denied, ok := toolbeltResult.FirstDenied(); ok {
+			jsonError(w, 422, fmt.Sprintf("invalid toolbelt: %s (%s)", denied.Reason, denied.ReasonCode))
+			return
+		}
+		jsonError(w, 422, "invalid toolbelt")
+		return
+	}
 	if err := agents.SaveAgentDefault(incoming); err != nil {
 		jsonError(w, 500, "save agent: "+err.Error())
 		return
