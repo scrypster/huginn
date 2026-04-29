@@ -45,6 +45,9 @@ jobs:
       - name: Run heartbeat benchmark confidence gate
         run: ./scripts/run_internal_benchmarks.sh
 
+      - name: Run proactivity quality gate
+        run: ./scripts/check_proactivity_quality.sh
+
       - name: Upload heartbeat benchmark scorecard
         uses: actions/upload-artifact@v4
         with:

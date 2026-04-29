@@ -2618,26 +2618,15 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// proactive DMs are budgeted per agent+DM, screened by relevance, and
 			// rate-limited by cooldown to avoid noisy check-ins.
 			scheduler.WithProactivityGate(func(_ context.Context, req scheduler.ProactivityGateRequest) (bool, string) {
-				if strings.TrimSpace(req.Schedule) == "" || !proactivity.IsHeartbeatEvent(req.WorkflowID, req.Summary) {
-					return true, ""
-				}
-				if strings.TrimSpace(req.AgentName) == "" || strings.TrimSpace(req.User) == "" {
-					return true, ""
-				}
-				decision := heartbeatPolicy.Allow(proactivity.Event{
+				return proactivity.EvaluateHeartbeatDeliveryGate(heartbeatPolicy, proactivity.DeliveryGateRequest{
+					WorkflowID: req.WorkflowID,
+					Schedule:   req.Schedule,
 					AgentName:  req.AgentName,
-					SpaceID:    req.User,
+					User:       req.User,
 					Summary:    req.Summary,
 					Detail:     req.Detail,
-					OccurredAt: req.CreatedAt,
+					CreatedAt:  req.CreatedAt,
 				})
-				if decision.Allowed {
-					return true, ""
-				}
-				if decision.Reason != "" {
-					return false, decision.Reason
-				}
-				return false, decision.ReasonCode
 			}),
 			// Phase 5: workflow chaining. After a parent workflow run reaches
 			// a terminal status, optionally trigger a downstream workflow.
