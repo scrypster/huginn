@@ -290,6 +290,57 @@ describe('ThreadCard — tool calls section', () => {
   })
 })
 
+describe('ThreadCard — team coordination timeline', () => {
+  it('shows proposal and awaiting approval rows for propose_action', async () => {
+    const wrapper = mountCard(makeThread({
+      toolCalls: [{
+        tool: 'propose_action',
+        done: true,
+        args: { provider: 'github', action: 'delete_issue', risk: 'critical' },
+        resultSummary: 'proposal abc recorded. Awaiting lead approval token before execution.',
+      }],
+    }))
+    expect(wrapper.find('[data-testid="thread-team-coordination"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Proposal submitted')
+    expect(wrapper.html()).toContain('Awaiting lead approval')
+    expect(wrapper.html()).toContain('github/delete_issue (critical)')
+  })
+
+  it('shows lead approval required row when tool result denies missing token', () => {
+    const wrapper = mountCard(makeThread({
+      toolCalls: [{
+        tool: 'github_delete_issue',
+        done: true,
+        resultSummary: 'tool error: permission denied: threadmgr: approval token required for high-risk action',
+      }],
+    }))
+    expect(wrapper.html()).toContain('Lead approval required')
+  })
+
+  it('shows lead intervention row for scope mismatch denial', () => {
+    const wrapper = mountCard(makeThread({
+      toolCalls: [{
+        tool: 'github_delete_issue',
+        done: true,
+        resultSummary: 'tool error: permission denied: threadmgr: approval token scope mismatch',
+      }],
+    }))
+    expect(wrapper.html()).toContain('Lead intervention needed')
+  })
+
+  it('shows lead-approved execution row when action includes approval token and succeeds', () => {
+    const wrapper = mountCard(makeThread({
+      toolCalls: [{
+        tool: 'github_delete_issue',
+        done: true,
+        args: { issue: 123, _approval_token: 'approval_abc' },
+        resultSummary: 'deleted issue #123',
+      }],
+    }))
+    expect(wrapper.html()).toContain('Lead-approved action executed')
+  })
+})
+
 // ── Summary metadata ────────────────────────────────────────────────────────
 
 describe('ThreadCard — summary metadata', () => {
