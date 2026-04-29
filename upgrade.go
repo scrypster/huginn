@@ -771,7 +771,10 @@ func newerVersionAvailable(current, latest string) bool {
 	return cPre != "" && lPre == ""
 }
 
-// parseSemver parses "vX.Y.Z[-prerelease][+build]" into its components.
+// parseSemver parses:
+// - "vX.Y.Z[-prerelease][+build]"
+// - "vX.Y[-prerelease][+build]" (treated as patch=0)
+// into numeric components for upgrade comparison.
 func parseSemver(s string) (maj, min, pat int, pre string, ok bool) {
 	s = strings.TrimPrefix(s, "v")
 	if i := strings.IndexByte(s, '+'); i >= 0 {
@@ -781,8 +784,8 @@ func parseSemver(s string) (maj, min, pat int, pre string, ok bool) {
 		pre = s[i+1:]
 		s = s[:i]
 	}
-	parts := strings.SplitN(s, ".", 3)
-	if len(parts) != 3 {
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 || len(parts) > 3 {
 		return 0, 0, 0, "", false
 	}
 	var err error
@@ -792,8 +795,11 @@ func parseSemver(s string) (maj, min, pat int, pre string, ok bool) {
 	if min, err = strconv.Atoi(parts[1]); err != nil {
 		return 0, 0, 0, "", false
 	}
-	if pat, err = strconv.Atoi(parts[2]); err != nil {
-		return 0, 0, 0, "", false
+	pat = 0
+	if len(parts) == 3 {
+		if pat, err = strconv.Atoi(parts[2]); err != nil {
+			return 0, 0, 0, "", false
+		}
 	}
 	return maj, min, pat, pre, true
 }
