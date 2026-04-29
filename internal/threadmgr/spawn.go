@@ -728,6 +728,13 @@ func (tm *ThreadManager) runOnce(
 			case "propose_action":
 				appendToolResult(tt.ProposeAction(tc.Function.Arguments))
 			default:
+				if provider, action, needsApproval := delegatedToolRisk(tc.Function.Name); needsApproval {
+					token, _ := tc.Function.Arguments["_approval_token"].(string)
+					if err := tm.RequireApprovalToken(threadID, token, provider, action); err != nil {
+						appendToolResult("tool error: permission denied: " + err.Error())
+						continue
+					}
+				}
 				// Dispatch to the per-agent runtime executor when available
 				// (gate-wrapped against the agent's session-local registry,
 				// includes MuninnDB and toolbelt providers). Otherwise fall
@@ -906,4 +913,54 @@ func formatSiblingContextBlock(msgs []ThreadContextMessage) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+var delegatedApprovalProviders = map[string]bool{
+	"aws":           true,
+	"azure":         true,
+	"gcp":           true,
+	"github":        true,
+	"gitlab":        true,
+	"homeassistant": true,
+	"kubernetes":    true,
+	"mysql":         true,
+	"postgres":      true,
+	"sendgrid":      true,
+	"slack":         true,
+}
+
+var lowRiskActionPrefixes = []string{
+	"describe_",
+	"fetch_",
+	"find_",
+	"get_",
+	"head_",
+	"list_",
+	"preview_",
+	"read_",
+	"search_",
+	"show_",
+	"status_",
+}
+
+func delegatedToolRisk(toolName string) (provider, action string, highRisk bool) {
+	toolName = strings.ToLower(strings.TrimSpace(toolName))
+	if toolName == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(toolName, "_", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	provider = strings.TrimSpace(parts[0])
+	action = strings.TrimSpace(parts[1])
+	if provider == "" || action == "" || !delegatedApprovalProviders[provider] {
+		return "", "", false
+	}
+	for _, p := range lowRiskActionPrefixes {
+		if strings.HasPrefix(action, p) {
+			return provider, action, false
+		}
+	}
+	return provider, action, true
 }
