@@ -79,7 +79,7 @@ test.describe('Delivery Queue UI', () => {
     await badge.click({ force: true })
 
     // Drawer should open with the entry
-    await expect(page.locator('text=Delivery Issues')).toBeVisible({ timeout: 3000 })
+    await expect(page.getByText('Delivery Issues', { exact: true })).toBeVisible({ timeout: 3000 })
     await expect(page.locator('text=https://hooks.example.com/webhook')).toBeVisible()
     await expect(page.locator('text=Failed after 5 attempts')).toBeVisible()
     await expect(page.locator('text=connection refused')).toBeVisible()
@@ -115,7 +115,7 @@ test.describe('Delivery Queue UI', () => {
     await expect(badge).toBeVisible({ timeout: 3000 })
     await badge.click({ force: true })
 
-    await expect(page.locator('text=Delivery Issues')).toBeVisible({ timeout: 3000 })
+    await expect(page.getByText('Delivery Issues', { exact: true })).toBeVisible({ timeout: 3000 })
     await expect(page.locator('text=https://hooks.example.com/webhook')).toBeVisible()
 
     // Click Dismiss
