@@ -10,8 +10,9 @@ packages=(
   "./internal/spaces"
   "./internal/memory"
   "./internal/stats"
+  "./internal/proactivity"
 )
-minimums=(55 62 74 58 54 45)
+minimums=(55 62 74 58 54 45 80)
 
 fail=0
 
