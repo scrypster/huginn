@@ -122,3 +122,34 @@ func TestDeliveryQueueStore_BadgeCount(t *testing.T) {
 		t.Errorf("BadgeCount = %d, want 1", count)
 	}
 }
+
+func TestDeliveryQueueStore_ListActionable_OnlyFailed(t *testing.T) {
+	s := newTestDeliveryQueueStore(t)
+	now := time.Now().UTC()
+	_ = s.Insert(DeliveryQueueEntry{ID: "a-failed", WorkflowID: "w1", RunID: "r1", Endpoint: "x", Channel: "webhook", Payload: "{}", Status: "failed", MaxAttempts: 5, RetryWindowS: 480, NextRetryAt: now})
+	_ = s.Insert(DeliveryQueueEntry{ID: "a-retrying", WorkflowID: "w1", RunID: "r2", Endpoint: "y", Channel: "email", Payload: "{}", Status: "retrying", MaxAttempts: 5, RetryWindowS: 480, NextRetryAt: now})
+
+	rows, err := s.ListActionable(10)
+	if err != nil {
+		t.Fatalf("ListActionable: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListActionable len = %d, want 1", len(rows))
+	}
+	if rows[0].ID != "a-failed" {
+		t.Errorf("ListActionable returned %q, want %q", rows[0].ID, "a-failed")
+	}
+}
+
+func TestDeliveryQueueStore_Dismiss_RemovesEntry(t *testing.T) {
+	s := newTestDeliveryQueueStore(t)
+	now := time.Now().UTC()
+	_ = s.Insert(DeliveryQueueEntry{ID: "dismiss-1", WorkflowID: "w1", RunID: "r1", Endpoint: "x", Channel: "webhook", Payload: "{}", Status: "failed", MaxAttempts: 5, RetryWindowS: 480, NextRetryAt: now})
+
+	if err := s.Dismiss("dismiss-1"); err != nil {
+		t.Fatalf("Dismiss: %v", err)
+	}
+	if _, err := s.Get("dismiss-1"); err == nil {
+		t.Fatal("expected dismissed entry lookup to fail")
+	}
+}

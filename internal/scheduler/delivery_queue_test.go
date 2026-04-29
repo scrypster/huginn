@@ -133,6 +133,129 @@ func TestDeliveryQueue_Worker_CircuitOpensAfter5Failures(t *testing.T) {
 	}
 }
 
+func TestDeliveryQueue_BadgeActionableAndDismiss(t *testing.T) {
+	q := newTestDeliveryQueue(t)
+	now := time.Now().UTC()
+	_ = q.store.Insert(DeliveryQueueEntry{
+		ID:           "badge-1",
+		WorkflowID:   "wf-1",
+		RunID:        "run-1",
+		Endpoint:     "https://hooks.slack.com/a",
+		Channel:      "webhook",
+		Payload:      `{}`,
+		Status:       "failed",
+		MaxAttempts:  5,
+		RetryWindowS: 480,
+		NextRetryAt:  now,
+	})
+
+	count, err := q.BadgeCount()
+	if err != nil {
+		t.Fatalf("BadgeCount: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("BadgeCount = %d, want 1", count)
+	}
+
+	rows, err := q.ListActionable(10)
+	if err != nil {
+		t.Fatalf("ListActionable: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "badge-1" {
+		t.Fatalf("ListActionable mismatch: %+v", rows)
+	}
+
+	if err := q.Dismiss("badge-1"); err != nil {
+		t.Fatalf("Dismiss: %v", err)
+	}
+	count, err = q.BadgeCount()
+	if err != nil {
+		t.Fatalf("BadgeCount after dismiss: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("BadgeCount after dismiss = %d, want 0", count)
+	}
+}
+
+func TestDeliveryQueue_ForceRetry_ResetsFailedEntryAndClosesCircuit(t *testing.T) {
+	db, err := sqlitedb.Open(filepath.Join(t.TempDir(), "force-retry.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.ApplySchema(); err != nil {
+		t.Fatalf("ApplySchema: %v", err)
+	}
+	if err := db.Migrate(Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// ForceRetry spawns a detached goroutine; give it a brief drain window before close.
+	t.Cleanup(func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = db.Close()
+	})
+	q := NewDeliveryQueue(NewDeliveryQueueStore(db), NewDelivererRegistry(nil), nil, nil)
+
+	now := time.Now().UTC()
+	entry := DeliveryQueueEntry{
+		ID:           "force-1",
+		WorkflowID:   "wf-force",
+		RunID:        "run-force",
+		Endpoint:     "https://hooks.slack.com/force",
+		Channel:      "webhook",
+		Payload:      `{}`,
+		Status:       "failed",
+		AttemptCount: 5,
+		MaxAttempts:  5,
+		RetryWindowS: 120,
+		NextRetryAt:  now,
+	}
+	if err := q.store.Insert(entry); err != nil {
+		t.Fatalf("insert failed entry: %v", err)
+	}
+	opened := now.Add(-time.Minute)
+	if err := q.store.UpsertHealth(EndpointHealth{
+		WorkflowID:          entry.WorkflowID,
+		Endpoint:            entry.Endpoint,
+		ConsecutiveFailures: 9,
+		CircuitState:        "open",
+		OpenedAt:            &opened,
+		LastProbeAt:         &opened,
+	}); err != nil {
+		t.Fatalf("UpsertHealth: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // make RunOnce(ctx) exit without mutating the reset entry
+	if err := q.ForceRetry(ctx, entry.ID); err != nil {
+		t.Fatalf("ForceRetry: %v", err)
+	}
+
+	got, err := q.store.Get(entry.ID)
+	if err != nil {
+		t.Fatalf("Get entry: %v", err)
+	}
+	if got.Status != "pending" {
+		t.Errorf("status after ForceRetry = %q, want pending", got.Status)
+	}
+	health, err := q.store.GetHealth(entry.WorkflowID, entry.Endpoint)
+	if err != nil {
+		t.Fatalf("GetHealth: %v", err)
+	}
+	if health.CircuitState != "closed" {
+		t.Errorf("circuit_state after ForceRetry = %q, want closed", health.CircuitState)
+	}
+	if health.ConsecutiveFailures != 0 {
+		t.Errorf("consecutive_failures after ForceRetry = %d, want 0", health.ConsecutiveFailures)
+	}
+}
+
+func TestDeliveryQueue_ForceRetry_NotFound(t *testing.T) {
+	q := newTestDeliveryQueue(t)
+	if err := q.ForceRetry(context.Background(), "does-not-exist"); err == nil {
+		t.Fatal("expected ForceRetry to fail for unknown entry")
+	}
+}
+
 type mockDeliverer struct {
 	status string
 	errMsg string
