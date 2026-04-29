@@ -121,6 +121,39 @@ jobs:
           path: web/playwright-report/
           retention-days: 7
 
+  # ── No-LLM golden journeys: deterministic confidence gate ──────────────────
+  no-llm-golden:
+    name: No-LLM golden journeys
+    runs-on: ubuntu-latest
+    needs: go
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Run deterministic backend golden tests
+        run: go test ./internal/agent ./internal/server -run 'TestChatWithAgent_ChannelMemoryReplication_QueuesFanout|TestChatWithAgent_WithoutReplicationContext_DoesNotQueueFanout|TestHandleWSMessage_ChannelLeadDelegation_GoldenPath' -count=1
+
+      - name: Install web dependencies
+        run: cd web && npm ci
+
+      - name: Install Playwright browsers
+        run: cd web && npx playwright install chromium --with-deps
+
+      - name: Run deterministic frontend golden journey tests
+        run: cd web && npx playwright test e2e/golden-journeys.spec.ts --reporter=list
+
   # ── Shell script linting ──────────────────────────────────────────────────
   shellcheck:
     name: Shellcheck
@@ -137,7 +170,7 @@ jobs:
   promote-main:
     name: Promote develop → main
     runs-on: ubuntu-latest
-    needs: [go, windows, playwright-e2e, shellcheck]
+    needs: [go, windows, playwright-e2e, no-llm-golden, shellcheck]
     if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
     permissions:
       contents: write

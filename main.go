@@ -3193,6 +3193,21 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	muninnCfgFilePath := filepath.Join(home, ".config", "huginn", "muninn.json")
 	srv.SetMuninnConfigPath(muninnCfgFilePath)
 	orch.SetMuninnConfigPath(muninnCfgFilePath)
+	if sqlDB != nil {
+		// Channel memory fan-out replicator (Muninn -> teammate vaults).
+		// Uses the same SQLite DB for durable retry queueing.
+		channelMemReplicator := agent.NewMemoryReplicator(
+			muninnCfgFilePath,
+			agent.NewSQLiteReplicationQueuer(sqlDB),
+		)
+		orch.SetMemoryReplicator(channelMemReplicator)
+		repCtx, repCancel := context.WithCancel(context.Background())
+		go channelMemReplicator.Start(repCtx)
+		cleanupFns = append(cleanupFns, func() {
+			repCancel()
+			channelMemReplicator.Stop()
+		})
+	}
 
 	// Surface the build-time version (set via -ldflags="-X main.version=...")
 	// to /api/v1/health so the frontend can render it in the H-logo tooltip,
