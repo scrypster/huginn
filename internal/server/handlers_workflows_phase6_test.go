@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -353,5 +354,103 @@ func TestHandleDiffWorkflowRuns_LeftMissing(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("diff 404: want 404, got %d", resp.StatusCode)
+	}
+}
+
+func installSaturatedSchedulerForPhase6(t *testing.T, srv *Server) {
+	t.Helper()
+
+	release := make(chan struct{})
+	var started atomic.Int64
+
+	sched := scheduler.New()
+	sched.SetWorkflowRunner(func(ctx context.Context, _ *scheduler.Workflow) error {
+		started.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	for i := 0; i < 10; i++ {
+		wf := &scheduler.Workflow{ID: "phase6-blocker-" + string(rune('a'+i)), Name: "Blocker"}
+		if err := sched.TriggerWorkflow(context.Background(), wf); err != nil {
+			close(release)
+			t.Fatalf("fill scheduler slot %d: %v", i, err)
+		}
+	}
+
+	deadline := time.After(3 * time.Second)
+	for started.Load() < 10 {
+		select {
+		case <-deadline:
+			close(release)
+			t.Fatalf("timeout waiting for scheduler saturation; started=%d", started.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	srv.mu.Lock()
+	srv.sched = sched
+	srv.mu.Unlock()
+
+	t.Cleanup(func() {
+		close(release)
+		sched.Stop(context.Background())
+	})
+}
+
+func TestHandleReplayWorkflowRun_ConcurrencyLimit_Returns503(t *testing.T) {
+	srv, ts := newTestServer(t)
+	srv.workflowRunStore = newMemRunStore()
+
+	id := createTestWorkflowHTTP(t, ts.URL, `{"name":"replay-capacity","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
+	snap := &scheduler.Workflow{ID: id, Name: "replay-capacity"}
+	seedRun(t, srv, id, "run-capacity", snap, map[string]string{"k": "v"}, scheduler.WorkflowRunStatusComplete, nil)
+
+	installSaturatedSchedulerForPhase6(t, srv)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows/"+id+"/runs/run-capacity/replay", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("replay 503: want 503, got %d", resp.StatusCode)
+	}
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "60" {
+		t.Errorf("replay Retry-After = %q, want \"60\"", retryAfter)
+	}
+}
+
+func TestHandleForkWorkflowRun_ConcurrencyLimit_Returns503(t *testing.T) {
+	srv, ts := newTestServer(t)
+	srv.workflowRunStore = newMemRunStore()
+
+	id := createTestWorkflowHTTP(t, ts.URL, `{"name":"fork-capacity","enabled":false,"schedule":"0 9 * * 1-5","steps":[]}`)
+	snap := &scheduler.Workflow{ID: id, Name: "fork-capacity"}
+	seedRun(t, srv, id, "run-capacity", snap, map[string]string{"base": "value"}, scheduler.WorkflowRunStatusComplete, nil)
+
+	installSaturatedSchedulerForPhase6(t, srv)
+
+	reqBody := `{"inputs":{"override":"yes"}}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows/"+id+"/runs/run-capacity/fork", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("fork 503: want 503, got %d", resp.StatusCode)
+	}
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "60" {
+		t.Errorf("fork Retry-After = %q, want \"60\"", retryAfter)
 	}
 }

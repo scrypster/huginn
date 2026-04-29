@@ -10,6 +10,7 @@ const mockInstalledError = ref<string | null>(null)
 const mockInstalledLoad = vi.fn()
 const mockInstalledToggleEnabled = vi.fn().mockResolvedValue(undefined)
 const mockInstalledUninstall = vi.fn().mockResolvedValue(undefined)
+const mockInstalledExecute = vi.fn().mockResolvedValue('ok')
 
 const mockRegistryIndex = ref<any[]>([])
 const mockRegistryCollections = ref<any[]>([])
@@ -27,6 +28,7 @@ vi.mock('../../composables/useSkills', () => ({
     load: mockInstalledLoad,
     toggleEnabled: mockInstalledToggleEnabled,
     uninstall: mockInstalledUninstall,
+    execute: (...args: unknown[]) => mockInstalledExecute(...args),
   }),
   useRegistrySkills: () => ({
     index: mockRegistryIndex,
@@ -107,6 +109,7 @@ beforeEach(() => {
   mockInstalledLoad.mockReset()
   mockInstalledUninstall.mockReset().mockResolvedValue(undefined)
   mockInstalledToggleEnabled.mockReset().mockResolvedValue(undefined)
+  mockInstalledExecute.mockReset().mockResolvedValue('ok')
   mockApiAgentsList.mockReset().mockResolvedValue([])
 })
 
@@ -257,6 +260,48 @@ describe('SkillsView (installed tab)', () => {
     await nextTick()
     expect(vm.showUsageModal).toBe(false)
     expect(vm.usageModalSkill).toBeNull()
+  })
+
+  it('runExecute calls installed.execute and stores output', async () => {
+    const w = mountView()
+    await nextTick()
+    const vm = w.vm as any
+    vm.openExecuteModal('code-review')
+    vm.executeInput = 'run this skill'
+    await vm.runExecute()
+    await flushPromises()
+    expect(mockInstalledExecute).toHaveBeenCalledWith(
+      'code-review',
+      'run this skill',
+      expect.any(AbortSignal),
+    )
+    expect(vm.executeOutput).toBe('ok')
+    expect(vm.executeError).toBeNull()
+    expect(vm.executing).toBe(false)
+  })
+
+  it('cancelExecute aborts in-flight skill execution', async () => {
+    mockInstalledExecute.mockImplementationOnce((_name: string, _input: string, signal: AbortSignal) => {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          const err = new Error('aborted')
+          ;(err as any).name = 'AbortError'
+          reject(err)
+        })
+      })
+    })
+    const w = mountView()
+    await nextTick()
+    const vm = w.vm as any
+    vm.openExecuteModal('code-review')
+    vm.executeInput = 'long running'
+    const runPromise = vm.runExecute()
+    await nextTick()
+    vm.cancelExecute()
+    await runPromise
+    await flushPromises()
+    expect(vm.executing).toBe(false)
+    expect(vm.executeError).toBeNull()
   })
 })
 
@@ -483,6 +528,33 @@ describe('SkillsView (browse tab — install flow)', () => {
     await nextTick()
     // When loading, the skills grid is hidden — no "Individual Skills" text
     expect(w.text()).not.toContain('Individual Skills')
+  })
+
+  it('installCollection reports failed skills but continues remaining installs', async () => {
+    const sampleCollection = {
+      id: 'col-1',
+      name: 'core',
+      display_name: 'Core Skills',
+      description: 'Core bundle',
+      author: 'huginn',
+      skills: ['rs-code-review', 'rs-deploy'],
+    }
+    mockRegistryCollections.value = [sampleCollection]
+    mockInstalledSkills.value = []
+    mockRegistryInstall.mockImplementation(async (skillName: string) => {
+      if (skillName === 'code-review') {
+        throw new Error('install failed')
+      }
+    })
+    const w = mountView({ tab: 'browse' })
+    await flushPromises()
+    const vm = w.vm as any
+    await vm.installCollection(sampleCollection)
+    await flushPromises()
+    expect(mockRegistryInstall).toHaveBeenCalledTimes(2)
+    expect(mockInstalledLoad).toHaveBeenCalled()
+    expect(vm.installError).toContain('code-review')
+    expect(vm.installLoading).toBe(false)
   })
 })
 
