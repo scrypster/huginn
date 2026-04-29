@@ -65,3 +65,31 @@ func TestRunner_EmptyOverride_NoOpThroughChain(t *testing.T) {
 		t.Errorf("expected empty override, got %q", seenOverride)
 	}
 }
+
+// TestRunner_DefaultContinuityMode_Deterministic verifies workflow runs always
+// request deterministic continuity by default so step prompts remain task-scoped.
+func TestRunner_DefaultContinuityMode_Deterministic(t *testing.T) {
+	t.Parallel()
+	store := &mockRunStore{}
+	var seen []string
+	agentFn := func(_ context.Context, opts RunOptions) (string, error) {
+		seen = append(seen, opts.ContinuityMode)
+		return "ok", nil
+	}
+	wf := &Workflow{
+		ID: "wf-cont", Name: "continuity-mode",
+		Steps: []WorkflowStep{
+			{Position: 1, Name: "a", Agent: "x", Prompt: "p"},
+			{Position: 2, Name: "b", Agent: "x", Prompt: "p"},
+		},
+	}
+	runner := MakeWorkflowRunner(store, agentFn, nil, nil, nil, nil, "", nil, nil)
+	if err := runner(context.Background(), wf); err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	for i, mode := range seen {
+		if mode != "deterministic" {
+			t.Fatalf("step %d continuity mode = %q, want deterministic", i+1, mode)
+		}
+	}
+}

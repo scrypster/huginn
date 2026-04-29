@@ -2446,6 +2446,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			if len(opts.Connections) > 0 {
 				ctx = agent.WithStepConnections(ctx, opts.Connections)
 			}
+			if opts.WorkflowID != "" {
+				mode := agent.ContinuityModeDeterministic
+				if strings.EqualFold(opts.ContinuityMode, agent.ContinuityModeConversational) {
+					mode = agent.ContinuityModeConversational
+				}
+				ctx = agent.WithContinuityMode(ctx, mode)
+			}
 			if err := orch.ChatWithAgent(ctx, ag, opts.Prompt, sessionID, onToken, nil, nil); err != nil {
 				return "", fmt.Errorf("workflow: agent execution: %w", err)
 			}
