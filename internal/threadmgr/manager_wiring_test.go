@@ -27,3 +27,19 @@ func TestThreadManager_SetCompletionNotifier(t *testing.T) {
 		t.Fatal("SetCompletionNotifier did not set the notifier")
 	}
 }
+
+func TestThreadManager_SetThreadBus(t *testing.T) {
+	tm := New()
+	if tm.threadBus == nil {
+		t.Fatal("expected default threadBus on new ThreadManager")
+	}
+	bus := NewThreadBus(4)
+	tm.SetThreadBus(bus)
+	if tm.threadBus != bus {
+		t.Fatal("SetThreadBus did not set bus")
+	}
+	tm.SetThreadBus(nil)
+	if tm.threadBus != nil {
+		t.Fatal("SetThreadBus(nil) should disable bus")
+	}
+}

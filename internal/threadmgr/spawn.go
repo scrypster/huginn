@@ -257,6 +257,7 @@ func (tm *ThreadManager) runOnce(
 		if r := recover(); r != nil {
 			switch v := r.(type) {
 			case *ErrFinish:
+				tm.PublishSiblingContext(threadID, "completed: "+v.Summary.Summary)
 				tm.Complete(threadID, v.Summary)
 				broadcast(sess.ID, "thread_done", map[string]any{
 					"thread_id":  threadID,
@@ -282,6 +283,7 @@ func (tm *ThreadManager) runOnce(
 				result = loopResult{kind: loopDone}
 
 			case *ErrHelp:
+				tm.PublishSiblingContext(threadID, "blocked: "+v.Message)
 				tm.setBlocked(threadID, v.Message)
 				if helpResolver != nil {
 					go func(msg string) {
@@ -407,6 +409,12 @@ func (tm *ThreadManager) runOnce(
 		} else {
 			history = append([]backend.Message{{Role: "system", Content: runtime.ExtraSystem}}, history...)
 		}
+	}
+	if sibling := tm.SiblingContext(threadID, 8); len(sibling) > 0 {
+		history = append(history, backend.Message{
+			Role:    "user",
+			Content: formatSiblingContextBlock(sibling),
+		})
 	}
 	logger.Info("runOnce: context built", "thread_id", threadID, "history_len", len(history))
 	// Log roles for debugging the "must end with user message" constraint.
@@ -601,6 +609,7 @@ func (tm *ThreadManager) runOnce(
 			ToolCalls: resp.ToolCalls,
 		}
 		history = append(history, assistantMsg)
+		tm.PublishSiblingContext(threadID, resp.Content)
 
 		// Persist the assistant message.
 		if err := store.AppendToThread(sess.ID, threadID, session.SessionMessage{
@@ -861,4 +870,25 @@ func clipResult(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func formatSiblingContextBlock(msgs []ThreadContextMessage) string {
+	var sb strings.Builder
+	sb.WriteString("## Team Context Updates\n")
+	for _, m := range msgs {
+		content := clipResult(m.Content, 140)
+		if content == "" {
+			continue
+		}
+		agent := m.AgentID
+		if agent == "" {
+			agent = "unknown-agent"
+		}
+		sb.WriteString("- ")
+		sb.WriteString(agent)
+		sb.WriteString(": ")
+		sb.WriteString(content)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
 }
