@@ -175,3 +175,54 @@ func TestReadDeliveryFailures_IgnoresOldFiles(t *testing.T) {
 		t.Error("new delivery failure not found in results")
 	}
 }
+
+func TestWriteDeliveryFailure_AppendsViaAsyncWrapper(t *testing.T) {
+	dir := t.TempDir()
+	WriteDeliveryFailure(dir, "wf-async", "run-async", "https://hooks.example.com/notify", 5, "timeout")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		records, err := ReadDeliveryFailures(dir, 10)
+		if err != nil {
+			t.Fatalf("ReadDeliveryFailures: %v", err)
+		}
+		if len(records) > 0 {
+			if records[0].WorkflowID != "wf-async" {
+				t.Fatalf("workflow_id = %q, want %q", records[0].WorkflowID, "wf-async")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected async WriteDeliveryFailure record within 2s")
+}
+
+func TestMarkDeliveryFailureRetried_FiltersOriginalFailure(t *testing.T) {
+	dir := t.TempDir()
+	rec := DeliveryFailureRecord{
+		Ts:         time.Now().UTC().Format(time.RFC3339),
+		WorkflowID: "wf-retry",
+		RunID:      "run-retry",
+		URL:        "https://hooks.example.com/notify",
+		Attempts:   3,
+		LastError:  "server error",
+	}
+	if err := appendDeliveryFailure(dir, rec); err != nil {
+		t.Fatalf("appendDeliveryFailure: %v", err)
+	}
+
+	MarkDeliveryFailureRetried(dir, rec.WorkflowID, rec.RunID, rec.URL)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		records, err := ReadDeliveryFailures(dir, 10)
+		if err != nil {
+			t.Fatalf("ReadDeliveryFailures: %v", err)
+		}
+		if len(records) == 0 {
+			return // original failure is filtered once retry marker exists
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected retried failure to be filtered from actionable list")
+}

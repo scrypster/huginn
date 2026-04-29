@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scrypster/huginn/internal/memory"
 )
 
 func TestHandleMuninnTest_MissingConfig(t *testing.T) {
@@ -180,5 +182,76 @@ func TestHandleMuninnTest_Unauthenticated(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleMuninnStatus_ConfiguredConnected(t *testing.T) {
+	srv, ts := newTestServer(t)
+	cfgPath := filepath.Join(t.TempDir(), "muninn.json")
+	if err := memory.SaveGlobalConfig(cfgPath, &memory.GlobalConfig{
+		Endpoint: "http://muninn.example",
+		Username: "root",
+	}); err != nil {
+		t.Fatalf("save muninn config: %v", err)
+	}
+	srv.muninnCfgPath = cfgPath
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/muninn/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["connected"] != true {
+		t.Fatalf("connected = %v, want true", body["connected"])
+	}
+	if body["endpoint"] != "http://muninn.example" {
+		t.Fatalf("endpoint = %v, want http://muninn.example", body["endpoint"])
+	}
+}
+
+func TestHandleMuninnVaultsList_SortsVaultNames(t *testing.T) {
+	srv, ts := newTestServer(t)
+	cfgPath := filepath.Join(t.TempDir(), "muninn.json")
+	if err := memory.SaveGlobalConfig(cfgPath, &memory.GlobalConfig{
+		Endpoint: "http://muninn.example",
+		Username: "root",
+		VaultTokens: map[string]string{
+			"zeta-vault":  "mk-z",
+			"alpha-vault": "mk-a",
+		},
+	}); err != nil {
+		t.Fatalf("save muninn config: %v", err)
+	}
+	srv.muninnCfgPath = cfgPath
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/muninn/vaults", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	vaults, ok := body["vaults"].([]any)
+	if !ok || len(vaults) != 2 {
+		t.Fatalf("vaults = %v, want 2 sorted entries", body["vaults"])
+	}
+	if vaults[0] != "alpha-vault" || vaults[1] != "zeta-vault" {
+		t.Fatalf("vault order = %v, want [alpha-vault zeta-vault]", vaults)
 	}
 }

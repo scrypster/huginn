@@ -78,6 +78,26 @@ func TestSafeWebhookURL_MalformedURL(t *testing.T) {
 	}
 }
 
+func TestValidateWebhookURLSyntax_AcceptsHostnameHTTPS(t *testing.T) {
+	if err := ValidateWebhookURLSyntax("https://hooks.example.com/notify"); err != nil {
+		t.Fatalf("expected hostname URL to pass syntax validation, got %v", err)
+	}
+}
+
+func TestValidateWebhookURLSyntax_RejectsPrivateLiteralIP(t *testing.T) {
+	err := ValidateWebhookURLSyntax("https://10.0.0.8/hook")
+	if err == nil {
+		t.Fatal("expected private literal IP to be rejected")
+	}
+}
+
+func TestValidateWebhookURLSyntax_RejectsScheme(t *testing.T) {
+	err := ValidateWebhookURLSyntax("ftp://example.com/hook")
+	if err == nil {
+		t.Fatal("expected non-http(s) scheme to be rejected")
+	}
+}
+
 // ── deliverWithRetry ──────────────────────────────────────────────────────────
 
 func TestDeliverWithRetry_SuccessOnFirstAttempt(t *testing.T) {
@@ -140,3 +160,16 @@ func TestDeliverWithRetry_PermanentErrorNotRetried(t *testing.T) {
 	}
 }
 
+func TestPermanentError_Unwrap(t *testing.T) {
+	base := errors.New("bad request")
+	err := &permanentError{base}
+	if !errors.Is(err, base) {
+		t.Fatalf("errors.Is should unwrap permanentError to base error")
+	}
+}
+
+func TestNewWebhookDeliverer_ExportedFactory(t *testing.T) {
+	if NewWebhookDeliverer() == nil {
+		t.Fatal("NewWebhookDeliverer returned nil")
+	}
+}
