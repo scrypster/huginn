@@ -818,6 +818,28 @@ func (tm *ThreadManager) SiblingContext(threadID string, limit int) []ThreadCont
 	return bus.SiblingContext(t.SessionID, threadID, limit)
 }
 
+// RequireApprovalToken validates a lead-issued token for a high-risk delegated
+// action within the scope of the thread's session/thread/provider/action.
+func (tm *ThreadManager) RequireApprovalToken(threadID, token, provider, action string) error {
+	tm.mu.RLock()
+	t, ok := tm.threads[threadID]
+	reg := tm.proposalRegistry
+	tm.mu.RUnlock()
+	if !ok {
+		return ErrApprovalTokenScopeMismatch
+	}
+	if reg == nil {
+		return ErrApprovalTokenRequired
+	}
+	return reg.RequireToken(token, TokenRequirement{
+		HighRisk:  true,
+		SessionID: t.SessionID,
+		ThreadID:  threadID,
+		Provider:  provider,
+		Action:    action,
+	})
+}
+
 // ErrThreadNotFound is returned by ArchiveThread when the thread ID does not exist.
 var ErrThreadNotFound = fmt.Errorf("thread not found")
 
