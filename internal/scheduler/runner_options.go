@@ -7,7 +7,10 @@
 // new positional argument so the existing call sites stay stable.
 package scheduler
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // runnerConfig collects optional runner dependencies that don't have natural
 // defaults from the existing positional parameters. Defaults are intentionally
@@ -18,6 +21,7 @@ type runnerConfig struct {
 	subWorkflow   SubWorkflowFunc
 	metrics       MetricsCollector
 	deliveryQueue *DeliveryQueue
+	proactivity   ProactivityGateFunc
 }
 
 // MetricsCollector is the minimal contract the runner needs to emit
@@ -58,6 +62,21 @@ func defaultRunnerConfig() runnerConfig {
 // future audit hooks, etc) without breaking the positional MakeWorkflowRunner
 // signature. Apply via MakeWorkflowRunner(..., WithAgentDMDelivery(fn)).
 type RunnerOption func(*runnerConfig)
+
+// ProactivityGateRequest captures context for a candidate proactive DM send.
+type ProactivityGateRequest struct {
+	WorkflowID string
+	Schedule   string
+	AgentName  string
+	User       string
+	Summary    string
+	Detail     string
+	CreatedAt  time.Time
+}
+
+// ProactivityGateFunc decides whether a candidate proactive DM is allowed.
+// Return allow=false with a reason when the send should be suppressed.
+type ProactivityGateFunc func(ctx context.Context, req ProactivityGateRequest) (allow bool, reason string)
 
 // WithAgentDMDelivery wires the per-agent DM delivery callback. The runner
 // invokes it for every NotificationDelivery whose Type is "agent_dm". The
@@ -118,5 +137,13 @@ func WithSubWorkflow(fn SubWorkflowFunc) RunnerOption {
 func WithDeliveryQueue(q *DeliveryQueue) RunnerOption {
 	return func(c *runnerConfig) {
 		c.deliveryQueue = q
+	}
+}
+
+// WithProactivityGate wires a policy gate for proactive agent_dm deliveries.
+// Nil (default) means all candidate deliveries proceed unchanged.
+func WithProactivityGate(fn ProactivityGateFunc) RunnerOption {
+	return func(c *runnerConfig) {
+		c.proactivity = fn
 	}
 }
