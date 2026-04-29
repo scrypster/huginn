@@ -84,6 +84,10 @@ type ThreadManager struct {
 	// Nil-safe — no events are emitted when nil.
 	emitter *EventEmitter
 
+	// threadBus, if set, stores bounded sibling-context updates so delegated
+	// threads can consume recent updates from other subthreads in the same session.
+	threadBus *ThreadBus
+
 	// onCancelMu guards onCancel.
 	onCancelMu sync.RWMutex
 	// onCancel, if non-nil, is called after a thread transitions to
@@ -93,7 +97,7 @@ type ThreadManager struct {
 	onCancel func(sessionID, threadID string)
 
 	// statusChangeMu guards statusChangeHooks.
-	statusChangeMu   sync.RWMutex
+	statusChangeMu    sync.RWMutex
 	statusChangeHooks []func(id string, status ThreadStatus)
 
 	// backendFor, if set, resolves the correct backend for a given agent
@@ -141,6 +145,7 @@ func New() *ThreadManager {
 		fileLocks:            make(map[string]string),
 		MaxThreadsPerSession: DefaultMaxThreadsPerSession,
 		auditLog:             make([]AuditEntry, 0, maxAuditEntries),
+		threadBus:            NewThreadBus(DefaultThreadBusCapacity),
 	}
 }
 
@@ -166,6 +171,13 @@ func (tm *ThreadManager) SetEventEmitter(e *EventEmitter) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.emitter = e
+}
+
+// SetThreadBus wires the sibling context bus. Pass nil to disable.
+func (tm *ThreadManager) SetThreadBus(bus *ThreadBus) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.threadBus = bus
 }
 
 // SetOnCancel registers a callback that is invoked after a thread is
@@ -480,7 +492,7 @@ func (tm *ThreadManager) ListBySession(sessionID string) []*Thread {
 	var result []*Thread
 	for _, t := range tm.threads {
 		if t.SessionID == sessionID {
-			cp := *t   // copy the struct
+			cp := *t // copy the struct
 			result = append(result, &cp)
 		}
 	}
@@ -731,6 +743,7 @@ func (tm *ThreadManager) CleanupSession(sessionID string) {
 	tm.mu.Lock()
 	var cancels []func()
 	var orphanIDs []string
+	bus := tm.threadBus
 	for id, t := range tm.threads {
 		if t.SessionID != sessionID {
 			continue
@@ -755,6 +768,42 @@ func (tm *ThreadManager) CleanupSession(sessionID string) {
 	for _, id := range orphanIDs {
 		tm.ReleaseLeases(id)
 	}
+	if bus != nil {
+		bus.ClearSession(sessionID)
+	}
+}
+
+// PublishSiblingContext writes a short context update for a live thread. The
+// update becomes visible to sibling threads in the same session.
+func (tm *ThreadManager) PublishSiblingContext(threadID, content string) {
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+	tm.mu.RLock()
+	t, ok := tm.threads[threadID]
+	bus := tm.threadBus
+	tm.mu.RUnlock()
+	if !ok || bus == nil {
+		return
+	}
+	bus.Publish(t.SessionID, ThreadContextMessage{
+		ThreadID: threadID,
+		AgentID:  t.AgentID,
+		Content:  clipResult(content, 240),
+	})
+}
+
+// SiblingContext returns recent context updates from sibling threads in the
+// same session as threadID. Updates from threadID itself are excluded.
+func (tm *ThreadManager) SiblingContext(threadID string, limit int) []ThreadContextMessage {
+	tm.mu.RLock()
+	t, ok := tm.threads[threadID]
+	bus := tm.threadBus
+	tm.mu.RUnlock()
+	if !ok || bus == nil {
+		return nil
+	}
+	return bus.SiblingContext(t.SessionID, threadID, limit)
 }
 
 // ErrThreadNotFound is returned by ArchiveThread when the thread ID does not exist.
