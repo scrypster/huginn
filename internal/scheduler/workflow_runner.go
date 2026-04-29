@@ -56,6 +56,12 @@ type RunOptions struct {
 	// means "use the agent default". AgentFuncs that honour this MUST NOT
 	// mutate agents.AgentDef — the override is request-scoped only.
 	ModelOverride string
+
+	// ContinuityMode controls how memory prefetch context is assembled:
+	// "deterministic" keeps continuity task-scoped (workflow-safe default),
+	// "conversational" enables broader orientation signals.
+	// Empty means deterministic for workflow runner calls.
+	ContinuityMode string
 }
 
 // AgentFunc executes an agent run headlessly and returns the raw output.
@@ -471,15 +477,16 @@ func MakeWorkflowRunner(
 				}
 
 				opts := RunOptions{
-					RunID:         runID,
-					AgentName:     step.Agent,
-					Prompt:        fullPrompt,
-					Connections:   step.Connections,
-					WorkflowID:    w.ID,
-					StepName:      stepName,
-					StepPosition:  step.Position,
-					OnToken:       onToken,
-					ModelOverride: step.ModelOverride,
+					RunID:          runID,
+					AgentName:      step.Agent,
+					Prompt:         fullPrompt,
+					Connections:    step.Connections,
+					WorkflowID:     w.ID,
+					StepName:       stepName,
+					StepPosition:   step.Position,
+					OnToken:        onToken,
+					ModelOverride:  step.ModelOverride,
+					ContinuityMode: "deterministic",
 				}
 				// Apply per-step timeout if set. The step context is always a child
 				// of the workflow context so the workflow-level deadline still wins.

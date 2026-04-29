@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
@@ -163,5 +164,43 @@ func TestPrefetchMemoryContextWithEvents_NoMuninnTool(t *testing.T) {
 	}
 	if fired {
 		t.Error("expected callback NOT to fire when no muninn tools are registered")
+	}
+}
+
+func TestPrefetchMemoryContextWithEvents_DeterministicModeTaskScoped(t *testing.T) {
+	t.Parallel()
+
+	o := orchForPrefetch(t)
+	reg := tools.NewRegistry()
+	reg.Register(&muninnFixtureTool{name: "muninn_where_left_off", output: "You were discussing weekend plans."})
+	reg.Register(&muninnFixtureTool{name: "muninn_recall", output: "Pipeline failed on deploy stage.\nNeed to rotate CI token."})
+
+	ctx := WithContinuityMode(context.Background(), ContinuityModeDeterministic)
+	got := o.prefetchMemoryContextWithEvents(ctx, reg, "agentE", "vaultE", "please fix the CI pipeline", nil)
+	if got == "" {
+		t.Fatal("expected non-empty continuity block")
+	}
+	if !strings.Contains(got, "### Task Scope") {
+		t.Fatalf("expected deterministic task scope section, got %q", got)
+	}
+	if strings.Contains(got, "### Recent Orientation") {
+		t.Fatalf("did not expect conversational orientation in deterministic mode, got %q", got)
+	}
+}
+
+func TestPrefetchMemoryContextWithEvents_DefaultConversationalMode(t *testing.T) {
+	t.Parallel()
+
+	o := orchForPrefetch(t)
+	reg := tools.NewRegistry()
+	reg.Register(&muninnFixtureTool{name: "muninn_where_left_off", output: "You were investigating flaky notifications."})
+	reg.Register(&muninnFixtureTool{name: "muninn_recall", output: "Action required: confirm delivery fallback endpoint."})
+
+	got := o.prefetchMemoryContextWithEvents(context.Background(), reg, "agentF", "vaultF", "what should I do next?", nil)
+	if got == "" {
+		t.Fatal("expected non-empty continuity block")
+	}
+	if !strings.Contains(got, "### Recent Orientation") {
+		t.Fatalf("expected conversational orientation section, got %q", got)
 	}
 }
