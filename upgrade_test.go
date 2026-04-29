@@ -63,6 +63,8 @@ func TestParseSemver(t *testing.T) {
 	}{
 		{"v1.2.3", 1, 2, 3, "", true},
 		{"1.2.3", 1, 2, 3, "", true},
+		{"v1.2", 1, 2, 0, "", true},
+		{"1.2-alpha", 1, 2, 0, "alpha", true},
 		{"v0.0.0", 0, 0, 0, "", true},
 		{"v1.2.3-rc.1", 1, 2, 3, "rc.1", true},
 		{"v1.2.3+build.123", 1, 2, 3, "", true},
@@ -70,7 +72,7 @@ func TestParseSemver(t *testing.T) {
 		{"v10.20.30", 10, 20, 30, "", true},
 		// invalid
 		{"", 0, 0, 0, "", false},
-		{"v1.2", 0, 0, 0, "", false},
+		{"v1", 0, 0, 0, "", false},
 		{"vX.Y.Z", 0, 0, 0, "", false},
 		{"1.2.x", 0, 0, 0, "", false},
 	}
@@ -96,6 +98,9 @@ func TestNewerVersionAvailable(t *testing.T) {
 		{"v0.2.0", "v0.2.1", true},
 		{"v0.2.0", "v1.0.0", true},
 		{"v0.9.99", "v1.0.0", true},
+		// Two-part semver tags (e.g. v0.2-alpha) should compare as patch=0.
+		{"v0.1.9-alpha", "v0.2-alpha", true},
+		{"v0.2-alpha", "v0.2", true}, // stable beats prerelease for same numeric version
 		// Already at or above latest
 		{"v0.2.0", "v0.2.0", false},
 		{"v0.3.0", "v0.2.9", false},
