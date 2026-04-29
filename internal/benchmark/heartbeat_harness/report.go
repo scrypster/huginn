@@ -30,6 +30,7 @@ func BuildMarkdownReport(generatedAt time.Time, results []Result) string {
 		))
 	}
 	agg := AggregateKPI(results)
+	gate := EvaluateGate(results, DefaultGateThresholds())
 	b.WriteString("\n## Aggregate\n\n")
 	b.WriteString(fmt.Sprintf(
 		"- Runs: expected `%d`, executed `%d`, missed `%d`, duplicates `%d`\n",
@@ -44,6 +45,21 @@ func BuildMarkdownReport(generatedAt time.Time, results []Result) string {
 	b.WriteString(fmt.Sprintf("- Recovery latency (p95): `%s`\n", agg.RecoveryLatency.Round(time.Millisecond)))
 	b.WriteString(fmt.Sprintf("- Nuisance score (0-100): `%.1f`\n", agg.NuisanceScore))
 	b.WriteString(fmt.Sprintf("- Actionability score (0-100): `%.1f`\n", agg.ActionabilityScore))
+	b.WriteString("\n## Quality Gate\n\n")
+	b.WriteString(fmt.Sprintf("- Status: `%s`\n", boolToStatus(gate.Passed)))
+	b.WriteString(fmt.Sprintf("- Max p95 adherence: `%s`\n", gate.Thresholds.MaxScheduleAdherenceP95))
+	b.WriteString(fmt.Sprintf("- Max p99 adherence: `%s`\n", gate.Thresholds.MaxScheduleAdherenceP99))
+	b.WriteString(fmt.Sprintf("- Max missed run rate: `%.2f%%`\n", gate.Thresholds.MaxMissedRunRate*100))
+	b.WriteString(fmt.Sprintf("- Max duplicate run rate: `%.2f%%`\n", gate.Thresholds.MaxDuplicateRunRate*100))
+	b.WriteString(fmt.Sprintf("- Max recovery latency: `%s`\n", gate.Thresholds.MaxRecoveryLatency))
+	b.WriteString(fmt.Sprintf("- Max nuisance score: `%.1f`\n", gate.Thresholds.MaxNuisanceScore))
+	b.WriteString(fmt.Sprintf("- Min actionability score: `%.1f`\n", gate.Thresholds.MinActionabilityScore))
+	if !gate.Passed && len(gate.Failures) > 0 {
+		b.WriteString("- Failures:\n")
+		for _, failure := range gate.Failures {
+			b.WriteString(fmt.Sprintf("  - `%s`\n", failure))
+		}
+	}
 	return b.String()
 }
 
@@ -53,4 +69,11 @@ func extractScenarios(results []Result) []Scenario {
 		out = append(out, r.Scenario)
 	}
 	return out
+}
+
+func boolToStatus(v bool) string {
+	if v {
+		return "pass"
+	}
+	return "fail"
 }
