@@ -1,6 +1,11 @@
 package threadmgr
 
-import "github.com/scrypster/huginn/internal/backend"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/scrypster/huginn/internal/backend"
+)
 
 // ErrFinish is panicked by ThreadTools.Finish() to break the LLM loop.
 type ErrFinish struct {
@@ -15,7 +20,12 @@ type ErrHelp struct {
 
 // ThreadTools holds the control-flow tools available inside a thread's LLM loop.
 // Not registered in tools.Registry — wired directly into SpawnThread.
-type ThreadTools struct{}
+type ThreadTools struct {
+	ThreadID  string
+	SessionID string
+	AgentID   string
+	Proposals *ProposalRegistry
+}
 
 // FinishSchema returns the backend.Tool schema for the finish() tool.
 func (tt *ThreadTools) FinishSchema() backend.Tool {
@@ -75,6 +85,39 @@ func (tt *ThreadTools) RequestHelpSchema() backend.Tool {
 	}
 }
 
+// ProposeActionSchema returns the backend.Tool schema for propose_action().
+func (tt *ThreadTools) ProposeActionSchema() backend.Tool {
+	return backend.Tool{
+		Type: "function",
+		Function: backend.ToolFunction{
+			Name:        "propose_action",
+			Description: "Request lead approval for a risky action before execution.",
+			Parameters: backend.ToolParameters{
+				Type:     "object",
+				Required: []string{"provider", "action", "risk"},
+				Properties: map[string]backend.ToolProperty{
+					"provider": {
+						Type:        "string",
+						Description: "Provider or integration name for the action (for example: github, sendgrid).",
+					},
+					"action": {
+						Type:        "string",
+						Description: "Action identifier that needs approval (for example: delete_issue).",
+					},
+					"risk": {
+						Type:        "string",
+						Description: "One of: safe, elevated, critical",
+					},
+					"justification": {
+						Type:        "string",
+						Description: "Why this action is necessary now.",
+					},
+				},
+			},
+		},
+	}
+}
+
 // Finish panics with *ErrFinish, breaking the LLM loop in SpawnThread.
 func (tt *ThreadTools) Finish(args map[string]any) {
 	summary, _ := args["summary"].(string)
@@ -124,4 +167,32 @@ func (tt *ThreadTools) Finish(args map[string]any) {
 func (tt *ThreadTools) RequestHelp(args map[string]any) {
 	msg, _ := args["message"].(string)
 	panic(&ErrHelp{Message: msg})
+}
+
+// ProposeAction records a risky action request in the proposal registry.
+func (tt *ThreadTools) ProposeAction(args map[string]any) string {
+	if tt.Proposals == nil {
+		return "propose_action: proposal registry not configured"
+	}
+	provider, _ := args["provider"].(string)
+	action, _ := args["action"].(string)
+	riskRaw, _ := args["risk"].(string)
+	justification, _ := args["justification"].(string)
+
+	proposal, err := tt.Proposals.Submit(ProposalRequest{
+		SessionID:     tt.SessionID,
+		ThreadID:      tt.ThreadID,
+		AgentID:       tt.AgentID,
+		Provider:      provider,
+		Action:        action,
+		Risk:          ActionRisk(strings.ToLower(strings.TrimSpace(riskRaw))),
+		Justification: justification,
+	})
+	if err != nil {
+		return fmt.Sprintf("propose_action: %v", err)
+	}
+	return fmt.Sprintf(
+		"proposal %s recorded for %s/%s (%s). Awaiting lead approval token before execution.",
+		proposal.ID, proposal.Provider, proposal.Action, proposal.Risk,
+	)
 }

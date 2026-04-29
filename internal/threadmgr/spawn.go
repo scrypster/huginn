@@ -370,10 +370,20 @@ func (tm *ThreadManager) runOnce(
 	toolExec := tm.toolExecutor
 	tm.mu.RUnlock()
 
-	tt := &ThreadTools{}
+	tm.mu.RLock()
+	proposals := tm.proposalRegistry
+	tm.mu.RUnlock()
+
+	tt := &ThreadTools{
+		ThreadID:  threadID,
+		SessionID: sess.ID,
+		AgentID:   agentID,
+		Proposals: proposals,
+	}
 	tools := []backend.Tool{
 		tt.FinishSchema(),
 		tt.RequestHelpSchema(),
+		tt.ProposeActionSchema(),
 	}
 
 	// Per-agent runtime path: schemas come from the orchestrator-built
@@ -678,6 +688,29 @@ func (tm *ThreadManager) runOnce(
 
 		// Process each tool call.
 		for _, tc := range resp.ToolCalls {
+			appendToolResult := func(resultContent string) {
+				history = append(history, backend.Message{
+					Role:       "tool",
+					Content:    resultContent,
+					ToolName:   tc.Function.Name,
+					ToolCallID: tc.ID,
+				})
+				if err := store.AppendToThread(sess.ID, threadID, session.SessionMessage{
+					Role:       "tool",
+					Content:    clipResult(resultContent, 200),
+					ToolName:   tc.Function.Name,
+					ToolCallID: tc.ID,
+				}); err != nil {
+					slog.Warn("threadmgr: failed to append to thread", "thread_id", threadID, "err", err)
+				}
+				// Broadcast tool done event after non-panic tool completes.
+				broadcast(sess.ID, "thread_tool_done", map[string]any{
+					"thread_id":      threadID,
+					"tool":           tc.Function.Name,
+					"result_summary": clipResult(resultContent, 120),
+				})
+			}
+
 			// Broadcast tool call event before dispatching.
 			broadcast(sess.ID, "thread_tool_call", map[string]any{
 				"thread_id": threadID,
@@ -692,6 +725,8 @@ func (tm *ThreadManager) runOnce(
 			case "request_help":
 				tt.RequestHelp(tc.Function.Arguments)
 				// RequestHelp() panics — execution stops here via defer/recover.
+			case "propose_action":
+				appendToolResult(tt.ProposeAction(tc.Function.Arguments))
 			default:
 				// Dispatch to the per-agent runtime executor when available
 				// (gate-wrapped against the agent's session-local registry,
@@ -720,27 +755,7 @@ func (tm *ThreadManager) runOnce(
 				default:
 					resultContent = fmt.Sprintf("unknown tool: %s", tc.Function.Name)
 				}
-				// Full content goes into LLM history; clipped for persistent store.
-				history = append(history, backend.Message{
-					Role:       "tool",
-					Content:    resultContent,
-					ToolName:   tc.Function.Name,
-					ToolCallID: tc.ID,
-				})
-				if err := store.AppendToThread(sess.ID, threadID, session.SessionMessage{
-					Role:       "tool",
-					Content:    clipResult(resultContent, 200),
-					ToolName:   tc.Function.Name,
-					ToolCallID: tc.ID,
-				}); err != nil {
-					slog.Warn("threadmgr: failed to append to thread", "thread_id", threadID, "err", err)
-				}
-				// Broadcast tool done event after non-panic tool completes.
-				broadcast(sess.ID, "thread_tool_done", map[string]any{
-					"thread_id":      threadID,
-					"tool":           tc.Function.Name,
-					"result_summary": clipResult(resultContent, 120),
-				})
+				appendToolResult(resultContent)
 			}
 		}
 

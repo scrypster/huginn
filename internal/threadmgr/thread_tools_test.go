@@ -1,6 +1,7 @@
 package threadmgr
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -106,5 +107,39 @@ func TestRequestHelpTool_EmptyMessage(t *testing.T) {
 
 	if caught == nil {
 		t.Fatal("expected ErrHelp panic with empty message")
+	}
+}
+
+func TestProposeAction_RequiresRegistry(t *testing.T) {
+	tt := &ThreadTools{
+		ThreadID:  "thread-1",
+		SessionID: "sess-1",
+		AgentID:   "SubAgent",
+	}
+	out := tt.ProposeAction(map[string]any{
+		"provider": "github",
+		"action":   "delete_issue",
+		"risk":     "critical",
+	})
+	if !strings.Contains(out, "proposal registry not configured") {
+		t.Fatalf("expected missing registry message, got %q", out)
+	}
+}
+
+func TestProposeAction_RecordsProposal(t *testing.T) {
+	tt := &ThreadTools{
+		ThreadID:  "thread-1",
+		SessionID: "sess-1",
+		AgentID:   "SubAgent",
+		Proposals: NewProposalRegistry(),
+	}
+	out := tt.ProposeAction(map[string]any{
+		"provider":      "github",
+		"action":        "delete_issue",
+		"risk":          "critical",
+		"justification": "clean up failed run artifact",
+	})
+	if !strings.Contains(out, "Awaiting lead approval token") {
+		t.Fatalf("expected approval guidance in output, got %q", out)
 	}
 }
