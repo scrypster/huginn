@@ -360,6 +360,23 @@ describe('useApi — apiFetch (via api.*)', () => {
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/agents/Coder')
   })
 
+  it('api.agents.capabilityMatrix calls capability matrix endpoint', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ connections: [], providers: [] }))
+    await api.agents.capabilityMatrix()
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/agents/capability-matrix')
+  })
+
+  it('api.agents.validateCapabilityMatrix sends POST payload', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ valid: true, decisions: [] }))
+    await api.agents.validateCapabilityMatrix([{ connection_id: 'conn-1', provider: 'github', approval_gate: false }])
+    const [url, opts] = fetchSpy.mock.calls[0]
+    expect(url).toBe('/api/v1/agents/capability-matrix/validate')
+    expect(opts?.method).toBe('POST')
+    expect(JSON.parse(opts?.body as string)).toEqual({
+      toolbelt: [{ connection_id: 'conn-1', provider: 'github', approval_gate: false }],
+    })
+  })
+
   it('api.threads.list calls correct endpoint with sessionId', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok([]))
     await api.threads.list('sess-1')

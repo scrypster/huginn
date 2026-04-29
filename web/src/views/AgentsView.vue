@@ -349,6 +349,16 @@
                 <span class="text-[11px] text-huginn-muted">{{ connectionsSummary }}</span>
               </div>
               <p class="text-[11px] text-huginn-muted leading-relaxed">Grant this agent access to external services and cloud tools.</p>
+              <div v-if="connectionValidationIssues.length"
+                data-testid="toolbelt-validation-warning"
+                class="px-3 py-2 rounded-lg border border-huginn-amber/40 bg-huginn-amber/8">
+                <p class="text-[11px] text-huginn-amber font-medium">Some assignments need attention before save:</p>
+                <p v-for="issue in connectionValidationIssues"
+                  :key="issue.entry.connection_id + ':' + (issue.entry.profile || '')"
+                  class="text-[10px] text-huginn-amber/80 mt-0.5">
+                  {{ connectionLabel(issue.entry.connection_id) }}: {{ issue.reason }}
+                </p>
+              </div>
               <div class="flex items-center gap-2">
                 <button
                   data-testid="connections-allow-all-btn"
@@ -466,7 +476,7 @@
           </div>
           <div class="flex gap-2">
             <button @click="discard" class="px-3 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">Discard</button>
-            <button data-testid="save-agent-btn-sticky" @click="save" :disabled="saving"
+            <button data-testid="save-agent-btn-sticky" @click="save" :disabled="saving || connectionValidationIssues.length > 0"
               class="px-4 py-1.5 text-xs font-medium text-white rounded-lg transition-all active:scale-95 disabled:opacity-50"
               style="background:rgba(88,166,255,0.9)">
               {{ saving ? 'Saving...' : 'Save changes' }}
@@ -717,6 +727,13 @@
                       </button>
                     </div>
 
+                    <div v-if="modalEntryIssueReason(entry)"
+                      class="px-3.5 py-2 border-t border-huginn-red/20 bg-huginn-red/6">
+                      <p class="text-[10px] text-huginn-red/85">
+                        {{ modalEntryIssueReason(entry) }}
+                      </p>
+                    </div>
+
                   </div>
                 </TransitionGroup>
 
@@ -735,8 +752,11 @@
               Cancel
             </button>
             <button @click="saveConnectionsModal"
+              :disabled="modalConnectionValidationIssues.length > 0"
               class="px-5 py-2 text-xs font-semibold text-white rounded-lg transition-all duration-150 active:scale-[0.97]"
-              style="background:linear-gradient(135deg,rgba(88,166,255,0.95),rgba(58,130,246,0.95));box-shadow:0 2px 14px rgba(88,166,255,0.28)">
+              :style="modalConnectionValidationIssues.length > 0
+                ? 'background:linear-gradient(135deg,rgba(88,166,255,0.45),rgba(58,130,246,0.45));box-shadow:none;cursor:not-allowed'
+                : 'background:linear-gradient(135deg,rgba(88,166,255,0.95),rgba(58,130,246,0.95));box-shadow:0 2px 14px rgba(88,166,255,0.28)'">
               Save
             </button>
           </div>
@@ -1368,6 +1388,9 @@ const {
   toolDescription,
   isConnectionsAllowAll,
   connectionsSummary,
+  connectionValidationIssues,
+  modalConnectionValidationIssues,
+  modalEntryIssueReason,
   toggleConnectionsAllowAll,
   save,
   discard,

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { defineComponent, ref } from 'vue'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { useAgentsViewState } from '../useAgentsViewState'
 
 const {
@@ -9,12 +9,14 @@ const {
   mockLoading,
   mockRouterPush,
   mockRouterReplace,
+  mockConnectionsList,
 } = vi.hoisted(() => ({
   mockApiFetch: vi.fn(),
   mockAgents: { value: [] as any[] },
   mockLoading: { value: false },
   mockRouterPush: vi.fn(),
   mockRouterReplace: vi.fn(),
+  mockConnectionsList: vi.fn().mockResolvedValue([]),
 }))
 
 vi.mock('../../../composables/useApi', () => ({
@@ -27,11 +29,13 @@ vi.mock('../../../composables/useApi', () => ({
       vaults: vi.fn().mockResolvedValue({ vaults: [] }),
       createVault: vi.fn().mockResolvedValue({}),
     },
-    connections: { list: vi.fn().mockResolvedValue([]) },
+    connections: { list: mockConnectionsList },
     system: { tools: vi.fn().mockResolvedValue([]) },
     agents: {
       get: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
+      capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
+      validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
     },
   },
 }))
@@ -73,6 +77,8 @@ beforeEach(() => {
   mockApiFetch.mockReset()
   mockRouterPush.mockReset()
   mockRouterReplace.mockReset()
+  mockConnectionsList.mockReset()
+  mockConnectionsList.mockResolvedValue([])
 })
 
 describe('useAgentsViewState', () => {
@@ -93,12 +99,16 @@ describe('useAgentsViewState', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/agents/Alpha')
   })
 
-  it('toggleConnectionsAllowAll toggles wildcard toolbelt entry', () => {
+  it('toggleConnectionsAllowAll toggles explicit assignable connections', async () => {
+    mockConnectionsList.mockResolvedValueOnce([
+      { id: 'conn-1', provider: 'github', account_label: 'GitHub' },
+    ])
     const { state } = mountHarness()
+    await flushPromises()
 
     state.form.value.toolbelt = []
     state.toggleConnectionsAllowAll()
-    expect(state.form.value.toolbelt).toEqual([{ connection_id: '*', provider: '*', profile: '', approval_gate: false }])
+    expect(state.form.value.toolbelt).toEqual([{ connection_id: 'conn-1', provider: 'github', approval_gate: false }])
 
     state.toggleConnectionsAllowAll()
     expect(state.form.value.toolbelt).toEqual([])
