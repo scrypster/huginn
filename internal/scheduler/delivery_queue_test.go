@@ -178,7 +178,23 @@ func TestDeliveryQueue_BadgeActionableAndDismiss(t *testing.T) {
 }
 
 func TestDeliveryQueue_ForceRetry_ResetsFailedEntryAndClosesCircuit(t *testing.T) {
-	q := newTestDeliveryQueue(t)
+	db, err := sqlitedb.Open(filepath.Join(t.TempDir(), "force-retry.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.ApplySchema(); err != nil {
+		t.Fatalf("ApplySchema: %v", err)
+	}
+	if err := db.Migrate(Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// ForceRetry spawns a detached goroutine; give it a brief drain window before close.
+	t.Cleanup(func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = db.Close()
+	})
+	q := NewDeliveryQueue(NewDeliveryQueueStore(db), NewDelivererRegistry(nil), nil, nil)
+
 	now := time.Now().UTC()
 	entry := DeliveryQueueEntry{
 		ID:           "force-1",
