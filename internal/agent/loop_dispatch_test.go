@@ -223,10 +223,10 @@ func TestDispatchTools_ParallelReadTools(t *testing.T) {
 	// A slow tool that records its start time.
 	makeSlowTool := func(name string) tools.Tool {
 		return &slowRecordingTool{
-			toolName:  name,
-			sleepDur:  30 * time.Millisecond,
-			startsMu:  &mu,
-			starts:    &starts,
+			toolName: name,
+			sleepDur: 30 * time.Millisecond,
+			startsMu: &mu,
+			starts:   &starts,
 		}
 	}
 
@@ -350,6 +350,7 @@ func TestDispatchTools_SerialToolsRunInOrder(t *testing.T) {
 // OnPermissionDenied is called and the tool is not executed.
 func TestRunLoop_PermissionGateDenies(t *testing.T) {
 	var deniedTools []string
+	var deniedMeta map[string]any
 
 	tool := &writeLevelMockTool{name: "dangerous_tool"}
 	reg := newRegistryWith(tool)
@@ -370,6 +371,9 @@ func TestRunLoop_PermissionGateDenies(t *testing.T) {
 		Tools:    reg,
 		Gate:     gate,
 		Messages: []backend.Message{{Role: "user", Content: "do dangerous thing"}},
+		OnToolDone: func(_ string, _ string, result tools.ToolResult) {
+			deniedMeta = result.Metadata
+		},
 		OnPermissionDenied: func(name string) {
 			deniedTools = append(deniedTools, name)
 		},
@@ -385,6 +389,12 @@ func TestRunLoop_PermissionGateDenies(t *testing.T) {
 	}
 	if len(deniedTools) != 1 || deniedTools[0] != "dangerous_tool" {
 		t.Errorf("expected OnPermissionDenied for dangerous_tool, got %v", deniedTools)
+	}
+	if deniedMeta == nil || deniedMeta["permission_denied"] != true {
+		t.Fatalf("expected permission denial metadata, got %v", deniedMeta)
+	}
+	if deniedMeta["reason_code"] != permissions.ReasonPromptUnavailable {
+		t.Fatalf("reason_code = %v, want %q", deniedMeta["reason_code"], permissions.ReasonPromptUnavailable)
 	}
 	// Verify denial message in history.
 	found := false

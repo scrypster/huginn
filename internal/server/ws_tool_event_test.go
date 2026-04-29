@@ -1,9 +1,11 @@
 package server
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/sqlitedb"
 )
 
 // TestStreamEventToWS_ToolCall verifies that tool_call events are serialised
@@ -164,5 +166,45 @@ func TestStreamEventToWS_TextVsDoneFiltering(t *testing.T) {
 	// Done should map to "done" type (but onEvent filters it before sending)
 	if doneMsg.Type != "done" {
 		t.Errorf("StreamDone mapped to Type=%q, want done", doneMsg.Type)
+	}
+}
+
+func TestLogToolPermissionAudit_WritesDeniedReasonCode(t *testing.T) {
+	db, err := sqlitedb.Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.ApplySchema(); err != nil {
+		t.Fatalf("ApplySchema: %v", err)
+	}
+
+	audit := newAuditLogger(db)
+	logToolPermissionAudit(audit, map[string]any{
+		"tool":              "write_file",
+		"permission_denied": true,
+		"reason_code":       "prompt_unavailable",
+		"reason":            "Permission prompt is unavailable.",
+	})
+	audit.Close()
+
+	row := db.Read().QueryRow(`SELECT action, resource, allowed, reason FROM audit_log ORDER BY id DESC LIMIT 1`)
+	var action, resource string
+	var allowed int
+	var reason *string
+	if err := row.Scan(&action, &resource, &allowed, &reason); err != nil {
+		t.Fatalf("scan audit row: %v", err)
+	}
+	if action != "tool_permission" {
+		t.Fatalf("action = %q, want %q", action, "tool_permission")
+	}
+	if resource != "write_file" {
+		t.Fatalf("resource = %q, want %q", resource, "write_file")
+	}
+	if allowed != 0 {
+		t.Fatalf("allowed = %d, want 0", allowed)
+	}
+	if reason == nil || *reason != "prompt_unavailable: Permission prompt is unavailable." {
+		t.Fatalf("reason = %v, want %q", reason, "prompt_unavailable: Permission prompt is unavailable.")
 	}
 }

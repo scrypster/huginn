@@ -749,14 +749,14 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		// Keying by callID (not tool name) fixes the same-tool-twice collision.
 		toolArgsCapture := make(map[string]map[string]any)
 		loopCfg := RunLoopConfig{
-			MaxTurns:      50,
-			ModelName:     ag.GetModelID(),
-			Messages:      msgs,
-			Tools:         vr.sessionReg,
-			ToolSchemas:   schemas,
-			Gate:          agentGate,
-			Backend:       agChatBackend,
-			OnToken:       onToken,
+			MaxTurns:         50,
+			ModelName:        ag.GetModelID(),
+			Messages:         msgs,
+			Tools:            vr.sessionReg,
+			ToolSchemas:      schemas,
+			Gate:             agentGate,
+			Backend:          agChatBackend,
+			OnToken:          onToken,
 			OnEvent:          onEvent,
 			VaultWarnOnce:    &sync.Once{},
 			VaultReconnector: vr.reconnector,
@@ -779,6 +779,20 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 				capturedArgs := toolArgsCapture[callID]
 				delete(toolArgsCapture, callID)
 				toolArgsMu.Unlock()
+				permissionDenied := false
+				reasonCode := ""
+				reason := ""
+				if result.Metadata != nil {
+					if denied, ok := result.Metadata["permission_denied"].(bool); ok {
+						permissionDenied = denied
+					}
+					if rc, ok := result.Metadata["reason_code"].(string); ok {
+						reasonCode = rc
+					}
+					if rs, ok := result.Metadata["reason"].(string); ok {
+						reason = rs
+					}
+				}
 				// Replicate memory writes to other channel members' vaults.
 				if o.memoryReplicator != nil && isMemoryToolName(name) && !result.IsError {
 					if replCtx := workforce.GetReplicationContext(ctx); replCtx != nil {
@@ -787,17 +801,35 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 				}
 				slog.Info("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 				if onToolEvent != nil {
-					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})
+					payload := map[string]any{"tool": name, "result": result.Output}
+					if result.Metadata != nil {
+						payload["metadata"] = result.Metadata
+					}
+					if permissionDenied {
+						payload["permission_denied"] = true
+						payload["reason_code"] = reasonCode
+						payload["reason"] = reason
+					}
+					onToolEvent("tool_result", payload)
 				} else if onEvent != nil {
+					payload := map[string]any{
+						"id":      callID,
+						"tool":    name,
+						"success": result.Error == "",
+						"result":  result.Output,
+						"args":    capturedArgs,
+					}
+					if result.Metadata != nil {
+						payload["metadata"] = result.Metadata
+					}
+					if permissionDenied {
+						payload["permission_denied"] = true
+						payload["reason_code"] = reasonCode
+						payload["reason"] = reason
+					}
 					onEvent(backend.StreamEvent{
-						Type: backend.StreamToolResult,
-						Payload: map[string]any{
-							"id":      callID,
-							"tool":    name,
-							"success": result.Error == "",
-							"result":  result.Output,
-							"args":    capturedArgs,
-						},
+						Type:    backend.StreamToolResult,
+						Payload: payload,
 					})
 				}
 			},

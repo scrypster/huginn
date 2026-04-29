@@ -30,7 +30,7 @@ type dispatchedResult struct {
 // RunLoopConfig configures a single agentic loop run.
 type RunLoopConfig struct {
 	MaxTurns           int
-	ModelName          string           // model identifier sent to backend
+	ModelName          string // model identifier sent to backend
 	Messages           []backend.Message
 	Tools              *tools.Registry
 	ToolSchemas        []backend.Tool
@@ -150,11 +150,34 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 			Args:     argsMap,
 			Provider: cfg.Tools.ProviderFor(toolName),
 		}
-		if !cfg.Gate.Check(req) {
+		checkResult := cfg.Gate.CheckDetailed(req)
+		if !checkResult.Allowed {
+			denyOutput := "error: permission denied"
+			if checkResult.Reason != "" {
+				denyOutput += ": " + checkResult.Reason
+			}
+			denyResult := tools.ToolResult{
+				Output:  denyOutput,
+				Error:   "permission denied",
+				IsError: true,
+				Metadata: map[string]any{
+					"permission_denied": true,
+					"reason_code":       checkResult.ReasonCode,
+					"reason":            checkResult.Reason,
+				},
+			}
+			// Surface denied tool attempts through normal tool-event callbacks so
+			// UIs/auditors can render and record the blocked action consistently.
+			if cfg.OnToolCall != nil {
+				cfg.OnToolCall(callID, toolName, argsMap)
+			}
+			if cfg.OnToolDone != nil {
+				cfg.OnToolDone(callID, toolName, denyResult)
+			}
 			if cfg.OnPermissionDenied != nil {
 				cfg.OnPermissionDenied(toolName)
 			}
-			return makeResult("error: permission denied")
+			return makeResult(denyOutput)
 		}
 	}
 

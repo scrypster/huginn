@@ -56,6 +56,20 @@ type PermissionRequest struct {
 	Provider string // provider tag from tool registry; empty if untagged
 }
 
+const (
+	ReasonProviderNotAllowed = "provider_not_allowed"
+	ReasonPromptUnavailable  = "prompt_unavailable"
+	ReasonPromptTimeout      = "prompt_timeout"
+	ReasonUserDenied         = "user_denied"
+)
+
+// CheckResult describes a gate decision with machine-readable denial context.
+type CheckResult struct {
+	Allowed    bool
+	ReasonCode string
+	Reason     string
+}
+
 // Gate controls whether tool calls proceed.
 type Gate struct {
 	mu               sync.Mutex
@@ -319,6 +333,12 @@ func (g *Gate) DeliverRelayResponse(requestID string, approved bool) bool {
 // PermRead tools are always allowed unless blocked by provider restriction.
 // PermWrite/PermExec respect skipAll, sessionAllowed, and promptFunc.
 func (g *Gate) Check(req PermissionRequest) bool {
+	return g.CheckDetailed(req).Allowed
+}
+
+// CheckDetailed returns the gate decision plus denial reason metadata.
+// Callers that only need a bool can use Check.
+func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 	// Toolbelt enforcement: reject calls from providers not in the allowed set.
 	// Only applies when allowedProviders is non-nil (agent has an explicit toolbelt)
 	// and req.Provider is non-empty (connection tool, not an internal tool).
@@ -327,12 +347,16 @@ func (g *Gate) Check(req PermissionRequest) bool {
 		allowed := g.allowedProviders
 		g.mu.Unlock()
 		if allowed != nil && !allowed[req.Provider] {
-			return false
+			return CheckResult{
+				Allowed:    false,
+				ReasonCode: ReasonProviderNotAllowed,
+				Reason:     "This agent is not allowed to use this provider.",
+			}
 		}
 	}
 	// Read-only tools are always allowed
 	if req.Level == tools.PermRead {
-		return true
+		return CheckResult{Allowed: true}
 	}
 	// --dangerously-skip-permissions bypasses everything UNLESS the provider
 	// is in watchedProviders (per-connection approval gate).
@@ -341,7 +365,7 @@ func (g *Gate) Check(req PermissionRequest) bool {
 		watched := g.watchedProviders[req.Provider]
 		g.mu.Unlock()
 		if !watched {
-			return true
+			return CheckResult{Allowed: true}
 		}
 		// Fall through to prompt for watched providers
 	}
@@ -349,13 +373,17 @@ func (g *Gate) Check(req PermissionRequest) bool {
 	// Check session allow-list
 	if g.sessionAllowed[req.ToolName] {
 		g.mu.Unlock()
-		return true
+		return CheckResult{Allowed: true}
 	}
 	g.mu.Unlock()
 
 	// No prompt function — deny by default
 	if g.promptFunc == nil {
-		return false
+		return CheckResult{
+			Allowed:    false,
+			ReasonCode: ReasonPromptUnavailable,
+			Reason:     "Permission prompt is unavailable.",
+		}
 	}
 
 	// Call promptFunc with a timeout. If it doesn't respond within
@@ -376,7 +404,11 @@ func (g *Gate) Check(req PermissionRequest) bool {
 	case <-timer.C:
 		slog.Warn("permissions: promptFunc timed out, denying request",
 			"tool", req.ToolName, "timeout", promptFuncTimeout)
-		return false
+		return CheckResult{
+			Allowed:    false,
+			ReasonCode: ReasonPromptTimeout,
+			Reason:     "Permission request timed out.",
+		}
 	}
 
 	switch decision {
@@ -399,11 +431,15 @@ func (g *Gate) Check(req PermissionRequest) bool {
 			g.lruTouch(req.ToolName)
 		}
 		g.mu.Unlock()
-		return true
+		return CheckResult{Allowed: true}
 	case Allow, AllowOnce:
-		return true
+		return CheckResult{Allowed: true}
 	default:
-		return false
+		return CheckResult{
+			Allowed:    false,
+			ReasonCode: ReasonUserDenied,
+			Reason:     "Permission request was denied.",
+		}
 	}
 }
 
