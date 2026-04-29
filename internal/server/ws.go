@@ -155,13 +155,13 @@ type WSHub struct {
 	mu         sync.RWMutex
 	broadcastC chan WSMessage
 	stopC      chan struct{}
-	stopOnce   sync.Once  // ensures stop() is idempotent
-	stopped    int32      // atomic: 1 once stop() has been called
+	stopOnce   sync.Once // ensures stop() is idempotent
+	stopped    int32     // atomic: 1 once stop() has been called
 	// seqMu guards sessionSeq. We use a separate mutex so broadcastToSession
 	// can hold the RLock on mu (for clients) while atomically incrementing the
 	// per-session sequence counter.
-	seqMu            sync.Mutex
-	sessionSeq       map[string]uint64
+	seqMu             sync.Mutex
+	sessionSeq        map[string]uint64
 	wsDroppedMessages atomic.Int64
 }
 
@@ -564,6 +564,32 @@ func payloadString(m map[string]any, key string) string {
 	return fmt.Sprintf("%v", v)
 }
 
+// logToolPermissionAudit writes denied tool-permission events to audit_log.
+// It is intentionally no-op for non-denied tool events.
+func logToolPermissionAudit(a *auditLogger, payload map[string]any) {
+	if a == nil || payload == nil || !parseBoolPayload(payload["permission_denied"]) {
+		return
+	}
+	toolName := payloadString(payload, "tool")
+	if toolName == "" {
+		toolName = "unknown_tool"
+	}
+	reasonCode := payloadString(payload, "reason_code")
+	reasonText := payloadString(payload, "reason")
+	reason := reasonText
+	if reasonCode != "" {
+		if reason != "" {
+			reason = reasonCode + ": " + reason
+		} else {
+			reason = reasonCode
+		}
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "permission denied"
+	}
+	a.Log("tool_permission", toolName, false, reason)
+}
+
 // streamEventToWS converts a backend.StreamEvent to a WSMessage.
 func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 	// Normalize streaming text and thought events to "token" so that the
@@ -597,17 +623,17 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 // server restart.
 //
 // Resolution order:
-//  1.  Session's primary agent (set via "set_primary_agent" WS message or
-//      stamped at session-creation time from the space's lead agent)
-//  1b. Channel @mention override — when the message starts with @Name and the
-//      named agent is a member of the channel space, route this message to
-//      that agent (stateless per-message, does not change session state).
-//      Only applies to KindChannel spaces; DMs are always 1:1.
-//  1c. Space lead agent — defence-in-depth for DM/channel sessions created
-//      before fix #33 or where space lookup failed at session creation.
-//      Heals existing sessions at runtime without any DB migration.
-//  2.  First agent marked IsDefault in the config
-//  3.  First agent in the config (last resort)
+//  1. Session's primary agent (set via "set_primary_agent" WS message or
+//     stamped at session-creation time from the space's lead agent)
+//     1b. Channel @mention override — when the message starts with @Name and the
+//     named agent is a member of the channel space, route this message to
+//     that agent (stateless per-message, does not change session state).
+//     Only applies to KindChannel spaces; DMs are always 1:1.
+//     1c. Space lead agent — defence-in-depth for DM/channel sessions created
+//     before fix #33 or where space lookup failed at session creation.
+//     Heals existing sessions at runtime without any DB migration.
+//  2. First agent marked IsDefault in the config
+//  3. First agent in the config (last resort)
 //
 // Returns nil only if no agents are configured or the config cannot be loaded,
 // in which case callers should fall back to Orchestrator.Chat().
@@ -961,6 +987,7 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 						tc.Args = args
 					}
 					collectedToolCalls = append(collectedToolCalls, tc)
+					logToolPermissionAudit(s.auditLog, ev.Payload)
 				}
 			}
 
