@@ -10,7 +10,9 @@ echo "==> Running heartbeat harness tests"
 go test ./internal/benchmark/heartbeat_harness -count=1
 
 echo "==> Generating internal heartbeat benchmark scorecard"
-go run ./internal/benchmark/heartbeat_harness/cmd -output "${report_path}"
+go run ./internal/benchmark/heartbeat_harness/cmd \
+  -output "${report_path}" \
+  -enforce-thresholds
 
 cp "${report_path}" "${latest_path}"
 
