@@ -89,6 +89,33 @@ func TestValidateToolbelt_DeniesDuplicateConnectionID(t *testing.T) {
 	}
 }
 
+func TestValidateToolbelt_AllowsSystemEntries(t *testing.T) {
+	matrix := NewCapabilityMatrixWithCatalog(nil, nil)
+	result := matrix.ValidateToolbelt([]agents.ToolbeltEntry{
+		{ConnectionID: "system:github", Provider: "github_cli"},
+	})
+	if !result.Valid {
+		t.Fatalf("expected valid result, got %+v", result)
+	}
+	if len(result.Decisions) != 1 || !result.Decisions[0].Allowed {
+		t.Fatalf("expected allowed decision, got %+v", result.Decisions)
+	}
+}
+
+func TestValidateToolbelt_AllowsSystemEntriesWithDistinctProfiles(t *testing.T) {
+	matrix := NewCapabilityMatrixWithCatalog(nil, nil)
+	result := matrix.ValidateToolbelt([]agents.ToolbeltEntry{
+		{ConnectionID: "system:aws", Provider: "aws", Profile: "prod"},
+		{ConnectionID: "system:aws", Provider: "aws", Profile: "staging"},
+	})
+	if !result.Valid {
+		t.Fatalf("expected valid result, got %+v", result)
+	}
+	if len(result.Decisions) != 2 || !result.Decisions[0].Allowed || !result.Decisions[1].Allowed {
+		t.Fatalf("expected both decisions allowed, got %+v", result.Decisions)
+	}
+}
+
 func TestValidateToolbelt_DeniesSingleAccountProviderMultipleAssignments(t *testing.T) {
 	matrix := NewCapabilityMatrixWithCatalog([]connections.Connection{
 		{ID: "conn-gh-1", Provider: connections.ProviderGitHub},

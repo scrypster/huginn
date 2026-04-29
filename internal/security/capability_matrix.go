@@ -147,7 +147,7 @@ func (m CapabilityMatrix) ValidateToolbelt(tb []agents.ToolbeltEntry) Validation
 		return ValidationResult{Valid: true, Decisions: []ToolbeltDecision{}}
 	}
 
-	seenConnIDs := map[string]bool{}
+	seenEntries := map[string]bool{}
 	seenProviders := map[string]int{}
 	decisions := make([]ToolbeltDecision, 0, len(tb))
 	valid := true
@@ -164,14 +164,36 @@ func (m CapabilityMatrix) ValidateToolbelt(tb []agents.ToolbeltEntry) Validation
 			decisions = append(decisions, decision)
 			continue
 		}
-		if seenConnIDs[connID] {
+		profile := strings.TrimSpace(entry.Profile)
+		entryKey := connID + "::" + profile
+		if seenEntries[entryKey] {
 			valid = false
 			decision.ReasonCode = ReasonDuplicateConnectionID
-			decision.Reason = fmt.Sprintf("connection_id %q is assigned multiple times", connID)
+			decision.Reason = fmt.Sprintf("connection_id/profile %q is assigned multiple times", entryKey)
 			decisions = append(decisions, decision)
 			continue
 		}
-		seenConnIDs[connID] = true
+		seenEntries[entryKey] = true
+		provider := strings.ToLower(strings.TrimSpace(entry.Provider))
+		if provider == "*" {
+			valid = false
+			decision.ReasonCode = ReasonWildcardProviderForbidden
+			decision.Reason = "wildcard provider is not allowed in toolbelt assignments"
+			decisions = append(decisions, decision)
+			continue
+		}
+
+		// System tool entries (system:<tool>) are not backed by connStore and may
+		// legitimately appear multiple times with distinct profiles.
+		if strings.HasPrefix(connID, "system:") {
+			if provider == "" {
+				provider = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(connID, "system:")))
+			}
+			decision.ResolvedProvider = provider
+			decision.Allowed = true
+			decisions = append(decisions, decision)
+			continue
+		}
 
 		conn, ok := m.connByID[connID]
 		if !ok {
@@ -184,14 +206,6 @@ func (m CapabilityMatrix) ValidateToolbelt(tb []agents.ToolbeltEntry) Validation
 
 		resolvedProvider := strings.ToLower(strings.TrimSpace(string(conn.Provider)))
 		decision.ResolvedProvider = resolvedProvider
-		provider := strings.ToLower(strings.TrimSpace(entry.Provider))
-		if provider == "*" {
-			valid = false
-			decision.ReasonCode = ReasonWildcardProviderForbidden
-			decision.Reason = "wildcard provider is not allowed in toolbelt assignments"
-			decisions = append(decisions, decision)
-			continue
-		}
 		if provider == "" {
 			provider = resolvedProvider
 		}

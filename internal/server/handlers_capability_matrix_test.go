@@ -160,3 +160,25 @@ func TestHandleUpdateAgent_AllowsMatchingToolbeltProvider(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
+
+func TestHandleUpdateAgent_AllowsSystemToolbeltEntry(t *testing.T) {
+	_, ts := newTestServerWithConnections(t)
+	body := `{
+		"name": "SystemToolAgent",
+		"model": "claude-opus-4",
+		"toolbelt": [
+			{"connection_id":"system:github","provider":"github_cli"}
+		]
+	}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/SystemToolAgent", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}

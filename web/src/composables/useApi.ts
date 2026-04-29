@@ -39,6 +39,39 @@ export interface ToolbeltEntry {
   approval_gate: boolean
 }
 
+export interface AgentCapabilityConnection {
+  connection_id: string
+  provider: string
+  account_label?: string
+  account_id?: string
+}
+
+export interface AgentCapabilityProvider {
+  provider: string
+  display_name?: string
+  category?: string
+  type?: string
+  multi_account: boolean
+}
+
+export interface AgentCapabilityMatrix {
+  connections: AgentCapabilityConnection[]
+  providers: AgentCapabilityProvider[]
+}
+
+export interface AgentToolbeltDecision {
+  entry: ToolbeltEntry
+  allowed: boolean
+  reason_code?: string
+  reason?: string
+  resolved_provider?: string
+}
+
+export interface AgentCapabilityValidation {
+  valid: boolean
+  decisions: AgentToolbeltDecision[]
+}
+
 export interface Agent {
   name: string
   model: string
@@ -258,6 +291,13 @@ export const api = {
     get: (name: string) => apiFetch<Agent>(`/api/v1/agents/${name}`),
     update: (name: string, data: unknown) =>
       apiFetch(`/api/v1/agents/${name}`, { method: 'PUT', body: JSON.stringify(data) }),
+    capabilityMatrix: () =>
+      apiFetch<AgentCapabilityMatrix>('/api/v1/agents/capability-matrix'),
+    validateCapabilityMatrix: (toolbelt: ToolbeltEntry[]) =>
+      apiFetch<AgentCapabilityValidation>('/api/v1/agents/capability-matrix/validate', {
+        method: 'POST',
+        body: JSON.stringify({ toolbelt }),
+      }),
     testVault: (agentName: string, vaultName?: string) =>
       apiFetch<{ status: string; vault: string; tools_count?: number; warning?: string }>(`/api/v1/agents/${encodeURIComponent(agentName)}/vault/test`, {
         method: 'POST',

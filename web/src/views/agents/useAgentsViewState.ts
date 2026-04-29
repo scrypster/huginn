@@ -4,6 +4,7 @@ import { api, apiFetch, getToken } from '../../composables/useApi'
 import type { Connection, ToolbeltEntry, SystemToolStatus } from '../../composables/useApi'
 import { useInstalledSkills } from '../../composables/useSkills'
 import { useAgents, type AgentSummary } from '../../composables/useAgents'
+import { useAgentCapabilityMatrix } from './useAgentCapabilityMatrix'
 
 interface OllamaModel {
   name: string
@@ -116,6 +117,7 @@ const SHELL_TOOL_NAMES = new Set(['bash', 'run_tests'])
 
 export function useAgentsViewState(agentName: Ref<string | undefined>, router: Router) {
   const { agents, loading, updateAgent, removeAgent: removeFromList, fetchAgents } = useAgents()
+  const capabilityMatrix = useAgentCapabilityMatrix()
 
   async function openDM(agent: AgentSummary) {
     try {
@@ -444,6 +446,87 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     return { bg: 'rgba(88,166,255,0.15)', fg: '#58a6ff', label: chars }
   }
 
+  function systemProviderName(toolName: string): string {
+    const providerMap: Record<string, string> = { github: 'github_cli', aws: 'aws', gcloud: 'gcloud' }
+    return providerMap[toolName] || toolName
+  }
+
+  const allAssignableToolbeltEntries = computed<ToolbeltEntry[]>(() => {
+    const entries: ToolbeltEntry[] = []
+
+    for (const conn of availableConnections.value) {
+      if (!capabilityMatrix.isAssignableConnection(conn)) continue
+      entries.push({
+        connection_id: conn.id,
+        provider: conn.provider,
+        approval_gate: false,
+      })
+    }
+    for (const tool of systemTools.value) {
+      const provider = systemProviderName(tool.name)
+      if (tool.profiles && tool.profiles.length > 1) {
+        for (const profile of tool.profiles) {
+          entries.push({
+            connection_id: 'system:' + tool.name,
+            provider,
+            profile,
+            approval_gate: false,
+          })
+        }
+      } else {
+        entries.push({
+          connection_id: 'system:' + tool.name,
+          provider,
+          profile: tool.profiles?.[0] || undefined,
+          approval_gate: false,
+        })
+      }
+    }
+    return entries
+  })
+
+  function normalizedToolbelt(entries: ToolbeltEntry[]): string {
+    return JSON.stringify(
+      [...entries]
+        .map(entry => ({
+          connection_id: entry.connection_id,
+          provider: entry.provider,
+          profile: entry.profile || '',
+          approval_gate: !!entry.approval_gate,
+        }))
+        .sort((a, b) => {
+          const aKey = `${a.connection_id}::${a.profile}`
+          const bKey = `${b.connection_id}::${b.profile}`
+          return aKey.localeCompare(bKey)
+        }),
+    )
+  }
+
+  const connectionValidationIssues = computed(() =>
+    form.value.toolbelt
+      .map(entry => ({
+        entry,
+        reason: capabilityMatrix.entryReason(entry),
+      }))
+      .filter(issue => !!issue.reason),
+  )
+
+  const modalConnectionValidationIssues = computed(() =>
+    modalToolbelt.value
+      .map(entry => ({
+        entry,
+        reason: capabilityMatrix.entryReason(entry),
+      }))
+      .filter(issue => !!issue.reason),
+  )
+
+  function modalEntryIssueReason(entry: ToolbeltEntry): string | null {
+    const issue = modalConnectionValidationIssues.value.find(
+      i => i.entry.connection_id === entry.connection_id && (i.entry.profile || '') === (entry.profile || ''),
+    )
+    return issue?.reason || null
+  }
+
   async function loadConnections() {
     loadError.value = false
     loadErrorMsg.value = ''
@@ -454,6 +537,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       ])
       availableConnections.value = conns
       systemTools.value = tools.filter(t => t.authed)
+      await capabilityMatrix.refreshMatrix()
     } catch (e) {
       console.error('loadConnections failed:', e)
       loadError.value = true
@@ -474,10 +558,17 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
 
   function openConnectionsModal() {
     modalToolbelt.value = JSON.parse(JSON.stringify(form.value.toolbelt))
+    capabilityMatrix.resetValidation()
     showConnectionsModal.value = true
   }
 
   async function saveConnectionsModal() {
+    const valid = await capabilityMatrix.validateToolbelt(modalToolbelt.value)
+    if (!valid || capabilityMatrix.hasIssues(modalToolbelt.value)) {
+      saveMsg.value = capabilityMatrix.firstReason(modalToolbelt.value) || 'Invalid connection assignment.'
+      saveError.value = true
+      return
+    }
     form.value.toolbelt = JSON.parse(JSON.stringify(modalToolbelt.value))
     showConnectionsModal.value = false
     if (agentName.value && agentName.value !== 'new') {
@@ -488,7 +579,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   }
 
   const modalAddableConnections = computed(() =>
-    availableConnections.value.filter(c => !modalToolbelt.value.some(e => e.connection_id === c.id)),
+    availableConnections.value.filter(c =>
+      capabilityMatrix.isAssignableConnection(c) &&
+      !modalToolbelt.value.some(e => e.connection_id === c.id),
+    ),
   )
 
   const modalAddableSystemToolsForModal = computed(() =>
@@ -510,8 +604,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   }
 
   function modalAddSystemTool(tool: SystemToolStatus, profile: string) {
-    const providerMap: Record<string, string> = { github: 'github_cli', aws: 'aws', gcloud: 'gcloud' }
-    const provider = providerMap[tool.name] || tool.name
+    const provider = systemProviderName(tool.name)
     modalToolbelt.value.push({ connection_id: 'system:' + tool.name, provider, profile: profile || undefined, approval_gate: false })
   }
 
@@ -527,9 +620,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     modalAddableConnections.value.forEach(conn => {
       modalToolbelt.value.push({ connection_id: conn.id, provider: conn.provider, approval_gate: false })
     })
-    const provMap: Record<string, string> = { github: 'github_cli', aws: 'aws', gcloud: 'gcloud' }
     modalAddableSystemToolsForModal.value.forEach(tool => {
-      const provider = provMap[tool.name] || tool.name
+      const provider = systemProviderName(tool.name)
       if (tool.profiles && tool.profiles.length > 1) {
         tool.profiles.forEach(p => {
           if (!modalIsProfileAdded(tool, p)) {
@@ -664,7 +756,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   }
 
   const isConnectionsAllowAll = computed(() =>
-    form.value.toolbelt.length === 1 && form.value.toolbelt[0]?.provider === '*',
+    normalizedToolbelt(form.value.toolbelt) === normalizedToolbelt(allAssignableToolbeltEntries.value) &&
+    allAssignableToolbeltEntries.value.length > 0,
   )
 
   const connectionsSummary = computed(() => {
@@ -677,7 +770,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     if (isConnectionsAllowAll.value) {
       form.value.toolbelt = []
     } else {
-      form.value.toolbelt = [{ connection_id: '*', provider: '*', profile: '', approval_gate: false }]
+      form.value.toolbelt = JSON.parse(JSON.stringify(allAssignableToolbeltEntries.value))
     }
     markDirty()
   }
@@ -760,6 +853,12 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     const validationError = validateAgentForm()
     if (validationError) {
       saveMsg.value = validationError
+      saveError.value = true
+      return
+    }
+    const toolbeltValid = await capabilityMatrix.validateToolbelt(form.value.toolbelt)
+    if (!toolbeltValid || capabilityMatrix.hasIssues(form.value.toolbelt)) {
+      saveMsg.value = capabilityMatrix.firstReason(form.value.toolbelt) || 'Invalid connection assignment.'
       saveError.value = true
       return
     }
@@ -929,6 +1028,9 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     modalAddableConnections,
     modalAddableSystemToolsForModal,
     modalAddableSkills,
+    connectionValidationIssues,
+    modalConnectionValidationIssues,
+    modalEntryIssueReason,
     isLocalAllowAll,
     localAccessSummary,
     showLocalAccessModal,
@@ -980,6 +1082,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     toolLabel,
     toolDescription,
     toggleConnectionsAllowAll,
+    capabilityMatrix,
     ensureVault,
     deriveMemoryType,
     loadAgent,

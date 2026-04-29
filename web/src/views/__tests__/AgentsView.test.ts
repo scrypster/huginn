@@ -47,6 +47,11 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
         status: vi.fn().mockResolvedValue({ connected: false }),
         vaults: vi.fn().mockResolvedValue({ vaults: [] }),
       },
+      agents: {
+        ...orig.api.agents,
+        capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
+        validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
+      },
       models: {
         ...orig.api.models,
         available: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
