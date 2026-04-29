@@ -17,7 +17,6 @@ import (
 	"github.com/scrypster/huginn/internal/notification"
 )
 
-
 // errUnresolvedPlaceholder is the prefix for step errors caused by template
 // placeholders that remain after variable resolution.
 const errUnresolvedPlaceholder = "step failed: unresolved template placeholders"
@@ -29,12 +28,12 @@ const maxStepOutputBytes = 64 * 1024 // 64 KB
 
 // RunOptions carries the parameters for a single agent run.
 type RunOptions struct {
-	RoutineID   string
-	RunID       string
-	AgentName   string
-	Prompt      string
-	Workspace   string
-	MaxTokens   int
+	RoutineID string
+	RunID     string
+	AgentName string
+	Prompt    string
+	Workspace string
+	MaxTokens int
 	// Connections maps provider name → connection account label for
 	// pre-authorised credentials. Injected into the agent's context so the
 	// agent picks the right account when calling integration tools.
@@ -483,36 +482,36 @@ func MakeWorkflowRunner(
 					ModelOverride: step.ModelOverride,
 				}
 				// Apply per-step timeout if set. The step context is always a child
-			// of the workflow context so the workflow-level deadline still wins.
-			stepCtx := ctx
-			stepHadOwnTimeout := false
-			if d := step.TimeoutDuration(); d > 0 {
-				var stepCancel context.CancelFunc
-				stepCtx, stepCancel = context.WithTimeout(ctx, d)
-				defer stepCancel()
-				stepHadOwnTimeout = true
-			}
-			// Plumb a scratchpad writer onto the step context. Tools (e.g.
-			// future set_scratch PromptTool) read this via ScratchSetter and
-			// can mutate the live runScratch map. Mutex-free is safe because
-			// linear workflows execute one step at a time; when fan-out lands
-			// (Phase 8) this needs a sync.Map or per-call mutex.
-			scratchSetter := func(k, v string) error {
-				runScratch[k] = v
-				return nil
-			}
-			stepCtx = WithScratchSetter(stepCtx, scratchSetter)
-			stepStartedAt := time.Now().UTC()
-			output, agentErr := executeStepWithRetry(stepCtx, agentFn, opts, step)
-			stepCompletedAt := time.Now().UTC()
-			stepLatencyMs := stepCompletedAt.Sub(stepStartedAt).Milliseconds()
-			// Final flush: emit any tokens still buffered when the agent
-			// finished so the live UI sees the complete output.
-			flushTokens(true)
-			// Annotate the error so operators know which deadline fired.
-			if agentErr != nil && stepHadOwnTimeout && errors.Is(agentErr, context.DeadlineExceeded) {
-				agentErr = fmt.Errorf("step %q timed out after %s: %w", step.Name, step.TimeoutDuration(), agentErr)
-			}
+				// of the workflow context so the workflow-level deadline still wins.
+				stepCtx := ctx
+				stepHadOwnTimeout := false
+				if d := step.TimeoutDuration(); d > 0 {
+					var stepCancel context.CancelFunc
+					stepCtx, stepCancel = context.WithTimeout(ctx, d)
+					defer stepCancel()
+					stepHadOwnTimeout = true
+				}
+				// Plumb a scratchpad writer onto the step context. Tools (e.g.
+				// future set_scratch PromptTool) read this via ScratchSetter and
+				// can mutate the live runScratch map. Mutex-free is safe because
+				// linear workflows execute one step at a time; when fan-out lands
+				// (Phase 8) this needs a sync.Map or per-call mutex.
+				scratchSetter := func(k, v string) error {
+					runScratch[k] = v
+					return nil
+				}
+				stepCtx = WithScratchSetter(stepCtx, scratchSetter)
+				stepStartedAt := time.Now().UTC()
+				output, agentErr := executeStepWithRetry(stepCtx, agentFn, opts, step)
+				stepCompletedAt := time.Now().UTC()
+				stepLatencyMs := stepCompletedAt.Sub(stepStartedAt).Milliseconds()
+				// Final flush: emit any tokens still buffered when the agent
+				// finished so the live UI sees the complete output.
+				flushTokens(true)
+				// Annotate the error so operators know which deadline fired.
+				if agentErr != nil && stepHadOwnTimeout && errors.Is(agentErr, context.DeadlineExceeded) {
+					agentErr = fmt.Errorf("step %q timed out after %s: %w", step.Name, step.TimeoutDuration(), agentErr)
+				}
 				if agentErr == nil && len(output) > maxStepOutputBytes {
 					slog.Warn("workflow step output truncated", "step", stepName, "original_bytes", len(output), "cap_bytes", maxStepOutputBytes)
 					output = output[:maxStepOutputBytes] + "\n[output truncated]"
@@ -584,7 +583,20 @@ func MakeWorkflowRunner(
 							// delivery receives "" which is valid, and inbox is always written.
 							n.Detail = body
 						}
-						deliveries := dispatchNotification(n, step.Notify.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, step.Agent, huginnDir, deliverers, onDeliveryFailure, cfg.deliveryQueue, w.Schedule)
+						deliveries := dispatchNotification(
+							n,
+							step.Notify.DeliverTo,
+							notifStore,
+							spaceDeliveryFn,
+							cfg.agentDM,
+							step.Agent,
+							huginnDir,
+							deliverers,
+							onDeliveryFailure,
+							cfg.deliveryQueue,
+							w.Schedule,
+							cfg.proactivity,
+						)
 						n.Deliveries = deliveries
 						if notifStore != nil {
 							if putErr := notifStore.Put(n); putErr != nil {
@@ -696,7 +708,20 @@ func MakeWorkflowRunner(
 			// Workflow-level notifications have no single agent author — use ""
 			// so the AgentDMDeliveryFunc binding can decide a default
 			// (e.g. the workflow's lead agent).
-			deliveries := dispatchNotification(n, w.Notification.DeliverTo, notifStore, spaceDeliveryFn, cfg.agentDM, "", huginnDir, deliverers, onDeliveryFailure, cfg.deliveryQueue, w.Schedule)
+			deliveries := dispatchNotification(
+				n,
+				w.Notification.DeliverTo,
+				notifStore,
+				spaceDeliveryFn,
+				cfg.agentDM,
+				"",
+				huginnDir,
+				deliverers,
+				onDeliveryFailure,
+				cfg.deliveryQueue,
+				w.Schedule,
+				cfg.proactivity,
+			)
 			n.Deliveries = deliveries
 			// Persist the run record FIRST — it is the authoritative historical record.
 			// On a crash between these two writes the run still exists and the user
@@ -1004,6 +1029,7 @@ func dispatchNotification(
 	onDeliveryFailure DeliveryFailureFunc,
 	deliveryQueue *DeliveryQueue,
 	schedule string,
+	proactivityGate ProactivityGateFunc,
 ) []notification.DeliveryRecord {
 	// Inbox is always implicit.
 	records := []notification.DeliveryRecord{
@@ -1047,6 +1073,28 @@ func dispatchNotification(
 				Type:   "agent_dm",
 				Target: author + "→" + t.User,
 				SentAt: time.Now().UTC(),
+			}
+			if proactivityGate != nil {
+				allow, reason := proactivityGate(context.Background(), ProactivityGateRequest{
+					WorkflowID: n.WorkflowID,
+					Schedule:   schedule,
+					AgentName:  author,
+					User:       t.User,
+					Summary:    n.Summary,
+					Detail:     n.Detail,
+					CreatedAt:  n.CreatedAt,
+				})
+				if !allow {
+					rec.Status = "skipped"
+					rec.Error = reason
+					records = append(records, rec)
+					slog.Info("scheduler: proactive agent_dm suppressed by policy",
+						"workflow_id", n.WorkflowID,
+						"agent", author,
+						"user", t.User,
+						"reason", reason)
+					continue
+				}
 			}
 			if err := agentDMFn(author, t.User, n.Summary, n.Detail); err != nil {
 				rec.Status = "failed"

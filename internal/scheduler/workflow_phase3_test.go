@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/notification"
 )
@@ -70,7 +71,7 @@ func TestDispatchNotification_AgentDM(t *testing.T) {
 	n := &notification.Notification{ID: "n1", Summary: "All clear", Detail: "12 PRs scanned"}
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
 
-	recs := dispatchNotification(n, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "")
+	recs := dispatchNotification(n, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "", nil)
 
 	if got.called != 1 {
 		t.Fatalf("agent DM fn called %d times, want 1", got.called)
@@ -94,7 +95,7 @@ func TestDispatchNotification_AgentDM_FromOverridesStepAgent(t *testing.T) {
 		return nil
 	})
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt", From: "Auditor"}}
-	dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "")
+	dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "", nil)
 	if seen != "Auditor" {
 		t.Fatalf("From override ignored: agent=%q want Auditor", seen)
 	}
@@ -106,7 +107,7 @@ func TestDispatchNotification_AgentDM_FromOverridesStepAgent(t *testing.T) {
 func TestDispatchNotification_AgentDM_NoBindingSkips(t *testing.T) {
 	t.Parallel()
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
-	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, nil, "Sentinel", "", nil, nil, nil, "")
+	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, nil, "Sentinel", "", nil, nil, nil, "", nil)
 	if len(recs) != 1 || recs[0].Type != "inbox" {
 		t.Fatalf("expected only inbox record without DM binding, got %+v", recs)
 	}
@@ -120,9 +121,63 @@ func TestDispatchNotification_AgentDM_DeliveryError(t *testing.T) {
 		return errors.New("boom")
 	})
 	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
-	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "")
+	recs := dispatchNotification(&notification.Notification{}, targets, nil, nil, dm, "Sentinel", "", nil, nil, nil, "", nil)
 	if len(recs) != 2 || recs[1].Status != "failed" || recs[1].Error == "" {
 		t.Fatalf("expected failed record with error, got %+v", recs[1])
+	}
+}
+
+func TestDispatchNotification_AgentDM_ProactivityGateSuppresses(t *testing.T) {
+	t.Parallel()
+	called := 0
+	dm := AgentDMDeliveryFunc(func(agent, user, summary, detail string) error {
+		called++
+		return nil
+	})
+	createdAt := time.Date(2026, 4, 29, 15, 30, 0, 0, time.UTC)
+	n := &notification.Notification{
+		WorkflowID: "heartbeat-lead",
+		Summary:    "[Heartbeat: Lead] all clear",
+		Detail:     "nothing unusual",
+		CreatedAt:  createdAt,
+	}
+	targets := []NotificationDelivery{{Type: "agent_dm", User: "matt"}}
+	var gotReq ProactivityGateRequest
+	recs := dispatchNotification(
+		n,
+		targets,
+		nil,
+		nil,
+		dm,
+		"Sentinel",
+		"",
+		nil,
+		nil,
+		nil,
+		"0 */4 * * *",
+		func(_ context.Context, req ProactivityGateRequest) (bool, string) {
+			gotReq = req
+			return false, "policy: low relevance"
+		},
+	)
+
+	if called != 0 {
+		t.Fatalf("expected DM send to be suppressed, called=%d", called)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected inbox + agent_dm records, got %d", len(recs))
+	}
+	if recs[1].Status != "skipped" {
+		t.Fatalf("expected skipped status, got %q", recs[1].Status)
+	}
+	if recs[1].Error != "policy: low relevance" {
+		t.Fatalf("unexpected skip reason %q", recs[1].Error)
+	}
+	if gotReq.WorkflowID != "heartbeat-lead" || gotReq.AgentName != "Sentinel" || gotReq.User != "matt" {
+		t.Fatalf("unexpected gate request: %+v", gotReq)
+	}
+	if !gotReq.CreatedAt.Equal(createdAt) {
+		t.Fatalf("expected created_at to propagate, got %s", gotReq.CreatedAt)
 	}
 }
 
@@ -178,5 +233,52 @@ func TestMakeWorkflowRunner_WithAgentDMDelivery_E2E(t *testing.T) {
 	}
 	if gotAgent != "Sentinel" {
 		t.Fatalf("DM author = %q, want Sentinel", gotAgent)
+	}
+}
+
+func TestMakeWorkflowRunner_WithProactivityGate_E2E(t *testing.T) {
+	t.Parallel()
+	store := &mockRunStore{}
+	dmCalled := 0
+	dm := AgentDMDeliveryFunc(func(agent, user, summary, detail string) error {
+		dmCalled++
+		return nil
+	})
+	agentFn := func(_ context.Context, _ RunOptions) (string, error) {
+		return `{"summary":"all done"}`, nil
+	}
+	wf := &Workflow{
+		ID:   "heartbeat-e2e",
+		Name: "Heartbeat: Sentinel",
+		Steps: []WorkflowStep{
+			{
+				Position: 1, Name: "checker", Agent: "Sentinel", Prompt: "do it",
+				Notify: &StepNotifyConfig{
+					OnSuccess: true,
+					DeliverTo: []NotificationDelivery{{Type: "agent_dm", User: "matt"}},
+				},
+			},
+		},
+	}
+	runner := MakeWorkflowRunner(
+		store,
+		agentFn,
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		nil,
+		nil,
+		WithAgentDMDelivery(dm),
+		WithProactivityGate(func(_ context.Context, _ ProactivityGateRequest) (bool, string) {
+			return false, "policy suppress"
+		}),
+	)
+	if err := runner(context.Background(), wf); err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	if dmCalled != 0 {
+		t.Fatalf("expected DM delivery to be suppressed, got called=%d", dmCalled)
 	}
 }
