@@ -43,3 +43,19 @@ func TestThreadManager_SetThreadBus(t *testing.T) {
 		t.Fatal("SetThreadBus(nil) should disable bus")
 	}
 }
+
+func TestThreadManager_SetProposalRegistry(t *testing.T) {
+	tm := New()
+	if tm.proposalRegistry == nil {
+		t.Fatal("expected default proposalRegistry on new ThreadManager")
+	}
+	reg := NewProposalRegistry()
+	tm.SetProposalRegistry(reg)
+	if tm.proposalRegistry != reg {
+		t.Fatal("SetProposalRegistry did not set registry")
+	}
+	tm.SetProposalRegistry(nil)
+	if tm.proposalRegistry != nil {
+		t.Fatal("SetProposalRegistry(nil) should disable registry")
+	}
+}

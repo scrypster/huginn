@@ -88,6 +88,10 @@ type ThreadManager struct {
 	// threads can consume recent updates from other subthreads in the same session.
 	threadBus *ThreadBus
 
+	// proposalRegistry stores action proposals and scoped approval tokens used
+	// by delegated threads when requesting approval for high-risk actions.
+	proposalRegistry *ProposalRegistry
+
 	// onCancelMu guards onCancel.
 	onCancelMu sync.RWMutex
 	// onCancel, if non-nil, is called after a thread transitions to
@@ -146,6 +150,7 @@ func New() *ThreadManager {
 		MaxThreadsPerSession: DefaultMaxThreadsPerSession,
 		auditLog:             make([]AuditEntry, 0, maxAuditEntries),
 		threadBus:            NewThreadBus(DefaultThreadBusCapacity),
+		proposalRegistry:     NewProposalRegistry(),
 	}
 }
 
@@ -178,6 +183,13 @@ func (tm *ThreadManager) SetThreadBus(bus *ThreadBus) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.threadBus = bus
+}
+
+// SetProposalRegistry wires the proposal/token registry. Pass nil to disable.
+func (tm *ThreadManager) SetProposalRegistry(reg *ProposalRegistry) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.proposalRegistry = reg
 }
 
 // SetOnCancel registers a callback that is invoked after a thread is
