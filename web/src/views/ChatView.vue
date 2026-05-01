@@ -545,6 +545,39 @@
                   </div>
                 </div>
 
+                <!-- Delegation error chips: shown when delegate_to_agent or tm.Create() failed -->
+                <div v-if="(msg as any).delegationErrors?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                  <div
+                    v-for="e in (msg as any).delegationErrors"
+                    :key="e.agent"
+                    class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                           border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
+                    :title="`Could not delegate to ${e.agent}: ${e.reason}`"
+                  >
+                    <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <span>{{ e.agent }} unavailable</span>
+                  </div>
+                </div>
+
+                <!-- Delegation warning chips: shown when heuristic detects a missed delegation -->
+                <div v-if="(msg as any).delegationWarnings?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                  <div
+                    v-for="w in (msg as any).delegationWarnings"
+                    :key="w.agent + w.reason"
+                    class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                           border border-huginn-yellow/30 bg-huginn-yellow/8 text-huginn-yellow"
+                    :title="w.reason === 'missing_mention_syntax' ? `${w.agent} was mentioned but not delegated — did you mean to assign them a task?` : `Unknown agent: ${w.agent}`"
+                  >
+                    <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <span v-if="w.reason === 'missing_mention_syntax'">{{ w.agent }} may have been missed</span>
+                    <span v-else>Unknown: {{ w.agent }}</span>
+                  </div>
+                </div>
+
                 <!-- Inline thread replies from agent_follow_up (Slack-style) -->
                 <div v-if="msg.threadReplies?.length" class="mt-2 space-y-2">
                   <div v-for="reply in msg.threadReplies" :key="reply.id"
