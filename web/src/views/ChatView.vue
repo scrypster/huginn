@@ -565,7 +565,7 @@
                 <div v-if="(msg as any).delegationWarnings?.length" class="mt-1.5 flex flex-wrap gap-1.5">
                   <div
                     v-for="w in (msg as any).delegationWarnings"
-                    :key="w.agent + w.reason"
+                    :key="w.agent + ':' + w.reason"
                     class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
                            border border-huginn-yellow/30 bg-huginn-yellow/8 text-huginn-yellow"
                     :title="w.reason === 'missing_mention_syntax' ? `${w.agent} was mentioned but not delegated — did you mean to assign them a task?` : `Unknown agent: ${w.agent}`"
@@ -1952,7 +1952,8 @@ registerWS(ws, 'delegation_error', (msg: WSMessage) => {
     for (const m of msgs) {
       if (m.id === parentMsgId) {
         if (!(m as any).delegationErrors) (m as any).delegationErrors = []
-        ;(m as any).delegationErrors.push({ agent, reason: reason ?? 'unknown' })
+        const errExists = (m as any).delegationErrors.some((e: any) => e.agent === agent)
+        if (!errExists) (m as any).delegationErrors.push({ agent, reason: reason ?? 'unknown' })
         break
       }
     }
@@ -1975,11 +1976,17 @@ registerWS(ws, 'delegation_warning', (msg: WSMessage) => {
       if (m.id === parentMsgId) {
         if (unknown?.length) {
           if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
-          ;(m as any).delegationWarnings.push(...unknown.map((a: string) => ({ agent: a, reason: 'unknown_agent' })))
+          for (const a of unknown) {
+            const exists = (m as any).delegationWarnings.some((w: any) => w.agent === a && w.reason === 'unknown_agent')
+            if (!exists) (m as any).delegationWarnings.push({ agent: a, reason: 'unknown_agent' })
+          }
         }
         if (heuristic?.length) {
           if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
-          ;(m as any).delegationWarnings.push(...heuristic.map((a: string) => ({ agent: a, reason: 'missing_mention_syntax' })))
+          for (const a of heuristic) {
+            const exists = (m as any).delegationWarnings.some((w: any) => w.agent === a && w.reason === 'missing_mention_syntax')
+            if (!exists) (m as any).delegationWarnings.push({ agent: a, reason: 'missing_mention_syntax' })
+          }
         }
         break
       }
