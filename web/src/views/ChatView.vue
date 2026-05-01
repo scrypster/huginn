@@ -511,8 +511,12 @@
                           {{ (d.replyCount ?? 1) === 1 ? '1 reply' : `${d.replyCount} replies` }}
                         </template>
                       </span>
-                      <!-- Separator · agent name · status when done/error -->
-                      <span class="text-[11px] text-huginn-muted/50">
+                      <!-- Task description — shown when available, truncated to keep strip compact -->
+                      <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate max-w-[200px]">
+                        · {{ d.task }}
+                      </span>
+                      <!-- Fallback: agent name + status when no task text available -->
+                      <span v-else class="text-[11px] text-huginn-muted/50">
                         · {{ d.agentId }}
                         <template v-if="getThreadById(d.threadId) && !['running','thinking','queued'].includes(getThreadById(d.threadId)!.Status)">
                           · {{ formatThreadStatus(getThreadById(d.threadId)!.Status) }}
@@ -1676,6 +1680,7 @@ registerWS(ws, 'thread_started', (msg: WSMessage) => {
           threadId: p.thread_id,
           agentId: p.agent_id || '',
           msgId: p.parent_message_id || target.id || '',
+          task: (p.task as string) || undefined,
           replyCount: 0,
         })
       }
@@ -1895,6 +1900,55 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     const agentId = p?.agent_id as string | undefined
     if (agentId) {
       activeToolCalls.value = activeToolCalls.value.filter(tc => (tc as any).agent !== agentId)
+    }
+  })
+
+  // delegation_error: a thread could not be created for an @mentioned agent.
+  // Mark the parent message with a failed-delegation badge so the user isn't
+  // left waiting for a response that will never come.
+registerWS(ws, 'delegation_error', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const parentMsgId = p?.parent_msg_id as string | undefined
+    const agent = p?.agent as string | undefined
+    const reason = p?.error as string | undefined
+    if (!parentMsgId || !agent) return
+    const msgs = getSourceMessages()
+    for (const m of msgs) {
+      if (m.id === parentMsgId) {
+        if (!(m as any).delegationErrors) (m as any).delegationErrors = []
+        ;(m as any).delegationErrors.push({ agent, reason: reason ?? 'unknown' })
+        break
+      }
+    }
+  })
+
+  // delegation_warning: @mention was found but agent name was not recognised,
+  // OR no @mention was found but the lead agent referenced an agent by name in
+  // natural language (heuristic fallback). Surface to the user so they know
+  // why delegation didn't fire.
+registerWS(ws, 'delegation_warning', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const parentMsgId = p?.parent_msg_id as string | undefined
+    const unknown = p?.unknown as string[] | undefined
+    const heuristic = p?.heuristic_agents as string[] | undefined
+    if (!parentMsgId) return
+    const msgs = getSourceMessages()
+    for (const m of msgs) {
+      if (m.id === parentMsgId) {
+        if (unknown?.length) {
+          if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
+          ;(m as any).delegationWarnings.push(...unknown.map((a: string) => ({ agent: a, reason: 'unknown_agent' })))
+        }
+        if (heuristic?.length) {
+          if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
+          ;(m as any).delegationWarnings.push(...heuristic.map((a: string) => ({ agent: a, reason: 'missing_mention_syntax' })))
+        }
+        break
+      }
     }
   })
 
