@@ -432,34 +432,6 @@
                 <!-- Message text -->
                 <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
-                <!-- Streaming "still responding" indicator — prominent bouncing dots
-                     shown between tool-result chips and the next text segment, or while
-                     tokens are still arriving. Replaces the old tiny 6px cursor. -->
-                <div v-if="msg.streaming && !activeToolCalls.length"
-                  data-testid="streaming-thinking"
-                  class="flex items-center gap-2 mt-2 py-1.5">
-                  <div class="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
-                    :style="displayAgent
-                      ? `background:${displayAgent.color}22;border:1px solid ${displayAgent.color}33`
-                      : 'background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)'">
-                    <span class="text-[9px] font-bold"
-                      :style="displayAgent ? `color:${displayAgent.color}` : 'color:rgba(88,166,255,0.9)'">
-                      {{ displayAgent?.icon ?? 'H' }}
-                    </span>
-                  </div>
-                  <div class="flex items-center gap-1">
-                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
-                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
-                      style="animation-delay:0ms" />
-                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
-                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
-                      style="animation-delay:150ms" />
-                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
-                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
-                      style="animation-delay:300ms" />
-                  </div>
-                  <span class="text-[11px] text-huginn-muted">responding…</span>
-                </div>
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
                 <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
@@ -611,33 +583,6 @@
             </div>
           </template>
 
-          <!-- Thinking bubble: shown while waiting for first token (agentThinking) -->
-          <div v-if="agentThinking" class="flex items-end gap-2 px-4 py-2">
-            <div class="flex gap-1 px-3 py-2 rounded-2xl rounded-bl-sm" style="background:rgba(255,255,255,0.06)">
-              <span v-for="i in 3" :key="i"
-                class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce"
-                :style="`animation-delay:${(i-1)*150}ms`"
-              />
-            </div>
-          </div>
-
-          <!-- Streaming thinking indicator (before first token) -->
-          <div v-if="streaming && messages.at(-1)?.role !== 'assistant'" class="flex gap-3">
-            <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-              :style="displayAgent
-                ? `background:${displayAgent.color}18;border:1px solid ${displayAgent.color}33`
-                : 'background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)'">
-              <span class="text-xs font-bold"
-                :style="displayAgent ? `color:${displayAgent.color}` : 'color:rgba(88,166,255,0.9)'">
-                {{ displayAgent?.icon ?? 'H' }}
-              </span>
-            </div>
-            <div class="flex items-center gap-1 py-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:0ms" />
-              <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:150ms" />
-              <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:300ms" />
-            </div>
-          </div>
         </div>
       </div>
 
@@ -725,14 +670,17 @@
       <Transition name="ws-banner">
         <div v-if="streaming"
           data-testid="streaming-banner"
-          class="flex-shrink-0 flex items-center gap-2 px-4 py-1.5 text-xs font-medium"
+          class="flex-shrink-0 relative overflow-hidden text-xs font-medium"
           style="background:rgba(88,166,255,0.08);border-top:1px solid rgba(88,166,255,0.18);color:rgba(88,166,255,0.85)">
-          <div class="flex items-center gap-1 flex-shrink-0">
-            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:0ms" />
-            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:120ms" />
-            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:240ms" />
+          <!-- Indeterminate progress bar along the top edge -->
+          <div class="absolute top-0 left-0 h-[2px] w-full overflow-hidden">
+            <div class="h-full streaming-progress-bar" style="background:rgba(88,166,255,0.5)" />
           </div>
-          <span>{{ displayAgent?.name ?? 'Agent' }} is responding…</span>
+          <div class="flex items-center gap-2 px-4 py-1.5">
+            <span>
+              {{ displayAgent?.name ?? 'Agent' }} is responding…<template v-if="activeToolCalls.length"> · <span class="opacity-75">{{ activeToolCalls[0]?.name }}</span></template><template v-if="streamingElapsed >= 10"> ({{ formatElapsed(streamingElapsed) }})</template>
+            </span>
+          </div>
         </div>
       </Transition>
 
@@ -960,7 +908,7 @@ function wsReconnectNow() { wsRef.value?.reconnectNow?.() }
 function reloadPage() { window.location.reload() }
 
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
-  getAgentThinking, setAgentThinking, getLastSeenMessageId, setLastSeenMessageId } = useSessions()
+  getLastSeenMessageId, setLastSeenMessageId } = useSessions()
 const { activeSpace } = useSpaces()
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
@@ -993,7 +941,10 @@ const sessionSwitching = ref(false)
 const {
   activeToolCalls, expandedToolCalls, expandedMsgCalls,
   streaming, currentRunId, notifyStreaming,
-  startStreamingWatchdog, clearStreamingWatchdog, toggleMsgToolCalls,
+  streamingElapsed,
+  startStreamingWatchdog, clearStreamingWatchdog,
+  startElapsedTimer, stopElapsedTimer, formatElapsed,
+  toggleMsgToolCalls,
   resetStreaming,
 } = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
@@ -1130,9 +1081,6 @@ const messages = computed(() => {
   return props.sessionId ? getMessages(props.sessionId) : []
 })
 
-const agentThinking = computed(() =>
-  props.sessionId ? getAgentThinking(props.sessionId) : false
-)
 
 const lastSeenMessageId = computed(() =>
   props.sessionId ? getLastSeenMessageId(props.sessionId) : null
@@ -1349,6 +1297,7 @@ async function handleEditorSend(markdown: string) {
     currentRunId.value = runId
     streaming.value = true
     startStreamingWatchdog()
+    startElapsedTimer()
 
     // Optimistic user message into the space timeline.
     tl.getState().messages.push({
@@ -1380,12 +1329,12 @@ async function handleEditorSend(markdown: string) {
   currentRunId.value = runId
   streaming.value = true
   startStreamingWatchdog()
+  startElapsedTimer()
   pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true, agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
 
-  if (props.sessionId) setAgentThinking(props.sessionId, true)
   if (props.sessionId) setLastSeenMessageId(props.sessionId, null)
   ws.send({ type: 'chat', content: markdown, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
@@ -1399,11 +1348,11 @@ function handleRetry(content: string) {
   currentRunId.value = runId
   streaming.value = true
   startStreamingWatchdog()
+  startElapsedTimer()
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true,
     agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
-  setAgentThinking(props.sessionId, true)
   setLastSeenMessageId(props.sessionId, null)
   wsRef.value.send({ type: 'chat', content, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
@@ -1483,7 +1432,6 @@ watch(wsRef, (ws) => {
     // switches (props.sessionId can change between WS registration and delivery).
     const sid = msg.session_id || props.sessionId
     if (!sid || sid !== props.sessionId) return // ignore tokens for other sessions
-    if (sid) setAgentThinking(sid, false)
     // Set lastSeenMessageId to the last user message on first token (if not set)
     if (sid && !getLastSeenMessageId(sid)) {
       const msgs = getMessages(sid)
@@ -1549,8 +1497,8 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       return
     }
     clearStreamingWatchdog()
+    stopElapsedTimer()
     streaming.value = false
-    if (props.sessionId) setAgentThinking(props.sessionId, false)
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
     // streaming but whose results haven't been attached yet (e.g. timing edge cases).
@@ -1603,8 +1551,8 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
     if (msg.run_id && msg.run_id !== currentRunId.value) return
-    if (props.sessionId) setAgentThinking(props.sessionId, false)
     clearStreamingWatchdog()
+    stopElapsedTimer()
     streaming.value = false
     activeToolCalls.value = []
     if (props.sessionId) {
@@ -2005,5 +1953,13 @@ onMounted(async () => {
 .ws-banner-leave-from {
   max-height: 48px;
   opacity: 1;
+}
+@keyframes streaming-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.streaming-progress-bar {
+  width: 30%;
+  animation: streaming-indeterminate 1.6s ease-in-out infinite;
 }
 </style>
