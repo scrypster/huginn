@@ -330,7 +330,7 @@ Web UI configuration lives in the `"web"` section of `~/.huginn/config.json`.
 | `web.port` | int | `8421` | HTTP port for the web server |
 | `web.auto_open` | bool | `false` | Automatically open the browser when `huginn tray` starts |
 | `web.bind` | string | `"127.0.0.1"` | Bind address. Set to `"0.0.0.0"` to expose on the network (Docker, remote access) |
-| `web.allowed_origins` | []string | `[]` | CORS allowed origins. Empty means same-origin only |
+| `web.allowed_origins` | []string | `[]` | WebSocket origin allowlist. Empty = allow all (default). Add your public URL when behind a reverse proxy. |
 | `web.trusted_proxies` | []string | `[]` | IP addresses of trusted reverse proxies for `X-Forwarded-For` handling |
 
 **Example — expose on the local network with auto-open:**
@@ -354,10 +354,13 @@ Web UI configuration lives in the `"web"` section of `~/.huginn/config.json`.
   "web": {
     "port": 8421,
     "bind": "127.0.0.1",
+    "allowed_origins": ["https://your-public-url.example.com"],
     "trusted_proxies": ["127.0.0.1"]
   }
 }
 ```
+
+> **`allowed_origins` is required when behind a reverse proxy.** Huginn's WebSocket upgrade checks the browser's `Origin` header. When you access Huginn through a proxy at `https://your-public-url.example.com`, the browser sends that URL as the origin — not `localhost`. If it isn't in `allowed_origins`, the WebSocket handshake is rejected and operations that depend on real-time server events (agent responses, vault creation, tool results) will fail silently or hang. Add your exact public URL (scheme + hostname, no trailing slash) to fix this.
 
 ---
 
