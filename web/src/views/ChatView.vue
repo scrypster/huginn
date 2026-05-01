@@ -992,17 +992,18 @@ function flushPendingToolResults(sessionId: string) {
 }
 
 // applyPermissionDenied attaches a permission denial entry to whichever
-// message owns the delegated thread that was blocked.
-function applyPermissionDenied(sessionId: string, threadId: string, agentId: string, tool: string) {
-  const msgs = getMessages(sessionId)
-  const msg = msgs.find(m =>
-    m.delegatedThreads?.some(d => d.threadId === threadId)
+// message owns the delegated thread that was blocked. Uses getSourceMessages()
+// so it works in both session mode and space mode.
+function applyPermissionDenied(threadId: string, agentId: string, tool: string) {
+  const msgs = getSourceMessages()
+  const msg = msgs.find((m: any) =>
+    m.delegatedThreads?.some((d: any) => d.threadId === threadId)
   )
   if (!msg) return
   if (!msg.permissionDenials) msg.permissionDenials = []
   // Frontend dedup: one entry per threadId:tool pair
   const key = `${threadId}:${tool}`
-  if (msg.permissionDenials.some(d => `${d.threadId}:${d.tool}` === key)) return
+  if (msg.permissionDenials.some((d: any) => `${d.threadId}:${d.tool}` === key)) return
   msg.permissionDenials.push({ agentId, tool, threadId })
 }
 
@@ -1974,12 +1975,7 @@ registerWS(ws, 'thread_permission_denied', (msg: WSMessage) => {
     const tool = p?.tool as string
     if (!threadId || !agentId || !tool) return
 
-    const sessionId = props.sessionId
-    if (!sessionId) return
-
-    const apply = () => applyPermissionDenied(sessionId, threadId, agentId, tool)
-    if (queueIfHydrating(sessionId, apply)) return
-    apply()
+    applyPermissionDenied(threadId, agentId, tool)
   })
 
   // Wire thread events via useThreads composable
