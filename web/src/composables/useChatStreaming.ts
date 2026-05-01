@@ -40,6 +40,28 @@ export function useChatStreaming() {
     if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
   }
 
+  // ── Elapsed timer ─────────────────────────────────────────────────────
+  // Tracks seconds since the current stream started. Shown in the status bar
+  // after 10s so users know a long-running agent hasn't frozen.
+  const streamingElapsed = ref(0)
+  let elapsedInterval: ReturnType<typeof setInterval> | null = null
+
+  function startElapsedTimer() {
+    streamingElapsed.value = 0
+    if (elapsedInterval !== null) { clearInterval(elapsedInterval); elapsedInterval = null }
+    elapsedInterval = setInterval(() => { streamingElapsed.value++ }, 1000)
+  }
+
+  function stopElapsedTimer() {
+    if (elapsedInterval !== null) { clearInterval(elapsedInterval); elapsedInterval = null }
+    streamingElapsed.value = 0
+  }
+
+  function formatElapsed(s: number): string {
+    if (s < 60) return `${s}s`
+    return `${Math.floor(s / 60)}m ${s % 60}s`
+  }
+
   function toggleMsgToolCalls(msgId: string) {
     if (expandedMsgCalls.value.has(msgId)) expandedMsgCalls.value.delete(msgId)
     else expandedMsgCalls.value.add(msgId)
@@ -48,6 +70,7 @@ export function useChatStreaming() {
   /** Reset all streaming state (used on session switch). */
   function resetStreaming() {
     clearStreamingWatchdog()
+    stopElapsedTimer()
     streaming.value = false
     currentRunId.value = ''
     notifyStreaming.value = false
@@ -61,8 +84,12 @@ export function useChatStreaming() {
     streaming,
     currentRunId,
     notifyStreaming,
+    streamingElapsed,
     startStreamingWatchdog,
     clearStreamingWatchdog,
+    startElapsedTimer,
+    stopElapsedTimer,
+    formatElapsed,
     toggleMsgToolCalls,
     resetStreaming,
   }
