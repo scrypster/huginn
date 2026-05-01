@@ -792,6 +792,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   }
 
   async function loadAgent(name: string) {
+    wildcardStripped.value = false
     try {
       const data = await api.agents.get(name) as unknown as AgentForm
       const memType = deriveMemoryType(data)
@@ -899,6 +900,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   function discard() {
     form.value = JSON.parse(original.value)
     dirty.value = false
+    wildcardStripped.value = false
   }
 
   function confirmDelete() { showDeleteConfirm.value = true }
