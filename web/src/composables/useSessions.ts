@@ -52,6 +52,7 @@ export interface ChatMessage {
   delegatedThreads?: DelegatedThread[]  // threads spawned by this message
   threadReplies?: ThreadReply[]         // inline thread replies from agent_follow_up (Slack-style)
   replyCount?: number     // thread reply count (for badge display after hydration)
+  permissionDenials?: Array<{ agentId: string; tool: string; threadId: string }>
 }
 
 // Module-level shared state (singleton across all component instances)

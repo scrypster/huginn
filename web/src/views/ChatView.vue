@@ -522,6 +522,30 @@
                   </div>
                 </div>
 
+                <!-- Permission denial cards: shown when a delegated agent was blocked by permissions -->
+                <div v-if="msg.permissionDenials?.length" class="mt-1.5 space-y-1">
+                  <div
+                    v-for="denial in msg.permissionDenials"
+                    :key="denial.threadId + ':' + denial.tool"
+                    class="flex items-center gap-2 px-2.5 py-2 rounded-lg border text-xs transition-opacity"
+                    :class="getDelegatedThread(msg, denial.threadId)?.done
+                      ? 'border-huginn-amber/15 bg-huginn-amber/4 opacity-50'
+                      : 'border-huginn-amber/30 bg-huginn-amber/8'"
+                  >
+                    <span class="text-huginn-amber flex-shrink-0">🔒</span>
+                    <span class="text-huginn-amber font-medium flex-1 min-w-0">
+                      {{ denial.agentId }} needs {{ formatToolName(denial.tool) }} access to continue
+                    </span>
+                    <router-link
+                      v-if="!getDelegatedThread(msg, denial.threadId)?.done"
+                      :to="`/agents/${denial.agentId}`"
+                      class="flex-shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium border border-huginn-amber/40 text-huginn-amber hover:bg-huginn-amber/15 transition-colors"
+                    >
+                      Grant
+                    </router-link>
+                  </div>
+                </div>
+
                 <!-- Inline thread replies from agent_follow_up (Slack-style) -->
                 <div v-if="msg.threadReplies?.length" class="mt-2 space-y-2">
                   <div v-for="reply in msg.threadReplies" :key="reply.id"
@@ -965,6 +989,41 @@ function flushPendingToolResults(sessionId: string) {
     last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true })
   }
   pendingToolResults.value = []
+}
+
+// applyPermissionDenied attaches a permission denial entry to whichever
+// message owns the delegated thread that was blocked.
+function applyPermissionDenied(sessionId: string, threadId: string, agentId: string, tool: string) {
+  const msgs = getMessages(sessionId)
+  const msg = msgs.find(m =>
+    m.delegatedThreads?.some(d => d.threadId === threadId)
+  )
+  if (!msg) return
+  if (!msg.permissionDenials) msg.permissionDenials = []
+  // Frontend dedup: one entry per threadId:tool pair
+  const key = `${threadId}:${tool}`
+  if (msg.permissionDenials.some(d => `${d.threadId}:${d.tool}` === key)) return
+  msg.permissionDenials.push({ agentId, tool, threadId })
+}
+
+function getDelegatedThread(msg: ChatMessage, threadId: string): DelegatedThread | undefined {
+  return msg.delegatedThreads?.find(d => d.threadId === threadId)
+}
+
+function formatToolName(tool: string): string {
+  const map: Record<string, string> = {
+    bash: 'bash shell',
+    run_tests: 'test runner',
+    read_file: 'file read',
+    write_file: 'file write',
+    edit_file: 'file edit',
+    list_dir: 'directory list',
+    search_files: 'file search',
+    grep: 'grep',
+    fetch_url: 'web fetch',
+    web_search: 'web search',
+  }
+  return map[tool] ?? tool.replace(/_/g, ' ')
 }
 
 // ── Agent state ──────────────────────────────────────────────────────
@@ -1902,6 +1961,25 @@ registerWS(ws, 'delegation_warning', (msg: WSMessage) => {
         break
       }
     }
+  })
+
+  // thread_permission_denied: a delegated agent was blocked from using a tool.
+  // Surface a denial card on the parent message so the user can grant access.
+registerWS(ws, 'thread_permission_denied', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const threadId = p?.thread_id as string
+    const agentId = p?.agent_id as string
+    const tool = p?.tool as string
+    if (!threadId || !agentId || !tool) return
+
+    const sessionId = props.sessionId
+    if (!sessionId) return
+
+    const apply = () => applyPermissionDenied(sessionId, threadId, agentId, tool)
+    if (queueIfHydrating(sessionId, apply)) return
+    apply()
   })
 
   // Wire thread events via useThreads composable
