@@ -33,7 +33,7 @@ body {
 .md-content a { @apply text-huginn-blue underline underline-offset-2; }
 .md-content hr { @apply border-huginn-border my-3; }
 .md-content strong { @apply font-semibold text-huginn-text; }
-.md-content table { @apply w-full text-sm mb-3 border-collapse; overflow-x: auto; display: block; }
+.md-content table { @apply text-sm mb-3 border-collapse; display: block; overflow-x: auto; min-width: 100%; width: max-content; }
 .md-content th { @apply border border-huginn-border px-2 py-1 text-left font-semibold; }
 .md-content td { @apply border border-huginn-border px-2 py-1; }
 
