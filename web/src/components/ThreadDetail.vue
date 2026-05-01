@@ -119,8 +119,8 @@
                         </span>
                         <span class="text-[10px] text-huginn-muted/50 ml-auto">consulted</span>
                       </div>
-                      <div class="px-2 py-1.5 bg-huginn-surface/20">
-                        <div class="md-content text-[11px] text-huginn-muted leading-relaxed break-words"
+                      <div class="px-2 py-1.5 bg-huginn-surface/20 min-w-0 overflow-hidden">
+                        <div class="md-content text-[11px] text-huginn-muted leading-relaxed break-words min-w-0 overflow-hidden"
                           v-html="renderMarkdown(cr.answer)" />
                       </div>
                     </div>
@@ -148,14 +148,14 @@
           </div>
 
           <!-- User message -->
-          <div v-if="item.msg.role === 'user'" class="flex justify-end">
-            <div class="md-content max-w-[85%] px-3 py-2.5 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words"
+          <div v-if="item.msg.role === 'user'" class="flex justify-end min-w-0">
+            <div class="md-content max-w-[85%] px-3 py-2.5 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
               style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
               v-html="renderMarkdown(item.msg.content)" />
           </div>
 
           <!-- Assistant message -->
-          <div v-else class="flex gap-2.5">
+          <div v-else class="flex gap-2.5 min-w-0">
             <!-- Agent avatar -->
             <div class="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5 select-none"
               :style="`background:${agentColor(item.msg.agent)}22;border:1px solid ${agentColor(item.msg.agent)}33`">
@@ -165,14 +165,14 @@
             </div>
             <div class="flex-1 min-w-0 pt-0.5">
               <!-- Agent name + time -->
-              <div class="flex items-center gap-1.5 mb-0.5">
+              <div class="flex items-center gap-1.5 mb-0.5 min-w-0">
                 <span class="text-xs font-semibold" :style="`color:${agentColor(item.msg.agent)}`">
                   {{ item.msg.agent || 'Agent' }}
                 </span>
                 <span class="text-[11px] text-huginn-muted/50">{{ formatTime(item.msg.created_at) }}</span>
               </div>
               <!-- Message content -->
-              <div v-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+              <div v-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
                 v-html="renderMarkdown(item.msg.content)" />
               <!-- Streaming cursor -->
               <span v-if="(item.msg as any).streaming" class="inline-block w-1.5 h-3.5 bg-huginn-muted/60 rounded-sm animate-pulse ml-0.5 align-middle" />
