@@ -755,10 +755,14 @@
             <svg class="w-3.5 h-3.5 animate-spin flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             <span>Reconnecting… (attempt {{ wsReconnectAttempts }}/{{ wsMaxAttempts }})<span v-if="wsSecondsUntilRetry > 0"> — retrying in {{ wsSecondsUntilRetry }}s</span></span>
           </div>
-          <button @click="wsReconnectNow()"
-            class="flex-shrink-0 px-2 py-0.5 rounded border border-[rgba(227,179,65,0.4)] hover:bg-[rgba(227,179,65,0.1)] transition-colors text-[11px]">
-            Retry now
-          </button>
+          <div class="flex items-center gap-2 flex-shrink-0">
+            <button @click="wsReconnectNow()"
+              class="px-2 py-0.5 rounded border border-[rgba(227,179,65,0.4)] hover:bg-[rgba(227,179,65,0.1)] transition-colors text-[11px]">
+              Retry now
+            </button>
+            <button @click="showDegradedBanner = false" data-testid="dismiss-banner"
+              class="opacity-60 hover:opacity-100 transition-opacity text-sm leading-none px-1">✕</button>
+          </div>
         </div>
         <div v-else-if="showDegradedBanner && wsConnectionState === 'disconnected'"
           data-testid="ws-degraded-banner"
@@ -771,10 +775,14 @@
               <span v-if="wsLastError" class="block text-[10px] opacity-70 truncate">{{ wsLastError }}</span>
             </div>
           </div>
-          <button @click="reloadPage()"
-            class="flex-shrink-0 px-2 py-0.5 rounded border border-[rgba(248,81,73,0.4)] hover:bg-[rgba(248,81,73,0.1)] transition-colors text-[11px]">
-            Reload Page
-          </button>
+          <div class="flex items-center gap-2 flex-shrink-0">
+            <button @click="reloadPage()"
+              class="px-2 py-0.5 rounded border border-[rgba(248,81,73,0.4)] hover:bg-[rgba(248,81,73,0.1)] transition-colors text-[11px]">
+              Reload Page
+            </button>
+            <button @click="showDegradedBanner = false" data-testid="dismiss-banner"
+              class="opacity-60 hover:opacity-100 transition-opacity text-sm leading-none px-1">✕</button>
+          </div>
         </div>
       </Transition>
 

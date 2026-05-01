@@ -72,7 +72,7 @@ test.describe('WS degradation banner — debounce timing', () => {
     const banner = page.locator('[data-testid="ws-degraded-banner"]')
     await expect(banner).toBeVisible({ timeout: 3000 })
 
-    await banner.locator('button').click()
+    await banner.locator('[data-testid="dismiss-banner"]').click()
     await expect(banner).not.toBeVisible({ timeout: 3000 })
   })
 
