@@ -448,7 +448,7 @@
                         <template v-if="!d.done">
                           working…
                         </template>
-                        <template v-else-if="d.done && (d.replyCount ?? 0) < 1">
+                        <template v-else-if="(d.replyCount ?? 0) < 1">
                           completed
                         </template>
                         <template v-else>
