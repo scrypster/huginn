@@ -687,6 +687,7 @@ func (tm *ThreadManager) runOnce(
 		})
 
 		// Process each tool call.
+		deniedTools := map[string]bool{}
 		for _, tc := range resp.ToolCalls {
 			appendToolResult := func(resultContent string) {
 				history = append(history, backend.Message{
@@ -732,6 +733,15 @@ func (tm *ThreadManager) runOnce(
 					token, _ := tc.Function.Arguments["_approval_token"].(string)
 					if err := tm.RequireApprovalToken(threadID, token, provider, action); err != nil {
 						appendToolResult("tool error: permission denied: " + err.Error())
+						if !deniedTools[tc.Function.Name] {
+							deniedTools[tc.Function.Name] = true
+							broadcast(sess.ID, "thread_permission_denied", map[string]any{
+								"thread_id":  threadID,
+								"agent_id":   agentID,
+								"tool":       tc.Function.Name,
+								"session_id": sess.ID,
+							})
+						}
 						continue
 					}
 				}
