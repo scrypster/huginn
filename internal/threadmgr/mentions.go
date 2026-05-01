@@ -247,7 +247,18 @@ func CreateFromMentions(
 		// Heuristic fallback: scan for bare agent names near delegation-intent
 		// language. Used for low-tier models that omit the @ sigil.
 		if broadcast != nil {
-			heuristic := detectBareAgentNames(userMsg, names)
+			// Exclude the caller agent from heuristic scan to prevent
+			// spurious self-delegation warnings.
+			nonCallerNames := names
+			if callerAgent != "" {
+				nonCallerNames = make([]string, 0, len(names))
+				for _, n := range names {
+					if !strings.EqualFold(n, callerAgent) {
+						nonCallerNames = append(nonCallerNames, n)
+					}
+				}
+			}
+			heuristic := detectBareAgentNames(userMsg, nonCallerNames)
 			if len(heuristic) > 0 {
 				logger.Warn("CreateFromMentions: heuristic detected bare agent names without @",
 					"session_id", sessionID, "heuristic_agents", heuristic)

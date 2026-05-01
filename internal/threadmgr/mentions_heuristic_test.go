@@ -5,6 +5,31 @@ import (
 	"testing"
 )
 
+// TestDetectBareAgentNamesCallerExclusion verifies the caller agent's name
+// does NOT appear in the heuristic result (handled at the call site by
+// filtering names before calling detectBareAgentNames).
+func TestDetectBareAgentNamesCallerExclusion(t *testing.T) {
+	// Simulate: caller is "Max", and Max says "Elena, please investigate"
+	// Names passed to heuristic should NOT include "Max"
+	knownExcludingCaller := []string{"Elena", "Sam"} // Max already filtered out
+	result := detectBareAgentNames("Max, please sync with Elena on this.", knownExcludingCaller)
+	for _, r := range result {
+		if strings.EqualFold(r, "Max") {
+			t.Errorf("caller agent 'Max' should not appear in heuristic result, got: %v", result)
+		}
+	}
+	// Elena should be found
+	found := false
+	for _, r := range result {
+		if strings.EqualFold(r, "Elena") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected Elena in result %v", result)
+	}
+}
+
 // TestDetectBareAgentNames verifies that detectBareAgentNames finds agent names
 // that appear in text without an @ sigil, near delegation-intent language.
 func TestDetectBareAgentNames(t *testing.T) {

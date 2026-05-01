@@ -1,6 +1,8 @@
 package agent_test
 
 import (
+	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -31,5 +33,18 @@ func TestChannelContextPromptPreservesMainChannelDiscipline(t *testing.T) {
 	result := agent.BuildSpaceContextBlock("Eng", "channel", "Tom", "Tom", members)
 	if !strings.Contains(result, "Main channel discipline") {
 		t.Errorf("Main channel discipline section missing from channel prompt")
+	}
+}
+
+// TestAgentDispatcherChannelCommentNotStale verifies that the stale comment
+// "delegate_to_agent is NOT injected" has been removed from agent_dispatcher.go
+// so future maintainers are not misled.
+func TestAgentDispatcherChannelCommentNotStale(t *testing.T) {
+	content, err := os.ReadFile("agent_dispatcher.go")
+	if err != nil {
+		t.Fatalf("could not read agent_dispatcher.go: %v", err)
+	}
+	if bytes.Contains(content, []byte("delegate_to_agent is NOT injected")) {
+		t.Error("stale comment 'delegate_to_agent is NOT injected' still present in agent_dispatcher.go — update it")
 	}
 }
