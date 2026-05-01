@@ -44,8 +44,8 @@ func TestBuildSpaceContextBlock_LeadAgentBlock_ContainsDelegationProtocol(t *tes
 	if !strings.Contains(result, "Delegation protocol") {
 		t.Error("lead agent block missing delegation protocol section")
 	}
-	if !strings.Contains(result, "@mentions") {
-		t.Error("lead agent block missing @mention example")
+	if !strings.Contains(result, "delegate_to_agent") {
+		t.Error("lead agent block missing delegate_to_agent tool reference")
 	}
 }
 

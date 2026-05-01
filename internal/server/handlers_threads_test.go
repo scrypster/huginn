@@ -468,3 +468,74 @@ func TestGetMessageThread_ReturnsToolCalls(t *testing.T) {
 		t.Errorf("expected tool call name 'bash', got %q", result.Messages[0].ToolCalls[0].Name)
 	}
 }
+
+// TestGetContainerThreads_ReturnsTaskField is a regression test for the hydration
+// fix — the container threads endpoint must return the "task" field from the threads
+// table so the frontend can show task descriptions after page reload.
+func TestGetContainerThreads_ReturnsTaskField(t *testing.T) {
+	srv := testServer(t)
+	db := openTestSQLiteDB(t)
+	srv.SetDB(db)
+
+	sqliteStore := session.NewSQLiteSessionStore(db)
+	sess := sqliteStore.New("task-field-test", "/tmp", "model")
+	if err := sqliteStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	wdb := db.Write()
+	if wdb == nil {
+		t.Fatal("write db is nil")
+	}
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	// Insert a parent message with thread_reply_count=1 so it is returned by
+	// the container threads query.
+	_, err := wdb.Exec(`
+		INSERT OR IGNORE INTO messages
+			(id, container_type, container_id, seq, ts, role, content, agent,
+			 tool_name, tool_call_id, type,
+			 prompt_tokens, completion_tokens, cost_usd, model,
+			 parent_message_id, thread_reply_count)
+		VALUES (?, 'session', ?, 1, ?, 'assistant', 'Delegating to Coder.', 'Lead',
+		        '', '', '', 0, 0, 0.0, '', '', 1)`,
+		"parent-task-1", sess.ID, ts,
+	)
+	if err != nil {
+		t.Fatalf("insert parent: %v", err)
+	}
+
+	// Insert a thread row with a non-empty task description.
+	const wantTask = "investigate the latency spike in the API"
+	_, err = wdb.Exec(`
+		INSERT OR IGNORE INTO threads
+			(id, parent_type, parent_id, agent_name, task, status,
+			 parent_msg_id, created_at, files_modified, key_decisions, artifacts)
+		VALUES (?, 'session', ?, 'Coder', ?, 'done',
+		        'parent-task-1', ?, '[]', '[]', '[]')`,
+		"thread-task-1", sess.ID, wantTask, ts,
+	)
+	if err != nil {
+		t.Fatalf("insert thread: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/containers/"+sess.ID+"/threads", nil)
+	req.SetPathValue("id", sess.ID)
+	w := httptest.NewRecorder()
+	srv.handleGetContainerThreads(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result []threadMessageRow
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 thread root, got %d", len(result))
+	}
+	if result[0].Task != wantTask {
+		t.Errorf("task field: got %q, want %q", result[0].Task, wantTask)
+	}
+}

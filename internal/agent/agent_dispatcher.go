@@ -507,12 +507,11 @@ func (o *Orchestrator) TaskWithAgent(
 
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
 
-	// Auto-inject read-only team tools when the agent is in a channel context.
-	// delegate_to_agent is NOT injected — channels use @mention-based delegation
-	// so the lead agent writes natural messages like "@Sam, please do X" and the
-	// mention parser (CreateFromMentions) spawns the thread automatically.
+	// Auto-inject team coordination tools when the agent is in a channel context.
+	// delegate_to_agent is the primary delegation path for capable models;
+	// list_team_status and recall_thread_result provide read access to the team.
 	if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-		delegationToolNames := []string{"list_team_status", "recall_thread_result"}
+		delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
 		seen := make(map[string]bool, len(schemas))
 		for _, s := range schemas {
 			seen[s.Function.Name] = true
@@ -707,12 +706,11 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		ctx = SetSessionID(ctx, sessionID)
 		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
 
-		// Auto-inject read-only team tools when the agent is in a channel context.
-		// delegate_to_agent is NOT injected — channels use @mention-based delegation
-		// so the lead agent writes natural messages like "@Sam, please do X" and the
-		// mention parser (CreateFromMentions) spawns the thread automatically.
+		// Auto-inject team coordination tools when the agent is in a channel context.
+		// delegate_to_agent is the primary delegation path for capable models;
+		// list_team_status and recall_thread_result provide read access to the team.
 		if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-			delegationToolNames := []string{"list_team_status", "recall_thread_result"}
+			delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
 			seen := make(map[string]bool, len(schemas))
 			for _, s := range schemas {
 				seen[s.Function.Name] = true

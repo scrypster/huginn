@@ -29,6 +29,7 @@ export interface DelegatedThread {
   threadId: string
   agentId: string
   msgId?: string          // parent message ID for fetching thread messages (GET /api/v1/messages/{id}/thread)
+  task?: string           // task description delegated to this agent (from thread_started payload)
   done?: boolean
   replyCount?: number     // actual thread reply count from DB (for badge label)
   inlineSummary?: string  // thread completion summary shown inline (Slack-style thread preview)

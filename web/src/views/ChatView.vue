@@ -430,7 +430,7 @@
                   <div v-for="d in msg.delegatedThreads" :key="d.threadId" class="space-y-1">
                     <button
                       @click="openThreadDetail(d)"
-                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60"
+                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60 overflow-hidden min-w-0"
                     >
                       <!-- Agent avatar mini — animated pulse when thread is active -->
                       <div class="relative w-4 h-4 flex-shrink-0">
@@ -452,8 +452,12 @@
                           {{ (d.replyCount ?? 1) === 1 ? '1 reply' : `${d.replyCount} replies` }}
                         </template>
                       </span>
-                      <!-- Separator · agent name · status when done/error -->
-                      <span class="text-[11px] text-huginn-muted/50">
+                      <!-- Task description — shown when available, truncated to keep strip compact -->
+                      <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate min-w-0 flex-1">
+                        · {{ d.task }}
+                      </span>
+                      <!-- Fallback: agent name + status when no task text available -->
+                      <span v-else class="text-[11px] text-huginn-muted/50">
                         · {{ d.agentId }}
                         <template v-if="getThreadById(d.threadId) && !['running','thinking','queued'].includes(getThreadById(d.threadId)!.Status)">
                           · {{ formatThreadStatus(getThreadById(d.threadId)!.Status) }}
@@ -479,6 +483,39 @@
                       </div>
                       <div class="text-sm text-huginn-text/80 whitespace-pre-wrap">{{ d.inlineSummary }}</div>
                     </div>
+                  </div>
+                </div>
+
+                <!-- Delegation error chips: shown when delegate_to_agent or tm.Create() failed -->
+                <div v-if="(msg as any).delegationErrors?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                  <div
+                    v-for="e in (msg as any).delegationErrors"
+                    :key="e.agent"
+                    class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                           border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
+                    :title="`Could not delegate to ${e.agent}: ${e.reason}`"
+                  >
+                    <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <span>{{ e.agent }} unavailable</span>
+                  </div>
+                </div>
+
+                <!-- Delegation warning chips: shown when heuristic detects a missed delegation -->
+                <div v-if="(msg as any).delegationWarnings?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                  <div
+                    v-for="w in (msg as any).delegationWarnings"
+                    :key="w.agent + ':' + w.reason"
+                    class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                           border border-huginn-yellow/30 bg-huginn-yellow/8 text-huginn-yellow"
+                    :title="w.reason === 'missing_mention_syntax' ? `${w.agent} was mentioned but not delegated — did you mean to assign them a task?` : `Unknown agent: ${w.agent}`"
+                  >
+                    <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <span v-if="w.reason === 'missing_mention_syntax'">{{ w.agent }} may have been missed</span>
+                    <span v-else>Unknown: {{ w.agent }}</span>
                   </div>
                 </div>
 
@@ -985,7 +1022,7 @@ async function hydrateThreadBadges(sessionId: string) {
   if (!sessionId || hydratingBadgesFor.has(sessionId)) return
   hydratingBadgesFor.add(sessionId)
   try {
-    type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number }
+    type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number; task?: string }
     const rows = await apiFetch<ContainerThreadRow[]>(`/api/v1/containers/${sessionId}/threads`)
     if (!Array.isArray(rows) || rows.length === 0) return
     // Use the mutable source messages so the data survives computed re-renders.
@@ -1003,6 +1040,7 @@ async function hydrateThreadBadges(sessionId: string) {
           msgId: row.id,
           done: true,
           replyCount: row.thread_reply_count || 1,
+          task: row.task || undefined,
         }]
       } else {
         // Update reply count on existing badge in case it grew since last WS event
@@ -1584,6 +1622,7 @@ registerWS(ws, 'thread_started', (msg: WSMessage) => {
           threadId: p.thread_id,
           agentId: p.agent_id || '',
           msgId: p.parent_message_id || target.id || '',
+          task: (p.task as string) || undefined,
           replyCount: 0,
         })
       }
@@ -1803,6 +1842,62 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     const agentId = p?.agent_id as string | undefined
     if (agentId) {
       activeToolCalls.value = activeToolCalls.value.filter(tc => (tc as any).agent !== agentId)
+    }
+  })
+
+  // delegation_error: a thread could not be created for an @mentioned agent.
+  // Mark the parent message with a failed-delegation badge so the user isn't
+  // left waiting for a response that will never come.
+registerWS(ws, 'delegation_error', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const parentMsgId = p?.parent_msg_id as string | undefined
+    const agent = p?.agent as string | undefined
+    const reason = p?.error as string | undefined
+    if (!parentMsgId || !agent) return
+    const msgs = getSourceMessages()
+    for (const m of msgs) {
+      if (m.id === parentMsgId) {
+        if (!(m as any).delegationErrors) (m as any).delegationErrors = []
+        const errExists = (m as any).delegationErrors.some((e: any) => e.agent === agent)
+        if (!errExists) (m as any).delegationErrors.push({ agent, reason: reason ?? 'unknown' })
+        break
+      }
+    }
+  })
+
+  // delegation_warning: @mention was found but agent name was not recognised,
+  // OR no @mention was found but the lead agent referenced an agent by name in
+  // natural language (heuristic fallback). Surface to the user so they know
+  // why delegation didn't fire.
+registerWS(ws, 'delegation_warning', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const parentMsgId = p?.parent_msg_id as string | undefined
+    const unknown = p?.unknown as string[] | undefined
+    const heuristic = p?.heuristic_agents as string[] | undefined
+    if (!parentMsgId) return
+    const msgs = getSourceMessages()
+    for (const m of msgs) {
+      if (m.id === parentMsgId) {
+        if (unknown?.length) {
+          if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
+          for (const a of unknown) {
+            const exists = (m as any).delegationWarnings.some((w: any) => w.agent === a && w.reason === 'unknown_agent')
+            if (!exists) (m as any).delegationWarnings.push({ agent: a, reason: 'unknown_agent' })
+          }
+        }
+        if (heuristic?.length) {
+          if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
+          for (const a of heuristic) {
+            const exists = (m as any).delegationWarnings.some((w: any) => w.agent === a && w.reason === 'missing_mention_syntax')
+            if (!exists) (m as any).delegationWarnings.push({ agent: a, reason: 'missing_mention_syntax' })
+          }
+        }
+        break
+      }
     }
   })
 

@@ -108,8 +108,10 @@ type Server struct {
 	// mentionDelegate is called after each chat message to parse @Agent mentions
 	// and spawn threads for any matched agents. Used as a fallback for models
 	// that don't support tool calling. parentMsgID is the session message ID of
-	// the triggering message (empty if unknown).
-	mentionDelegate func(ctx context.Context, sessionID, userMsg, parentMsgID string)
+	// the triggering message (empty if unknown). originalUserMsg is the user's
+	// original message (before the assistant responded) and is used by the
+	// caller to dedup mentions that already appeared in the user's message.
+	mentionDelegate func(ctx context.Context, sessionID, assistantMsg, originalUserMsg, parentMsgID string)
 
 	runtimeMgr *runtime.Manager // may be nil if built-in llama.cpp not configured
 	modelStore *models.Store    // may be nil if built-in llama.cpp not configured
@@ -485,8 +487,11 @@ func (s *Server) SendRelay(msg relay.Message) {
 // SetMentionDelegate installs a function that is called after each chat message
 // to parse @AgentName mentions and spawn threads for matching agents. This acts
 // as a fallback delegation path for models that don't support tool calling.
-// parentMsgID is the session message ID of the triggering message (empty if unknown).
-func (s *Server) SetMentionDelegate(fn func(ctx context.Context, sessionID, userMsg, parentMsgID string)) {
+// assistantMsg is the assistant's full response text containing @mentions.
+// originalUserMsg is the user's original message; callers use it with
+// DedupMentions to strip @mentions that were already in the user's prompt.
+// parentMsgID is the session message ID of the triggering assistant message.
+func (s *Server) SetMentionDelegate(fn func(ctx context.Context, sessionID, assistantMsg, originalUserMsg, parentMsgID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mentionDelegate = fn

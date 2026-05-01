@@ -29,6 +29,7 @@ type threadMessageRow struct {
 	TriggeringMessageID string                      `json:"triggering_message_id,omitempty"`
 	ThreadReplyCount    int                         `json:"thread_reply_count"`
 	ToolCalls           []session.PersistedToolCall `json:"tool_calls,omitempty"`
+	Task                string                      `json:"task,omitempty"`
 }
 
 // MessageThreadResponse is the JSON body returned by GET /api/v1/messages/:id/thread.
@@ -161,7 +162,8 @@ func (s *Server) handleGetContainerThreads(w http.ResponseWriter, r *http.Reques
 		       COALESCE(m.parent_message_id, ''),
 		       COALESCE(m.triggering_message_id, ''),
 		       COALESCE(m.thread_reply_count, 0),
-		       COALESCE(m.tool_calls_json, '')
+		       COALESCE(m.tool_calls_json, ''),
+		       COALESCE(t.task, '')
 		FROM messages m
 		LEFT JOIN threads t ON t.parent_msg_id = m.id
 		WHERE m.container_type = 'session' AND m.container_id = ?
@@ -176,12 +178,48 @@ func (s *Server) handleGetContainerThreads(w http.ResponseWriter, r *http.Reques
 	}
 	defer rows.Close()
 
-	msgs, err := scanThreadMessageRows(rows)
+	msgs, err := scanContainerThreadRows(rows)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "scan container threads: "+err.Error())
 		return
 	}
 	jsonOK(w, msgs)
+}
+
+// scanContainerThreadRows scans SQL rows from handleGetContainerThreads into a
+// []threadMessageRow. The query includes an extra task column (13th column)
+// compared to the standard scanThreadMessageRows query.
+// Returns a non-nil empty slice when there are no rows.
+func scanContainerThreadRows(rows *sql.Rows) ([]threadMessageRow, error) {
+	var out []threadMessageRow
+	for rows.Next() {
+		var m threadMessageRow
+		var tsStr string
+		var toolCallsJSON string
+		if err := rows.Scan(
+			&m.ID, &m.ContainerID, &m.Seq, &tsStr,
+			&m.Role, &m.Content, &m.Agent, &m.ToolName,
+			&m.ParentMessageID, &m.TriggeringMessageID,
+			&m.ThreadReplyCount, &toolCallsJSON,
+			&m.Task,
+		); err != nil {
+			return nil, err
+		}
+		if t, e := time.Parse(time.RFC3339, tsStr); e == nil {
+			m.Ts = t.UTC()
+		}
+		if toolCallsJSON != "" {
+			_ = json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []threadMessageRow{}
+	}
+	return out, nil
 }
 
 // scanThreadMessageRows scans SQL rows into a []threadMessageRow.

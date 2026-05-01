@@ -64,10 +64,10 @@ func TestHandleWSMessage_ChannelLeadDelegation_GoldenPath(t *testing.T) {
 		parentMsgID string
 	}
 	callCh := make(chan delegateCall, 1)
-	srv.SetMentionDelegate(func(_ context.Context, sessionID, userMsg, parentMsgID string) {
+	srv.SetMentionDelegate(func(_ context.Context, sessionID, assistantMsg, _ /* originalUserMsg */, parentMsgID string) {
 		callCh <- delegateCall{
 			sessionID:   sessionID,
-			assistant:   userMsg,
+			assistant:   assistantMsg,
 			parentMsgID: parentMsgID,
 		}
 	})
