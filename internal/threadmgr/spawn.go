@@ -687,6 +687,7 @@ func (tm *ThreadManager) runOnce(
 		})
 
 		// Process each tool call.
+		// deniedTools deduplicates thread_permission_denied broadcasts within this turn.
 		deniedTools := map[string]bool{}
 		for _, tc := range resp.ToolCalls {
 			appendToolResult := func(resultContent string) {
