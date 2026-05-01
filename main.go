@@ -3243,6 +3243,12 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	}
 	orch.StartSessionCleanup(ctx)
 
+	// Start thread watchdog: transitions stale queued/thinking threads to error
+	// and broadcasts thread_done so the frontend does not leave users waiting.
+	tm.StartWatchdog(ctx, func(sid, msgType string, payload map[string]any) {
+		srv.BroadcastToSession(sid, msgType, payload)
+	})
+
 	// Wire the cross-channel memory replicator. Fans out muninn writes from one
 	// channel member to all other members' vaults in the same space.
 	// The SQLite queue provides durability across restarts.
