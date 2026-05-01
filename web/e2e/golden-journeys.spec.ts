@@ -87,7 +87,7 @@ test.describe('Golden no-LLM journeys', () => {
     ws.send(JSON.stringify({ type: 'done', session_id: DM_SESSION, run_id: runID }))
 
     await expect(page.locator('.md-content').nth(1)).toContainText('Absolutely — here is a concise summary.', { timeout: 5_000 })
-    await expect(page.locator('[data-testid="streaming-thinking"]')).not.toBeVisible()
+    await expect(page.locator('[data-testid="streaming-banner"]')).not.toBeVisible()
   })
 
   test('channel lead delegates and thread lifecycle stays visible', async ({ page }) => {
