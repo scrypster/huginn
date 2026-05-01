@@ -49,6 +49,74 @@ var MentionRe = regexp.MustCompile("(?:^|[\\s,;:!?.*_`~()\\[\\]{}'\"<>])@([\\w-]
 // mentionRe is the package-internal alias kept for backward compat with existing callers.
 var mentionRe = MentionRe
 
+// delegationIntentRe matches common phrases that indicate the speaker is
+// delegating a task to someone. Used by detectBareAgentNames to reduce
+// false positives from casual name mentions.
+var delegationIntentRe = regexp.MustCompile(`(?i)\b(please|can you|could you|would you|i need you|go ahead|proceed|investigate|look into|check|handle|take care of|work on|help with|analyse|analyze|review|run|execute|prepare|write|create|build|fix|update|deploy)\b`)
+
+// detectBareAgentNames scans msg for known agent names that appear WITHOUT
+// an @ sigil, near delegation-intent language (e.g. "Elena, please investigate").
+// Returns the names found. Used as a heuristic fallback for low-tier models
+// that omit the @ sigil.
+//
+// Rules:
+//  1. The name must not be immediately preceded by @ (already an @mention)
+//  2. A delegation-intent verb must appear within 60 chars before or after the name
+//  3. The name must appear at a word boundary (not mid-word like "Samsung")
+func detectBareAgentNames(msg string, knownAgents []string) []string {
+	lower := strings.ToLower(msg)
+	var found []string
+	for _, name := range knownAgents {
+		lname := strings.ToLower(name)
+		idx := 0
+		for {
+			pos := strings.Index(lower[idx:], lname)
+			if pos < 0 {
+				break
+			}
+			abs := idx + pos
+			idx = abs + len(lname)
+
+			// Reject if preceded by @ (already an @mention).
+			if abs > 0 && msg[abs-1] == '@' {
+				continue
+			}
+
+			// Require word boundary before.
+			if abs > 0 {
+				before := lower[abs-1]
+				if (before >= 'a' && before <= 'z') || (before >= '0' && before <= '9') || before == '_' || before == '-' {
+					continue
+				}
+			}
+			// Require word boundary after.
+			end := abs + len(lname)
+			if end < len(lower) {
+				after := lower[end]
+				if (after >= 'a' && after <= 'z') || (after >= '0' && after <= '9') || after == '_' || after == '-' {
+					continue
+				}
+			}
+
+			// Check for delegation-intent language within a 60-char window.
+			start := abs - 60
+			if start < 0 {
+				start = 0
+			}
+			end2 := abs + len(lname) + 60
+			if end2 > len(lower) {
+				end2 = len(lower)
+			}
+			window := lower[start:end2]
+			if delegationIntentRe.MatchString(window) {
+				found = append(found, name)
+				break
+			}
+		}
+	}
+	return found
+}
+
 // ParseMentions scans msg for @AgentName patterns and returns a DelegationRequest
 // for each mention that matches a known agent name (case-insensitive).
 // Duplicate mentions of the same agent produce a single request.
@@ -176,6 +244,22 @@ func CreateFromMentions(
 		logger.Warn("CreateFromMentions: no valid mentions resolved",
 			"session_id", sessionID, "caller", callerAgent,
 			"unknown", unknown, "raw_msg_len", len(userMsg))
+		// Heuristic fallback: scan for bare agent names near delegation-intent
+		// language. Used for low-tier models that omit the @ sigil.
+		if broadcast != nil {
+			heuristic := detectBareAgentNames(userMsg, names)
+			if len(heuristic) > 0 {
+				logger.Warn("CreateFromMentions: heuristic detected bare agent names without @",
+					"session_id", sessionID, "heuristic_agents", heuristic)
+				broadcast(sessionID, "delegation_warning", map[string]any{
+					"session_id":       sessionID,
+					"parent_msg_id":    parentMsgID,
+					"caller":           callerAgent,
+					"heuristic_agents": heuristic,
+					"reason":           "missing_mention_syntax",
+				})
+			}
+		}
 	}
 	for i, req := range requests {
 		logger.Info("CreateFromMentions: processing mention",
