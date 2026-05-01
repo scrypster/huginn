@@ -445,11 +445,14 @@
                       </div>
                       <!-- Reply count label or "working…" indicator -->
                       <span class="text-xs font-medium" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                        <template v-if="['running','thinking','queued'].includes(getThreadById(d.threadId)?.Status ?? '')">
+                        <template v-if="!d.done">
                           working…
                         </template>
+                        <template v-else-if="d.done && (d.replyCount ?? 0) < 1">
+                          completed
+                        </template>
                         <template v-else>
-                          {{ (d.replyCount ?? 1) === 1 ? '1 reply' : `${d.replyCount} replies` }}
+                          {{ d.replyCount === 1 ? '1 reply' : `${d.replyCount} replies` }}
                         </template>
                       </span>
                       <!-- Task description — shown when available, truncated to keep strip compact -->
