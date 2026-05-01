@@ -79,6 +79,16 @@
             Refreshing…
           </div>
         </div>
+        <!-- Wildcard strip info banner -->
+        <div v-if="wildcardStripped"
+          class="flex items-center gap-2 px-4 py-2.5 border-b border-huginn-amber/20 bg-huginn-amber/8 text-huginn-amber text-xs"
+        >
+          <svg class="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          Removed legacy wildcard connection. Save to persist.
+          <button @click="wildcardStripped = false" class="ml-auto text-huginn-amber/60 hover:text-huginn-amber transition-colors">✕</button>
+        </div>
       </div>
 
       <!-- Two-panel layout: identity sidebar + configuration main -->
@@ -476,7 +486,7 @@
           </div>
           <div class="flex gap-2">
             <button @click="discard" class="px-3 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">Discard</button>
-            <button data-testid="save-agent-btn-sticky" @click="save" :disabled="saving || connectionValidationIssues.length > 0"
+            <button data-testid="save-agent-btn-sticky" @click="() => save()" :disabled="saving || connectionValidationIssues.length > 0"
               class="px-4 py-1.5 text-xs font-medium text-white rounded-lg transition-all active:scale-95 disabled:opacity-50"
               style="background:rgba(88,166,255,0.9)">
               {{ saving ? 'Saving...' : 'Save changes' }}
@@ -1324,6 +1334,7 @@ const {
   loadError,
   loadErrorMsg,
   showDeleteConfirm,
+  wildcardStripped,
   availableModels,
   showModelPicker,
   modelSearch,
