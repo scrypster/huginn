@@ -136,8 +136,7 @@ func TestBuildDMCrossSpaceContextBlock_MemberDescriptions_Included(t *testing.T)
 }
 
 // TestBuildDMCrossSpaceContextBlock_ContainsDelegateInstruction verifies that
-// the output contains instructions about delegating work, mentioning delegation
-// mechanisms such as delegate_to_agent or @mention.
+// the output contains delegate_to_agent-first delegation instructions.
 func TestBuildDMCrossSpaceContextBlock_ContainsDelegateInstruction(t *testing.T) {
 	channels := []ChannelRoster{
 		{
@@ -151,9 +150,10 @@ func TestBuildDMCrossSpaceContextBlock_ContainsDelegateInstruction(t *testing.T)
 
 	result := BuildDMCrossSpaceContextBlock("Alice", channels)
 
-	// Check for delegation instruction keywords
-	hasDelegateKeyword := strings.Contains(result, "delegate_to_agent") || strings.Contains(result, "@mention")
-	if !hasDelegateKeyword {
-		t.Errorf("expected output to contain delegation instructions (delegate_to_agent or @mention), got: %s", result)
+	if !strings.Contains(result, "delegate_to_agent") {
+		t.Errorf("expected output to contain delegate_to_agent delegation instructions, got: %s", result)
+	}
+	if strings.Contains(result, "@mention") {
+		t.Errorf("did not expect @mention fallback guidance in DM cross-space context, got: %s", result)
 	}
 }

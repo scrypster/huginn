@@ -297,6 +297,33 @@ describe('useThreads — wireWS', () => {
     expect(threads[0]!.Status).toBe('blocked')
     expect(threads[0]!.Summary?.Summary).toBe('Need clarification on requirements')
   })
+
+  it('returns cleanup function that unregisters all handlers', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const removed: string[] = []
+    const ws = {
+      on: (event: string, handler: (msg: unknown) => void) => { handlers[event] = handler },
+      off: (event: string) => { removed.push(event) },
+    }
+
+    const cleanup = wireWS(ws as any, () => 'sess-clean')
+    expect(typeof cleanup).toBe('function')
+    cleanup()
+
+    expect(removed).toContain('thread_started')
+    expect(removed).toContain('thread_status')
+    expect(removed).toContain('thread_token')
+    expect(removed).toContain('thread_tool_call')
+    expect(removed).toContain('thread_tool_done')
+    expect(removed).toContain('thread_done')
+    expect(removed).toContain('thread_help')
+    expect(removed).toContain('thread_help_resolving')
+    expect(removed).toContain('thread_help_resolved')
+    expect(removed).toContain('thread_reply_updated')
+    expect(removed).toContain('delegation_preview')
+  })
 })
 
 describe('useThreads — clearSession', () => {
@@ -526,6 +553,23 @@ describe('useThreads — getSessionPreviews / ackPreview', () => {
     expect(previews).toHaveLength(1)
     expect(previews[0]!.agentId).toBe('qa')
     expect(previews[0]!.task).toBe('run tests')
+  })
+
+  it('delegation_preview accepts legacy payload key "agent"', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionPreviews } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-prev-legacy')
+
+    handlers['delegation_preview']!({
+      session_id: 'sess-prev-legacy',
+      payload: { thread_id: 'thread-p2', agent: 'qa', task: 'run tests' },
+    })
+
+    const previews = getSessionPreviews('sess-prev-legacy')
+    expect(previews).toHaveLength(1)
+    expect(previews[0]!.agentId).toBe('qa')
   })
 
   it('duplicate delegation_preview is deduplicated', async () => {

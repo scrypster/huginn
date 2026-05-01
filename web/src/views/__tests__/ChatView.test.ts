@@ -204,6 +204,8 @@ describe('ChatView', () => {
     vi.clearAllMocks()
     mockMessages['test-session-id'] = []
     mockSessions.value = [{ id: 'test-session-id', title: 'Test Session' }]
+    mockActiveSpace.value = null
+    mockSpaceState = makeSpaceState()
   })
 
   afterEach(() => {
@@ -338,7 +340,7 @@ describe('ChatView', () => {
       { id: 'h-1', role: 'assistant', content: 'start ', streaming: true },
     ]
 
-    mountChatView({}, mockWs)
+    const wrapper = mountChatView({}, mockWs)
     await nextTick()
 
     // Simulate a token WS event
@@ -705,7 +707,7 @@ describe('ChatView', () => {
     )
   })
 
-  it('handleEditorSend: blocks send while streaming', async () => {
+  it('handleEditorSend: allows queued send while streaming', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = [
       { id: 'h-1', role: 'assistant', content: 'in progress...', streaming: true },
@@ -734,8 +736,53 @@ describe('ChatView', () => {
       (c: any[]) => c[0]?.type === 'chat'
     ).length
 
-    // Second message should be blocked (same count)
-    expect(sendCountAfterSecond).toBe(sendCountAfterFirst)
+    // Second message should be queued/sent (count increases)
+    expect(sendCountAfterSecond).toBe(sendCountAfterFirst + 1)
+    const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
+    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
+    expect(lastChatSend?.payload?.update_route).toBe('all_active')
+  })
+
+  it('shows pre-stream thinking indicator immediately after send', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello')
+    await nextTick()
+
+    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+  })
+
+  it('handleEditorSend: supports specific delegate routing for queued updates', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'h-1', role: 'assistant', content: 'in progress...', streaming: true },
+    ]
+    mockGetSessionThreads.mockReturnValue([
+      { ID: 'thr-1', SessionID: 'test-session-id', AgentID: 'Researcher', Status: 'thinking' },
+    ])
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'First message')
+    await nextTick()
+
+    const specificRouteBtn = wrapper.findAll('button').find(b => b.text() === 'Specific delegate')
+    expect(specificRouteBtn).toBeDefined()
+    await specificRouteBtn!.trigger('click')
+    await nextTick()
+
+    await chatEditor.vm.$emit('send', 'Second message')
+    await nextTick()
+
+    const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
+    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
+    expect(lastChatSend?.payload?.update_route).toBe('specific_delegate')
+    expect(lastChatSend?.payload?.target_agent).toBe('Researcher')
   })
 
   it('handleEditorSend: auto-selects default agent on first send and sends chat', async () => {
@@ -910,7 +957,31 @@ describe('ChatView', () => {
     expect(wrapper.html()).toContain('5 agents')
   })
 
-  it('WS thread_started handler: attaches delegated thread to last assistant message', async () => {
+  it('WS thread_started handler: attaches delegated thread to explicit parent message', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u-1', role: 'user', content: 'run tests' },
+      { id: 'h-1', role: 'assistant', content: 'delegating...', streaming: true },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_started',
+      payload: { thread_id: 'thr-abc', agent_id: 'TestRunner', parent_message_id: 'u-1' },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const parent = msgs.find((m: any) => m.id === 'u-1') as any
+    expect(parent?.delegatedThreads).toBeDefined()
+    expect(parent.delegatedThreads.length).toBe(1)
+    expect(parent.delegatedThreads[0].threadId).toBe('thr-abc')
+    expect(parent.delegatedThreads[0].agentId).toBe('TestRunner')
+  })
+
+  it('WS thread_started handler: does not attach without parent_message_id', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = [
       { id: 'u-1', role: 'user', content: 'run tests' },
@@ -927,11 +998,151 @@ describe('ChatView', () => {
     await nextTick()
 
     const msgs = mockGetMessages('test-session-id')
-    const lastAssistant = [...msgs].reverse().find((m: any) => m.role === 'assistant')
-    expect(lastAssistant?.delegatedThreads).toBeDefined()
-    expect(lastAssistant.delegatedThreads.length).toBe(1)
-    expect(lastAssistant.delegatedThreads[0].threadId).toBe('thr-abc')
-    expect(lastAssistant.delegatedThreads[0].agentId).toBe('TestRunner')
+    expect((msgs.find((m: any) => m.id === 'u-1') as any)?.delegatedThreads).toBeUndefined()
+    expect((msgs.find((m: any) => m.id === 'h-1') as any)?.delegatedThreads).toBeUndefined()
+  })
+
+  it('WS thread_permission_denied: adds deduped denial card and clears on thread_done', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'run tests',
+        delegatedThreads: [{ threadId: 'thr-1', agentId: 'TestRunner', msgId: 'u-1' }],
+      },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_permission_denied',
+      session_id: 'test-session-id',
+      payload: { thread_id: 'thr-1', agent_id: 'TestRunner', tool: 'bash_execute' },
+    })
+    mockWs.simulateMessage({
+      type: 'thread_permission_denied',
+      session_id: 'test-session-id',
+      payload: { thread_id: 'thr-1', agent_id: 'TestRunner', tool: 'bash_execute' },
+    })
+    await nextTick()
+
+    const parent = mockGetMessages('test-session-id').find((m: any) => m.id === 'u-1') as any
+    expect(parent.permissionDenials).toBeDefined()
+    expect(parent.permissionDenials.length).toBe(1)
+    expect(parent.permissionDenials[0].threadId).toBe('thr-1')
+    expect(parent.permissionDenials[0].tool).toBe('bash_execute')
+
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: 'test-session-id',
+      payload: { thread_id: 'thr-1', status: 'done' },
+    })
+    await nextTick()
+    expect(parent.permissionDenials.length).toBe(0)
+  })
+
+  it('WS thread_reply_updated: updates single delegated thread reply count', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'run tests',
+        delegatedThreads: [{ threadId: 'thr-1', agentId: 'TestRunner', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_reply_updated',
+      session_id: 'test-session-id',
+      payload: { message_id: 'u-1', reply_count: 3 },
+    })
+    await nextTick()
+
+    const parent = mockGetMessages('test-session-id').find((m: any) => m.id === 'u-1') as any
+    expect(parent.delegatedThreads[0].replyCount).toBe(3)
+  })
+
+  it('delegation activity row: transitions from working to completed on thread_done', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'run tests',
+        delegatedThreads: [{ threadId: 'thr-1', agentId: 'TestRunner', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+    expect(wrapper.html()).toContain('Delegated to')
+    expect(wrapper.html()).toContain('@TestRunner')
+    expect(wrapper.html()).toContain('working…')
+
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: 'test-session-id',
+      payload: { thread_id: 'thr-1', status: 'done', reply_count: 0 },
+    })
+    await nextTick()
+    expect(wrapper.html()).toContain('completed')
+  })
+
+  it('thread_done with summary renders a completion card in main timeline', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'run tests',
+        delegatedThreads: [{ threadId: 'thr-1', agentId: 'TestRunner', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: 'test-session-id',
+      payload: {
+        thread_id: 'thr-1',
+        agent_id: 'TestRunner',
+        status: 'done',
+        summary: 'Added regression coverage.',
+      },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const card = msgs.find((m: any) => m.threadSummaryThreadId === 'thr-1')
+    expect(card).toBeDefined()
+    expect(card.threadSummary).toBe(true)
+    expect(card.content).toContain('completed delegated work')
+    expect(card.content).toContain('Added regression coverage.')
+  })
+
+  it('thread_help surfaces a blocked-thread alert banner', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_help',
+      session_id: 'test-session-id',
+      payload: { thread_id: 'thr-1', message: 'Need credentials to continue.' },
+    })
+    await nextTick()
+
+    expect(wrapper.html()).toContain('needs input')
+    expect(wrapper.html()).toContain('Need credentials to continue.')
   })
 })
 
@@ -1744,7 +1955,7 @@ describe('ChatView — space mode', () => {
     )
   })
 
-  it('blocks a second send while the first is still streaming', async () => {
+  it('queues a second send while the first is still streaming', async () => {
     const mockWs = createMockWs()
     const wrapper = mountSpaceChatView(mockWs)
     await flushPromises()
@@ -1763,6 +1974,9 @@ describe('ChatView — space mode', () => {
 
     const chatSendsAfterSecond = mockWs.sentMessages.filter((m: any) => m.type === 'chat').length
 
-    expect(chatSendsAfterSecond).toBe(chatSendsAfterFirst)
+    expect(chatSendsAfterSecond).toBe(chatSendsAfterFirst + 1)
+    const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
+    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
+    expect(lastChatSend?.payload?.update_route).toBe('all_active')
   })
 })

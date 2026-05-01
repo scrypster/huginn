@@ -13,8 +13,10 @@ const DefaultThreadBusCapacity = 128
 type ThreadContextMessage struct {
 	ThreadID string
 	AgentID  string
-	Content  string
-	At       time.Time
+	// TargetAgentID scopes the update to a single delegate. Empty means broadcast.
+	TargetAgentID string
+	Content       string
+	At            time.Time
 }
 
 // ThreadBus keeps bounded per-session context messages that sibling threads can
@@ -60,8 +62,9 @@ func (b *ThreadBus) Publish(sessionID string, msg ThreadContextMessage) {
 }
 
 // SiblingContext returns recent context updates from a session, excluding the
-// given thread ID.
-func (b *ThreadBus) SiblingContext(sessionID, excludeThreadID string, limit int) []ThreadContextMessage {
+// given thread ID. When forAgentID is set, directed updates are returned only
+// when TargetAgentID matches forAgentID (case-insensitive).
+func (b *ThreadBus) SiblingContext(sessionID, excludeThreadID, forAgentID string, limit int) []ThreadContextMessage {
 	if b == nil || sessionID == "" {
 		return nil
 	}
@@ -79,6 +82,9 @@ func (b *ThreadBus) SiblingContext(sessionID, excludeThreadID string, limit int)
 	out := make([]ThreadContextMessage, 0, limit)
 	for i := len(src) - 1; i >= 0 && len(out) < limit; i-- {
 		if excludeThreadID != "" && src[i].ThreadID == excludeThreadID {
+			continue
+		}
+		if src[i].TargetAgentID != "" && !strings.EqualFold(strings.TrimSpace(src[i].TargetAgentID), strings.TrimSpace(forAgentID)) {
 			continue
 		}
 		out = append(out, src[i])

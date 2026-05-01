@@ -38,6 +38,37 @@
     <div class="flex flex-col flex-1 min-h-0">
 
     <div class="flex-1 overflow-y-auto py-4 px-4 space-y-4">
+      <div v-if="messages.length > 0 && !loading && !error" class="flex items-center justify-between gap-2">
+        <span
+          class="text-[10px] px-2 py-0.5 rounded-full border uppercase tracking-wide"
+          :class="{
+            'text-huginn-blue border-huginn-blue/30 bg-huginn-blue/10': lifecycleState === 'active',
+            'text-huginn-yellow border-huginn-yellow/30 bg-huginn-yellow/10': lifecycleState === 'needs_input',
+            'text-huginn-green border-huginn-green/30 bg-huginn-green/10': lifecycleState === 'resolved',
+            'text-huginn-muted border-huginn-border bg-huginn-surface/40': lifecycleState === 'expired',
+          }"
+        >
+          {{ lifecycleLabel }}
+        </span>
+        <div class="inline-flex rounded-lg border border-huginn-border overflow-hidden">
+          <button
+            type="button"
+            class="px-2 py-1 text-[11px] transition-colors"
+            :class="threadViewMode === 'timeline' ? 'bg-huginn-surface text-huginn-text' : 'text-huginn-muted hover:text-huginn-text'"
+            @click="threadViewMode = 'timeline'"
+          >
+            Timeline
+          </button>
+          <button
+            type="button"
+            class="px-2 py-1 text-[11px] transition-colors border-l border-huginn-border"
+            :class="threadViewMode === 'lanes' ? 'bg-huginn-surface text-huginn-text' : 'text-huginn-muted hover:text-huginn-text'"
+            @click="threadViewMode = 'lanes'"
+          >
+            Agent lanes
+          </button>
+        </div>
+      </div>
       <!-- Loading state -->
       <div v-if="loading" class="flex items-center justify-center h-16 gap-2">
         <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:0ms" />
@@ -62,6 +93,7 @@
       </div>
 
       <!-- Message list (grouped so consecutive tool calls collapse into one row) -->
+      <template v-if="threadViewMode === 'timeline'">
       <template v-for="(item, idx) in groupedMessages" :key="item.type === 'message' ? item.msg.id : item.key">
 
         <!-- Tool call group: collapsed "N tool calls" with expandable details -->
@@ -77,22 +109,26 @@
           <template v-else>
             <!-- Collapsed summary row -->
             <button
-              @click="toggleGroup(item.key)"
-              class="flex items-center gap-1.5 py-1 text-huginn-muted/50 hover:text-huginn-muted/80 transition-colors w-full text-left"
+            @click="!item.isInternal && toggleGroup(item.key)"
+            class="flex items-center gap-1.5 py-1 text-huginn-muted/50 transition-colors w-full text-left"
+            :class="item.isInternal ? 'cursor-default' : 'hover:text-huginn-muted/80'"
             >
               <svg class="w-3 h-3 flex-shrink-0 text-huginn-muted/40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
               </svg>
-              <span class="text-[11px]">
+            <span v-if="item.isInternal" class="text-[11px]">
+              🧠 Memory: {{ summarizeMemoryOp(item.calls) }}
+            </span>
+            <span v-else class="text-[11px]">
                 {{ item.calls.length }} tool call{{ item.calls.length !== 1 ? 's' : '' }}
               </span>
-              <svg class="w-3 h-3 ml-auto flex-shrink-0 transition-transform" :class="{'rotate-180': expandedGroups[item.key]}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <svg v-if="!item.isInternal" class="w-3 h-3 ml-auto flex-shrink-0 transition-transform" :class="{'rotate-180': expandedGroups[item.key]}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
 
             <!-- Expanded detail: each tool call + its result -->
-            <div v-if="expandedGroups[item.key]" class="mt-1 space-y-1 pl-4 border-l-2" style="border-color:rgba(255,255,255,0.08)">
+          <div v-if="!item.isInternal && expandedGroups[item.key]" class="mt-1 space-y-1 pl-4 border-l-2" style="border-color:rgba(255,255,255,0.08)">
               <template v-for="call in item.calls" :key="call.id">
                 <!-- Tool call row -->
                 <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-huginn-border bg-huginn-surface/30 text-xs">
@@ -222,6 +258,53 @@
         </template>
 
       </template>
+      </template>
+
+      <!-- Agent lanes (group messages by author for Slack-like delegation scanning) -->
+      <template v-else>
+        <div v-for="lane in laneGroups" :key="lane.lane" class="space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-[11px] font-semibold" :style="`color:${lane.color}`">
+              {{ lane.lane }}
+            </span>
+            <span class="text-[10px] text-huginn-muted/60">
+              {{ lane.messages.length }} message{{ lane.messages.length === 1 ? '' : 's' }}
+            </span>
+            <div class="flex-1 border-t border-huginn-border/70" />
+          </div>
+          <div class="space-y-3">
+            <template v-for="msg in lane.messages" :key="msg.id">
+              <div v-if="msg.role === 'user'" class="flex justify-end min-w-0">
+                <div class="md-content max-w-[85%] px-3 py-2.5 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
+                  style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
+                  v-html="renderMarkdown(msg.content)" />
+              </div>
+              <div v-else class="flex gap-2.5 min-w-0">
+                <div class="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5 select-none"
+                  :style="`background:${agentColor(msg.agent)}22;border:1px solid ${agentColor(msg.agent)}33`">
+                  <span class="text-[10px] font-bold" :style="`color:${agentColor(msg.agent)}`">
+                    {{ (msg.agent?.[0] ?? 'A').toUpperCase() }}
+                  </span>
+                </div>
+                <div class="flex-1 min-w-0 pt-0.5">
+                  <div class="flex items-center gap-1.5 mb-0.5 min-w-0">
+                    <span class="text-xs font-semibold" :style="`color:${agentColor(msg.agent)}`">
+                      {{ msg.agent || 'Agent' }}
+                    </span>
+                    <span class="text-[11px] text-huginn-muted/50">{{ formatTime(msg.created_at) }}</span>
+                  </div>
+                  <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
+                    v-html="renderMarkdown(msg.content)" />
+                  <span v-if="(msg as any).streaming" class="inline-block w-1.5 h-3.5 bg-huginn-muted/60 rounded-sm animate-pulse ml-0.5 align-middle" />
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+        <p class="text-[10px] text-huginn-muted/60">
+          Tool-call rows remain in Timeline mode for full execution detail.
+        </p>
+      </template>
 
       <!-- Artifact card at bottom of thread -->
       <ArtifactCard
@@ -240,7 +323,7 @@
     </div>
 
     <!-- ── Injection input ──────────────────────────────────────── -->
-    <div v-if="threadId" class="px-3 pb-3 flex-shrink-0 border-t border-huginn-border"
+    <div v-if="threadId && threadStatus === 'blocked'" class="px-3 pb-3 flex-shrink-0 border-t border-huginn-border"
       :style="threadStatus === 'blocked' ? 'background:rgba(210,153,34,0.06)' : ''">
       <div class="flex items-center gap-2 pt-2.5">
         <!-- Hint: highlighted when blocked -->
@@ -254,7 +337,7 @@
         <input
           v-model="injectInput"
           type="text"
-          placeholder="Send a message to this thread..."
+          placeholder="Reply to unblock this thread..."
           class="flex-1 min-w-0 bg-huginn-surface/50 border border-huginn-border rounded-lg px-2.5 py-1.5 text-xs text-huginn-text placeholder-huginn-muted/40 outline-none focus:border-huginn-blue/40 transition-colors"
           :disabled="injectState === 'sending'"
           @keydown.enter="handleInject"
@@ -277,15 +360,34 @@
       </div>
       <p v-if="injectState === 'failed'"
         class="text-[10px] text-huginn-red mt-1 pl-14">
-        Failed to deliver — thread buffer full. Try again.
+        {{ injectErrorMessage }}
       </p>
+      <p v-else-if="injectState === 'sent' && injectSuccessMessage"
+        class="text-[10px] text-huginn-green mt-1 pl-14">
+        {{ injectSuccessMessage }}
+      </p>
+    </div>
+    <div v-else-if="threadId" class="px-3 pb-3 pt-2.5 flex-shrink-0 border-t border-huginn-border">
+      <p class="text-[10px] text-huginn-muted/60 mb-2">
+        {{ lifecycleState === 'expired'
+          ? 'This thread is stale. Reopen it in chat to continue with fresh delegations.'
+          : 'Thread input is available only when the agent explicitly requests help.' }}
+      </p>
+      <button
+        v-if="showFollowUpCta"
+        type="button"
+        class="text-[11px] px-2 py-1 rounded-md border border-huginn-blue/30 text-huginn-blue hover:bg-huginn-blue/10 transition-colors"
+        @click="startFollowUp"
+      >
+        {{ lifecycleState === 'expired' ? 'Reopen thread in chat' : 'Start follow-up task in chat' }}
+      </button>
     </div>
   </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import type { ThreadMessage, ThreadArtifact } from '../composables/useThreadDetail'
@@ -304,6 +406,11 @@ type ToolGroup = {
   isInternal: boolean
 }
 type GroupedItem = MsgItem | ToolGroup
+type LaneGroup = {
+  lane: string
+  color: string
+  messages: ThreadMessage[]
+}
 
 const PALETTE = ['#58A6FF', '#3FB950', '#FF7B72', '#D2A8FF', '#FFA657', '#79C0FF']
 
@@ -377,6 +484,9 @@ const props = defineProps<{
   threadId?: string         // live thread ID for injection
 }>()
 
+const THREAD_EXPIRY_MS = 48 * 60 * 60 * 1000
+const threadViewMode = ref<'timeline' | 'lanes'>('timeline')
+
 // ── Tool call grouping ────────────────────────────────────────────────
 // Groups consecutive tool_call / tool_result messages so they render as a
 // single collapsible "N tool calls" summary instead of individual rows.
@@ -439,38 +549,165 @@ const groupedMessages = computed((): GroupedItem[] => {
   return result
 })
 
+const laneGroups = computed((): LaneGroup[] => {
+  const nonTool = props.messages.filter((m) =>
+    (m.role as string) !== 'cost' &&
+    (m.role as string) !== 'system' &&
+    m.role !== 'tool_call' &&
+    m.role !== 'tool_result'
+  )
+  const buckets = new Map<string, LaneGroup>()
+  for (const msg of nonTool) {
+    const lane = msg.role === 'user' ? 'You' : (msg.agent || 'Agent')
+    const existing = buckets.get(lane)
+    if (existing) {
+      existing.messages.push(msg)
+      continue
+    }
+    buckets.set(lane, {
+      lane,
+      color: msg.role === 'user' ? '#58A6FF' : agentColor(msg.agent || 'Agent'),
+      messages: [msg],
+    })
+  }
+  return [...buckets.values()].map((lane) => ({
+    ...lane,
+    messages: [...lane.messages].sort((a, b) => {
+      const ta = Date.parse(a.created_at || '')
+      const tb = Date.parse(b.created_at || '')
+      if (!Number.isNaN(ta) && !Number.isNaN(tb) && ta !== tb) return ta - tb
+      return (a.seq ?? 0) - (b.seq ?? 0)
+    }),
+  }))
+})
+
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'accept-artifact', id: string): void
   (e: 'reject-artifact', id: string): void
   (e: 'inject', threadId: string, content: string): void
+  (e: 'start-follow-up', threadId: string, draft?: string): void
 }>()
 
 // ── Injection input ──────────────────────────────────────────────────
 const injectInput = ref('')
 type InjectState = 'idle' | 'sending' | 'sent' | 'failed'
 const injectState = ref<InjectState>('idle')
+const injectErrorMessage = ref('Failed to deliver — thread input is full. Try again.')
+const injectSuccessMessage = ref('')
+let injectTimeoutHandle: ReturnType<typeof setTimeout> | null = null
+const terminalStatuses = new Set(['done', 'completed', 'completed-with-timeout', 'error', 'cancelled'])
+function resolvedOrExpiredFromLastMessage(): 'resolved' | 'expired' {
+  const lastMessage = [...props.messages].reverse().find(m => !!m.created_at)
+  if (!lastMessage?.created_at) return 'resolved'
+  const lastMs = Date.parse(lastMessage.created_at)
+  if (Number.isNaN(lastMs)) return 'resolved'
+  return Date.now() - lastMs >= THREAD_EXPIRY_MS ? 'expired' : 'resolved'
+}
+const lifecycleState = computed<'active' | 'needs_input' | 'resolved' | 'expired'>(() => {
+  const status = (props.threadStatus || '').toLowerCase()
+  if (status === 'blocked') return 'needs_input'
+  // Older/pruned threads may not exist in live thread state anymore; treat
+  // missing status as resolved by default and derive "expired" from recency.
+  if (!status) return resolvedOrExpiredFromLastMessage()
+  if (!terminalStatuses.has(status)) return 'active'
+  return resolvedOrExpiredFromLastMessage()
+})
+const lifecycleLabel = computed(() => {
+  switch (lifecycleState.value) {
+    case 'needs_input': return 'Needs Input'
+    case 'resolved': return 'Resolved'
+    case 'expired': return 'Expired'
+    default: return 'Active'
+  }
+})
+const showFollowUpCta = computed(() => {
+  return !!props.threadId && (lifecycleState.value === 'resolved' || lifecycleState.value === 'expired')
+})
+
+function clearInjectTimeout() {
+  if (injectTimeoutHandle) {
+    clearTimeout(injectTimeoutHandle)
+    injectTimeoutHandle = null
+  }
+}
 
 function handleInject() {
   const content = injectInput.value.trim()
   if (!content || !props.threadId) return
   injectState.value = 'sending'
+  injectErrorMessage.value = 'Failed to deliver — thread input is full. Try again.'
+  injectSuccessMessage.value = ''
+  clearInjectTimeout()
+  injectTimeoutHandle = setTimeout(() => {
+    if (injectState.value === 'sending') {
+      injectState.value = 'failed'
+      injectErrorMessage.value = 'Send timed out. The thread may have finished or disconnected.'
+    }
+  }, 5000)
   emit('inject', props.threadId, content)
   // State will be resolved by parent after ack/error
 }
 
-function onInjectAck() {
+function startFollowUp() {
+  if (!props.threadId) return
+  const draft = lifecycleState.value === 'expired'
+    ? `Reopen thread ${props.threadId}. Use prior context and continue with this update: `
+    : `Follow up on thread ${props.threadId}: `
+  emit('start-follow-up', props.threadId, draft)
+}
+
+function onInjectAck(receipt?: {
+  delivered_to_agent?: string
+  deliveredToAgent?: string
+  shared_with_active?: number
+  sharedWithActive?: number
+}) {
+  clearInjectTimeout()
   injectInput.value = ''
+  injectErrorMessage.value = 'Failed to deliver — thread input is full. Try again.'
+  const deliveredTo = receipt?.delivered_to_agent || receipt?.deliveredToAgent || ''
+  const sharedRaw = receipt?.shared_with_active ?? receipt?.sharedWithActive ?? 0
+  const sharedWith = typeof sharedRaw === 'number' ? sharedRaw : Number(sharedRaw) || 0
+  if (deliveredTo && sharedWith > 0) {
+    injectSuccessMessage.value = `Delivered to @${deliveredTo}; shared with ${sharedWith} active delegate${sharedWith === 1 ? '' : 's'}.`
+  } else if (deliveredTo) {
+    injectSuccessMessage.value = `Delivered to @${deliveredTo}.`
+  } else if (sharedWith > 0) {
+    injectSuccessMessage.value = `Delivered and shared with ${sharedWith} active delegate${sharedWith === 1 ? '' : 's'}.`
+  } else {
+    injectSuccessMessage.value = 'Delivered.'
+  }
   injectState.value = 'sent'
   setTimeout(() => { injectState.value = 'idle' }, 2000)
 }
 
-function onInjectError() {
+function onInjectError(reason?: string) {
+  clearInjectTimeout()
+  injectSuccessMessage.value = ''
   injectState.value = 'failed'
+  switch (reason) {
+    case 'not_waiting':
+      injectErrorMessage.value = 'This thread is no longer waiting for input.'
+      break
+    case 'not_found':
+      injectErrorMessage.value = 'Thread not found. It may be old or already pruned.'
+      break
+    case 'buffer_full':
+      injectErrorMessage.value = 'Failed to deliver — thread input is full. Try again.'
+      break
+    default:
+      injectErrorMessage.value = 'Failed to deliver input. Try again.'
+      break
+  }
   setTimeout(() => { injectState.value = 'idle' }, 3000)
 }
 
 defineExpose({ onInjectAck, onInjectError })
+
+onUnmounted(() => {
+  clearInjectTimeout()
+})
 
 const panelStyle = computed(() => ({
   width: props.visible ? '400px' : '0px',

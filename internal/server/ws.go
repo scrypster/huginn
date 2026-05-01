@@ -956,18 +956,24 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		// specific run that triggered them and avoid stale-event mis-fires.
 		runID := msg.RunID
 		userMsg := msg.Content
-		// Snapshot mentionDelegate under the lock so the goroutine doesn't race.
-		s.mu.Lock()
-		mentionDelegate := s.mentionDelegate
-		s.mu.Unlock()
-		go func(runID string) {
+		intent := ""
+		if rawIntent, ok := msg.Payload["intent"].(string); ok {
+			intent = strings.ToLower(strings.TrimSpace(rawIntent))
+		}
+		updateRoute := ""
+		if rawRoute, ok := msg.Payload["update_route"].(string); ok {
+			updateRoute = strings.ToLower(strings.TrimSpace(rawRoute))
+		}
+		targetAgent := ""
+		if rawTarget, ok := msg.Payload["target_agent"].(string); ok {
+			targetAgent = strings.TrimSpace(rawTarget)
+		}
+		go func(runID, intent, updateRoute, targetAgent string) {
 			// assistantBuf accumulates response tokens for persistence after completion.
 			var assistantBuf strings.Builder
 			// collectedToolCalls accumulates tool results for persistence with the assistant message.
 			var collectedToolCalls []session.PersistedToolCall
-			// Pre-generate assistant message ID so mentionDelegate can parent
-			// threads under the assistant's @mention message (Slack-like UX)
-			// rather than the user's message.
+			// Pre-generate assistant message ID so done payload + persistence agree.
 			assistantMsgID := session.NewID()
 			onToken := func(token string) {
 				assistantBuf.WriteString(token)
@@ -1009,12 +1015,58 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 				chatCtx = threadmgr.SetCallingAgent(chatCtx, ag.Name)
 			}
 
-			var err error
-			if ag != nil {
-				err = s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, nil, onEvent)
-			} else {
+			runChat := func() error {
+				if ag != nil {
+					return s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, nil, onEvent)
+				}
 				// No agents configured — fall back to generic Chat.
-				err = s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
+				return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
+			}
+
+			err := runChat()
+			if err != nil && strings.Contains(err.Error(), "already running") {
+				warnContent := "Another response is still finishing — queued your message and retrying."
+				if intent == "update_active_work" && s.tm != nil {
+					switch updateRoute {
+					case "lead_only":
+						warnContent = "Queued a lead follow-up to your update."
+					case "specific_delegate":
+						if targetAgent != "" {
+							activeDelegates := s.tm.PublishSessionGuidanceTarget(sessionID, "operator", targetAgent, "main-channel update: "+userMsg)
+							if activeDelegates > 0 {
+								warnContent = fmt.Sprintf("Shared your update with @%s and queued a lead follow-up.", targetAgent)
+							} else {
+								warnContent = fmt.Sprintf("No active delegate matched @%s — queued a lead follow-up.", targetAgent)
+							}
+							break
+						}
+						fallthrough
+					case "", "all_active":
+						activeDelegates := s.tm.PublishSessionGuidance(sessionID, "operator", "main-channel update: "+userMsg)
+						if activeDelegates > 0 {
+							if activeDelegates == 1 {
+								warnContent = "Shared your update with 1 active delegate and queued a lead follow-up."
+							} else {
+								warnContent = fmt.Sprintf("Shared your update with %d active delegates and queued a lead follow-up.", activeDelegates)
+							}
+						}
+					default:
+						warnContent = "Queued a lead follow-up to your update."
+					}
+				}
+				// Slack-like behavior: treat quick follow-up user messages as queued
+				// guidance when another run is still winding down.
+				c.safeSend(WSMessage{
+					Type:      "warning",
+					Content:   warnContent,
+					SessionID: sessionID,
+					RunID:     runID,
+				})
+				waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer waitCancel()
+				if s.orch.WaitForSessionIdle(sessionID, waitCtx) {
+					err = runChat()
+				}
 			}
 			// persistAccumulated saves the user message and whatever assistant
 			// content/tool-calls have been accumulated so far. Called on
@@ -1080,10 +1132,6 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 					c.safeSend(WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID, RunID: runID})
 					persistAccumulated("⚠️ " + err.Error())
 				}
-				// Fall through to mentionDelegate — even on disconnect/error the
-				// assistant may have produced @mentions that should spawn threads.
-				// The mentionDelegate uses srv.Context() for spawned threads so a
-				// cancelled c.ctx won't prevent them from running.
 			} else {
 				c.safeSend(WSMessage{Type: "done", SessionID: sessionID, RunID: runID, Payload: map[string]any{
 					"message_id": assistantMsgID,
@@ -1094,17 +1142,12 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 				persistAccumulated("")
 			}
 
-			// Parse @AgentName mentions in the assistant's response and spawn threads
-			// for any matched agents. This runs on BOTH success and error/disconnect
-			// paths because the assistant may have streamed @mentions before the error.
-			// The mentionDelegate in main.go uses srv.Context() (not c.ctx) for spawned
-			// threads, so even a cancelled client context won't prevent delegation.
-			assistantResponse := assistantBuf.String()
-			logger.Info("ws chat done", "session_id", sessionID, "mentionDelegate_set", mentionDelegate != nil, "assistant_response_len", len(assistantResponse), "had_error", err != nil)
-			if mentionDelegate != nil && assistantResponse != "" {
-				mentionDelegate(c.ctx, sessionID, assistantResponse, userMsg, assistantMsgID)
-			}
-		}(runID)
+			logger.Info("ws chat done",
+				"session_id", sessionID,
+				"assistant_response_len", assistantBuf.Len(),
+				"had_error", err != nil,
+			)
+		}(runID, intent, updateRoute, targetAgent)
 	case "ping":
 		c.send <- WSMessage{Type: "pong"}
 
@@ -1126,30 +1169,42 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if threadID == "" {
 			return
 		}
-		if ch, ok := s.tm.GetInputCh(threadID); ok && ch != nil {
+		sessionID := msg.SessionID
+		if sessionID == "" {
+			sessionID, _ = msg.Payload["session_id"].(string)
+		}
+		sent, found, reason := s.tm.TrySendInput(threadID, sessionID, content)
+		if sent {
+			deliveredTo, sharedWithActive, _ := s.tm.InjectReceipt(threadID)
+			// Ack delivery.
 			select {
-			case ch <- content:
-				// Ack delivery.
-				select {
-				case c.send <- WSMessage{
-					Type:    "thread_inject_ack",
-					Payload: map[string]any{"thread_id": threadID},
-				}:
-				default:
-				}
+			case c.send <- WSMessage{
+				Type: "thread_inject_ack",
+				Payload: map[string]any{
+					"thread_id":          threadID,
+					"delivered_to_agent": deliveredTo,
+					"shared_with_active": sharedWithActive,
+				},
+			}:
 			default:
-				// InputCh buffer full — notify the caller.
-				select {
-				case c.send <- WSMessage{
-					Type: "thread_inject_error",
-					Payload: map[string]any{
-						"thread_id": threadID,
-						"reason":    "buffer_full",
-					},
-				}:
-				default:
-				}
 			}
+			return
+		}
+		if !found {
+			reason = "not_found"
+		}
+		if reason == "" {
+			reason = "not_waiting"
+		}
+		select {
+		case c.send <- WSMessage{
+			Type: "thread_inject_error",
+			Payload: map[string]any{
+				"thread_id": threadID,
+				"reason":    reason,
+			},
+		}:
+		default:
 		}
 
 	case "delegation_preview_ack":

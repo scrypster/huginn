@@ -68,7 +68,8 @@ func (g *DelegationPreviewGate) Approve(
 	if broadcastFn != nil {
 		payload := map[string]any{
 			"thread_id": threadID,
-			"agent":     agentName,
+			"agent_id":  agentName,
+			"agent":     agentName, // backward-compatible alias for older clients
 			"task":      task,
 		}
 		if parentMessageID != "" {

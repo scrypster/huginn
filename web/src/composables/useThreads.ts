@@ -332,8 +332,7 @@ export function useThreads() {
 
   // ── Wire WS events (call once after ws is ready) ──────────────────────────
   function wireWS(ws: HuginnWS, sessionId: () => string) {
-
-    ws.on('thread_started', (msg: WSMessage) => {
+    const onThreadStarted = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
@@ -344,18 +343,18 @@ export function useThreads() {
       if (p.parent_message_id) t.parentMessageId = p.parent_message_id
       startTicker(sid, p.thread_id!)
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_status', (msg: WSMessage) => {
+    const onThreadStatus = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
       const t = ensureThread(sid, p.thread_id!)
       t.Status = p.status as ThreadStatus
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_token', (msg: WSMessage) => {
+    const onThreadToken = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
@@ -364,9 +363,9 @@ export function useThreads() {
       t.streamingContent = (t.streamingContent + p.token).slice(-600)
       // Streaming content is ephemeral — debounce persist for status only
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_tool_call', (msg: WSMessage) => {
+    const onThreadToolCall = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, unknown>
@@ -377,9 +376,9 @@ export function useThreads() {
         done: false,
       })
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_tool_done', (msg: WSMessage) => {
+    const onThreadToolDone = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
@@ -391,9 +390,9 @@ export function useThreads() {
         tc.resultSummary = p.result_summary
       }
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_done', (msg: WSMessage) => {
+    const onThreadDone = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, unknown>
@@ -411,9 +410,9 @@ export function useThreads() {
       t.streamingContent = ''
       stopTicker(sid, tid)
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_help', (msg: WSMessage) => {
+    const onThreadHelp = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
@@ -423,28 +422,28 @@ export function useThreads() {
       t.Summary = { Summary: p.message!, Status: 'blocked' }
       stopTicker(sid, p.thread_id!)
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_help_resolving', (msg: WSMessage) => {
+    const onThreadHelpResolving = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
       const t = ensureThread(sid, p.thread_id!)
       t.Status = 'resolving'
       debouncedPersist(sid)
-    })
+    }
 
-    ws.on('thread_help_resolved', (msg: WSMessage) => {
+    const onThreadHelpResolved = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
       const t = ensureThread(sid, p.thread_id!)
       t.Status = 'thinking'
       debouncedPersist(sid)
-    })
+    }
 
     // Reply-count update: a thread reply was appended; update the badge cache.
-    ws.on('thread_reply_updated', (msg: WSMessage) => {
+    const onThreadReplyUpdated = (msg: WSMessage) => {
       const p = msg.payload as { message_id?: string; reply_count?: number }
       if (p.message_id && typeof p.reply_count === 'number') {
         replyCountsByMessageId.value = {
@@ -452,15 +451,16 @@ export function useThreads() {
           [p.message_id]: p.reply_count,
         }
       }
-    })
+    }
 
     // Delegation preview: server asks the user to approve/reject a delegation.
     // Store as a pending preview; ChatView renders an approval banner.
-    ws.on('delegation_preview', (msg: WSMessage) => {
+    const onDelegationPreview = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
       const p = msg.payload as Record<string, string>
-      if (!p.thread_id || !p.agent_id) return
+      const agentId = p.agent_id || p.agent
+      if (!p.thread_id || !agentId) return
       // Avoid duplicates (idempotent on reconnect).
       const exists = pendingPreviews.value.some(
         pp => pp.threadId === p.thread_id && pp.sessionId === sid
@@ -469,12 +469,38 @@ export function useThreads() {
         pendingPreviews.value.push({
           sessionId: sid,
           threadId: p.thread_id,
-          agentId: p.agent_id,
+          agentId,
           task: p.task ?? '',
           parentMessageId: p.parent_message_id,
         })
       }
-    })
+    }
+
+    ws.on('thread_started', onThreadStarted)
+    ws.on('thread_status', onThreadStatus)
+    ws.on('thread_token', onThreadToken)
+    ws.on('thread_tool_call', onThreadToolCall)
+    ws.on('thread_tool_done', onThreadToolDone)
+    ws.on('thread_done', onThreadDone)
+    ws.on('thread_help', onThreadHelp)
+    ws.on('thread_help_resolving', onThreadHelpResolving)
+    ws.on('thread_help_resolved', onThreadHelpResolved)
+    ws.on('thread_reply_updated', onThreadReplyUpdated)
+    ws.on('delegation_preview', onDelegationPreview)
+
+    return () => {
+      ws.off?.('thread_started', onThreadStarted)
+      ws.off?.('thread_status', onThreadStatus)
+      ws.off?.('thread_token', onThreadToken)
+      ws.off?.('thread_tool_call', onThreadToolCall)
+      ws.off?.('thread_tool_done', onThreadToolDone)
+      ws.off?.('thread_done', onThreadDone)
+      ws.off?.('thread_help', onThreadHelp)
+      ws.off?.('thread_help_resolving', onThreadHelpResolving)
+      ws.off?.('thread_help_resolved', onThreadHelpResolved)
+      ws.off?.('thread_reply_updated', onThreadReplyUpdated)
+      ws.off?.('delegation_preview', onDelegationPreview)
+    }
   }
 
   // ── Clear session threads (call on session destroy or LRU eviction) ─────────

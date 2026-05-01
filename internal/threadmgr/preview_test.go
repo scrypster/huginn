@@ -116,6 +116,9 @@ func TestDelegationPreview_Enabled_BroadcastFnCalled(t *testing.T) {
 		if payload["thread_id"] != "t-5" {
 			t.Errorf("expected thread_id=t-5, got %v", payload["thread_id"])
 		}
+		if payload["agent_id"] != "Stacy" {
+			t.Errorf("expected agent_id=Stacy, got %v", payload["agent_id"])
+		}
 		if payload["agent"] != "Stacy" {
 			t.Errorf("expected agent=Stacy, got %v", payload["agent"])
 		}

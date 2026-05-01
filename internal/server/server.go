@@ -105,12 +105,9 @@ type Server struct {
 	// store doesn't implement session.DelegationStore (e.g. in-memory store in tests).
 	delegationStore session.DelegationStore
 
-	// mentionDelegate is called after each chat message to parse @Agent mentions
-	// and spawn threads for any matched agents. Used as a fallback for models
-	// that don't support tool calling. parentMsgID is the session message ID of
-	// the triggering message (empty if unknown). originalUserMsg is the user's
-	// original message (before the assistant responded) and is used by the
-	// caller to dedup mentions that already appeared in the user's message.
+	// mentionDelegate is a deprecated hook kept for compatibility with older
+	// integrations and tests. Runtime chat delegation uses delegate_to_agent as
+	// the single control-plane path.
 	mentionDelegate func(ctx context.Context, sessionID, assistantMsg, originalUserMsg, parentMsgID string)
 
 	runtimeMgr *runtime.Manager // may be nil if built-in llama.cpp not configured
@@ -484,13 +481,8 @@ func (s *Server) SendRelay(msg relay.Message) {
 	_ = hub.Send("", msg) // best-effort; errors are not fatal
 }
 
-// SetMentionDelegate installs a function that is called after each chat message
-// to parse @AgentName mentions and spawn threads for matching agents. This acts
-// as a fallback delegation path for models that don't support tool calling.
-// assistantMsg is the assistant's full response text containing @mentions.
-// originalUserMsg is the user's original message; callers use it with
-// DedupMentions to strip @mentions that were already in the user's prompt.
-// parentMsgID is the session message ID of the triggering assistant message.
+// SetMentionDelegate sets a deprecated compatibility hook.
+// Runtime chat delegation is tool-driven via delegate_to_agent.
 func (s *Server) SetMentionDelegate(fn func(ctx context.Context, sessionID, assistantMsg, originalUserMsg, parentMsgID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
