@@ -2953,8 +2953,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 
 		// Also wire the mention-based delegation path so @AgentName in chat
 		// spawns threads even when the primary model doesn't support tool calls.
-		srv.SetMentionDelegate(func(ctx context.Context, sessionID, userMsg, parentMsgID string) {
-			logger.Info("mentionDelegate: called", "session_id", sessionID, "msg", userMsg, "parent_msg_id", parentMsgID)
+		srv.SetMentionDelegate(func(ctx context.Context, sessionID, assistantMsg, originalUserMsg, parentMsgID string) {
+			logger.Info("mentionDelegate: called", "session_id", sessionID, "msg_len", len(assistantMsg), "parent_msg_id", parentMsgID)
 			sess, loadErr := sessStore.Load(sessionID)
 			if loadErr != nil {
 				logger.Warn("mentionDelegate: session load failed, using stub", "err", loadErr)
@@ -2972,7 +2972,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			} else {
 				logger.Info("mentionDelegate: using server lifecycle context", "session_id", sessionID, "ctx_err", spawnCtx.Err())
 			}
-			// Resolve the caller agent (the agent that produced userMsg) to guard against
+			// Resolve the caller agent (the agent that produced assistantMsg) to guard against
 			// self-delegation. The caller is the session's primary agent.
 			callerAgent := ""
 			if sess != nil {
@@ -2984,10 +2984,15 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			if sess != nil {
 				spaceID = sess.SpaceID()
 			}
+			// Dedup: strip @mentions from the assistant response that were already
+			// present in the user's original message, preventing double-delegation
+			// when the assistant echoes back an @mention the user typed.
+			dedupedMsg := threadmgr.DedupMentions(originalUserMsg, assistantMsg)
 			logger.Info("mentionDelegate: resolved context",
 				"session_id", sessionID, "caller_agent", callerAgent,
-				"space_id", spaceID, "sess_nil", sess == nil)
-			threadmgr.CreateFromMentions(spawnCtx, sessionID, userMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
+				"space_id", spaceID, "sess_nil", sess == nil,
+				"deduped", dedupedMsg != assistantMsg)
+			threadmgr.CreateFromMentions(spawnCtx, sessionID, dedupedMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
 			logger.Info("mentionDelegate: CreateFromMentions returned", "session_id", sessionID)
 		})
 

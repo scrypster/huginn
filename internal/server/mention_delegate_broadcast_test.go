@@ -23,7 +23,7 @@ import (
 
 func TestServer_SetMentionDelegate_Iter7(t *testing.T) {
 	srv, _ := newTestServer(t)
-	srv.SetMentionDelegate(func(ctx context.Context, sessionID, userMsg, parentMsgID string) {})
+	srv.SetMentionDelegate(func(ctx context.Context, sessionID, assistantMsg, originalUserMsg, parentMsgID string) {})
 	srv.mu.Lock()
 	hasDel := srv.mentionDelegate != nil
 	srv.mu.Unlock()
