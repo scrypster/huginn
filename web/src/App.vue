@@ -1,18 +1,6 @@
 <template>
   <div class="flex h-screen bg-huginn-bg text-huginn-text font-mono overflow-hidden">
 
-    <!-- WS degradation banner: shown after 4 s of non-connected state -->
-    <Teleport to="body">
-      <div v-if="showDegradedBanner"
-        data-testid="ws-degraded-banner"
-        class="fixed top-0 inset-x-0 z-[9999] flex items-center justify-center gap-3 px-4 py-2
-               bg-huginn-red/90 text-white text-xs font-medium backdrop-blur-sm">
-        <span>⚠ Connection lost — reconnecting…</span>
-        <button @click="showDegradedBanner = false"
-          class="ml-auto opacity-70 hover:opacity-100 transition-opacity text-base leading-none">✕</button>
-      </div>
-    </Teleport>
-
     <!-- ── Column 1: Icon strip (48px) ─────────────────────────────── -->
     <nav class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
 
@@ -755,20 +743,57 @@
     </Teleport>
 
     <!-- ── Column 3: Main content ───────────────────────────────────── -->
-    <main class="flex-1 overflow-hidden">
-      <!-- App loading -->
-      <div v-if="appLoading" class="flex flex-col items-center justify-center h-full gap-4">
-        <div class="w-8 h-8 border-2 border-huginn-border border-t-huginn-blue rounded-full animate-spin" />
-        <p class="text-huginn-muted text-sm">Starting huginn...</p>
-      </div>
+    <main class="flex-1 overflow-hidden flex flex-col">
 
-      <!-- App error -->
-      <div v-else-if="appError" class="flex flex-col items-center justify-center h-full gap-3">
-        <p class="text-huginn-red text-sm">{{ appError }}</p>
-        <button @click="initApp" class="text-huginn-blue text-xs hover:underline">Retry connection</button>
-      </div>
+      <!-- WS connection banner — in layout flow so it pushes content down (no overlap) -->
+      <Transition name="ws-banner">
+        <div v-if="showDegradedBanner && wsConnectionState === 'reconnecting'"
+          data-testid="ws-degraded-banner"
+          class="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs font-medium"
+          style="background:rgba(227,179,65,0.12);border-bottom:1px solid rgba(227,179,65,0.25);color:rgba(227,179,65,0.92)">
+          <div class="flex items-center gap-2">
+            <svg class="w-3.5 h-3.5 animate-spin flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <span>Reconnecting… (attempt {{ wsReconnectAttempts }}/{{ wsMaxAttempts }})<span v-if="wsSecondsUntilRetry > 0"> — retrying in {{ wsSecondsUntilRetry }}s</span></span>
+          </div>
+          <button @click="wsReconnectNow()"
+            class="flex-shrink-0 px-2 py-0.5 rounded border border-[rgba(227,179,65,0.4)] hover:bg-[rgba(227,179,65,0.1)] transition-colors text-[11px]">
+            Retry now
+          </button>
+        </div>
+        <div v-else-if="showDegradedBanner && wsConnectionState === 'disconnected'"
+          data-testid="ws-degraded-banner"
+          class="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs font-medium"
+          style="background:rgba(248,81,73,0.12);border-bottom:1px solid rgba(248,81,73,0.25);color:rgba(248,81,73,0.92)">
+          <div class="flex items-center gap-2 min-w-0">
+            <svg class="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <div class="min-w-0">
+              <span>Connection lost — real-time updates unavailable</span>
+              <span v-if="wsLastError" class="block text-[10px] opacity-70 truncate">{{ wsLastError }}</span>
+            </div>
+          </div>
+          <button @click="reloadPage()"
+            class="flex-shrink-0 px-2 py-0.5 rounded border border-[rgba(248,81,73,0.4)] hover:bg-[rgba(248,81,73,0.1)] transition-colors text-[11px]">
+            Reload Page
+          </button>
+        </div>
+      </Transition>
 
-      <RouterView v-else />
+      <!-- Content area fills remaining height -->
+      <div class="flex-1 overflow-hidden min-h-0">
+        <!-- App loading -->
+        <div v-if="appLoading" class="flex flex-col items-center justify-center h-full gap-4">
+          <div class="w-8 h-8 border-2 border-huginn-border border-t-huginn-blue rounded-full animate-spin" />
+          <p class="text-huginn-muted text-sm">Starting huginn...</p>
+        </div>
+
+        <!-- App error -->
+        <div v-else-if="appError" class="flex flex-col items-center justify-center h-full gap-3">
+          <p class="text-huginn-red text-sm">{{ appError }}</p>
+          <button @click="initApp" class="text-huginn-blue text-xs hover:underline">Retry connection</button>
+        </div>
+
+        <RouterView v-else />
+      </div>
     </main>
 
     <!-- Delivery issues drawer -->
@@ -1047,6 +1072,12 @@ provide('ws', wsRef)
 
 const wsConnected = computed(() => wsRef.value?.connected.value ?? false)
 const wsConnectionState = computed(() => wsRef.value?.connectionState.value ?? 'connecting')
+const wsReconnectAttempts = computed(() => wsRef.value?.reconnectAttempts?.value ?? 0)
+const wsMaxAttempts = computed(() => wsRef.value?.maxReconnectAttempts ?? 10)
+const wsSecondsUntilRetry = computed(() => wsRef.value?.secondsUntilRetry?.value ?? 0)
+const wsLastError = computed(() => wsRef.value?.lastError?.value ?? null)
+function wsReconnectNow() { wsRef.value?.reconnectNow?.() }
+function reloadPage() { window.location.reload() }
 
 // Show a banner after 4 s of non-connected state to avoid flicker on brief blips.
 const showDegradedBanner = ref(false)
@@ -1370,5 +1401,20 @@ onUnmounted(() => {
 .slide-right-enter-from,
 .slide-right-leave-to {
   transform: translateX(100%);
+}
+.ws-banner-enter-active,
+.ws-banner-leave-active {
+  transition: max-height 0.2s ease, opacity 0.2s ease;
+  overflow: hidden;
+}
+.ws-banner-enter-from,
+.ws-banner-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+.ws-banner-enter-to,
+.ws-banner-leave-from {
+  max-height: 48px;
+  opacity: 1;
 }
 </style>
