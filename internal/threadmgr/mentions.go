@@ -199,6 +199,15 @@ func CreateFromMentions(
 		if err != nil {
 			logger.Warn("CreateFromMentions: create FAILED", "agent", req.AgentName, "err", err,
 				"session_id", sessionID, "space_id", spaceID)
+			if broadcast != nil {
+				broadcast(sessionID, "delegation_error", map[string]any{
+					"session_id":    sessionID,
+					"parent_msg_id": parentMsgID,
+					"agent":         req.AgentName,
+					"error":         err.Error(),
+					"reason":        "create_failed",
+				})
+			}
 			continue
 		}
 		ready := tm.IsReady(t.ID)
