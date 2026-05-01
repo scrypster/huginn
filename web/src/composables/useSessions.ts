@@ -41,6 +41,12 @@ export interface ThreadReply {
   content: string
 }
 
+export interface PermissionDenial {
+  threadId: string
+  agentId: string
+  tool: string
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -52,7 +58,13 @@ export interface ChatMessage {
   delegatedThreads?: DelegatedThread[]  // threads spawned by this message
   threadReplies?: ThreadReply[]         // inline thread replies from agent_follow_up (Slack-style)
   replyCount?: number     // thread reply count (for badge display after hydration)
-  permissionDenials?: Array<{ agentId: string; tool: string; threadId: string }>
+  permissionDenials?: PermissionDenial[]
+  threadSummary?: boolean       // true for synthetic completion cards injected on thread_done
+  threadSummaryThreadId?: string // thread ID this completion card belongs to (dedup guard)
+  // Space-mode fields present on messages fetched from container history
+  session_id?: string
+  seq?: number
+  ts?: string
 }
 
 // Module-level shared state (singleton across all component instances)
