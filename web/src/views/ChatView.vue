@@ -489,7 +489,7 @@
                   <div v-for="d in msg.delegatedThreads" :key="d.threadId" class="space-y-1">
                     <button
                       @click="openThreadDetail(d)"
-                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60"
+                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60 overflow-hidden min-w-0"
                     >
                       <!-- Agent avatar mini — animated pulse when thread is active -->
                       <div class="relative w-4 h-4 flex-shrink-0">
@@ -512,7 +512,7 @@
                         </template>
                       </span>
                       <!-- Task description — shown when available, truncated to keep strip compact -->
-                      <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate max-w-[200px]">
+                      <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate min-w-0 flex-1">
                         · {{ d.task }}
                       </span>
                       <!-- Fallback: agent name + status when no task text available -->
@@ -1078,7 +1078,7 @@ async function hydrateThreadBadges(sessionId: string) {
   if (!sessionId || hydratingBadgesFor.has(sessionId)) return
   hydratingBadgesFor.add(sessionId)
   try {
-    type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number }
+    type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number; task?: string }
     const rows = await apiFetch<ContainerThreadRow[]>(`/api/v1/containers/${sessionId}/threads`)
     if (!Array.isArray(rows) || rows.length === 0) return
     // Use the mutable source messages so the data survives computed re-renders.
@@ -1096,6 +1096,7 @@ async function hydrateThreadBadges(sessionId: string) {
           msgId: row.id,
           done: true,
           replyCount: row.thread_reply_count || 1,
+          task: row.task || undefined,
         }]
       } else {
         // Update reply count on existing badge in case it grew since last WS event
