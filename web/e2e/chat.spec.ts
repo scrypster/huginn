@@ -124,8 +124,8 @@ test.describe('Chat — basic text response', () => {
     // Send one token — streaming indicator should be visible during streaming
     ws.send(JSON.stringify({ type: 'token', session_id: SESSION, content: 'Partial ', run_id: runId }))
 
-    // The streaming indicator now uses data-testid="streaming-thinking" with bouncing dots
-    const indicator = page.locator('[data-testid="streaming-thinking"]')
+    // The streaming indicator is the bottom streaming bar (consolidated in PR #104)
+    const indicator = page.locator('[data-testid="streaming-banner"]')
     await expect(indicator).toBeVisible({ timeout: 3000 })
 
     // Send done — indicator should disappear
@@ -499,8 +499,8 @@ test.describe('Chat — streaming indicator', () => {
       run_id: runId,
     }))
 
-    // After tool_result and before next token, the streaming-thinking indicator should be visible
-    const indicator = page.locator('[data-testid="streaming-thinking"]')
+    // After tool_result and before next token, the streaming banner should be visible
+    const indicator = page.locator('[data-testid="streaming-banner"]')
     await expect(indicator).toBeVisible({ timeout: 5000 })
   })
 
@@ -515,7 +515,7 @@ test.describe('Chat — streaming indicator', () => {
     ws.send(JSON.stringify({ type: 'token', session_id: SESSION, content: 'Done!', run_id: runId }))
 
     // Indicator should be visible while streaming
-    const indicator = page.locator('[data-testid="streaming-thinking"]')
+    const indicator = page.locator('[data-testid="streaming-banner"]')
     await expect(indicator).toBeVisible({ timeout: 3000 })
 
     // Send done — indicator should disappear

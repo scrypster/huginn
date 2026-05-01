@@ -1,37 +1,6 @@
 <template>
   <div class="flex flex-col h-full bg-huginn-bg">
 
-    <!-- ── WebSocket connection state banner ───────────────────────── -->
-    <Transition name="ws-banner">
-      <div v-if="wsConnectionState === 'reconnecting'"
-        class="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs font-medium"
-        style="background:rgba(227,179,65,0.12);border-bottom:1px solid rgba(227,179,65,0.25);color:rgba(227,179,65,0.92)">
-        <div class="flex items-center gap-2">
-          <svg class="w-3.5 h-3.5 animate-spin flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-          <span>Reconnecting… (attempt {{ wsReconnectAttempts }}/{{ wsMaxAttempts }})<span v-if="wsSecondsUntilRetry > 0"> — retrying in {{ wsSecondsUntilRetry }}s</span></span>
-        </div>
-        <button @click="wsReconnectNow()"
-          class="px-2 py-0.5 rounded border border-huginn-amber/40 hover:bg-huginn-amber/10 transition-colors text-[11px]">
-          Retry now
-        </button>
-      </div>
-      <div v-else-if="wsConnectionState === 'disconnected'"
-        class="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs font-medium"
-        style="background:rgba(248,81,73,0.12);border-bottom:1px solid rgba(248,81,73,0.25);color:rgba(248,81,73,0.92)">
-        <div class="flex items-center gap-2 min-w-0">
-          <svg class="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          <div class="min-w-0">
-            <span>Connection lost — real-time updates unavailable</span>
-            <span v-if="wsLastError" class="block text-[10px] opacity-70 truncate">{{ wsLastError }}</span>
-          </div>
-        </div>
-        <button @click="reloadPage()"
-          class="flex-shrink-0 px-2 py-0.5 rounded border border-huginn-red/40 hover:bg-huginn-red/10 transition-colors text-[11px]">
-          Reload Page
-        </button>
-      </div>
-    </Transition>
-
     <!-- ── Hydration overflow toast ────────────────────────────────── -->
     <Transition name="ws-banner">
       <div v-if="hydrationOverflowToastVisible"
@@ -432,34 +401,6 @@
                 <!-- Message text -->
                 <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
-                <!-- Streaming "still responding" indicator — prominent bouncing dots
-                     shown between tool-result chips and the next text segment, or while
-                     tokens are still arriving. Replaces the old tiny 6px cursor. -->
-                <div v-if="msg.streaming && !activeToolCalls.length"
-                  data-testid="streaming-thinking"
-                  class="flex items-center gap-2 mt-2 py-1.5">
-                  <div class="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
-                    :style="displayAgent
-                      ? `background:${displayAgent.color}22;border:1px solid ${displayAgent.color}33`
-                      : 'background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)'">
-                    <span class="text-[9px] font-bold"
-                      :style="displayAgent ? `color:${displayAgent.color}` : 'color:rgba(88,166,255,0.9)'">
-                      {{ displayAgent?.icon ?? 'H' }}
-                    </span>
-                  </div>
-                  <div class="flex items-center gap-1">
-                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
-                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
-                      style="animation-delay:0ms" />
-                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
-                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
-                      style="animation-delay:150ms" />
-                    <span class="w-1.5 h-1.5 rounded-full animate-bounce"
-                      :style="displayAgent ? `background:${displayAgent.color}` : 'background:rgba(88,166,255,0.7)'"
-                      style="animation-delay:300ms" />
-                  </div>
-                  <span class="text-[11px] text-huginn-muted">responding…</span>
-                </div>
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
                 <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
@@ -489,7 +430,7 @@
                   <div v-for="d in msg.delegatedThreads" :key="d.threadId" class="space-y-1">
                     <button
                       @click="openThreadDetail(d)"
-                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60"
+                      class="group flex items-center gap-2 py-1 px-2 -ml-1 rounded-lg transition-all duration-150 hover:bg-huginn-surface/60 overflow-hidden min-w-0"
                     >
                       <!-- Agent avatar mini — animated pulse when thread is active -->
                       <div class="relative w-4 h-4 flex-shrink-0">
@@ -511,8 +452,12 @@
                           {{ (d.replyCount ?? 1) === 1 ? '1 reply' : `${d.replyCount} replies` }}
                         </template>
                       </span>
-                      <!-- Separator · agent name · status when done/error -->
-                      <span class="text-[11px] text-huginn-muted/50">
+                      <!-- Task description — shown when available, truncated to keep strip compact -->
+                      <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate min-w-0 flex-1">
+                        · {{ d.task }}
+                      </span>
+                      <!-- Fallback: agent name + status when no task text available -->
+                      <span v-else class="text-[11px] text-huginn-muted/50">
                         · {{ d.agentId }}
                         <template v-if="getThreadById(d.threadId) && !['running','thinking','queued'].includes(getThreadById(d.threadId)!.Status)">
                           · {{ formatThreadStatus(getThreadById(d.threadId)!.Status) }}
@@ -538,6 +483,39 @@
                       </div>
                       <div class="text-sm text-huginn-text/80 whitespace-pre-wrap">{{ d.inlineSummary }}</div>
                     </div>
+                  </div>
+                </div>
+
+                <!-- Delegation error chips: shown when delegate_to_agent or tm.Create() failed -->
+                <div v-if="(msg as any).delegationErrors?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                  <div
+                    v-for="e in (msg as any).delegationErrors"
+                    :key="e.agent"
+                    class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                           border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
+                    :title="`Could not delegate to ${e.agent}: ${e.reason}`"
+                  >
+                    <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <span>{{ e.agent }} unavailable</span>
+                  </div>
+                </div>
+
+                <!-- Delegation warning chips: shown when heuristic detects a missed delegation -->
+                <div v-if="(msg as any).delegationWarnings?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                  <div
+                    v-for="w in (msg as any).delegationWarnings"
+                    :key="w.agent + ':' + w.reason"
+                    class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                           border border-huginn-yellow/30 bg-huginn-yellow/8 text-huginn-yellow"
+                    :title="w.reason === 'missing_mention_syntax' ? `${w.agent} was mentioned but not delegated — did you mean to assign them a task?` : `Unknown agent: ${w.agent}`"
+                  >
+                    <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <span v-if="w.reason === 'missing_mention_syntax'">{{ w.agent }} may have been missed</span>
+                    <span v-else>Unknown: {{ w.agent }}</span>
                   </div>
                 </div>
 
@@ -611,33 +589,6 @@
             </div>
           </template>
 
-          <!-- Thinking bubble: shown while waiting for first token (agentThinking) -->
-          <div v-if="agentThinking" class="flex items-end gap-2 px-4 py-2">
-            <div class="flex gap-1 px-3 py-2 rounded-2xl rounded-bl-sm" style="background:rgba(255,255,255,0.06)">
-              <span v-for="i in 3" :key="i"
-                class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce"
-                :style="`animation-delay:${(i-1)*150}ms`"
-              />
-            </div>
-          </div>
-
-          <!-- Streaming thinking indicator (before first token) -->
-          <div v-if="streaming && messages.at(-1)?.role !== 'assistant'" class="flex gap-3">
-            <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-              :style="displayAgent
-                ? `background:${displayAgent.color}18;border:1px solid ${displayAgent.color}33`
-                : 'background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.2)'">
-              <span class="text-xs font-bold"
-                :style="displayAgent ? `color:${displayAgent.color}` : 'color:rgba(88,166,255,0.9)'">
-                {{ displayAgent?.icon ?? 'H' }}
-              </span>
-            </div>
-            <div class="flex items-center gap-1 py-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:0ms" />
-              <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:150ms" />
-              <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/60 animate-bounce" style="animation-delay:300ms" />
-            </div>
-          </div>
         </div>
       </div>
 
@@ -725,14 +676,17 @@
       <Transition name="ws-banner">
         <div v-if="streaming"
           data-testid="streaming-banner"
-          class="flex-shrink-0 flex items-center gap-2 px-4 py-1.5 text-xs font-medium"
+          class="flex-shrink-0 relative overflow-hidden text-xs font-medium"
           style="background:rgba(88,166,255,0.08);border-top:1px solid rgba(88,166,255,0.18);color:rgba(88,166,255,0.85)">
-          <div class="flex items-center gap-1 flex-shrink-0">
-            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:0ms" />
-            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:120ms" />
-            <span class="w-1 h-1 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:240ms" />
+          <!-- Indeterminate progress bar along the top edge -->
+          <div class="absolute top-0 left-0 h-[2px] w-full overflow-hidden">
+            <div class="h-full streaming-progress-bar" style="background:rgba(88,166,255,0.5)" />
           </div>
-          <span>{{ displayAgent?.name ?? 'Agent' }} is responding…</span>
+          <div class="flex items-center gap-2 px-4 py-1.5">
+            <span>
+              {{ displayAgent?.name ?? 'Agent' }} is responding…<template v-if="activeToolCalls.length"> · <span class="opacity-75">{{ activeToolCalls[0]?.name }}</span></template><template v-if="streamingElapsed >= 10"> ({{ formatElapsed(streamingElapsed) }})</template>
+            </span>
+          </div>
         </div>
       </Transition>
 
@@ -950,17 +904,8 @@ watch(() => props.spaceId, async (newId) => {
   }
 }, { immediate: true })
 
-// ── WebSocket connection state (for the banner) ───────────────────────────────
-const wsConnectionState = computed(() => wsRef.value?.connectionState?.value ?? 'connected')
-const wsReconnectAttempts = computed(() => wsRef.value?.reconnectAttempts?.value ?? 0)
-const wsMaxAttempts = computed(() => wsRef.value?.maxReconnectAttempts ?? 10)
-const wsLastError = computed(() => wsRef.value?.lastError?.value ?? null)
-const wsSecondsUntilRetry = computed(() => wsRef.value?.secondsUntilRetry?.value ?? 0)
-function wsReconnectNow() { wsRef.value?.reconnectNow?.() }
-function reloadPage() { window.location.reload() }
-
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
-  getAgentThinking, setAgentThinking, getLastSeenMessageId, setLastSeenMessageId } = useSessions()
+  getLastSeenMessageId, setLastSeenMessageId } = useSessions()
 const { activeSpace } = useSpaces()
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
@@ -993,7 +938,10 @@ const sessionSwitching = ref(false)
 const {
   activeToolCalls, expandedToolCalls, expandedMsgCalls,
   streaming, currentRunId, notifyStreaming,
-  startStreamingWatchdog, clearStreamingWatchdog, toggleMsgToolCalls,
+  streamingElapsed,
+  startStreamingWatchdog, clearStreamingWatchdog,
+  startElapsedTimer, stopElapsedTimer, formatElapsed,
+  toggleMsgToolCalls,
   resetStreaming,
 } = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
@@ -1074,7 +1022,7 @@ async function hydrateThreadBadges(sessionId: string) {
   if (!sessionId || hydratingBadgesFor.has(sessionId)) return
   hydratingBadgesFor.add(sessionId)
   try {
-    type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number }
+    type ContainerThreadRow = { id: string; agent: string; thread_reply_count: number; task?: string }
     const rows = await apiFetch<ContainerThreadRow[]>(`/api/v1/containers/${sessionId}/threads`)
     if (!Array.isArray(rows) || rows.length === 0) return
     // Use the mutable source messages so the data survives computed re-renders.
@@ -1092,6 +1040,7 @@ async function hydrateThreadBadges(sessionId: string) {
           msgId: row.id,
           done: true,
           replyCount: row.thread_reply_count || 1,
+          task: row.task || undefined,
         }]
       } else {
         // Update reply count on existing badge in case it grew since last WS event
@@ -1130,9 +1079,6 @@ const messages = computed(() => {
   return props.sessionId ? getMessages(props.sessionId) : []
 })
 
-const agentThinking = computed(() =>
-  props.sessionId ? getAgentThinking(props.sessionId) : false
-)
 
 const lastSeenMessageId = computed(() =>
   props.sessionId ? getLastSeenMessageId(props.sessionId) : null
@@ -1349,6 +1295,7 @@ async function handleEditorSend(markdown: string) {
     currentRunId.value = runId
     streaming.value = true
     startStreamingWatchdog()
+    startElapsedTimer()
 
     // Optimistic user message into the space timeline.
     tl.getState().messages.push({
@@ -1380,12 +1327,12 @@ async function handleEditorSend(markdown: string) {
   currentRunId.value = runId
   streaming.value = true
   startStreamingWatchdog()
+  startElapsedTimer()
   pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true, agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
 
-  if (props.sessionId) setAgentThinking(props.sessionId, true)
   if (props.sessionId) setLastSeenMessageId(props.sessionId, null)
   ws.send({ type: 'chat', content: markdown, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
@@ -1399,11 +1346,11 @@ function handleRetry(content: string) {
   currentRunId.value = runId
   streaming.value = true
   startStreamingWatchdog()
+  startElapsedTimer()
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true,
     agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
-  setAgentThinking(props.sessionId, true)
   setLastSeenMessageId(props.sessionId, null)
   wsRef.value.send({ type: 'chat', content, session_id: props.sessionId, run_id: runId })
   scrollToBottom()
@@ -1483,7 +1430,6 @@ watch(wsRef, (ws) => {
     // switches (props.sessionId can change between WS registration and delivery).
     const sid = msg.session_id || props.sessionId
     if (!sid || sid !== props.sessionId) return // ignore tokens for other sessions
-    if (sid) setAgentThinking(sid, false)
     // Set lastSeenMessageId to the last user message on first token (if not set)
     if (sid && !getLastSeenMessageId(sid)) {
       const msgs = getMessages(sid)
@@ -1549,8 +1495,8 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       return
     }
     clearStreamingWatchdog()
+    stopElapsedTimer()
     streaming.value = false
-    if (props.sessionId) setAgentThinking(props.sessionId, false)
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
     // streaming but whose results haven't been attached yet (e.g. timing edge cases).
@@ -1603,8 +1549,8 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
     if (msg.run_id && msg.run_id !== currentRunId.value) return
-    if (props.sessionId) setAgentThinking(props.sessionId, false)
     clearStreamingWatchdog()
+    stopElapsedTimer()
     streaming.value = false
     activeToolCalls.value = []
     if (props.sessionId) {
@@ -1676,6 +1622,7 @@ registerWS(ws, 'thread_started', (msg: WSMessage) => {
           threadId: p.thread_id,
           agentId: p.agent_id || '',
           msgId: p.parent_message_id || target.id || '',
+          task: (p.task as string) || undefined,
           replyCount: 0,
         })
       }
@@ -1898,6 +1845,62 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     }
   })
 
+  // delegation_error: a thread could not be created for an @mentioned agent.
+  // Mark the parent message with a failed-delegation badge so the user isn't
+  // left waiting for a response that will never come.
+registerWS(ws, 'delegation_error', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const parentMsgId = p?.parent_msg_id as string | undefined
+    const agent = p?.agent as string | undefined
+    const reason = p?.error as string | undefined
+    if (!parentMsgId || !agent) return
+    const msgs = getSourceMessages()
+    for (const m of msgs) {
+      if (m.id === parentMsgId) {
+        if (!(m as any).delegationErrors) (m as any).delegationErrors = []
+        const errExists = (m as any).delegationErrors.some((e: any) => e.agent === agent)
+        if (!errExists) (m as any).delegationErrors.push({ agent, reason: reason ?? 'unknown' })
+        break
+      }
+    }
+  })
+
+  // delegation_warning: @mention was found but agent name was not recognised,
+  // OR no @mention was found but the lead agent referenced an agent by name in
+  // natural language (heuristic fallback). Surface to the user so they know
+  // why delegation didn't fire.
+registerWS(ws, 'delegation_warning', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = msg.payload as Record<string, unknown>
+    const parentMsgId = p?.parent_msg_id as string | undefined
+    const unknown = p?.unknown as string[] | undefined
+    const heuristic = p?.heuristic_agents as string[] | undefined
+    if (!parentMsgId) return
+    const msgs = getSourceMessages()
+    for (const m of msgs) {
+      if (m.id === parentMsgId) {
+        if (unknown?.length) {
+          if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
+          for (const a of unknown) {
+            const exists = (m as any).delegationWarnings.some((w: any) => w.agent === a && w.reason === 'unknown_agent')
+            if (!exists) (m as any).delegationWarnings.push({ agent: a, reason: 'unknown_agent' })
+          }
+        }
+        if (heuristic?.length) {
+          if (!(m as any).delegationWarnings) (m as any).delegationWarnings = []
+          for (const a of heuristic) {
+            const exists = (m as any).delegationWarnings.some((w: any) => w.agent === a && w.reason === 'missing_mention_syntax')
+            if (!exists) (m as any).delegationWarnings.push({ agent: a, reason: 'missing_mention_syntax' })
+          }
+        }
+        break
+      }
+    }
+  })
+
   // Wire thread events via useThreads composable
   wireThreadWS(ws, () => props.sessionId ?? '')
 }, { immediate: true })
@@ -2005,5 +2008,13 @@ onMounted(async () => {
 .ws-banner-leave-from {
   max-height: 48px;
   opacity: 1;
+}
+@keyframes streaming-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.streaming-progress-bar {
+  width: 30%;
+  animation: streaming-indeterminate 1.6s ease-in-out infinite;
 }
 </style>

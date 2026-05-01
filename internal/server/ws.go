@@ -1102,7 +1102,7 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			assistantResponse := assistantBuf.String()
 			logger.Info("ws chat done", "session_id", sessionID, "mentionDelegate_set", mentionDelegate != nil, "assistant_response_len", len(assistantResponse), "had_error", err != nil)
 			if mentionDelegate != nil && assistantResponse != "" {
-				mentionDelegate(c.ctx, sessionID, assistantResponse, assistantMsgID)
+				mentionDelegate(c.ctx, sessionID, assistantResponse, userMsg, assistantMsgID)
 			}
 		}(runID)
 	case "ping":

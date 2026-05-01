@@ -952,6 +952,96 @@ func (tm *ThreadManager) StartPruner(ctx context.Context, interval, maxAge time.
 	}()
 }
 
+// StartWatchdog launches a background goroutine that scans all threads every
+// 60 seconds and transitions stale non-terminal threads to StatusError,
+// broadcasting a thread_done event so the frontend updates immediately rather
+// than leaving the user waiting forever. Two thresholds apply:
+//
+//   - StatusQueued threads older than 10 minutes: never started — likely a bug
+//     in the delegation path or a transient scheduler overload.
+//   - StatusThinking / StatusTooling threads older than 30 minutes: sub-agent
+//     did not complete within a reasonable wall-clock bound.
+//
+// The goroutine exits cleanly when ctx is cancelled.
+// broadcast may be nil; when nil, no WS event is emitted but the thread is
+// still transitioned to StatusError so it does not block DAG evaluation.
+func (tm *ThreadManager) StartWatchdog(ctx context.Context, broadcast BroadcastFn) {
+	const (
+		scanInterval    = 60 * time.Second
+		queuedTimeout   = 10 * time.Minute
+		runningTimeout  = 30 * time.Minute
+	)
+	go func() {
+		ticker := time.NewTicker(scanInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				tm.mu.Lock()
+				type timedOut struct {
+					id        string
+					sessionID string
+					summary   string
+				}
+				var victims []timedOut
+				for id, t := range tm.threads {
+					switch t.Status {
+					case StatusQueued:
+						if now.Sub(t.CreatedAt) > queuedTimeout {
+							victims = append(victims, timedOut{
+								id:        id,
+								sessionID: t.SessionID,
+								summary:   "delegation timed out — thread never started",
+							})
+						}
+					case StatusThinking, StatusTooling:
+						if now.Sub(t.CreatedAt) > runningTimeout {
+							victims = append(victims, timedOut{
+								id:        id,
+								sessionID: t.SessionID,
+								summary:   "delegation timed out — sub-agent did not complete",
+							})
+						}
+					}
+				}
+				// Transition victims to StatusError while still holding the lock.
+				for _, v := range victims {
+					t, ok := tm.threads[v.id]
+					if !ok {
+						continue
+					}
+					// Skip threads that transitioned since we built the list.
+					switch t.Status {
+					case StatusDone, StatusCancelled, StatusError:
+						continue
+					}
+					t.Status = StatusError
+					t.CompletedAt = now
+				}
+				tm.mu.Unlock()
+
+				// Fire status-change hooks and broadcast events outside the lock.
+				for _, v := range victims {
+					tm.appendAudit(v.id, "error", "", v.summary)
+					tm.fireStatusChange(v.id, StatusError)
+					if broadcast != nil {
+						broadcast(v.sessionID, "thread_done", map[string]any{
+							"thread_id": v.id,
+							"status":    "error",
+							"summary":   v.summary,
+						})
+					}
+					slog.Warn("threadmgr: watchdog timed out thread",
+						"thread_id", v.id, "session_id", v.sessionID, "reason", v.summary)
+				}
+			}
+		}
+	}()
+}
+
 // trySnapshot serialises the current thread dependency graph for sessionID to
 // graphDir if one is configured. It is a no-op when graphDir is empty.
 // Errors are logged but not returned — snapshot failures are non-fatal.
