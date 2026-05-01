@@ -43,7 +43,7 @@ test.describe('WS degradation banner — debounce timing', () => {
 
     const banner = page.locator('[data-testid="ws-degraded-banner"]')
     await expect(banner).toBeVisible({ timeout: 3000 })
-    await expect(banner).toContainText('reconnecting')
+    await expect(banner).toContainText('Reconnecting')
   })
 
   // ── 3. Banner absent when connection stays up past 4 s ────────────────────
