@@ -66,67 +66,73 @@
 
         <!-- Tool call group: collapsed "N tool calls" with expandable details -->
         <div v-if="item.type === 'toolgroup'">
-          <!-- Collapsed summary row -->
-          <button
-            @click="toggleGroup(item.key)"
-            class="flex items-center gap-1.5 py-1 text-huginn-muted/50 hover:text-huginn-muted/80 transition-colors w-full text-left"
+          <!-- Internal memory ops: compact, non-interactive summary -->
+          <div v-if="item.isInternal"
+            class="flex items-center gap-1.5 py-0.5 text-huginn-muted/40 select-none"
           >
-            <svg class="w-3 h-3 flex-shrink-0 text-huginn-muted/40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-            </svg>
-            <span class="text-[11px]">
-              {{ item.calls.length }} tool call{{ item.calls.length !== 1 ? 's' : '' }}
-            </span>
-            <svg class="w-3 h-3 ml-auto flex-shrink-0 transition-transform" :class="{'rotate-180': expandedGroups[item.key]}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
+            <span class="text-[11px] italic">🧠 Memory: {{ summarizeMemoryOp(item.calls) }}</span>
+          </div>
 
-          <!-- Expanded detail: each tool call + its result -->
-          <div v-if="expandedGroups[item.key]" class="mt-1 space-y-1 pl-4 border-l-2" style="border-color:rgba(255,255,255,0.08)">
-            <template v-for="call in item.calls" :key="call.id">
-              <!-- Tool call row -->
-              <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-huginn-border bg-huginn-surface/30 text-xs">
-                <svg class="w-3 h-3 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-                </svg>
-                <span class="text-huginn-text font-medium">{{ extractToolName(call.content) }}</span>
-              </div>
-              <!-- Matching tool result (if any) -->
-              <template v-if="item.results.find(r => r.tool_name === call.tool_name)">
-                <!-- Use v-for single-element array to bind parseConsultResult once per call card,
-                     avoiding 7 redundant re-evaluations of the same expression. -->
-                <template v-for="cr in [call.tool_name === 'consult_agent' ? parseConsultResult(item.results.find(r => r.tool_name === call.tool_name)?.content ?? '') : null]" :key="call.tool_name + '-cr'">
-                  <!-- Consultation card: special rendering for consult_agent results -->
-                  <div v-if="cr" class="rounded-lg border overflow-hidden"
-                    :style="`border-color:${agentColor(cr.agentName)}33`">
-                    <!-- Consultation header -->
-                    <div class="flex items-center gap-1.5 px-2 py-1.5"
-                      :style="`background:${agentColor(cr.agentName)}10`">
-                      <div class="w-3.5 h-3.5 rounded text-[8px] font-bold flex items-center justify-center flex-shrink-0"
-                        :style="`background:${agentColor(cr.agentName)}22;color:${agentColor(cr.agentName)}`">
-                        {{ cr.agentName[0]?.toUpperCase() }}
+          <!-- Regular tool groups: collapsible chip -->
+          <template v-else>
+            <!-- Collapsed summary row -->
+            <button
+              @click="toggleGroup(item.key)"
+              class="flex items-center gap-1.5 py-1 text-huginn-muted/50 hover:text-huginn-muted/80 transition-colors w-full text-left"
+            >
+              <svg class="w-3 h-3 flex-shrink-0 text-huginn-muted/40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+              </svg>
+              <span class="text-[11px]">
+                {{ item.calls.length }} tool call{{ item.calls.length !== 1 ? 's' : '' }}
+              </span>
+              <svg class="w-3 h-3 ml-auto flex-shrink-0 transition-transform" :class="{'rotate-180': expandedGroups[item.key]}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+
+            <!-- Expanded detail: each tool call + its result -->
+            <div v-if="expandedGroups[item.key]" class="mt-1 space-y-1 pl-4 border-l-2" style="border-color:rgba(255,255,255,0.08)">
+              <template v-for="call in item.calls" :key="call.id">
+                <!-- Tool call row -->
+                <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-huginn-border bg-huginn-surface/30 text-xs">
+                  <svg class="w-3 h-3 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                  </svg>
+                  <span class="text-huginn-text font-medium">{{ extractToolName(call.content) }}</span>
+                </div>
+                <!-- Matching tool result (if any) -->
+                <template v-if="item.results.find(r => r.tool_name === call.tool_name)">
+                  <template v-for="cr in [call.tool_name === 'consult_agent' ? parseConsultResult(item.results.find(r => r.tool_name === call.tool_name)?.content ?? '') : null]" :key="call.tool_name + '-cr'">
+                    <!-- Consultation card: special rendering for consult_agent results -->
+                    <div v-if="cr" class="rounded-lg border overflow-hidden"
+                      :style="`border-color:${agentColor(cr.agentName)}33`">
+                      <div class="flex items-center gap-1.5 px-2 py-1.5"
+                        :style="`background:${agentColor(cr.agentName)}10`">
+                        <div class="w-3.5 h-3.5 rounded text-[8px] font-bold flex items-center justify-center flex-shrink-0"
+                          :style="`background:${agentColor(cr.agentName)}22;color:${agentColor(cr.agentName)}`">
+                          {{ cr.agentName[0]?.toUpperCase() }}
+                        </div>
+                        <span class="text-[11px] font-medium"
+                          :style="`color:${agentColor(cr.agentName)}`">
+                          {{ cr.agentName }}
+                        </span>
+                        <span class="text-[10px] text-huginn-muted/50 ml-auto">consulted</span>
                       </div>
-                      <span class="text-[11px] font-medium"
-                        :style="`color:${agentColor(cr.agentName)}`">
-                        {{ cr.agentName }}
-                      </span>
-                      <span class="text-[10px] text-huginn-muted/50 ml-auto">consulted</span>
+                      <div class="px-2 py-1.5 bg-huginn-surface/20">
+                        <div class="md-content text-[11px] text-huginn-muted leading-relaxed break-words"
+                          v-html="renderMarkdown(cr.answer)" />
+                      </div>
                     </div>
-                    <!-- Consultation answer -->
-                    <div class="px-2 py-1.5 bg-huginn-surface/20">
-                      <div class="md-content text-[11px] text-huginn-muted leading-relaxed break-words"
-                        v-html="renderMarkdown(cr.answer)" />
+                    <!-- Generic tool result -->
+                    <div v-else class="px-2 py-1.5 rounded-lg border border-huginn-border bg-huginn-surface/20">
+                      <pre class="text-[11px] text-huginn-muted overflow-x-auto max-h-24 leading-relaxed whitespace-pre-wrap break-words">{{ item.results.find(r => r.tool_name === call.tool_name)?.content }}</pre>
                     </div>
-                  </div>
-                  <!-- Generic tool result -->
-                  <div v-else class="px-2 py-1.5 rounded-lg border border-huginn-border bg-huginn-surface/20">
-                    <pre class="text-[11px] text-huginn-muted overflow-x-auto max-h-24 leading-relaxed whitespace-pre-wrap break-words">{{ item.results.find(r => r.tool_name === call.tool_name)?.content }}</pre>
-                  </div>
+                  </template>
                 </template>
               </template>
-            </template>
-          </div>
+            </div>
+          </template>
         </div>
 
         <!-- Regular messages (non-tool) -->
@@ -295,10 +301,34 @@ type ToolGroup = {
   key: string
   calls: ThreadMessage[]
   results: ThreadMessage[]
+  isInternal: boolean
 }
 type GroupedItem = MsgItem | ToolGroup
 
 const PALETTE = ['#58A6FF', '#3FB950', '#FF7B72', '#D2A8FF', '#FFA657', '#79C0FF']
+
+const INTERNAL_TOOLS = new Set([
+  'muninn_recall', 'muninn_remember', 'muninn_remember_batch', 'muninn_remember_tree',
+  'muninn_read', 'muninn_session', 'muninn_where_left_off', 'muninn_state',
+  'muninn_entities', 'muninn_entity', 'muninn_find_by_entity', 'muninn_link',
+  'muninn_forget', 'muninn_consolidate', 'muninn_evolve', 'muninn_feedback',
+  'muninn_guide', 'muninn_status', 'muninn_traverse', 'muninn_recall_tree',
+])
+
+function isInternalTool(toolName: string): boolean {
+  return INTERNAL_TOOLS.has(toolName) || toolName.startsWith('muninn_')
+}
+
+function summarizeMemoryOp(calls: ThreadMessage[]): string {
+  const names = calls.map(c => extractToolName(c.content))
+  if (names.some(n => n === 'muninn_remember' || n === 'muninn_remember_batch' || n === 'muninn_remember_tree')) {
+    return 'saved to memory'
+  }
+  if (names.some(n => n === 'muninn_session' || n === 'muninn_where_left_off')) {
+    return 'resumed session'
+  }
+  return 'checked context'
+}
 
 function agentColor(name: string): string {
   if (!name) return PALETTE[0]!
@@ -407,6 +437,7 @@ const groupedMessages = computed((): GroupedItem[] => {
         key: `tg-${startIdx}`,
         calls,
         results,
+        isInternal: calls.length > 0 && calls.every(c => isInternalTool(extractToolName(c.content))),
       })
     } else {
       result.push({ type: 'message', msg: m })
