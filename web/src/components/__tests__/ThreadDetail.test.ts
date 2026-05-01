@@ -431,6 +431,79 @@ describe('ThreadDetail — consult_agent card', () => {
   })
 })
 
+// ── Internal memory tool rendering ────────────────────────────────────────────
+
+describe('ThreadDetail — internal memory tool rendering', () => {
+  it('renders muninn_recall as 🧠 Memory: checked context (not an expandable chip)', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-1',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_recall' }),
+          tool_name: 'muninn_recall',
+        }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory: checked context')
+    // Must NOT render as an expandable chip button — chip renders "1 tool call"
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
+
+  it('renders muninn_remember as 🧠 Memory: saved to memory', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-2',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_remember' }),
+          tool_name: 'muninn_remember',
+        }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory: saved to memory')
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
+
+  it('renders muninn_session as 🧠 Memory: resumed session', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-3',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_session' }),
+          tool_name: 'muninn_session',
+        }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory: resumed session')
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
+
+  it('renders a mixed group (muninn_recall + read_file) as a regular expandable chip (not internal)', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-4',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_recall' }),
+          tool_name: 'muninn_recall',
+        }),
+        makeMessage({
+          id: 'mt-5',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'read_file' }),
+          tool_name: 'read_file',
+        }),
+      ],
+    })
+    // Mixed group — has at least one non-internal tool, so it must be a regular chip
+    expect(wrapper.html()).toContain('tool call')
+    // Must NOT render as a memory summary
+    expect(wrapper.html()).not.toContain('🧠 Memory:')
+  })
+})
+
 // ── Tool call chip (persisted toolCalls) ──────────────────────────────────────
 
 describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {

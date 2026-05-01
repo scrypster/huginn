@@ -307,16 +307,8 @@ type GroupedItem = MsgItem | ToolGroup
 
 const PALETTE = ['#58A6FF', '#3FB950', '#FF7B72', '#D2A8FF', '#FFA657', '#79C0FF']
 
-const INTERNAL_TOOLS = new Set([
-  'muninn_recall', 'muninn_remember', 'muninn_remember_batch', 'muninn_remember_tree',
-  'muninn_read', 'muninn_session', 'muninn_where_left_off', 'muninn_state',
-  'muninn_entities', 'muninn_entity', 'muninn_find_by_entity', 'muninn_link',
-  'muninn_forget', 'muninn_consolidate', 'muninn_evolve', 'muninn_feedback',
-  'muninn_guide', 'muninn_status', 'muninn_traverse', 'muninn_recall_tree',
-])
-
 function isInternalTool(toolName: string): boolean {
-  return INTERNAL_TOOLS.has(toolName) || toolName.startsWith('muninn_')
+  return toolName.startsWith('muninn_')
 }
 
 function summarizeMemoryOp(calls: ThreadMessage[]): string {
