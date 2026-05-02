@@ -383,6 +383,9 @@ func (s *Scheduler) TriggerWorkflow(ctx context.Context, w *Workflow) error {
 		s.mu.Unlock()
 		return fmt.Errorf("scheduler: workflow runner not configured")
 	}
+	// Prevent concurrent runs of the same workflow: overlapping runs would
+	// interleave outputs, corrupt scratch state, and produce ambiguous notifications.
+	// Both scheduled and manual triggers share this guard.
 	if s.workflowRunning[w.ID] {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrWorkflowAlreadyRunning, w.ID)
