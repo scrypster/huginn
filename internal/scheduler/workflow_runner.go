@@ -1021,6 +1021,9 @@ func parseOutput(output string) (summary, detail string) {
 			continue
 		}
 		// Try to parse JSON block.
+		// The double guard (valid JSON + non-empty "summary" field) ensures that
+		// arbitrary JSON output (objects without a "summary" key) falls through to
+		// the plain-text path instead of being mistakenly treated as a summary block.
 		if strings.HasPrefix(line, "{") {
 			var block struct {
 				Summary string `json:"summary"`
