@@ -230,6 +230,10 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid SKILL.md: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	if !validSkillName(sk.Name()) {
+		http.Error(w, "invalid skill name in registry SKILL.md", http.StatusBadGateway)
+		return
+	}
 	sdir := s.skillsDirPath()
 	os.MkdirAll(sdir, 0755)
 	if err := os.WriteFile(filepath.Join(sdir, sk.Name()+".md"), rawBytes, 0644); err != nil {
