@@ -494,6 +494,9 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	if err != nil {
 		// tool_calls_json or parent_message_id may not exist on older databases — retry without them.
 		if isNoSuchColumnError(err) {
+			// NOTE: old databases lack the parent_message_id column, so this fallback
+			// query cannot filter out thread replies. Space timelines on pre-thread-feature
+			// databases may include thread replies in the main view.
 			query = fmt.Sprintf(`
 				SELECT id, session_id, seq, ts, role, content, agent, NULL FROM (
 					SELECT m.id, m.container_id AS session_id, m.seq, m.ts,
