@@ -972,6 +972,29 @@ func (tm *ThreadManager) IsReady(id string) bool {
 	return true
 }
 
+// IsBlockedByFailure returns true if any upstream dependency has reached a
+// terminal failure state (StatusCancelled or StatusError), making it
+// impossible for this thread to ever become ready. Callers should cancel
+// or error the thread immediately rather than waiting for the watchdog.
+func (tm *ThreadManager) IsBlockedByFailure(id string) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	t, ok := tm.threads[id]
+	if !ok {
+		return false
+	}
+	for _, depID := range t.DependsOn {
+		dep, ok := tm.threads[depID]
+		if !ok {
+			continue // unknown dep treated conservatively
+		}
+		if dep.Status == StatusCancelled || dep.Status == StatusError {
+			return true
+		}
+	}
+	return false
+}
+
 // DetectCycle returns true if there is a cycle in the dependency graph reachable
 // from the given thread ID. It performs a depth-first search through DependsOn edges.
 // This is the public variant; it acquires a read lock.
