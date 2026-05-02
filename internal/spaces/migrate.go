@@ -7,9 +7,15 @@ import (
 	"github.com/scrypster/huginn/internal/sqlitedb"
 )
 
-// Migrations returns an empty list — all schema is now in the base schema DDL.
+// Migrations returns the spaces package DDL migrations. Each runs inside a
+// transaction; the framework records applied migrations in _migrations so they
+// execute exactly once per database file.
 func Migrations() []sqlitedb.Migration {
-	return nil
+	return []sqlitedb.Migration{
+		{Name: "spaces_v1_initial_schema", Up: migrateSpacesV1},
+		{Name: "spaces_v2_messages_container_ts_index", Up: migrateSpacesV2},
+		{Name: "spaces_v3_channel_name_unique_index", Up: migrateSpacesV3},
+	}
 }
 
 // migrateSpacesV1 runs inside a single transaction supplied by sqlitedb.runMigration.
@@ -128,6 +134,17 @@ func migrateSpacesV2(tx *sql.Tx) error {
 		CREATE INDEX IF NOT EXISTS idx_messages_container_ts
 		    ON messages(container_id, ts DESC, id DESC)
 		    WHERE container_type = 'session'
+	`)
+	return err
+}
+
+// migrateSpacesV3 adds a case-insensitive unique index on channel names to
+// eliminate the TOCTOU race in handleCreateSpace. The partial index applies
+// only to rows where kind = 'channel'; DM spaces are unaffected.
+func migrateSpacesV3(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_channel_name_unique
+		ON spaces(LOWER(name)) WHERE kind = 'channel'
 	`)
 	return err
 }
