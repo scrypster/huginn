@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -418,5 +419,55 @@ func TestFormatTable_NegativeValue(t *testing.T) {
 	out := FormatTable(snap)
 	if !strings.Contains(out, "-5.5") {
 		t.Errorf("expected negative value in output: %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// registryCollector.Histogram – histValues population (bug fix tests)
+// ---------------------------------------------------------------------------
+
+func TestRegistryCollector_Histogram_PopulatesHistValues(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	c := r.Collector()
+
+	// Record via the Collector interface (the DI path).
+	c.Histogram("latency_ms", 10.0)
+	c.Histogram("latency_ms", 20.0)
+	c.Histogram("latency_ms", 30.0)
+
+	snap := r.Snapshot()
+	vals, ok := snap.HistValues["latency_ms"]
+	if !ok {
+		t.Fatal("expected HistValues[latency_ms] to be populated via Collector path, got missing key")
+	}
+	if len(vals) != 3 {
+		t.Errorf("expected 3 values, got %d", len(vals))
+	}
+
+	p50, p95, p99 := computePercentiles(vals)
+	if p50 == 0 && p95 == 0 && p99 == 0 {
+		t.Error("expected non-zero percentiles, got all zeros")
+	}
+}
+
+func TestRegistryCollector_Histogram_EnforcesKeyCap(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	c := r.Collector()
+
+	// Fill to the key cap.
+	for i := 0; i < maxHistogramKeys; i++ {
+		c.Histogram(fmt.Sprintf("metric_%d", i), float64(i))
+	}
+	// One more key — should be silently dropped.
+	c.Histogram("overflow_key", 99.0)
+
+	snap := r.Snapshot()
+	if _, ok := snap.HistValues["overflow_key"]; ok {
+		t.Error("expected overflow key to be silently dropped")
+	}
+	if len(snap.HistValues) > maxHistogramKeys {
+		t.Errorf("expected at most %d keys, got %d", maxHistogramKeys, len(snap.HistValues))
 	}
 }

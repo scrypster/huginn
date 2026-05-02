@@ -143,6 +143,7 @@ func (c *registryCollector) Record(metric string, value float64, tags ...string)
 func (c *registryCollector) Histogram(metric string, value float64, tags ...string) {
 	c.r.mu.Lock()
 	defer c.r.mu.Unlock()
+	// Append to the flat event log (for chronological queries).
 	c.r.histograms = append(c.r.histograms, metricEntry{
 		Metric: metric,
 		Value:  value,
@@ -152,6 +153,18 @@ func (c *registryCollector) Histogram(metric string, value float64, tags ...stri
 	if len(c.r.histograms) > maxEntries {
 		c.r.histograms = c.r.histograms[len(c.r.histograms)-maxEntries:]
 	}
+	// Also update histValues for percentile computation (the bug fix).
+	vals, exists := c.r.histValues[metric]
+	if !exists {
+		if len(c.r.histValues) >= maxHistogramKeys {
+			return // key cap exceeded — drop silently, same as Registry.Histogram
+		}
+	}
+	vals = append(vals, value)
+	if len(vals) > maxHistogramSamples {
+		vals = vals[len(vals)-histogramTrimTo:]
+	}
+	c.r.histValues[metric] = vals
 }
 
 // computePercentiles returns the p50, p95, and p99 percentiles of vals.
