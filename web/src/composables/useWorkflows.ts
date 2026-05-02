@@ -368,8 +368,8 @@ export function useWorkflows() {
       } else {
         if (!liveEvents.value[wfId]) liveEvents.value[wfId] = []
         liveEvents.value[wfId]!.push(evt)
-        if (liveEvents.value[wfId]!.length > 100) {
-          liveEvents.value[wfId]!.shift()
+        if (liveEvents.value[wfId]!.length > 500) {
+          liveEvents.value[wfId] = liveEvents.value[wfId]!.slice(-500)
         }
       }
 

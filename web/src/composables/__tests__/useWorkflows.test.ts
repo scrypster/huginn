@@ -413,14 +413,14 @@ describe('useWorkflows', () => {
       expect(liveEvents.value['wf-b']).toHaveLength(1)
     })
 
-    it('caps liveEvents per workflow at 100 entries (oldest dropped)', () => {
+    it('caps liveEvents per workflow at 500 entries (oldest dropped)', () => {
       const { result: { wireWS, liveEvents } } = withSetup(() => useWorkflows())
       const ws = makeFakeHuginnWS()
       wireWS(ws as any)
 
       // workflow_started clears events; we only want to test the cap on
       // continuing-run events, so use workflow_step_complete only.
-      for (let i = 0; i < 105; i++) {
+      for (let i = 0; i < 510; i++) {
         ws.fire('workflow_step_complete', {
           type: 'workflow_step_complete',
           workflow_id: 'wf-cap',
@@ -428,10 +428,10 @@ describe('useWorkflows', () => {
           position: i,
         })
       }
-      expect(liveEvents.value['wf-cap']).toHaveLength(100)
-      // Oldest dropped → first remaining is r-5.
-      expect(liveEvents.value['wf-cap']![0]!.run_id).toBe('r-5')
-      expect(liveEvents.value['wf-cap']![99]!.run_id).toBe('r-104')
+      expect(liveEvents.value['wf-cap']).toHaveLength(500)
+      // Oldest dropped → first remaining is r-10.
+      expect(liveEvents.value['wf-cap']![0]!.run_id).toBe('r-10')
+      expect(liveEvents.value['wf-cap']![499]!.run_id).toBe('r-509')
     })
 
     it('refetches workflows on terminal events (complete/failed/partial/cancelled)', async () => {
