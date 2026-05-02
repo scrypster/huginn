@@ -419,7 +419,9 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	updates.Version = target.Version
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	updates.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(updates.TimeoutMinutes)
-	if err := scheduler.SaveWorkflow(dir, &updates); err != nil {
+	// Two-phase write: write to temp first, only commit after scheduler registration succeeds.
+	tmpPath, err := scheduler.WriteWorkflowTemp(dir, &updates)
+	if err != nil {
 		jsonError(w, 500, "save workflow: "+err.Error())
 		return
 	}
@@ -430,27 +432,28 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		sched.RemoveWorkflow(id)
 		if updates.Enabled {
 			if err := sched.RegisterWorkflow(&updates); err != nil {
-				// Scheduler registration failed — attempt compensating rollback to
-				// restore the previous workflow on disk and re-register it.
-				// TODO: replace with atomic save-then-register (temp file + rename) to
-				// eliminate the divergence window entirely.
-				rollbackMsg := "register workflow: " + err.Error()
-				if rerr := scheduler.SaveWorkflow(dir, target); rerr != nil {
-					slog.Error("workflow update: rollback save failed; workflow may be in inconsistent state",
-						"id", id, "save_err", rerr, "register_err", err)
-					jsonError(w, 500, rollbackMsg+"; rollback also failed — manual scheduler restart may be required")
-					return
-				}
+				// Registration failed — discard temp file (disk unchanged) and
+				// restore old version in scheduler.
+				_ = os.Remove(tmpPath)
 				if target.Enabled {
 					if rerr := sched.RegisterWorkflow(target); rerr != nil {
-						slog.Error("workflow update: rollback re-register failed; workflow may be in inconsistent state",
-							"id", id, "register_err", rerr)
+						slog.Error("workflow update: rollback re-register failed",
+							"id", id, "err", rerr)
 					}
 				}
-				jsonError(w, 500, rollbackMsg)
+				jsonError(w, 500, "register workflow: "+err.Error())
 				return
 			}
 		}
+	}
+	// Registration succeeded (or scheduler nil/disabled) — commit the file.
+	if err := os.Rename(tmpPath, updates.FilePath); err != nil {
+		// Rename failed after registration succeeded — scheduler and disk are now
+		// diverged. Log prominently and return 500.
+		slog.Error("workflow update: commit rename failed; scheduler registered but disk not updated",
+			"id", id, "tmp", tmpPath, "dest", updates.FilePath, "err", err)
+		jsonError(w, 500, "commit workflow: "+err.Error())
+		return
 	}
 	jsonOK(w, updates)
 }
