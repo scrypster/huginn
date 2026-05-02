@@ -106,6 +106,22 @@ func (s *stubNotifStore) ListByWorkflow(workflowID string) ([]*notification.Noti
 	return out, nil
 }
 
+func (s *stubNotifStore) ListByRoutineN(routineID string, limit int) ([]*notification.Notification, error) {
+	all, err := s.ListByRoutine(routineID)
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
+func (s *stubNotifStore) ListByWorkflowN(workflowID string, limit int) ([]*notification.Notification, error) {
+	all, err := s.ListByWorkflow(workflowID)
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
 func (s *stubNotifStore) PendingCount() (int, error) {
 	ns, err := s.ListPending()
 	return len(ns), err

@@ -101,6 +101,18 @@ func (s *Store) ListByWorkflow(workflowID string) ([]*Notification, error) {
 	return s.listByPrefix(pfxByWorkflow + workflowID + "/")
 }
 
+// ListByRoutineN returns up to limit notifications for a routine, newest first.
+// If limit <= 0 all notifications are returned.
+func (s *Store) ListByRoutineN(routineID string, limit int) ([]*Notification, error) {
+	return s.listByPrefixN(pfxByRoutine+routineID+"/", limit)
+}
+
+// ListByWorkflowN returns up to limit notifications for a workflow, newest first.
+// If limit <= 0 all notifications are returned.
+func (s *Store) ListByWorkflowN(workflowID string, limit int) ([]*Notification, error) {
+	return s.listByPrefixN(pfxByWorkflow+workflowID+"/", limit)
+}
+
 // PendingCount returns the count of pending notifications.
 // Uses a prefix-iterator count to avoid allocating a full ID slice.
 func (s *Store) PendingCount() (int, error) {
