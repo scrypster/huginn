@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -78,7 +79,7 @@ func (r *Registry) Histogram(metric string, value float64, tags ...string) {
 	vals, exists := r.histValues[metric]
 	if !exists {
 		if len(r.histValues) >= maxHistogramKeys {
-			// Key cap exceeded — drop the new metric silently.
+			slog.Warn("stats: histogram key cap reached; dropping metric", "metric", metric, "cap", maxHistogramKeys)
 			return
 		}
 	}
@@ -162,7 +163,8 @@ func (c *registryCollector) Histogram(metric string, value float64, tags ...stri
 	vals, exists := c.r.histValues[metric]
 	if !exists {
 		if len(c.r.histValues) >= maxHistogramKeys {
-			return // key cap exceeded — drop silently, same as Registry.Histogram
+			slog.Warn("stats: histogram key cap reached; dropping metric", "metric", metric, "cap", maxHistogramKeys)
+			return
 		}
 	}
 	vals = append(vals, value)
