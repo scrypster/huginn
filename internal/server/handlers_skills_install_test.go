@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +137,152 @@ func TestHandleSkillsInstall_AcceptsValidName(t *testing.T) {
 
 	// Verify file was written to disk at correct location
 	expectedPath := filepath.Join(sdir, "valid-skill.md")
+	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
+		t.Errorf("expected skill file not found at %s", expectedPath)
+	}
+}
+
+// TestHandleSkillsInstall_WithCorrectSHA256 verifies that when the registry index
+// entry has a SHA-256 that matches the downloaded content, the skill is installed.
+func TestHandleSkillsInstall_WithCorrectSHA256(t *testing.T) {
+	const skillContent = "---\nname: hashed-skill\nauthor: official\n---\n\nA verified skill.\n"
+
+	sum := sha256.Sum256([]byte(skillContent))
+	correctHash := hex.EncodeToString(sum[:])
+
+	registrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(skillContent))
+	}))
+	defer registrySrv.Close()
+
+	dir := t.TempDir()
+	sdir := filepath.Join(dir, "skills")
+	os.MkdirAll(sdir, 0755)
+	cacheDir := filepath.Join(dir, "cache")
+	os.MkdirAll(cacheDir, 0755)
+
+	indexEntry := skills.IndexEntry{
+		Name:      "hashed-skill",
+		SourceURL: registrySrv.URL + "/skills/hashed-skill/SKILL.md",
+		SHA256:    correctHash,
+	}
+	cachedIndex := map[string]any{
+		"fetched_at": time.Now().UTC().Format(time.RFC3339),
+		"entries":    []skills.IndexEntry{indexEntry},
+	}
+	cacheBytes, _ := json.Marshal(cachedIndex)
+	os.WriteFile(filepath.Join(cacheDir, "skills-index.json"), cacheBytes, 0644)
+
+	srv := &Server{huginnDir: dir}
+
+	body, _ := json.Marshal(map[string]string{"target": "hashed-skill"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/install", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSkillsInstall(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("handleSkillsInstall: status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+	expectedPath := filepath.Join(sdir, "hashed-skill.md")
+	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
+		t.Errorf("expected skill file not found at %s", expectedPath)
+	}
+}
+
+// TestHandleSkillsInstall_WithWrongSHA256 verifies that when the registry index
+// entry has a SHA-256 that does NOT match the downloaded content, the install
+// is rejected with a 502 BadGateway and nothing is written to disk.
+func TestHandleSkillsInstall_WithWrongSHA256(t *testing.T) {
+	const skillContent = "---\nname: tampered-skill\nauthor: attacker\n---\n\nTampered content.\n"
+	const wrongHash = "0000000000000000000000000000000000000000000000000000000000000000"
+
+	registrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(skillContent))
+	}))
+	defer registrySrv.Close()
+
+	dir := t.TempDir()
+	sdir := filepath.Join(dir, "skills")
+	os.MkdirAll(sdir, 0755)
+	cacheDir := filepath.Join(dir, "cache")
+	os.MkdirAll(cacheDir, 0755)
+
+	indexEntry := skills.IndexEntry{
+		Name:      "tampered-skill",
+		SourceURL: registrySrv.URL + "/skills/tampered-skill/SKILL.md",
+		SHA256:    wrongHash,
+	}
+	cachedIndex := map[string]any{
+		"fetched_at": time.Now().UTC().Format(time.RFC3339),
+		"entries":    []skills.IndexEntry{indexEntry},
+	}
+	cacheBytes, _ := json.Marshal(cachedIndex)
+	os.WriteFile(filepath.Join(cacheDir, "skills-index.json"), cacheBytes, 0644)
+
+	srv := &Server{huginnDir: dir}
+
+	body, _ := json.Marshal(map[string]string{"target": "tampered-skill"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/install", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSkillsInstall(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("handleSkillsInstall: status = %d, want 502; body: %s", w.Code, w.Body.String())
+	}
+	// Verify nothing was written to disk
+	entries, _ := os.ReadDir(sdir)
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
+			t.Errorf("unexpected .md file written after integrity failure: %s", entry.Name())
+		}
+	}
+}
+
+// TestHandleSkillsInstall_WithoutSHA256 verifies that when the registry index
+// entry has no SHA-256 field, the skill installs without any hash check (existing behavior).
+func TestHandleSkillsInstall_WithoutSHA256(t *testing.T) {
+	const skillContent = "---\nname: unverified-skill\nauthor: author\n---\n\nNo hash provided.\n"
+
+	registrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(skillContent))
+	}))
+	defer registrySrv.Close()
+
+	dir := t.TempDir()
+	sdir := filepath.Join(dir, "skills")
+	os.MkdirAll(sdir, 0755)
+	cacheDir := filepath.Join(dir, "cache")
+	os.MkdirAll(cacheDir, 0755)
+
+	// SHA256 is intentionally omitted (empty string / zero value)
+	indexEntry := skills.IndexEntry{
+		Name:      "unverified-skill",
+		SourceURL: registrySrv.URL + "/skills/unverified-skill/SKILL.md",
+	}
+	cachedIndex := map[string]any{
+		"fetched_at": time.Now().UTC().Format(time.RFC3339),
+		"entries":    []skills.IndexEntry{indexEntry},
+	}
+	cacheBytes, _ := json.Marshal(cachedIndex)
+	os.WriteFile(filepath.Join(cacheDir, "skills-index.json"), cacheBytes, 0644)
+
+	srv := &Server{huginnDir: dir}
+
+	body, _ := json.Marshal(map[string]string{"target": "unverified-skill"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/install", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSkillsInstall(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("handleSkillsInstall: status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+	expectedPath := filepath.Join(sdir, "unverified-skill.md")
 	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
 		t.Errorf("expected skill file not found at %s", expectedPath)
 	}

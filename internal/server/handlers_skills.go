@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -224,6 +227,15 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 	if err != nil || len(rawBytes) > maxBytes {
 		http.Error(w, "failed to read skill content", http.StatusBadGateway)
 		return
+	}
+	// If the registry entry includes a SHA-256 hash, verify the downloaded content.
+	if found.SHA256 != "" {
+		sum := sha256.Sum256(rawBytes)
+		got := hex.EncodeToString(sum[:])
+		if got != strings.ToLower(found.SHA256) {
+			http.Error(w, fmt.Sprintf("skill integrity check failed: expected sha256 %s, got %s", found.SHA256, got), http.StatusBadGateway)
+			return
+		}
 	}
 	sk, err := skills.ParseMarkdownSkillBytes(rawBytes)
 	if err != nil {
