@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -480,5 +481,148 @@ func TestRunner_WorkflowRetry_StepOverrideWins(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("agent called %d times, want 2 (step override of MaxRetries=1)", calls)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Runner: sub-workflow cycle detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRunWorkflow_SubWorkflowCycleDetected verifies that a mutual sub-workflow
+// cycle (A → B → A) is caught at runtime without hanging or stack-overflowing.
+// The runner must fail the step that would re-enter a workflow already in the
+// call stack, reporting a clear "cycle detected" error message.
+func TestRunWorkflow_SubWorkflowCycleDetected(t *testing.T) {
+	t.Parallel()
+	store := &mockRunStore{}
+	agentFn := func(_ context.Context, _ RunOptions) (string, error) { return "ok", nil }
+
+	// wfA has one step that calls wfB as a sub-workflow.
+	wfA := &Workflow{
+		ID:   "cycle-wf-a",
+		Name: "Cycle A",
+		Steps: []WorkflowStep{
+			{Position: 1, Name: "call-b", SubWorkflow: "cycle-wf-b"},
+		},
+	}
+	// wfB has one step that calls wfA — completing the cycle.
+	wfB := &Workflow{
+		ID:   "cycle-wf-b",
+		Name: "Cycle B",
+		Steps: []WorkflowStep{
+			{Position: 1, Name: "call-a", SubWorkflow: "cycle-wf-a"},
+		},
+	}
+
+	// The sub-workflow resolver dispatches to the shared runner so the context
+	// ancestor set is threaded through correctly.
+	var runner WorkflowRunner
+	subFn := func(ctx context.Context, id string, inputs map[string]string) (string, error) {
+		var target *Workflow
+		switch id {
+		case "cycle-wf-a":
+			target = wfA
+		case "cycle-wf-b":
+			target = wfB
+		default:
+			return "", fmt.Errorf("unknown workflow: %s", id)
+		}
+		// Seed the child context with the parent's initial inputs (as the real
+		// wiring in main.go would do) and invoke the shared runner.
+		childCtx := WithInitialInputs(ctx, inputs)
+		if err := runner(childCtx, target); err != nil {
+			return "", err
+		}
+		return "sub-done", nil
+	}
+
+	runner = MakeWorkflowRunner(store, agentFn, nil, nil, nil, nil, "", nil, nil,
+		WithSubWorkflow(subFn))
+
+	if err := runner(context.Background(), wfA); err != nil {
+		t.Fatalf("runner returned top-level error: %v", err)
+	}
+
+	// There should be at least one run stored for wfA.
+	if len(store.runs) == 0 {
+		t.Fatal("expected at least one run stored")
+	}
+	// The first step of wfA ("call-b") must have failed because wfB tried to
+	// call wfA again, which was detected as a cycle.
+	run := store.runs[0]
+	if len(run.Steps) == 0 {
+		t.Fatal("expected step results in run")
+	}
+	step := run.Steps[0]
+	if step.Status != "failed" {
+		t.Fatalf("step status = %q, want failed (cycle should abort the step)", step.Status)
+	}
+	if !strings.Contains(step.Error, "cycle") {
+		t.Fatalf("step error = %q, want substring 'cycle'", step.Error)
+	}
+}
+
+// TestRunWorkflow_SubWorkflowNoCycleOnSiblingCalls verifies that two sibling
+// steps calling the SAME sub-workflow (but not in a cycle) are both allowed to
+// succeed. A→B, A→B is not a cycle.
+func TestRunWorkflow_SubWorkflowNoCycleOnSiblingCalls(t *testing.T) {
+	t.Parallel()
+	store := &mockRunStore{}
+	agentFn := func(_ context.Context, _ RunOptions) (string, error) { return "ok", nil }
+
+	wfChild := &Workflow{
+		ID:   "sibling-child",
+		Name: "Child",
+		Steps: []WorkflowStep{
+			{Position: 1, Name: "do-work", Agent: "a", Prompt: "work"},
+		},
+	}
+
+	var runner WorkflowRunner
+	subFn := func(ctx context.Context, id string, inputs map[string]string) (string, error) {
+		if id != "sibling-child" {
+			return "", fmt.Errorf("unknown workflow: %s", id)
+		}
+		childCtx := WithInitialInputs(ctx, inputs)
+		if err := runner(childCtx, wfChild); err != nil {
+			return "", err
+		}
+		return "child-out", nil
+	}
+
+	wfParent := &Workflow{
+		ID:   "sibling-parent",
+		Name: "Parent",
+		Steps: []WorkflowStep{
+			{Position: 1, Name: "first-call", SubWorkflow: "sibling-child"},
+			{Position: 2, Name: "second-call", SubWorkflow: "sibling-child"},
+		},
+	}
+
+	runner = MakeWorkflowRunner(store, agentFn, nil, nil, nil, nil, "", nil, nil,
+		WithSubWorkflow(subFn))
+
+	if err := runner(context.Background(), wfParent); err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	// Find the parent run (last stored, since child runs are appended first).
+	var parentRun *WorkflowRun
+	for i := range store.runs {
+		if store.runs[i].WorkflowID == "sibling-parent" {
+			parentRun = store.runs[i]
+			break
+		}
+	}
+	if parentRun == nil {
+		t.Fatal("parent run not found in store")
+	}
+	if parentRun.Status != WorkflowRunStatusComplete {
+		t.Fatalf("parent run status = %q, want complete (sibling calls are not a cycle)", parentRun.Status)
+	}
+	for _, s := range parentRun.Steps {
+		if s.Status != "success" {
+			t.Fatalf("step %q status = %q, want success", s.Slug, s.Status)
+		}
 	}
 }
