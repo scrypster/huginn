@@ -86,6 +86,7 @@ export interface ChatMessage {
 // Module-level shared state (singleton across all component instances)
 const sessions = ref<Session[]>([])
 const loading = ref(false)
+const fetchSessionsError = ref<string | null>(null)
 const messagesBySession = ref<Record<string, ChatMessage[]>>({})
 const fetchErrorBySession = ref<Record<string, string | null>>({})
 // agentThinking: true from message send until first token/status/done/error
@@ -139,6 +140,7 @@ function queueIfHydrating(sessionId: string, handler: () => void): boolean {
 export function useSessions() {
   async function fetchSessions() {
     loading.value = true
+    fetchSessionsError.value = null
     try {
       const data = await api.sessions.list() as unknown
       if (Array.isArray(data)) {
@@ -146,8 +148,8 @@ export function useSessions() {
       } else {
         sessions.value = (data as { sessions?: Session[] }).sessions ?? []
       }
-    } catch {
-      // ignore — server may not be fully ready
+    } catch (err: unknown) {
+      fetchSessionsError.value = err instanceof Error ? err.message : 'Failed to load sessions'
     } finally {
       loading.value = false
     }
@@ -344,5 +346,6 @@ export function useSessions() {
     setLastSeenMessageId,
     getFetchError,
     clearFetchError,
+    fetchSessionsError,
   }
 }
