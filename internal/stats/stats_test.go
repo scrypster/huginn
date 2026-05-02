@@ -451,6 +451,40 @@ func TestRegistryCollector_Histogram_PopulatesHistValues(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Registry.Histogram vs Collector.Histogram asymmetry contract tests
+// ---------------------------------------------------------------------------
+
+func TestRegistry_DirectHistogram_DoesNotPopulateEventLog(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	// Call Registry.Histogram directly (not via Collector)
+	r.Histogram("direct", 1.0)
+	snap := r.Snapshot()
+	// histValues should be populated
+	if _, ok := snap.HistValues["direct"]; !ok {
+		t.Error("expected HistValues to contain 'direct'")
+	}
+	// flat event log should NOT be populated (this is the documented asymmetry)
+	if len(snap.Histograms) != 0 {
+		t.Errorf("expected Histograms event log to be empty for direct Registry.Histogram, got %d entries", len(snap.Histograms))
+	}
+}
+
+func TestRegistry_CollectorHistogram_PopulatesBothPaths(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	c := r.Collector()
+	c.Histogram("via_collector", 1.0)
+	snap := r.Snapshot()
+	if _, ok := snap.HistValues["via_collector"]; !ok {
+		t.Error("expected HistValues populated via collector")
+	}
+	if len(snap.Histograms) != 1 {
+		t.Errorf("expected 1 entry in Histograms event log, got %d", len(snap.Histograms))
+	}
+}
+
 func TestRegistryCollector_Histogram_EnforcesKeyCap(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry()
