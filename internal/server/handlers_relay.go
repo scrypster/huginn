@@ -138,7 +138,7 @@ func relaySuccessHTML(provider string) string {
   <script>
     setTimeout(function() {
       if (window.opener) {
-        window.opener.postMessage({type:'huginn_oauth_complete',provider:%s}, '*');
+        window.opener.postMessage({type:'huginn_oauth_complete',provider:%s}, window.location.origin);
       }
       window.close();
     }, 1500);
