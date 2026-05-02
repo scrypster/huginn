@@ -151,9 +151,12 @@ func (s *Store) listByPrefixN(prefix string, limit int) ([]*Notification, error)
 	if err != nil {
 		return nil, err
 	}
-	// Reverse to get newest first (IDs sort ascending by creation time).
-	for i, j := 0, len(ids)-1; i < j; i, j = i+1, j-1 {
-		ids[i], ids[j] = ids[j], ids[i]
+	// When limit==0: ids are ascending (oldest first); reverse for newest-first output.
+	// When limit>0: ids are already descending (newest first) from reverse scan.
+	if limit <= 0 {
+		for i, j := 0, len(ids)-1; i < j; i, j = i+1, j-1 {
+			ids[i], ids[j] = ids[j], ids[i]
+		}
 	}
 	out := make([]*Notification, 0, len(ids))
 	for _, id := range ids {
@@ -171,8 +174,9 @@ func (s *Store) scanIDs(prefix string) ([]string, error) {
 	return s.scanIDsN(prefix, 0)
 }
 
-// scanIDsN returns notification IDs under a prefix in ascending order,
-// stopping after limit IDs are collected. If limit <= 0, all IDs are returned.
+// scanIDsN returns notification IDs under a prefix.
+// When limit <= 0, scans ascending (oldest first) and returns all IDs.
+// When limit > 0, scans descending (newest first) and returns at most limit IDs.
 func (s *Store) scanIDsN(prefix string, limit int) ([]string, error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte(prefix),
@@ -182,12 +186,21 @@ func (s *Store) scanIDsN(prefix string, limit int) ([]string, error) {
 		return nil, fmt.Errorf("notification: iter: %w", err)
 	}
 	defer iter.Close()
-	var ids []string
-	for iter.First(); iter.Valid(); iter.Next() {
-		ids = append(ids, string(iter.Value()))
-		if limit > 0 && len(ids) >= limit {
-			break
+
+	if limit <= 0 {
+		// No limit: scan ascending (existing behavior preserved for scanIDs delegate).
+		var ids []string
+		for iter.First(); iter.Valid(); iter.Next() {
+			ids = append(ids, string(iter.Value()))
 		}
+		return ids, iter.Error()
+	}
+
+	// With limit: scan descending so we collect the newest N IDs first.
+	// listByPrefixN will NOT reverse this result, so output is newest-first.
+	ids := make([]string, 0, limit)
+	for ok := iter.Last(); ok && len(ids) < limit; ok = iter.Prev() {
+		ids = append(ids, string(iter.Value()))
 	}
 	return ids, iter.Error()
 }

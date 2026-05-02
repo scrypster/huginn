@@ -188,10 +188,13 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 	s := notification.NewStore(db)
 
 	const total = 10
+	var lastID string
 	for i := 0; i < total; i++ {
-		if err := s.Put(makeNotif("routineA", "run1", notification.SeverityInfo)); err != nil {
+		n := makeNotif("routineA", "run1", notification.SeverityInfo)
+		if err := s.Put(n); err != nil {
 			t.Fatal(err)
 		}
+		lastID = n.ID
 	}
 
 	got, err := s.ListPendingN(5)
@@ -201,6 +204,10 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 	if len(got) != 5 {
 		t.Fatalf("want 5, got %d", len(got))
 	}
+	// The first result should be the most recently created notification (newest first).
+	if got[0].ID != lastID {
+		t.Errorf("want first result to be newest ID %s, got %s", lastID, got[0].ID)
+	}
 
 	// limit=0 should return all
 	all, err := s.ListPendingN(0)
@@ -209,5 +216,9 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 	}
 	if len(all) != total {
 		t.Fatalf("want %d with limit=0, got %d", total, len(all))
+	}
+	// limit=0 result should also be newest-first
+	if all[0].ID != lastID {
+		t.Errorf("want first result (no limit) to be newest ID %s, got %s", lastID, all[0].ID)
 	}
 }
