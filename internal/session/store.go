@@ -422,6 +422,13 @@ func (s *Store) AppendToThread(sessionID, threadID string, msg SessionMessage) e
 	if err := validateID(threadID); err != nil {
 		return err
 	}
+
+	// Acquire a per-thread append mutex before any file I/O so that concurrent
+	// callers for the same thread cannot interleave JSONL lines.
+	mu := s.sessionAppendMu(sessionID + "/thread/" + threadID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	dir := s.sessionDir(sessionID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("session mkdir: %w", err)
