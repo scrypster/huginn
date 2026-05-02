@@ -806,6 +806,29 @@ func (f *failingRunStore) Get(workflowID, runID string) (*WorkflowRun, error) {
 	return nil, nil
 }
 
+// TestRunID_Uniqueness verifies that runID generates distinct values across
+// repeated calls for the same workflow, confirming that the random suffix
+// prevents millisecond-timestamp collisions.
+func TestRunID_Uniqueness(t *testing.T) {
+	const iterations = 100
+	seen := make(map[string]struct{}, iterations)
+	for i := 0; i < iterations; i++ {
+		id := runID("test-workflow")
+		if _, dup := seen[id]; dup {
+			t.Fatalf("runID collision on iteration %d: %q", i, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestRunID_Format verifies that runID includes the workflow ID and starts with "wf-".
+func TestRunID_Format(t *testing.T) {
+	id := runID("my-workflow")
+	if !strings.HasPrefix(id, "wf-my-workflow-") {
+		t.Errorf("expected runID to start with 'wf-my-workflow-', got %q", id)
+	}
+}
+
 // TestMakeWorkflowRunner_RunStoreAppendFailure_ContinuesExecution confirms the
 // runner returns nil even when runStore.Append fails (error is logged, not propagated).
 func TestMakeWorkflowRunner_RunStoreAppendFailure_ContinuesExecution(t *testing.T) {
