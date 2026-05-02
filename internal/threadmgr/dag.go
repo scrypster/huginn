@@ -27,6 +27,11 @@ func (tm *ThreadManager) EvaluateDAG(
 		if t.Status != StatusQueued {
 			continue
 		}
+		// Fast-fail: if an upstream failed/cancelled, cascade-cancel this thread.
+		if tm.IsBlockedByFailure(t.ID) {
+			tm.Cancel(t.ID)
+			continue
+		}
 		if !tm.IsReady(t.ID) {
 			continue
 		}
