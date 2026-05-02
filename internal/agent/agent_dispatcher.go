@@ -364,7 +364,9 @@ func (o *Orchestrator) ExecuteAgentTool(ctx context.Context, model string, budge
 	// budgetTokens is accepted for future use but not yet propagated to ChatRequest,
 	// which does not expose a per-call MaxTokens field. When ChatRequest gains that
 	// field, wire budgetTokens through here.
-	_ = budgetTokens
+	if budgetTokens > 0 {
+		slog.Warn("agent: budgetTokens parameter is not yet enforced", "budget", budgetTokens)
+	}
 
 	o.mu.RLock()
 	b := o.backend
