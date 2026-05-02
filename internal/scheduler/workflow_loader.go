@@ -89,6 +89,28 @@ func SaveWorkflow(dir string, w *Workflow) error {
 	return nil
 }
 
+// WriteWorkflowTemp marshals w to a ".tmp" file alongside its FilePath,
+// incrementing w.Version. Returns the temp path. The caller must either
+// os.Rename(tmpPath, w.FilePath) to commit or os.Remove(tmpPath) to abort.
+// On any error, w.Version is rolled back.
+func WriteWorkflowTemp(dir string, w *Workflow) (string, error) {
+	if w.FilePath == "" {
+		w.FilePath = filepath.Join(dir, w.ID+".yaml")
+	}
+	w.Version++
+	data, err := yaml.Marshal(w)
+	if err != nil {
+		w.Version--
+		return "", fmt.Errorf("scheduler: marshal workflow: %w", err)
+	}
+	tmp := w.FilePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		w.Version--
+		return "", fmt.Errorf("scheduler: write workflow: %w", err)
+	}
+	return tmp, nil
+}
+
 // DeleteWorkflow removes the workflow's YAML file from disk.
 func DeleteWorkflow(w *Workflow) error {
 	if w.FilePath == "" {
