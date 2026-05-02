@@ -36,9 +36,9 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	var err error
 	switch {
 	case r.URL.Query().Get("routine_id") != "":
-		notifications, err = store.ListByRoutine(r.URL.Query().Get("routine_id"))
+		notifications, err = store.ListByRoutineN(r.URL.Query().Get("routine_id"), limit)
 	case r.URL.Query().Get("workflow_id") != "":
-		notifications, err = store.ListByWorkflow(r.URL.Query().Get("workflow_id"))
+		notifications, err = store.ListByWorkflowN(r.URL.Query().Get("workflow_id"), limit)
 	default:
 		notifications, err = store.ListPendingN(limit)
 	}

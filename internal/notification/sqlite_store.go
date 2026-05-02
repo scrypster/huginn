@@ -188,6 +188,44 @@ func (s *SQLiteNotificationStore) ListByWorkflow(workflowID string) ([]*Notifica
 	return scanNotifications(rows)
 }
 
+// ListByRoutineN returns up to limit notifications for a routine, newest first.
+// If limit <= 0 all notifications are returned.
+func (s *SQLiteNotificationStore) ListByRoutineN(routineID string, limit int) ([]*Notification, error) {
+	if limit <= 0 {
+		return s.ListByRoutine(routineID)
+	}
+	rows, err := s.db.Read().Query(`
+		SELECT id, routine_id, run_id, satellite_id, workflow_id, workflow_run_id,
+		       summary, detail, severity, status, session_id, proposed_actions,
+		       step_position, step_name, deliveries,
+		       created_at, updated_at, expires_at
+		FROM notifications WHERE routine_id = ? ORDER BY id DESC LIMIT ?`, routineID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("notification: list by routine n %q: %w", routineID, err)
+	}
+	defer rows.Close()
+	return scanNotifications(rows)
+}
+
+// ListByWorkflowN returns up to limit notifications for a workflow, newest first.
+// If limit <= 0 all notifications are returned.
+func (s *SQLiteNotificationStore) ListByWorkflowN(workflowID string, limit int) ([]*Notification, error) {
+	if limit <= 0 {
+		return s.ListByWorkflow(workflowID)
+	}
+	rows, err := s.db.Read().Query(`
+		SELECT id, routine_id, run_id, satellite_id, workflow_id, workflow_run_id,
+		       summary, detail, severity, status, session_id, proposed_actions,
+		       step_position, step_name, deliveries,
+		       created_at, updated_at, expires_at
+		FROM notifications WHERE workflow_id = ? ORDER BY id DESC LIMIT ?`, workflowID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("notification: list by workflow n %q: %w", workflowID, err)
+	}
+	defer rows.Close()
+	return scanNotifications(rows)
+}
+
 // PendingCount returns the count of pending notifications.
 func (s *SQLiteNotificationStore) PendingCount() (int, error) {
 	var count int

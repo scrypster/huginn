@@ -21,8 +21,16 @@ type StoreInterface interface {
 	// ListByRoutine returns all notifications for a routine, newest first.
 	ListByRoutine(routineID string) ([]*Notification, error)
 
+	// ListByRoutineN returns up to limit notifications for a routine, newest first.
+	// If limit <= 0 all notifications are returned.
+	ListByRoutineN(routineID string, limit int) ([]*Notification, error)
+
 	// ListByWorkflow returns all notifications produced by a workflow, newest first.
 	ListByWorkflow(workflowID string) ([]*Notification, error)
+
+	// ListByWorkflowN returns up to limit notifications for a workflow, newest first.
+	// If limit <= 0 all notifications are returned.
+	ListByWorkflowN(workflowID string, limit int) ([]*Notification, error)
 
 	// PendingCount returns the count of pending notifications.
 	PendingCount() (int, error)
