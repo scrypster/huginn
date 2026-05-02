@@ -181,6 +181,7 @@ func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/skills/install
 func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var body struct {
 		Target string `json:"target"`
 	}
@@ -280,6 +281,7 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 // the old file is removed afterwards (atomic write-then-delete). The manifest is
 // updated accordingly and the skills registry is reloaded.
 func (s *Server) handleSkillsUpdate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	urlName := r.PathValue("name")
 	if !validSkillName(urlName) {
 		http.Error(w, "invalid skill name", http.StatusBadRequest)
