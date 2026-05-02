@@ -536,11 +536,10 @@ func MakeWorkflowRunner(
 				// Apply per-step timeout if set. The step context is always a child
 				// of the workflow context so the workflow-level deadline still wins.
 				stepCtx := ctx
+				stepCancel := func() {} // no-op default; replaced below when a per-step timeout is set
 				stepHadOwnTimeout := false
 				if d := step.TimeoutDuration(); d > 0 {
-					var stepCancel context.CancelFunc
 					stepCtx, stepCancel = context.WithTimeout(ctx, d)
-					defer stepCancel()
 					stepHadOwnTimeout = true
 				}
 				// Plumb a scratchpad writer onto the step context. Tools (e.g.
@@ -673,8 +672,10 @@ func MakeWorkflowRunner(
 
 				if agentErr != nil && step.EffectiveOnFailure() == "stop" {
 					aborted = true
+					stepCancel()
 					break
 				}
+				stepCancel()
 				continue
 			}
 
