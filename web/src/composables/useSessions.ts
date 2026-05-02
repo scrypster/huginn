@@ -87,6 +87,7 @@ export interface ChatMessage {
 const sessions = ref<Session[]>([])
 const loading = ref(false)
 const messagesBySession = ref<Record<string, ChatMessage[]>>({})
+const fetchErrorBySession = ref<Record<string, string | null>>({})
 // agentThinking: true from message send until first token/status/done/error
 const agentThinkingBySession = ref<Record<string, boolean>>({})
 // lastSeenMessageId: set when agent starts streaming to mark the last user message as "seen"
@@ -220,6 +221,8 @@ export function useSessions() {
 
     // Begin buffering WS events for this session until the fetch completes.
     preHydrationQueue.set(sessionId, [])
+    // Reset any prior fetch error so stale errors don't persist on re-fetch.
+    clearFetchError(sessionId)
 
     // 30-second timeout: if the server hangs, we still flush the queue so that
     // live WS streaming is not permanently blocked for this session.
@@ -260,9 +263,15 @@ export function useSessions() {
           }
         })
       messagesBySession.value[sessionId] = msgs
-    } catch {
-      // Ignore — server may not have messages for this session, or the
-      // 30-second timeout fired. Either way we fall through to flush the queue.
+    } catch (err: unknown) {
+      // AbortError is from our own 30s timeout — not a real error, silently continue.
+      // Any other error (network down, 401, 5xx) is surfaced so the UI can show it.
+      if (err instanceof Error && err.name !== 'AbortError') {
+        fetchErrorBySession.value = {
+          ...fetchErrorBySession.value,
+          [sessionId]: err.message || 'Failed to load messages',
+        }
+      }
     } finally {
       clearTimeout(timeoutId)
     }
@@ -306,6 +315,18 @@ export function useSessions() {
     lastSeenMessageIdBySession.value[sessionId] = id
   }
 
+  function getFetchError(sessionId: string): string | null {
+    return fetchErrorBySession.value[sessionId] ?? null
+  }
+
+  function clearFetchError(sessionId: string): void {
+    if (fetchErrorBySession.value[sessionId] !== undefined) {
+      const next = { ...fetchErrorBySession.value }
+      delete next[sessionId]
+      fetchErrorBySession.value = next
+    }
+  }
+
   return {
     sessions,
     loading,
@@ -321,5 +342,7 @@ export function useSessions() {
     setAgentThinking,
     getLastSeenMessageId,
     setLastSeenMessageId,
+    getFetchError,
+    clearFetchError,
   }
 }
