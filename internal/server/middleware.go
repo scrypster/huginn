@@ -199,12 +199,18 @@ func (a *authFailLimiter) recordFailure(ip string) bool {
 }
 
 // isBlocked returns true if ip currently exceeds the failure threshold.
+// If eviction empties the slice, the map key is deleted to prevent unbounded
+// map growth from IPs that have not been seen since their window expired.
 func (a *authFailLimiter) isBlocked(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.clockFn()
 	cutoff := now.Add(-authFailWindow)
 	times := a.evict(ip, cutoff)
+	if len(times) == 0 {
+		delete(a.window, ip)
+		return false
+	}
 	a.window[ip] = times
 	return len(times) > authFailMaxPerMinute
 }
