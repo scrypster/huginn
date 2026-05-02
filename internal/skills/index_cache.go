@@ -27,6 +27,7 @@ type IndexEntry struct {
 	Tags        []string `json:"tags"`
 	SourceURL   string   `json:"source_url"` // full URL to the raw SKILL.md
 	Collection  string   `json:"collection"` // e.g. "obra/superpowers", or ""
+	SHA256      string   `json:"sha256,omitempty"` // hex-encoded SHA-256 of the SKILL.md content; empty = unverified
 }
 
 // IndexCollection represents a collection of related skills.
