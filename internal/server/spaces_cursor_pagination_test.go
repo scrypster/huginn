@@ -354,3 +354,4 @@ func (s *stubSpaceStore) GetChannelsForAgent(_ string) ([]*spaces.Space, error) 
 func (s *stubSpaceStore) SpacesByLeadAgent(_ string) ([]*spaces.Space, error) {
 	return nil, nil
 }
+func (s *stubSpaceStore) FindChannelByName(_ string) (*spaces.Space, error) { return nil, nil }

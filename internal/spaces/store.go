@@ -732,6 +732,29 @@ func (s *SQLiteSpaceStore) GetChannelsForAgent(agentName string) ([]*Space, erro
 	return result, rows.Err()
 }
 
+// FindChannelByName returns the first non-archived channel whose name matches
+// name (case-insensitive), or nil if no such channel exists.
+// This is an O(1) SQL lookup — use it for duplicate-name checks before
+// inserting a new channel instead of listing all channels and scanning in Go.
+func (s *SQLiteSpaceStore) FindChannelByName(name string) (*Space, error) {
+	var id string
+	err := s.db.Read().QueryRow(
+		`SELECT id FROM spaces
+		 WHERE kind = 'channel'
+		   AND archived_at IS NULL
+		   AND LOWER(name) = LOWER(?)
+		 LIMIT 1`,
+		name,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("spaces: find channel by name: %w", err)
+	}
+	return s.loadSpace(id)
+}
+
 // SpacesByLeadAgent returns all non-archived spaces where agentName is the lead agent.
 // Used to prevent deletion of agents that are assigned as space leads.
 func (s *SQLiteSpaceStore) SpacesByLeadAgent(agentName string) ([]*Space, error) {

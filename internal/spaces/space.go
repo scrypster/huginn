@@ -212,6 +212,10 @@ type StoreInterface interface {
 	// already loaded — enabling infinite scroll upward.
 	// limit is clamped to [1, 100]; defaults to 20 when 0.
 	ListSpaceMessages(spaceID string, before *SpaceMsgCursor, limit int) (SpaceMessagesResult, error)
+	// FindChannelByName returns the first non-archived channel whose name
+	// matches name (case-insensitive), or nil if no such channel exists.
+	// Use this for O(1) duplicate-name checks before inserting a new channel.
+	FindChannelByName(name string) (*Space, error)
 }
 
 // ErrImmutableDM is returned when attempting a mutating operation on a DM space

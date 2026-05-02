@@ -110,14 +110,11 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Prevent duplicate channel names (case-insensitive).
-	if existing, err := s.spaceStore.ListSpaces(spaces.ListOpts{Kind: "channel", Limit: 500}); err == nil {
-		trimmedName := strings.TrimSpace(body.Name)
-		for _, sp := range existing.Spaces {
-			if strings.EqualFold(sp.Name, trimmedName) {
-				jsonError(w, 409, fmt.Sprintf("a channel named %q already exists", sp.Name))
-				return
-			}
-		}
+	// FindChannelByName uses a SQL LOWER() lookup — O(1) vs the previous O(n)
+	// scan over ListSpaces results, and correct regardless of channel count.
+	if existing, err := s.spaceStore.FindChannelByName(strings.TrimSpace(body.Name)); err == nil && existing != nil {
+		jsonError(w, 409, fmt.Sprintf("a channel named %q already exists", existing.Name))
+		return
 	}
 	if body.LeadAgent == "" {
 		jsonError(w, 400, "lead_agent is required")
