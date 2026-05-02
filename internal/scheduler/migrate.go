@@ -95,6 +95,7 @@ func MigrateRoutinesToWorkflows(routineDir, workflowDir string) error {
 			UpdatedAt: now,
 		}
 		if err := SaveWorkflow(workflowDir, w); err != nil {
+			slog.Warn("migrate: failed to save workflow; skipping", "name", r.Name, "err", err)
 			continue
 		}
 		migrated++
