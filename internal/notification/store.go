@@ -322,7 +322,6 @@ func (s *Store) PruneExpired(ctx context.Context) (int, error) {
 
 		// Delete all index keys for each expired notification in one atomic batch.
 		wb := s.db.NewBatch()
-		defer wb.Close()
 		for _, e := range toDelete {
 			n := e.n
 			wb.Delete([]byte(pfxByID+n.ID), nil)
@@ -334,8 +333,10 @@ func (s *Store) PruneExpired(ctx context.Context) (int, error) {
 			}
 		}
 		if err := wb.Commit(pebble.Sync); err != nil {
+			wb.Close()
 			return pruned, fmt.Errorf("notification: prune delete batch: %w", err)
 		}
+		wb.Close()
 		pruned += len(toDelete)
 	}
 
