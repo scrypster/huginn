@@ -2349,16 +2349,26 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	ca := threadmgr.NewCostAccumulator(0) // 0 = unlimited; no budget field in config
 	srv.SetCostAccumulator(ca)
 
-	previewEnabled := true
+	previewMode := strings.ToLower(strings.TrimSpace(os.Getenv("HUGINN_DELEGATION_PREVIEW_MODE")))
+	if previewMode == "" {
+		previewMode = "manual"
+	}
+	// Backward-compatible boolean env: off disables preview; true/1 forces manual mode.
 	if raw := strings.TrimSpace(os.Getenv("HUGINN_DELEGATION_PREVIEW")); raw != "" {
 		switch strings.ToLower(raw) {
 		case "0", "false", "off", "no":
-			previewEnabled = false
+			previewMode = "off"
 		default:
-			previewEnabled = true
+			previewMode = "manual"
 		}
 	}
-	previewGate := threadmgr.NewDelegationPreviewGate(previewEnabled)
+	previewTimeout := 30 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("HUGINN_DELEGATION_PREVIEW_TIMEOUT_SECS")); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			previewTimeout = time.Duration(secs) * time.Second
+		}
+	}
+	previewGate := threadmgr.NewDelegationPreviewGateWithConfig(previewMode, previewTimeout)
 	srv.SetPreviewGate(previewGate)
 
 	// ── Spaces store ─────────────────────────────────────────────────────
@@ -3307,8 +3317,12 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		srv.SetStatsPersister(servePersister)
 		// Forward CostAccumulator events to the persister for SQLite storage.
 		ca.SetCostSink(func(threadID string, costUSD float64, promptTokens, completionTokens int) {
+			sessionID := threadID // fallback: use threadID if thread not found
+			if t, ok := tm.Get(threadID); ok {
+				sessionID = t.SessionID
+			}
 			servePersister.EnqueueCost(stats.CostEvent{
-				SessionID:        threadID,
+				SessionID:        sessionID,
 				CostUSD:          costUSD,
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
