@@ -3,6 +3,7 @@ package notification
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -187,7 +188,8 @@ func (s *Store) listByPrefixN(prefix string, limit int) ([]*Notification, error)
 	for _, id := range ids {
 		n, err := s.Get(id)
 		if err != nil {
-			continue // skip corrupt/missing records
+			slog.Warn("notification: skipping corrupt or missing record", "id", id, "err", err)
+			continue
 		}
 		out = append(out, n)
 	}
