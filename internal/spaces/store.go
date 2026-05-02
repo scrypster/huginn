@@ -41,39 +41,41 @@ func isNoSuchColumnError(err error) bool {
 
 // OpenDM returns the existing DM space for agentName, or creates one.
 // Idempotent: calling it N times with the same agentName always returns the same Space.
+// An iterative retry loop (max 3 attempts) is used instead of recursion to prevent
+// unbounded call-stack growth if the re-fetch after INSERT somehow keeps returning
+// sql.ErrNoRows (e.g. due to a concurrent DELETE or an unusual SQLite race).
 func (s *SQLiteSpaceStore) OpenDM(agentName string) (*Space, error) {
 	if agentName == "" {
 		return nil, &SpaceError{Code: "invalid_agent", Message: "agent name is required"}
 	}
-	var id string
-	err := s.db.Read().QueryRow(
-		`SELECT id FROM spaces WHERE kind = 'dm' AND lead_agent = ? AND archived_at IS NULL`,
-		agentName,
-	).Scan(&id)
-
-	if err == nil {
-		// DM already exists — return it.
-		return s.loadSpace(id)
+	const maxRetries = 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		var id string
+		err := s.db.Read().QueryRow(
+			`SELECT id FROM spaces WHERE kind = 'dm' AND lead_agent = ? AND archived_at IS NULL`,
+			agentName,
+		).Scan(&id)
+		if err == nil {
+			return s.loadSpace(id)
+		}
+		if err != sql.ErrNoRows {
+			return nil, fmt.Errorf("spaces: open DM lookup: %w", err)
+		}
+		// Not found — try to insert idempotently.
+		spaceID := newID()
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		_, insertErr := s.db.Write().Exec(
+			`INSERT INTO spaces(id, name, kind, lead_agent, icon, color, created_at, updated_at)
+			 VALUES (?,?,?,?,?,?,?,?)
+			 ON CONFLICT(lead_agent) WHERE kind='dm' DO NOTHING`,
+			spaceID, agentName, KindDM, agentName, "", "", now, now,
+		)
+		if insertErr != nil {
+			return nil, fmt.Errorf("spaces: create DM: %w", insertErr)
+		}
+		// Re-fetch on next iteration — the winner may be our row or a concurrent insert.
 	}
-	if err != sql.ErrNoRows {
-		return nil, fmt.Errorf("spaces: open DM lookup: %w", err)
-	}
-
-	// Does not exist — insert idempotently.
-	spaceID := newID()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.Write().Exec(
-		`INSERT INTO spaces(id, name, kind, lead_agent, icon, color, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)
-		 ON CONFLICT(lead_agent) WHERE kind='dm' DO NOTHING`,
-		spaceID, agentName, KindDM, agentName, "", "", now, now,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("spaces: create DM: %w", err)
-	}
-
-	// Re-fetch to return the winner (handles concurrent inserts).
-	return s.OpenDM(agentName)
+	return nil, fmt.Errorf("spaces: open DM: failed to resolve after %d attempts", maxRetries)
 }
 
 // CreateChannel creates a new channel space with the given name, lead agent, and members.
