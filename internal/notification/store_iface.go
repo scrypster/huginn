@@ -14,6 +14,10 @@ type StoreInterface interface {
 	// ListPending returns all pending notifications, newest first.
 	ListPending() ([]*Notification, error)
 
+	// ListPendingN returns up to limit pending notifications, newest first.
+	// If limit <= 0 all pending notifications are returned.
+	ListPendingN(limit int) ([]*Notification, error)
+
 	// ListByRoutine returns all notifications for a routine, newest first.
 	ListByRoutine(routineID string) ([]*Notification, error)
 

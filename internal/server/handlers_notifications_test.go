@@ -72,6 +72,14 @@ func (s *stubNotifStore) ListPending() ([]*notification.Notification, error) {
 	return out, nil
 }
 
+func (s *stubNotifStore) ListPendingN(limit int) ([]*notification.Notification, error) {
+	all, err := s.ListPending()
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
 func (s *stubNotifStore) ListByRoutine(routineID string) ([]*notification.Notification, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

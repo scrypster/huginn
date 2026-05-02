@@ -84,6 +84,12 @@ func (s *Store) ListPending() ([]*Notification, error) {
 	return s.listByPrefix(pfxByStatus + string(StatusPending) + "/")
 }
 
+// ListPendingN returns up to limit pending notifications, newest first.
+// If limit <= 0 all pending notifications are returned.
+func (s *Store) ListPendingN(limit int) ([]*Notification, error) {
+	return s.listByPrefixN(pfxByStatus+string(StatusPending)+"/", limit)
+}
+
 // ListByRoutine returns all notifications for a routine, newest first.
 func (s *Store) ListByRoutine(routineID string) ([]*Notification, error) {
 	return s.listByPrefix(pfxByRoutine + routineID + "/")
@@ -135,7 +141,13 @@ func (s *Store) ExpireRun(runID string) error {
 // listByPrefix does a prefix scan on index keys, loads canonical records,
 // and returns them newest-first (IDs are time-sortable ascending).
 func (s *Store) listByPrefix(prefix string) ([]*Notification, error) {
-	ids, err := s.scanIDs(prefix)
+	return s.listByPrefixN(prefix, 0)
+}
+
+// listByPrefixN is like listByPrefix but stops after collecting limit IDs.
+// If limit <= 0, all matching records are returned.
+func (s *Store) listByPrefixN(prefix string, limit int) ([]*Notification, error) {
+	ids, err := s.scanIDsN(prefix, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +168,12 @@ func (s *Store) listByPrefix(prefix string) ([]*Notification, error) {
 
 // scanIDs returns all notification IDs under a prefix in ascending order.
 func (s *Store) scanIDs(prefix string) ([]string, error) {
+	return s.scanIDsN(prefix, 0)
+}
+
+// scanIDsN returns notification IDs under a prefix in ascending order,
+// stopping after limit IDs are collected. If limit <= 0, all IDs are returned.
+func (s *Store) scanIDsN(prefix string, limit int) ([]string, error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte(prefix),
 		UpperBound: keyUpperBound([]byte(prefix)),
@@ -167,6 +185,9 @@ func (s *Store) scanIDs(prefix string) ([]string, error) {
 	var ids []string
 	for iter.First(); iter.Valid(); iter.Next() {
 		ids = append(ids, string(iter.Value()))
+		if limit > 0 && len(ids) >= limit {
+			break
+		}
 	}
 	return ids, iter.Error()
 }

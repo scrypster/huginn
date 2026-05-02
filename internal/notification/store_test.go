@@ -181,3 +181,33 @@ func TestStore_ListByWorkflow(t *testing.T) {
 		t.Error("WorkflowRunID mismatch")
 	}
 }
+
+func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	s := notification.NewStore(db)
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		if err := s.Put(makeNotif("routineA", "run1", notification.SeverityInfo)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.ListPendingN(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("want 5, got %d", len(got))
+	}
+
+	// limit=0 should return all
+	all, err := s.ListPendingN(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != total {
+		t.Fatalf("want %d with limit=0, got %d", total, len(all))
+	}
+}
