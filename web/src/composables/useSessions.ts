@@ -276,6 +276,13 @@ export function useSessions() {
           ...fetchErrorBySession.value,
           [sessionId]: err.message || 'Failed to load messages',
         }
+        // Inject a synthetic message so the user sees history failed to load
+        // rather than silently seeing an empty history before live WS events.
+        messagesBySession.value[sessionId] = [{
+          id: `hydration-error-${sessionId}`,
+          role: 'assistant' as const,
+          content: '⚠️ Message history could not be loaded. Showing live events only.',
+        }]
       }
     } finally {
       clearTimeout(timeoutId)
