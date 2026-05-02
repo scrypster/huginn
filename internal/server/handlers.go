@@ -446,9 +446,11 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	if baseURL == "" {
 		baseURL = "http://localhost:11434"
 	}
-	resp, err := http.Get(baseURL + "/api/tags") //nolint:noctx
-	if err != nil {
-		ollamaErr = "Ollama not reachable: " + err.Error()
+	ollamaReq, ollamaReqErr := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"/api/tags", nil)
+	if ollamaReqErr != nil {
+		ollamaErr = "build request: " + ollamaReqErr.Error()
+	} else if resp, doErr := http.DefaultClient.Do(ollamaReq); doErr != nil {
+		ollamaErr = "Ollama not reachable: " + doErr.Error()
 	} else {
 		defer resp.Body.Close()
 		var result struct {
@@ -1041,7 +1043,13 @@ func (s *Server) handlePullModel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, "marshal error: "+err.Error())
 		return
 	}
-	resp, err := http.Post(baseURL+"/api/pull", "application/json", bytes.NewReader(payload)) //nolint:noctx
+	pullReq, pullReqErr := http.NewRequestWithContext(r.Context(), http.MethodPost, baseURL+"/api/pull", bytes.NewReader(payload))
+	if pullReqErr != nil {
+		jsonError(w, http.StatusInternalServerError, "build request: "+pullReqErr.Error())
+		return
+	}
+	pullReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(pullReq)
 	if err != nil {
 		jsonError(w, 502, "Ollama not reachable: "+err.Error())
 		return
