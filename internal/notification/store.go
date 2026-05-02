@@ -101,12 +101,27 @@ func (s *Store) ListByWorkflow(workflowID string) ([]*Notification, error) {
 }
 
 // PendingCount returns the count of pending notifications.
+// Uses a prefix-iterator count to avoid allocating a full ID slice.
 func (s *Store) PendingCount() (int, error) {
-	ids, err := s.scanIDs(pfxByStatus + string(StatusPending) + "/")
+	return s.countByPrefix(pfxByStatus + string(StatusPending) + "/")
+}
+
+// countByPrefix counts how many index keys exist under a prefix
+// without loading their values into memory.
+func (s *Store) countByPrefix(prefix string) (int, error) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte(prefix),
+		UpperBound: keyUpperBound([]byte(prefix)),
+	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("notification: iter: %w", err)
 	}
-	return len(ids), nil
+	defer iter.Close()
+	n := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		n++
+	}
+	return n, iter.Error()
 }
 
 // ExpireRun sets ExpiresAt = now for all notifications belonging to runID.
@@ -120,20 +135,30 @@ func (s *Store) ExpireRun(runID string) error {
 		return nil
 	}
 	now := time.Now().UTC()
+	// Use a single snapshot for all reads so we open one consistent reader
+	// instead of N separate point-lookup handles.
+	snap := s.db.NewSnapshot()
+	defer snap.Close()
 	b := s.db.NewBatch()
 	defer b.Close()
 	for _, id := range ids {
-		n, err := s.Get(id)
+		data, closer, err := snap.Get([]byte(pfxByID + id))
 		if err != nil {
+			continue
+		}
+		var n Notification
+		unmarshalErr := json.Unmarshal(data, &n)
+		closer.Close()
+		if unmarshalErr != nil {
 			continue
 		}
 		n.ExpiresAt = &now
 		n.UpdatedAt = now
-		data, err := json.Marshal(n)
+		updated, err := json.Marshal(&n)
 		if err != nil {
 			continue
 		}
-		b.Set([]byte(pfxByID+id), data, nil)
+		b.Set([]byte(pfxByID+id), updated, nil)
 	}
 	return b.Commit(pebble.Sync)
 }
