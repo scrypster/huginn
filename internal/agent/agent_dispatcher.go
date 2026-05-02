@@ -595,11 +595,23 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	onToken func(string),
 	onToolEvent func(eventType string, payload map[string]any),
 	onEvent func(backend.StreamEvent)) error {
-	o.mu.Lock()
+	// Fast path: read lock — handles the common case where the session already exists.
+	o.mu.RLock()
 	var sess *Session
 	if sessionID != "" {
+		sess = o.sessions[sessionID]
+	} else {
+		sess = o.defaultSession()
+	}
+	reg := o.toolRegistry
+	gate := o.permGate
+	o.mu.RUnlock()
+
+	// Slow path: named session not found — create it under write lock (double-check pattern).
+	if sess == nil && sessionID != "" {
+		o.mu.Lock()
 		if s, ok := o.sessions[sessionID]; ok {
-			sess = s
+			sess = s // created by a concurrent goroutine between RUnlock and Lock
 		} else {
 			// Session not in memory (e.g. after server restart). Create a fresh
 			// in-memory session for this ID rather than falling back to the shared
@@ -608,13 +620,8 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			sess = newSession(sessionID)
 			o.sessions[sessionID] = sess
 		}
+		o.mu.Unlock()
 	}
-	if sess == nil {
-		sess = o.defaultSession()
-	}
-	reg := o.toolRegistry
-	gate := o.permGate
-	o.mu.Unlock()
 
 	// Guard against concurrent calls on the same session. Only one agentic loop
 	// may run at a time per session — concurrent calls would interleave history
