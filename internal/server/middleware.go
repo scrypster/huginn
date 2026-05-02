@@ -303,22 +303,30 @@ type endpointRateLimiter struct {
 	window map[string][]time.Time
 	limit  int
 	dur    time.Duration
+	now    func() time.Time // injectable for testing; defaults to time.Now
 }
 
 // newEndpointRateLimiter creates a sliding-window limiter that allows at most
 // limit requests per IP within the given window duration.
 func newEndpointRateLimiter(limit int, dur time.Duration) *endpointRateLimiter {
+	return newEndpointRateLimiterWithClock(limit, dur, time.Now)
+}
+
+// newEndpointRateLimiterWithClock creates an endpointRateLimiter with a custom
+// clock, allowing tests to control time without real sleeps.
+func newEndpointRateLimiterWithClock(limit int, dur time.Duration, clock func() time.Time) *endpointRateLimiter {
 	return &endpointRateLimiter{
 		window: make(map[string][]time.Time),
 		limit:  limit,
 		dur:    dur,
+		now:    clock,
 	}
 }
 
 func (e *endpointRateLimiter) allow(ip string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	now := time.Now()
+	now := e.now()
 	cutoff := now.Add(-e.dur)
 	times := e.window[ip]
 	// Evict stale entries outside the window.
