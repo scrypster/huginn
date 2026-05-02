@@ -129,6 +129,35 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 	return schemas, agentGate
 }
 
+// toolGetter is the minimal interface needed to look up a registered tool by
+// name. *tools.Registry satisfies this interface.
+type toolGetter interface {
+	Get(name string) (tools.Tool, bool)
+}
+
+// injectDelegationTools appends delegation tool schemas to schemas when the
+// context carries a space context. It is a no-op when there is no space context
+// or when the tool is already present in schemas. The original slice is never
+// mutated if it is unchanged.
+func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg toolGetter) []backend.Tool {
+	if workforce.GetSpaceContext(ctx) == "" {
+		return schemas
+	}
+	delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
+	seen := make(map[string]bool, len(schemas))
+	for _, s := range schemas {
+		seen[s.Function.Name] = true
+	}
+	for _, name := range delegationToolNames {
+		if !seen[name] {
+			if t, ok := reg.Get(name); ok {
+				schemas = append(schemas, t.Schema())
+			}
+		}
+	}
+	return schemas
+}
+
 // agentToolbelt translates the agent's toolbelt entries into the session
 // package's ToolbeltEntry type, avoiding an import cycle between session
 // and agents.
@@ -510,20 +539,7 @@ func (o *Orchestrator) TaskWithAgent(
 	// Auto-inject team coordination tools when the agent is in a channel context.
 	// delegate_to_agent is the primary delegation path for capable models;
 	// list_team_status and recall_thread_result provide read access to the team.
-	if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-		delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
-		seen := make(map[string]bool, len(schemas))
-		for _, s := range schemas {
-			seen[s.Function.Name] = true
-		}
-		for _, name := range delegationToolNames {
-			if !seen[name] {
-				if t, ok := vr.sessionReg.Get(name); ok {
-					schemas = append(schemas, t.Schema())
-				}
-			}
-		}
-	}
+	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg)
 
 	// Create isolated session environment for this agent run.
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
@@ -716,20 +732,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		// Auto-inject team coordination tools when the agent is in a channel context.
 		// delegate_to_agent is the primary delegation path for capable models;
 		// list_team_status and recall_thread_result provide read access to the team.
-		if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-			delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
-			seen := make(map[string]bool, len(schemas))
-			for _, s := range schemas {
-				seen[s.Function.Name] = true
-			}
-			for _, name := range delegationToolNames {
-				if !seen[name] {
-					if t, ok := vr.sessionReg.Get(name); ok {
-						schemas = append(schemas, t.Schema())
-					}
-				}
-			}
-		}
+		schemas = injectDelegationTools(ctx, schemas, vr.sessionReg)
 
 		// Create isolated session environment for this agent run.
 		agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
