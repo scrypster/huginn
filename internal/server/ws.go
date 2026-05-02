@@ -261,7 +261,11 @@ func (h *WSHub) stop() {
 }
 
 func (h *WSHub) broadcast(msg WSMessage) {
-	h.broadcastC <- msg
+	select {
+	case h.broadcastC <- msg:
+	default:
+		slog.Warn("ws: broadcast channel full, dropping message", "type", msg.Type)
+	}
 }
 
 // registerWithSession registers a client scoped to a specific session.
