@@ -133,6 +133,7 @@ func (s *Server) handleSkillsGet(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/skills — create/save skill from UI (Create section)
 func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var body struct {
 		Content string `json:"content"`
 	}
