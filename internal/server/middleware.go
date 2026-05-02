@@ -278,18 +278,20 @@ func (f *flowRateLimiter) allow(ip string) bool {
 // IPv6 addresses (which include colons) by using net.SplitHostPort.
 // Falls back to the raw RemoteAddr if parsing fails.
 func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header for proxied requests first.
-	// The server binds to 127.0.0.1 only, so this is low-risk, but we still
-	// sanitise: take only the first (leftmost) entry.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		if ip := strings.TrimSpace(parts[0]); ip != "" {
-			return ip
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	// Only trust X-Forwarded-For when the direct connection is from a loopback
+	// address (local reverse proxy). A client connecting directly must not be
+	// allowed to supply their own IP to bypass the rate limiter.
+	if parsed := net.ParseIP(host); parsed != nil && parsed.IsLoopback() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.SplitN(xff, ",", 2)
+			if ip := strings.TrimSpace(parts[0]); ip != "" {
+				return ip
+			}
+		}
 	}
 	return host
 }
