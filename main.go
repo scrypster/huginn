@@ -2416,14 +2416,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 
 	// Use SQLite store if available; fall back to Pebble store.
 	var notifStore notification.StoreInterface
+	prunerCtx, prunerCancel := context.WithCancel(context.Background())
+	cleanupFns = append(cleanupFns, prunerCancel)
 	if sqlDB != nil {
-		notifStore = notification.NewSQLiteNotificationStore(sqlDB)
+		sqlNotifStore := notification.NewSQLiteNotificationStore(sqlDB)
 		// Purge expired notifications on startup (non-fatal).
 		sqlDB.Write().Exec(
 			`DELETE FROM notifications WHERE expires_at IS NOT NULL AND expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
 		)
+		sqlNotifStore.StartPruner(prunerCtx, 15*time.Minute)
+		notifStore = sqlNotifStore
 	} else {
-		notifStore = notification.NewStore(notifDB)
+		pebbleNotifStore := notification.NewStore(notifDB)
+		pebbleNotifStore.StartPruner(prunerCtx, 15*time.Minute)
+		notifStore = pebbleNotifStore
 	}
 	srv.SetNotificationStore(notifStore)
 

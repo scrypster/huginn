@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -242,6 +243,127 @@ func (s *Store) scanIDsN(prefix string, limit int) ([]string, error) {
 		ids = append(ids, string(iter.Value()))
 	}
 	return ids, iter.Error()
+}
+
+// PruneExpired deletes all notifications whose ExpiresAt is set and is in the past.
+// It scans all primary ID-keyed records in batches of up to 100, deleting expired
+// ones without holding a write lock across the entire scan. Respects ctx.Done().
+// Returns the count of pruned notifications.
+func (s *Store) PruneExpired(ctx context.Context) (int, error) {
+	const batchSize = 100
+	now := time.Now().UTC()
+	pruned := 0
+
+	// Collect all notification IDs by scanning the primary prefix.
+	// Unlike the index prefixes (where value == ID), the pfxByID prefix stores
+	// JSON as the value; the ID is the key suffix after the prefix.
+	pfxBytes := []byte(pfxByID)
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: pfxBytes,
+		UpperBound: keyUpperBound(pfxBytes),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("notification: prune iter: %w", err)
+	}
+	var allIDs []string
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := string(iter.Key())
+		id := key[len(pfxByID):]
+		allIDs = append(allIDs, id)
+	}
+	if iterErr := iter.Error(); iterErr != nil {
+		iter.Close()
+		return 0, fmt.Errorf("notification: prune scan: %w", iterErr)
+	}
+	iter.Close()
+
+	// Process in batches to avoid holding a write lock across the entire scan.
+	for len(allIDs) > 0 {
+		// Check for cancellation at the start of each batch.
+		select {
+		case <-ctx.Done():
+			return pruned, ctx.Err()
+		default:
+		}
+
+		end := batchSize
+		if end > len(allIDs) {
+			end = len(allIDs)
+		}
+		batch := allIDs[:end]
+		allIDs = allIDs[end:]
+
+		snap := s.db.NewSnapshot()
+		type expiredEntry struct {
+			n *Notification
+		}
+		toDelete := make([]expiredEntry, 0, len(batch))
+
+		for _, id := range batch {
+			data, closer, err := snap.Get([]byte(pfxByID + id))
+			if err != nil {
+				continue
+			}
+			var n Notification
+			unmarshalErr := json.Unmarshal(data, &n)
+			closer.Close()
+			if unmarshalErr != nil {
+				continue
+			}
+			if n.ExpiresAt != nil && !n.ExpiresAt.IsZero() && n.ExpiresAt.Before(now) {
+				toDelete = append(toDelete, expiredEntry{n: &n})
+			}
+		}
+		snap.Close()
+
+		if len(toDelete) == 0 {
+			continue
+		}
+
+		// Delete all index keys for each expired notification in one atomic batch.
+		wb := s.db.NewBatch()
+		for _, e := range toDelete {
+			n := e.n
+			wb.Delete([]byte(pfxByID+n.ID), nil)
+			wb.Delete([]byte(pfxByStatus+string(n.Status)+"/"+n.ID), nil)
+			wb.Delete([]byte(pfxByRoutine+n.RoutineID+"/"+n.ID), nil)
+			wb.Delete([]byte(pfxByRun+n.RunID+"/"+n.ID), nil)
+			if n.WorkflowID != "" {
+				wb.Delete([]byte(pfxByWorkflow+n.WorkflowID+"/"+n.ID), nil)
+			}
+		}
+		if err := wb.Commit(pebble.Sync); err != nil {
+			wb.Close()
+			return pruned, fmt.Errorf("notification: prune delete batch: %w", err)
+		}
+		wb.Close()
+		pruned += len(toDelete)
+	}
+
+	return pruned, nil
+}
+
+// StartPruner launches a background goroutine that calls PruneExpired on the
+// given interval until ctx is cancelled. Log output is written at INFO level.
+// The goroutine exits cleanly when ctx is done.
+func (s *Store) StartPruner(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := s.PruneExpired(ctx)
+				if err != nil && ctx.Err() == nil {
+					slog.Warn("notification: prune expired failed", "err", err)
+				} else if n > 0 {
+					slog.Info("notification: pruned expired notifications", "count", n)
+				}
+			}
+		}
+	}()
 }
 
 // Compile-time assertion: *Store must satisfy StoreInterface.
