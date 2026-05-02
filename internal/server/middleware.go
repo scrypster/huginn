@@ -330,8 +330,12 @@ func (e *endpointRateLimiter) allow(ip string) bool {
 		}
 	}
 	times = times[:j]
-	if len(times) >= e.limit {
+	if len(times) == 0 {
+		delete(e.window, ip)
+	} else {
 		e.window[ip] = times
+	}
+	if len(times) >= e.limit {
 		return false
 	}
 	e.window[ip] = append(times, now)
