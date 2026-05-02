@@ -4,10 +4,14 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/relay"
 )
+
+const defaultNotificationLimit = 100
+const maxNotificationLimit = 1000
 
 func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
@@ -17,6 +21,17 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 		jsonOK(w, []any{})
 		return
 	}
+
+	limit := defaultNotificationLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxNotificationLimit {
+		limit = maxNotificationLimit
+	}
+
 	var notifications []*notification.Notification
 	var err error
 	switch {
@@ -33,6 +48,9 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	}
 	if notifications == nil {
 		notifications = []*notification.Notification{}
+	}
+	if len(notifications) > limit {
+		notifications = notifications[:limit]
 	}
 	jsonOK(w, notifications)
 }
@@ -131,19 +149,30 @@ func (s *Server) handleInboxSummary(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]int{"pending_count": 0, "urgent_count": 0})
 		return
 	}
+	pendingCount, err := store.PendingCount()
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	// Load up to defaultNotificationLimit items to count urgent ones.
+	// Beyond this cap, urgent_count is a lower bound — acceptable for a badge.
 	pending, err := store.ListPending()
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
 	}
 	urgentCount := 0
-	for _, n := range pending {
+	limit := defaultNotificationLimit
+	for i, n := range pending {
+		if i >= limit {
+			break
+		}
 		if n.Severity == notification.SeverityUrgent {
 			urgentCount++
 		}
 	}
 	jsonOK(w, map[string]int{
-		"pending_count": len(pending),
+		"pending_count": pendingCount,
 		"urgent_count":  urgentCount,
 	})
 }
