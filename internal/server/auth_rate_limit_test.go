@@ -216,6 +216,36 @@ func TestAuthMiddleware_FirstFailureStillReturns401(t *testing.T) {
 	}
 }
 
+// TestAuthFailLimiter_IsBlocked_CleansUpEmptyKeys verifies that isBlocked
+// deletes the map key for an IP whose window has fully expired, preventing
+// unbounded map growth from stale entries.
+func TestAuthFailLimiter_IsBlocked_CleansUpEmptyKeys(t *testing.T) {
+	now := time.Now()
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		if calls <= 1 {
+			return now // recordFailure time
+		}
+		return now.Add(authFailWindow + time.Second) // isBlocked: past window
+	}
+	a := newAuthFailLimiterWithClock(clock)
+	a.recordFailure("1.2.3.4") // adds one entry at `now`
+
+	// Advance clock past the window — isBlocked should evict the entry and
+	// delete the key rather than storing an empty slice.
+	blocked := a.isBlocked("1.2.3.4")
+	if blocked {
+		t.Error("expected not blocked after window expired")
+	}
+	a.mu.Lock()
+	_, exists := a.window["1.2.3.4"]
+	a.mu.Unlock()
+	if exists {
+		t.Error("expected map key to be deleted after eviction emptied the slice")
+	}
+}
+
 // TestAuthMiddleware_RetryAfterHeaderValue verifies the Retry-After header
 // value is set to "60" (one minute) when returning 429.
 func TestAuthMiddleware_RetryAfterHeaderValue(t *testing.T) {
