@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/scrypster/huginn/internal/tools"
 )
@@ -46,6 +47,10 @@ type FilesystemSkill struct {
 	def            SkillDef
 	promptFragment string
 	ruleContent    string
+
+	mu          sync.Mutex
+	toolsCached bool
+	cachedTools []tools.Tool
 }
 
 // LoadFromDir reads a skill directory and returns a FilesystemSkill.
@@ -93,13 +98,32 @@ func (s *FilesystemSkill) SystemPromptFragment() string { return s.promptFragmen
 func (s *FilesystemSkill) RuleContent() string          { return s.ruleContent }
 
 func (s *FilesystemSkill) Tools() []tools.Tool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.toolsCached {
+		return s.cachedTools
+	}
 	promptTools, err := LoadToolsFromDir(s.dir)
 	if err != nil || len(promptTools) == 0 {
+		s.toolsCached = true
+		s.cachedTools = nil
 		return nil
 	}
 	result := make([]tools.Tool, len(promptTools))
 	for i, pt := range promptTools {
 		result[i] = pt
 	}
+	s.toolsCached = true
+	s.cachedTools = result
 	return result
+}
+
+// Reload clears the cached tools so the next call to Tools() re-reads the
+// tools directory from disk. Call this when the skill's tools/ directory has
+// been modified and you want the in-place instance to pick up the changes.
+func (s *FilesystemSkill) Reload() {
+	s.mu.Lock()
+	s.toolsCached = false
+	s.cachedTools = nil
+	s.mu.Unlock()
 }
