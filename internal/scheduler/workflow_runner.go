@@ -836,7 +836,21 @@ func MakeWorkflowRunner(
 	}
 }
 
-// resolveInlineVars substitutes {{KEY}} placeholders in prompt with values from vars.
+// resolveInlineVars substitutes {{KEY}} placeholders in prompt with values
+// from vars using a single pass through the vars map.
+//
+// Why single-pass is sufficient:
+//
+// vars holds the static key/value pairs declared directly on a WorkflowStep
+// (step.Vars). These are literal string constants defined in the workflow YAML
+// — they never reference other vars entries or other steps' outputs. Because
+// there are no cross-variable dependencies and no circular references possible,
+// one iteration over the map is guaranteed to resolve every placeholder.
+//
+// Dynamic, cross-step substitutions ({{prev.output}}, {{inputs.alias}},
+// {{run.scratch.KEY}}) are handled separately by resolveRuntimeVars, which
+// runs after this function. The two-stage design keeps static substitution
+// cheap and free of any runtime state.
 func resolveInlineVars(prompt string, vars map[string]string) string {
 	result := prompt
 	for k, v := range vars {
