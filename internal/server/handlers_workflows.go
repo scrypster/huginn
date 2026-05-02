@@ -185,6 +185,53 @@ func validateWorkflow(wf *scheduler.Workflow) error {
 	return nil
 }
 
+// validateSubWorkflowCycles detects cycles in SubWorkflow cross-references
+// across the full workflow registry. A cycle (e.g. A→B→A) would cause
+// infinite recursion at runtime. wf is the workflow being saved (may be
+// new and not yet present in all). all is the current on-disk registry.
+func validateSubWorkflowCycles(wf *scheduler.Workflow, all []*scheduler.Workflow) error {
+	registry := make(map[string]*scheduler.Workflow, len(all)+1)
+	for _, w := range all {
+		registry[w.ID] = w
+	}
+	registry[wf.ID] = wf // include candidate (may override stale on-disk version)
+
+	const (
+		unvisited = 0
+		inStack   = 1
+		done      = 2
+	)
+	state := make(map[string]int, len(registry))
+
+	var dfs func(id string) error
+	dfs = func(id string) error {
+		state[id] = inStack
+		w, ok := registry[id]
+		if !ok {
+			state[id] = done
+			return nil // dangling ref — not a cycle
+		}
+		for _, step := range w.Steps {
+			ref := step.SubWorkflow
+			if ref == "" {
+				continue
+			}
+			if state[ref] == inStack {
+				return fmt.Errorf("circular sub_workflow reference: %q → %q creates a cycle", id, ref)
+			}
+			if state[ref] == unvisited {
+				if err := dfs(ref); err != nil {
+					return err
+				}
+			}
+		}
+		state[id] = done
+		return nil
+	}
+
+	return dfs(wf.ID)
+}
+
 // validateWorkflowAgentsAndConnections checks that every step in the workflow
 // references a known agent name and known connection IDs. It is a best-effort
 // check: if the agent loader or connection store are unavailable the check is
@@ -277,6 +324,14 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 422, "invalid workflow: "+err.Error())
 		return
 	}
+	// Check for cycles across the cross-workflow SubWorkflow call graph.
+	dir := filepath.Join(s.huginnDir, "workflows")
+	if allWFs, loadErr := scheduler.LoadWorkflows(dir); loadErr == nil {
+		if err := validateSubWorkflowCycles(&wf, allWFs); err != nil {
+			jsonError(w, 422, "invalid workflow: "+err.Error())
+			return
+		}
+	}
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	wf.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(wf.TimeoutMinutes)
 	if wf.ID == "" {
@@ -285,7 +340,6 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	wf.CreatedAt = now
 	wf.UpdatedAt = now
-	dir := filepath.Join(s.huginnDir, "workflows")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		jsonError(w, 500, "create workflows dir: "+err.Error())
 		return
@@ -353,6 +407,11 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updates.ID = id
+	// Check for cycles across the cross-workflow SubWorkflow call graph.
+	if err := validateSubWorkflowCycles(&updates, workflows); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
 	updates.FilePath = target.FilePath
 	updates.CreatedAt = target.CreatedAt
 	updates.UpdatedAt = time.Now().UTC()
