@@ -547,9 +547,25 @@ func (s *Store) List() ([]Manifest, error) {
 	return manifests, nil
 }
 
+// evictAppendMu removes all mutex entries for the given session ID from
+// appendMu. This includes the bare session-level key as well as any
+// per-thread keys of the form "sessionID/thread/threadID" that were created
+// by AppendToThread.
+func (s *Store) evictAppendMu(sessionID string) {
+	prefix := sessionID + "/"
+	s.appendMu.Delete(sessionID)
+	s.appendMu.Range(func(k, _ any) bool {
+		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
+			s.appendMu.Delete(key)
+		}
+		return true
+	})
+}
+
 // Delete removes a session directory entirely.
-// It also evicts the per-session append mutex from appendMu to prevent
-// unbounded sync.Map growth over the lifetime of the process.
+// It also evicts all per-session append mutex entries from appendMu (both the
+// session-level key and any per-thread keys) to prevent unbounded sync.Map
+// growth over the lifetime of the process.
 func (s *Store) Delete(id string) error {
 	if err := validateID(id); err != nil {
 		return err
@@ -557,7 +573,7 @@ func (s *Store) Delete(id string) error {
 	if err := os.RemoveAll(s.sessionDir(id)); err != nil {
 		return err
 	}
-	s.appendMu.Delete(id)
+	s.evictAppendMu(id)
 	return nil
 }
 
