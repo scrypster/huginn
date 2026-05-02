@@ -21,6 +21,22 @@ import (
 // placeholders that remain after variable resolution.
 const errUnresolvedPlaceholder = "step failed: unresolved template placeholders"
 
+// ancestorSetKey is the context key for the set of workflow IDs currently in
+// the sub-workflow call stack. Used by cycle detection at runtime.
+type ancestorSetKey struct{}
+
+// withAncestors returns a new context carrying the given ancestor set.
+func withAncestors(ctx context.Context, ancestors map[string]struct{}) context.Context {
+	return context.WithValue(ctx, ancestorSetKey{}, ancestors)
+}
+
+// ancestorsFromContext extracts the ancestor set from a context, returning nil
+// if none has been set (i.e. this is a top-level run).
+func ancestorsFromContext(ctx context.Context) map[string]struct{} {
+	v, _ := ctx.Value(ancestorSetKey{}).(map[string]struct{})
+	return v
+}
+
 // unresolvedPlaceholderRe matches any {{...}} token that was not substituted.
 var unresolvedPlaceholderRe = regexp.MustCompile(`\{\{[^}]+\}\}`)
 
@@ -145,6 +161,23 @@ func MakeWorkflowRunner(
 		opt(&cfg)
 	}
 	return func(ctx context.Context, w *Workflow) error {
+		// Cycle detection: if this workflow's ID is already in the ancestor set
+		// carried by the context, a sub-workflow cycle (A → B → A) has been
+		// detected. Return an error immediately rather than recursing.
+		ancestors := ancestorsFromContext(ctx)
+		if _, cycle := ancestors[w.ID]; cycle {
+			return fmt.Errorf("sub_workflow cycle detected: workflow %s is already executing in this call chain", w.ID)
+		}
+		// Build an updated ancestor set that includes the current workflow and
+		// attach it to the context. Any sub-workflow invoked from this run will
+		// see the full call chain so nested cycles are also caught.
+		newAncestors := make(map[string]struct{}, len(ancestors)+1)
+		for k := range ancestors {
+			newAncestors[k] = struct{}{}
+		}
+		newAncestors[w.ID] = struct{}{}
+		ctx = withAncestors(ctx, newAncestors)
+
 		// Sort steps by Position ascending.
 		steps := make([]WorkflowStep, len(w.Steps))
 		copy(steps, w.Steps)
