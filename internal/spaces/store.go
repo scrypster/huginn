@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -369,10 +370,22 @@ func (s *SQLiteSpaceStore) loadSpace(id string) (*Space, error) {
 		return nil, fmt.Errorf("spaces: load space %q: %w", id, err)
 	}
 
-	sp.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	sp.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	var parseErr error
+	sp.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt)
+	if parseErr != nil {
+		slog.Warn("spaces: loadSpace: failed to parse created_at", "space_id", sp.ID, "value", createdAt, "err", parseErr)
+	}
+
+	sp.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedAt)
+	if parseErr != nil {
+		slog.Warn("spaces: loadSpace: failed to parse updated_at", "space_id", sp.ID, "value", updatedAt, "err", parseErr)
+	}
+
 	if archivedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, archivedAt.String)
+		t, parseErr := time.Parse(time.RFC3339Nano, archivedAt.String)
+		if parseErr != nil {
+			slog.Warn("spaces: loadSpace: failed to parse archived_at", "space_id", sp.ID, "value", archivedAt.String, "err", parseErr)
+		}
 		sp.ArchivedAt = &t
 	}
 
