@@ -347,6 +347,12 @@ func (s *Scheduler) RunWorkflowSyncWithInputs(ctx context.Context, w *Workflow, 
 	// matches w.ID is ours. This is robust to other workflows running in
 	// parallel because we filter by workflow ID via store.List.
 	startedAtFloor := time.Now().UTC().Add(-time.Second)
+	// Run correlation: the child run is identified by finding the most recent run
+	// for this workflow started within the last second. This is a best-effort
+	// heuristic — in the rare case where two sub-workflow invocations for the same
+	// workflow ID start within the same wall-clock second, the wrong run may be
+	// correlated. In practice, sub-workflows are sequential per step so this
+	// window is effectively never hit.
 	if err := wr(runCtx, w); err != nil {
 		return nil, err
 	}
