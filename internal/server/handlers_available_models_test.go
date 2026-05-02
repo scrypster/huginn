@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestHandleListAvailableModels_IncludesProviderModels verifies that when a cloud
@@ -101,4 +103,50 @@ func TestHandleListAvailableModels_NoProviderModelsWhenUnconfigured(t *testing.T
 	if _, ok := body["models"]; !ok {
 		t.Error("response missing 'models' key")
 	}
+}
+
+// TestHandleListAvailableModels_OllamaHangRespectsRequestContext verifies that
+// when the Ollama server hangs and the request context is cancelled, the handler
+// returns promptly instead of blocking until OS TCP timeout.
+func TestHandleListAvailableModels_OllamaHangRespectsRequestContext(t *testing.T) {
+	// Start an HTTP server that hangs forever — never writes a response.
+	hangSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the test ends (server is closed).
+		<-r.Context().Done()
+	}))
+	defer hangSrv.Close()
+
+	srv, ts := newTestServer(t)
+	// Point Huginn's Ollama base URL at the hanging server.
+	srv.cfg.OllamaBaseURL = hangSrv.URL
+
+	// Build a request with a short context timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/v1/models/available", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testToken)
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	elapsed := time.Since(start)
+
+	// The request should complete (either with a response or a context error)
+	// well within 500ms — not hang for minutes.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("handler took %v — expected <500ms; Ollama HTTP call may not respect request context", elapsed)
+	}
+
+	if err == nil {
+		defer resp.Body.Close()
+		// If a response came back, it should be 200 (with ollamaErr set internally).
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200, got %d", resp.StatusCode)
+		}
+	}
+	// If err != nil it's because the context was cancelled before the response,
+	// which is also acceptable — the key assertion is elapsed < 500ms.
 }

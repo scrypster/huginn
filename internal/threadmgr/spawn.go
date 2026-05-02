@@ -91,13 +91,12 @@ func (tm *ThreadManager) SpawnThread(
 		threadTimeout = t.Timeout
 	}
 
-	// Apply per-thread deadline when Timeout is set.
+	// Apply per-thread deadline when Timeout is set. timeoutCancel is captured
+	// by the goroutine closure and deferred there so the timer goroutine is
+	// released as soon as the thread goroutine exits (not when SpawnThread returns).
+	var timeoutCancel context.CancelFunc
 	if threadTimeout > 0 {
-		var timeoutCancel context.CancelFunc
 		threadCtx, timeoutCancel = context.WithTimeout(threadCtx, threadTimeout)
-		// Chain cancels: timeoutCancel is released when the goroutine exits via
-		// the deferred cancel() below (which closes threadCtx's parent).
-		_ = timeoutCancel // goroutine captures threadCtx; parent cancel cleans up
 	}
 
 	// Snapshot emitter reference under read lock for goroutine safety.
@@ -140,6 +139,11 @@ func (tm *ThreadManager) SpawnThread(
 
 	go func() {
 		defer cancel() // always release context when goroutine exits
+		// Release the timeout timer goroutine immediately when this thread
+		// goroutine exits, rather than waiting for the deadline to fire.
+		if timeoutCancel != nil {
+			defer timeoutCancel()
+		}
 
 		// Snapshot resolver references under read lock to avoid data races.
 		tm.mu.RLock()
