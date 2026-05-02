@@ -99,3 +99,17 @@ func TestHandleMetrics_ContentType_IsJSON(t *testing.T) {
 		t.Error("Content-Type header missing on /metrics response")
 	}
 }
+
+func TestMetricsRoute_RegisteredAndAuthenticated(t *testing.T) {
+	_, ts := newTestServer(t)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/v1/metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/metrics, got %d", resp.StatusCode)
+	}
+}

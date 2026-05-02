@@ -46,15 +46,21 @@ func agentFromDefWithVault(def agents.AgentDef) *agents.Agent {
 	return a
 }
 
-// serverEpoch is a random uint64 generated at process startup. It is stamped
+// serverEpoch is a random non-zero value generated at process startup. It is stamped
 // on every session-scoped WebSocket message so that clients can detect server
 // restarts and reset their sequence-number state.
+// The value is constrained to 53 bits so JavaScript clients can compare it
+// exactly (Number safe integer range).
 var serverEpoch uint64
 
 func init() {
+	const maxSafeJSEpoch = uint64(1<<53) - 1
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err == nil {
-		serverEpoch = binary.LittleEndian.Uint64(b[:])
+		serverEpoch = binary.LittleEndian.Uint64(b[:]) & maxSafeJSEpoch
+	}
+	if serverEpoch == 0 {
+		serverEpoch = 1
 	}
 }
 
@@ -125,6 +131,11 @@ type wsClient struct {
 // the channel is closed or the context has been cancelled (client disconnected).
 // Returns true if the message was delivered, false if the client is gone.
 func (c *wsClient) safeSend(msg WSMessage) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
 	select {
 	case c.send <- msg:
 		return true
@@ -327,9 +338,10 @@ func (h *WSHub) WSDroppedMessages() int64 {
 	return h.wsDroppedMessages.Load()
 }
 
-// unregisterClient synchronously removes a client from the hub, cancels its
-// per-connection context (which propagates to any in-flight chat goroutines),
-// and closes its send channel. It is safe to call from any goroutine.
+// unregisterClient synchronously removes a client from the hub and cancels its
+// per-connection context (which propagates to ws loops and in-flight chat goroutines).
+// It intentionally does not close c.send to avoid send-on-closed-channel races
+// with in-flight broadcasters.
 func (h *WSHub) unregisterClient(c *wsClient) {
 	h.mu.Lock()
 	delete(h.clients, c)
@@ -337,10 +349,6 @@ func (h *WSHub) unregisterClient(c *wsClient) {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	func() {
-		defer func() { recover() }() //nolint:errcheck // intentional: close only once
-		close(c.send)
-	}()
 }
 
 // isLocalhostOrigin returns true when the origin URL refers to a loopback
@@ -482,7 +490,14 @@ func (s *Server) wsWritePump(c *wsClient) {
 		}
 		c.conn.Close()
 	}()
-	for msg := range c.send {
+	for {
+		var msg WSMessage
+		select {
+		case <-c.ctx.Done():
+			return
+		case m := <-c.send:
+			msg = m
+		}
 		// Set a per-write deadline to prevent a slow network path from stalling
 		// this goroutine indefinitely. The deadline is reset each iteration.
 		c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait)) //nolint:errcheck
@@ -945,7 +960,7 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		// Route to orchestrator. Always resolve the agent fresh from disk so
 		// that model changes made via the UI take effect without a restart.
 		if s.orch == nil {
-			c.send <- WSMessage{Type: "error", Content: "orchestrator not initialized"}
+			c.safeSend(WSMessage{Type: "error", Content: "orchestrator not initialized"})
 			return
 		}
 		sessionID := msg.SessionID
@@ -1149,7 +1164,7 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			)
 		}(runID, intent, updateRoute, targetAgent)
 	case "ping":
-		c.send <- WSMessage{Type: "pong"}
+		c.safeSend(WSMessage{Type: "pong"})
 
 	case "thread_cancel":
 		if s.tm == nil {
@@ -1222,7 +1237,20 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if threadID == "" || sessionID == "" {
 			return
 		}
-		s.previewGate.Ack(sessionID, threadID, approved)
+		matched := s.previewGate.Ack(sessionID, threadID, approved)
+		status := "accepted"
+		if !matched {
+			status = "not_found"
+		}
+		c.safeSend(WSMessage{
+			Type:      "delegation_preview_ack_result",
+			SessionID: sessionID,
+			Payload: map[string]any{
+				"thread_id": threadID,
+				"approved":  approved,
+				"status":    status,
+			},
+		})
 
 	case "set_primary_agent":
 		agentName, _ := msg.Payload["agent"].(string)
@@ -1255,11 +1283,11 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			if spErr != nil {
 				logger.Error("set_primary_agent: cannot verify space kind, blocking switch",
 					"space_id", sess.Manifest.SpaceID, "err", spErr)
-				c.send <- WSMessage{Type: "error", Content: "unable to verify space type"}
+				c.safeSend(WSMessage{Type: "error", Content: "unable to verify space type"})
 				return
 			}
 			if sp.Kind == spaces.KindDM {
-				c.send <- WSMessage{Type: "error", Content: "cannot change agent in a DM"}
+				c.safeSend(WSMessage{Type: "error", Content: "cannot change agent in a DM"})
 				return
 			}
 		}

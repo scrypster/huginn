@@ -14,6 +14,7 @@ import (
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
 // TestHandleWSMessage_Chat_PersistsUserAndAssistantMessages verifies that
@@ -338,7 +339,101 @@ func (d *disconnectBackend) ChatCompletion(ctx context.Context, req backend.Chat
 }
 func (d *disconnectBackend) Health(_ context.Context) error   { return nil }
 func (d *disconnectBackend) Shutdown(_ context.Context) error { return nil }
-func (d *disconnectBackend) ContextWindow() int               { return 4096 }
+
+func TestBroadcastToSession_PersistsThreadLifecycleEvent(t *testing.T) {
+	srv, _ := newTestServer(t)
+	sess := srv.store.New("lifecycle-persist", "/workspace", "test-model")
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	tm := threadmgr.New()
+	srv.SetThreadManager(tm)
+	thread, err := tm.Create(threadmgr.CreateParams{
+		SessionID:       sess.ID,
+		AgentID:         "Researcher",
+		Task:            "Investigate bug",
+		ParentMessageID: "parent-1",
+	})
+	if err != nil {
+		t.Fatalf("Create thread: %v", err)
+	}
+
+	srv.BroadcastToSession(sess.ID, "thread_done", map[string]any{
+		"thread_id": thread.ID,
+		"summary":   "Added regression tests.",
+	})
+
+	msgs, err := srv.store.TailMessages(sess.ID, 20)
+	if err != nil {
+		t.Fatalf("TailMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 persisted lifecycle message, got %d", len(msgs))
+	}
+	if msgs[0].Type != "thread_event" {
+		t.Errorf("expected type=thread_event, got %q", msgs[0].Type)
+	}
+	if msgs[0].ToolName != "thread_done" {
+		t.Errorf("expected tool_name=thread_done, got %q", msgs[0].ToolName)
+	}
+	if msgs[0].ToolCallID != thread.ID {
+		t.Errorf("expected tool_call_id=%q, got %q", thread.ID, msgs[0].ToolCallID)
+	}
+	if !strings.Contains(msgs[0].Content, "completed delegated work") {
+		t.Errorf("unexpected lifecycle content: %q", msgs[0].Content)
+	}
+}
+
+func TestBroadcastToSession_DoesNotPersistNonLifecycleEvent(t *testing.T) {
+	srv, _ := newTestServer(t)
+	sess := srv.store.New("no-lifecycle-persist", "/workspace", "test-model")
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	srv.BroadcastToSession(sess.ID, "thread_reply_updated", map[string]any{
+		"message_id":  "m-1",
+		"reply_count": 3,
+	})
+
+	msgs, err := srv.store.TailMessages(sess.ID, 20)
+	if err != nil {
+		t.Fatalf("TailMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected 0 persisted messages for non-lifecycle event, got %d", len(msgs))
+	}
+}
+
+func TestBroadcastToSession_PersistsDelegationPreviewTimeoutEvent(t *testing.T) {
+	srv, _ := newTestServer(t)
+	sess := srv.store.New("preview-timeout-persist", "/workspace", "test-model")
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	srv.BroadcastToSession(sess.ID, "delegation_preview_timeout", map[string]any{
+		"thread_id":       "thr-timeout-1",
+		"agent_id":        "Elena",
+		"timeout_seconds": 30,
+	})
+
+	msgs, err := srv.store.TailMessages(sess.ID, 20)
+	if err != nil {
+		t.Fatalf("TailMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 persisted preview-timeout message, got %d", len(msgs))
+	}
+	if msgs[0].ToolName != "delegation_preview_timeout" {
+		t.Errorf("expected tool_name=delegation_preview_timeout, got %q", msgs[0].ToolName)
+	}
+	if !strings.Contains(msgs[0].Content, "auto-approved after 30s") {
+		t.Errorf("unexpected timeout content: %q", msgs[0].Content)
+	}
+}
+func (d *disconnectBackend) ContextWindow() int { return 4096 }
 
 // TestWSChat_PersistsOnDisconnect verifies that when a WS client disconnects
 // mid-stream (before the done event fires), whatever content was accumulated

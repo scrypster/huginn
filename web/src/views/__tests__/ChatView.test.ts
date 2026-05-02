@@ -42,6 +42,7 @@ const mockGetActiveThreadCount = vi.fn().mockReturnValue(0)
 const mockLoadThreads = vi.fn()
 const mockWireWS = vi.fn()
 const mockGetSessionPreviews = vi.fn().mockReturnValue([])
+const mockClearSessionPreviews = vi.fn()
 const mockAckPreview = vi.fn()
 
 vi.mock('../../composables/useThreads', () => ({
@@ -51,6 +52,7 @@ vi.mock('../../composables/useThreads', () => ({
     loadThreads: mockLoadThreads,
     wireWS: mockWireWS,
     getSessionPreviews: mockGetSessionPreviews,
+    clearSessionPreviews: mockClearSessionPreviews,
     ackPreview: mockAckPreview,
   }),
 }))
@@ -206,6 +208,9 @@ describe('ChatView', () => {
     mockSessions.value = [{ id: 'test-session-id', title: 'Test Session' }]
     mockActiveSpace.value = null
     mockSpaceState = makeSpaceState()
+    mockGetSessionThreads.mockReturnValue([])
+    mockGetActiveThreadCount.mockReturnValue(0)
+    mockGetSessionPreviews.mockReturnValue([])
   })
 
   afterEach(() => {
@@ -1094,6 +1099,39 @@ describe('ChatView', () => {
     expect(wrapper.html()).toContain('completed')
   })
 
+  it('delegation activity row: shows elapsed time and tool progress', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'run tests',
+        delegatedThreads: [{ threadId: 'thr-1', agentId: 'TestRunner', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+    mockGetSessionThreads.mockReturnValue([
+      {
+        ID: 'thr-1',
+        SessionID: 'test-session-id',
+        AgentID: 'TestRunner',
+        Status: 'thinking',
+        elapsedMs: 72_000,
+        toolCalls: [
+          { tool: 'read_file', done: true },
+          { tool: 'grep', done: true },
+          { tool: 'bash', done: false },
+          { tool: 'web_search', done: false },
+        ],
+      },
+    ])
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    expect(wrapper.html()).toContain('1m 12s')
+    expect(wrapper.html()).toContain('4 tool calls')
+  })
+
   it('thread_done with summary renders a completion card in main timeline', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = [
@@ -1143,6 +1181,44 @@ describe('ChatView', () => {
 
     expect(wrapper.html()).toContain('needs input')
     expect(wrapper.html()).toContain('Need credentials to continue.')
+  })
+
+  it('blocked-thread count chip remains visible from live thread state', async () => {
+    mockGetSessionThreads.mockReturnValue([
+      {
+        ID: 'thr-blocked-1',
+        SessionID: 'test-session-id',
+        AgentID: 'Researcher',
+        Status: 'blocked',
+        elapsedMs: 5_000,
+        toolCalls: [],
+      },
+    ])
+    mockGetActiveThreadCount.mockReturnValue(1)
+    const wrapper = mountChatView({}, createMockWs())
+    await nextTick()
+
+    const blockedChip = wrapper.find('button[title="Blocked delegated threads need attention"]')
+    expect(blockedChip.exists()).toBe(true)
+    expect(blockedChip.text()).toContain('1')
+    expect(blockedChip.text()).toContain('blocked')
+  })
+
+  it('delegation_preview_timeout appends auto-approved timeline message', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'delegation_preview_timeout',
+      session_id: 'test-session-id',
+      payload: { thread_id: 'thr-timeout-1', agent_id: 'Elena', timeout_seconds: 30 },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    expect(msgs.some((m: any) => String(m.content).includes('auto-approved after 30s'))).toBe(true)
   })
 })
 
@@ -1663,6 +1739,27 @@ describe('ChatView — message display edge cases', () => {
     const html = wrapper.html()
     expect(html).toContain('1 tool call')
     expect(html).toContain('done')
+  })
+
+  it('memory-only completed tool calls render friendly memory chip text', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'done',
+        toolCalls: [
+          { id: 'tc1', name: 'muninn_session', args: {}, result: 'ok', done: true },
+          { id: 'tc2', name: 'muninn_recall', args: {}, result: 'ok', done: true },
+        ],
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const html = wrapper.html()
+    expect(html).toContain('Memory:')
+    expect(html).toContain('resumed session')
   })
 
   it('assistant message with named agent shows agent name in rendered output', async () => {

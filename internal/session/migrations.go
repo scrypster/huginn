@@ -17,13 +17,117 @@ import (
 func Migrations() []sqlitedb.Migration {
 	return []sqlitedb.Migration{
 		{Name: "thread_columns_and_artifacts_v1", Up: migrateThreadColumnsAndArtifacts},
-		{Name: "delegations_session_id_v1",       Up: migrateDelegationsSessionIDV1},
-		{Name: "sessions_space_id_index_v1",      Up: migrateAddSpaceIDIndex},
-		{Name: "sessions_fts_v2",                 Up: migrateSessionsFTSv2},
-		{Name: "memory_replication_queue_v1",     Up: migrateMemoryReplicationQueueV1},
-		{Name: "memory_replication_queue_v2",     Up: migrateMemoryReplicationQueueV2},
-		{Name: "cloud_vault_queue_v1",            Up: migrateCloudVaultQueueV1},
+		{Name: "messages_type_thread_event_v1", Up: migrateMessagesTypeThreadEventV1},
+		{Name: "delegations_session_id_v1", Up: migrateDelegationsSessionIDV1},
+		{Name: "sessions_space_id_index_v1", Up: migrateAddSpaceIDIndex},
+		{Name: "sessions_fts_v2", Up: migrateSessionsFTSv2},
+		{Name: "memory_replication_queue_v1", Up: migrateMemoryReplicationQueueV1},
+		{Name: "memory_replication_queue_v2", Up: migrateMemoryReplicationQueueV2},
+		{Name: "cloud_vault_queue_v1", Up: migrateCloudVaultQueueV1},
 	}
+}
+
+// migrateMessagesTypeThreadEventV1 rebuilds the messages table so its type CHECK
+// constraint accepts lifecycle entries (`thread_event`) in addition to normal and
+// cost records. Existing databases shipped with CHECK(type IN (”, 'cost')), which
+// silently dropped thread lifecycle rows due to INSERT OR IGNORE write paths.
+func migrateMessagesTypeThreadEventV1(tx *sql.Tx) error {
+	var ddl sql.NullString
+	err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'`).Scan(&ddl)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.Contains(strings.ToLower(ddl.String), "thread_event") {
+		return nil
+	}
+
+	if _, err := tx.Exec(`ALTER TABLE messages RENAME TO messages_old`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		CREATE TABLE messages (
+		    id              TEXT    NOT NULL PRIMARY KEY,
+		    container_type  TEXT    NOT NULL
+		                        CHECK (container_type IN ('session', 'team', 'thread')),
+		    container_id    TEXT    NOT NULL,
+		    tenant_id       TEXT    NOT NULL DEFAULT '',
+		    seq             INTEGER NOT NULL,
+		    ts              TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		    role            TEXT    NOT NULL
+		                        CHECK (role IN ('user', 'assistant', 'tool', 'system', 'cost')),
+		    content         TEXT    NOT NULL DEFAULT '',
+		    agent           TEXT    NOT NULL DEFAULT '',
+		    tool_name       TEXT    NOT NULL DEFAULT '',
+		    tool_call_id    TEXT    NOT NULL DEFAULT '',
+		    tool_calls_json TEXT,
+		    type            TEXT    NOT NULL DEFAULT ''
+		                        CHECK (type IN ('', 'cost', 'thread_event')),
+		    prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+		    completion_tokens INTEGER NOT NULL DEFAULT 0,
+		    cost_usd        REAL    NOT NULL DEFAULT 0.0,
+		    model           TEXT    NOT NULL DEFAULT '',
+		    parent_message_id     TEXT,
+		    triggering_message_id TEXT,
+		    thread_reply_count    INTEGER NOT NULL DEFAULT 0,
+		    thread_last_reply_at  TEXT,
+		    UNIQUE (container_id, seq)
+		)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO messages (
+			id, container_type, container_id, tenant_id, seq, ts, role, content,
+			agent, tool_name, tool_call_id, tool_calls_json, type,
+			prompt_tokens, completion_tokens, cost_usd, model,
+			parent_message_id, triggering_message_id, thread_reply_count, thread_last_reply_at
+		)
+		SELECT
+			id, container_type, container_id, tenant_id, seq, ts, role, content,
+			agent, tool_name, tool_call_id, tool_calls_json, type,
+			prompt_tokens, completion_tokens, cost_usd, model,
+			parent_message_id, triggering_message_id, thread_reply_count, thread_last_reply_at
+		FROM messages_old`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE messages_old`); err != nil {
+		return err
+	}
+	for _, ddl := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_messages_container_seq
+		    ON messages (container_id, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_cost
+		    ON messages (container_id, type)
+		    WHERE type = 'cost'`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_tenant
+		    ON messages (tenant_id, ts DESC)
+		    WHERE tenant_id != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_agent
+		    ON messages (agent, ts DESC)
+		    WHERE agent != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_container_ts
+		    ON messages (container_id, ts DESC, id DESC)
+		    WHERE container_type = 'session'`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_thread_parent
+		    ON messages (parent_message_id)
+		    WHERE parent_message_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_parent_message
+		    ON messages (parent_message_id)
+		    WHERE parent_message_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_triggering_message
+		    ON messages (triggering_message_id)
+		    WHERE triggering_message_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_thread_replies
+		    ON messages (parent_message_id, ts ASC)
+		    WHERE parent_message_id IS NOT NULL`,
+	} {
+		if _, err := tx.Exec(ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateDelegationsSessionIDV1 adds a session_id column to the delegations
@@ -58,7 +162,7 @@ func migrateAddSpaceIDIndex(tx *sql.Tx) error {
 }
 
 // migrateSessionsFTSv2 drops the contentless sessions_fts virtual table
-// (content='') and recreates it as a standard FTS5 table that stores column
+// (content=”) and recreates it as a standard FTS5 table that stores column
 // values. The contentless variant was written but could never return session_id
 // or title values, causing SearchSessions to always return 0 results because
 // the JOIN ON s.id = sessions_fts.session_id always failed.

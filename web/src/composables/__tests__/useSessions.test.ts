@@ -311,6 +311,31 @@ describe('useSessions', () => {
       expect(msgs[0].id).toBe('m1')
     })
 
+    it('maps persisted thread_done lifecycle events into completion cards', async () => {
+      vi.mocked(api.sessions.getMessages).mockResolvedValueOnce([
+        {
+          id: 'evt-1',
+          role: 'assistant',
+          content: '**Researcher** completed delegated work: Added tests.',
+          type: 'thread_event',
+          tool_name: 'thread_done',
+          tool_call_id: 'thr-42',
+          ts: '2026-03-10T14:00:02Z',
+        },
+      ] as never)
+
+      const { fetchMessages, getMessages } = useSessions()
+      await fetchMessages('sess-thread-event')
+      const msgs = getMessages('sess-thread-event')
+
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0]).toMatchObject({
+        id: 'evt-1',
+        threadSummary: true,
+        threadSummaryThreadId: 'thr-42',
+      })
+    })
+
     it('persists both text AND tool calls for multi-turn agent conversations', async () => {
       // Simulates what the server persists after a chat turn with tool calls:
       // the assistant message has BOTH content (accumulated text tokens) AND
@@ -360,14 +385,26 @@ describe('useSessions', () => {
       expect(getMessages('sess-del-1')).toHaveLength(0)
     })
 
-    it('still removes session and messages even when fetch throws', async () => {
+    it('does not remove session/messages when fetch throws', async () => {
       vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('network'))
       const { sessions, deleteSession, getMessages } = useSessions()
       sessions.value = [{ id: 'sess-del-2', title: 'Test', agent_id: 'a', state: 'idle', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }] as any
       getMessages('sess-del-2').push({ id: 'm1', role: 'user', content: 'hi', streaming: false } as any)
       await deleteSession('sess-del-2')
-      expect(sessions.value).toHaveLength(0)
-      expect(getMessages('sess-del-2')).toHaveLength(0)
+      expect(sessions.value).toHaveLength(1)
+      expect(getMessages('sess-del-2')).toHaveLength(1)
+    })
+
+    it('does not remove session/messages when server returns non-2xx', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'failed' }), { status: 500 })
+      )
+      const { sessions, deleteSession, getMessages } = useSessions()
+      sessions.value = [{ id: 'sess-del-3', title: 'Test', agent_id: 'a', state: 'idle', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }] as any
+      getMessages('sess-del-3').push({ id: 'm1', role: 'user', content: 'hi', streaming: false } as any)
+      await deleteSession('sess-del-3')
+      expect(sessions.value).toHaveLength(1)
+      expect(getMessages('sess-del-3')).toHaveLength(1)
     })
   })
 })

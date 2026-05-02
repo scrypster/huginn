@@ -6,6 +6,22 @@ import { api, getToken } from './useApi'
 // to show a user-visible warning (e.g. an amber toast) and then reset it to
 // false once the warning has been acknowledged or auto-dismissed.
 export const hydrationQueueOverflowed = ref(false)
+const hydrationQueueOverflowBySession = ref<Record<string, true>>({})
+
+function setHydrationOverflow(sessionId: string, overflowed: boolean): void {
+  if (!sessionId) return
+  if (overflowed) {
+    hydrationQueueOverflowBySession.value = {
+      ...hydrationQueueOverflowBySession.value,
+      [sessionId]: true,
+    }
+  } else if (hydrationQueueOverflowBySession.value[sessionId]) {
+    const next = { ...hydrationQueueOverflowBySession.value }
+    delete next[sessionId]
+    hydrationQueueOverflowBySession.value = next
+  }
+  hydrationQueueOverflowed.value = Object.keys(hydrationQueueOverflowBySession.value).length > 0
+}
 
 export interface Session {
   id: string
@@ -110,9 +126,8 @@ function queueIfHydrating(sessionId: string, handler: () => void): boolean {
       // Drop the oldest buffered event (FIFO eviction) to cap memory use.
       q.shift()
       console.warn(`[useSessions] hydration queue for session ${sessionId} exceeded ${MAX_HYDRATION_QUEUE_SIZE} events; dropping oldest`)
-      // Signal UI components to show a user-visible warning. Reset to false
-      // after the session finishes hydrating (see flushQueue below).
-      hydrationQueueOverflowed.value = true
+      // Signal UI components to show a user-visible warning for this session.
+      setHydrationOverflow(sessionId, true)
     }
     q.push(handler)
     return true
@@ -152,17 +167,23 @@ export function useSessions() {
   }
 
   async function deleteSession(id: string) {
+    let deleted = false
     try {
-      await fetch(`/api/v1/sessions/${id}`, {
+      const resp = await fetch(`/api/v1/sessions/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
-    } catch { /* ignore */ }
+      deleted = resp.ok
+    } catch {
+      deleted = false
+    }
+    if (!deleted) return
     sessions.value = sessions.value.filter(s => s.id !== id)
     delete messagesBySession.value[id]
     // Clean up hydration state so the session can be re-fetched if re-created.
     hydrated.delete(id)
     preHydrationQueue.delete(id) // discard any buffered handlers — session is gone
+    setHydrationOverflow(id, false)
   }
 
   async function renameSession(id: string, title: string) {
@@ -232,6 +253,10 @@ export function useSessions() {
             agent: (r.agent as string | undefined) || undefined,
             createdAt: (r.ts as string | undefined) || undefined,
             toolCalls,
+            threadSummary: (r.type === 'thread_event' && r.tool_name === 'thread_done') || undefined,
+            threadSummaryThreadId: (r.type === 'thread_event' && typeof r.tool_call_id === 'string')
+              ? r.tool_call_id as string
+              : undefined,
           }
         })
       messagesBySession.value[sessionId] = msgs
@@ -250,7 +275,7 @@ export function useSessions() {
     for (const fn of queue) fn()
     // Reset the overflow flag after flushing so the warning auto-clears once
     // the hydration backlog has been processed.
-    hydrationQueueOverflowed.value = false
+    setHydrationOverflow(sessionId, false)
   }
 
   function formatSessionLabel(session: Session): string {

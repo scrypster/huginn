@@ -70,3 +70,61 @@ func TestWithModelOverride_PreservesSkillsAndToolbelt(t *testing.T) {
 		t.Errorf("local tools lost: %#v", cp.LocalTools)
 	}
 }
+
+func TestWithModelOverride_DeepCopiesSliceFields(t *testing.T) {
+	t.Parallel()
+	a := &Agent{
+		Name:       "Dina",
+		ModelID:    "haiku",
+		Skills:     []string{"code-review"},
+		Toolbelt:   []ToolbeltEntry{{Provider: "github", ConnectionID: "gh-1"}},
+		LocalTools: []string{"read_file"},
+	}
+	cp := a.WithModelOverride("sonnet")
+
+	cp.Skills[0] = "mutated-skill"
+	cp.Toolbelt[0].Provider = "jira"
+	cp.LocalTools[0] = "write_file"
+
+	if a.Skills[0] != "code-review" {
+		t.Fatalf("source Skills mutated through copy alias: %v", a.Skills)
+	}
+	if a.Toolbelt[0].Provider != "github" {
+		t.Fatalf("source Toolbelt mutated through copy alias: %v", a.Toolbelt)
+	}
+	if a.LocalTools[0] != "read_file" {
+		t.Fatalf("source LocalTools mutated through copy alias: %v", a.LocalTools)
+	}
+}
+
+func TestWithExtraSystem_DeepCopiesSliceFields(t *testing.T) {
+	t.Parallel()
+	a := &Agent{
+		Name:         "Eli",
+		SystemPrompt: "you are eli",
+		Skills:       []string{"research"},
+		Toolbelt:     []ToolbeltEntry{{Provider: "github", ConnectionID: "gh-2"}},
+		LocalTools:   []string{"read_file"},
+	}
+	cp := a.WithExtraSystem("\nExtra instructions")
+	if cp == a {
+		t.Fatal("WithExtraSystem must return copy when extraSystem is set")
+	}
+	if cp.SystemPrompt == a.SystemPrompt {
+		t.Fatal("expected extra system prompt to be appended")
+	}
+
+	cp.Skills[0] = "mutated-research"
+	cp.Toolbelt[0].ConnectionID = "changed"
+	cp.LocalTools[0] = "bash"
+
+	if a.Skills[0] != "research" {
+		t.Fatalf("source Skills mutated through copy alias: %v", a.Skills)
+	}
+	if a.Toolbelt[0].ConnectionID != "gh-2" {
+		t.Fatalf("source Toolbelt mutated through copy alias: %v", a.Toolbelt)
+	}
+	if a.LocalTools[0] != "read_file" {
+		t.Fatalf("source LocalTools mutated through copy alias: %v", a.LocalTools)
+	}
+}
