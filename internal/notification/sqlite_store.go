@@ -1,10 +1,12 @@
 package notification
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/scrypster/huginn/internal/sqlitedb"
@@ -248,6 +250,45 @@ func (s *SQLiteNotificationStore) ExpireRun(runID string) error {
 		return fmt.Errorf("notification: expire run %q: %w", runID, err)
 	}
 	return nil
+}
+
+// StartPruner launches a background goroutine that calls PruneExpired on the
+// given interval until ctx is cancelled. Log output is written at INFO level.
+// The goroutine exits cleanly when ctx is done.
+func (s *SQLiteNotificationStore) StartPruner(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := s.PruneExpired(ctx)
+				if err != nil && ctx.Err() == nil {
+					slog.Warn("notification: prune expired failed", "err", err)
+				} else if n > 0 {
+					slog.Info("notification: pruned expired notifications", "count", n)
+				}
+			}
+		}
+	}()
+}
+
+// PruneExpired deletes all notifications whose expires_at is set and in the past.
+// Returns the count of pruned notifications. Respects ctx.Done() for cancellation.
+func (s *SQLiteNotificationStore) PruneExpired(ctx context.Context) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.Write().ExecContext(ctx,
+		`DELETE FROM notifications WHERE expires_at IS NOT NULL AND expires_at <= ?`, now)
+	if err != nil {
+		return 0, fmt.Errorf("notification: prune expired: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("notification: prune expired rows affected: %w", err)
+	}
+	return int(rows), nil
 }
 
 // scanNotification reads a single Notification from a sql.Row.

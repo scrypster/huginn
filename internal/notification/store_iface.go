@@ -1,5 +1,7 @@
 package notification
 
+import "context"
+
 // StoreInterface is the read/write contract for a notification store.
 type StoreInterface interface {
 	// Put writes a Notification and all its index keys atomically.
@@ -37,4 +39,9 @@ type StoreInterface interface {
 
 	// ExpireRun sets ExpiresAt = now for all notifications belonging to runID.
 	ExpireRun(runID string) error
+
+	// PruneExpired deletes all notifications whose ExpiresAt is set and in the past.
+	// Returns the count of pruned notifications.
+	// Respects ctx.Done() for cancellation.
+	PruneExpired(ctx context.Context) (int, error)
 }
