@@ -160,13 +160,15 @@ func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write skill", http.StatusInternalServerError)
 		return
 	}
-	manifest, _ := skills.LoadManifest(filepath.Join(sdir, "installed.json"))
-	if manifest != nil {
-		manifest.Upsert(skills.InstalledEntry{Name: sk.Name(), Source: "local", Enabled: true})
-		if err := manifest.Save(); err != nil {
-			jsonError(w, http.StatusInternalServerError, "failed to save skill manifest: "+err.Error())
-			return
-		}
+	manifest, err := skills.LoadManifest(filepath.Join(sdir, "installed.json"))
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "load skill manifest: "+err.Error())
+		return
+	}
+	manifest.Upsert(skills.InstalledEntry{Name: sk.Name(), Source: "local", Enabled: true})
+	if err := manifest.Save(); err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to save skill manifest: "+err.Error())
+		return
 	}
 	s.reloadSkills()
 	s.BroadcastWS(WSMessage{Type: "skill_changed", Payload: map[string]any{"name": sk.Name(), "action": "created"}})
