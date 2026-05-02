@@ -2421,9 +2421,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	if sqlDB != nil {
 		sqlNotifStore := notification.NewSQLiteNotificationStore(sqlDB)
 		// Purge expired notifications on startup (non-fatal).
-		sqlDB.Write().Exec(
-			`DELETE FROM notifications WHERE expires_at IS NOT NULL AND expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-		)
+		if _, pruneErr := sqlNotifStore.PruneExpired(context.Background()); pruneErr != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: startup notification prune: %v\n", pruneErr)
+		}
 		sqlNotifStore.StartPruner(prunerCtx, 15*time.Minute)
 		notifStore = sqlNotifStore
 	} else {
