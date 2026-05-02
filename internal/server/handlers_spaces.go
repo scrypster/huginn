@@ -153,6 +153,10 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request) {
 	}
 	sp, err := s.spaceStore.CreateChannel(body.Name, body.LeadAgent, body.Members, body.Icon, body.Color)
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			jsonError(w, 409, fmt.Sprintf("a channel named %q already exists", body.Name))
+			return
+		}
 		jsonError(w, 500, err.Error())
 		return
 	}
@@ -482,6 +486,15 @@ func (s *Server) emitSpaceActivity(spaceID string) {
 			"unseen_count": count,
 		},
 	})
+}
+
+// isUniqueConstraintError returns true if err is a SQLite UNIQUE constraint violation.
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed")
 }
 
 func jsonSpaceError(w http.ResponseWriter, err error) {
