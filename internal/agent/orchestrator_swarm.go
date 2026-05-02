@@ -40,7 +40,10 @@ func (o *Orchestrator) SpawnThread(ctx context.Context, threadID string, sess *h
 		if wg != nil {
 			defer wg.Done()
 		}
-		tm.SpawnThread(ctx, threadID, store, sess, reg, b, broadcast, ca, nil)
+		dagFn := func() {
+			tm.EvaluateDAG(ctx, sess.ID, store, sess, reg, b, broadcast, ca)
+		}
+		tm.SpawnThread(ctx, threadID, store, sess, reg, b, broadcast, ca, dagFn)
 	}()
 }
 
