@@ -19,12 +19,14 @@ export interface WSMessage {
 // lastSeq: the highest contiguous sequence number delivered to handlers.
 // buffer: messages received out-of-order waiting to be delivered.
 interface SessionSeqState {
-  epoch: number
+  epoch: number | null
   lastSeq: number
   buffer: Map<number, WSMessage>
 }
 
 const SEQ_BUFFER_MAX = 20
+const ORDERING_DROP_WARN_COOLDOWN_MS = 10_000
+const SEQ_GAP_RESYNC_MS = 3_000
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'reconnecting'
 
@@ -88,6 +90,8 @@ export function useHuginnWS(token: string) {
   // Only messages that carry a seq field are buffered; messages without seq
   // (e.g. global broadcasts) pass straight through for backward compatibility.
   const seqStates = new Map<string, SessionSeqState>()
+  const orderingDropWarnAt = new Map<string, number>()
+  const seqGapRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   // Outgoing message queue: drained on reconnect, bounded by OUTBOX_MAX.
   const outbox: WSMessage[] = []
@@ -161,6 +165,65 @@ export function useHuginnWS(token: string) {
     fns.forEach(fn => fn(msg))
   }
 
+  function dispatchOrderingWarning(sessionId: string, content: string) {
+    const now = Date.now()
+    const lastWarnAt = orderingDropWarnAt.get(sessionId) ?? 0
+    if (now - lastWarnAt < ORDERING_DROP_WARN_COOLDOWN_MS) return
+    orderingDropWarnAt.set(sessionId, now)
+    dispatchMsg({
+      type: 'warning',
+      session_id: sessionId,
+      content,
+    })
+  }
+
+  function clearGapRecoveryTimer(sessionId: string) {
+    const timer = seqGapRecoveryTimers.get(sessionId)
+    if (timer != null) {
+      clearTimeout(timer)
+      seqGapRecoveryTimers.delete(sessionId)
+    }
+  }
+
+  function clearAllGapRecoveryTimers() {
+    for (const timer of seqGapRecoveryTimers.values()) clearTimeout(timer)
+    seqGapRecoveryTimers.clear()
+  }
+
+  function flushBufferedInOrder(state: SessionSeqState) {
+    let next = state.lastSeq + 1
+    while (state.buffer.has(next)) {
+      const buffered = state.buffer.get(next)!
+      state.buffer.delete(next)
+      dispatchMsg(buffered)
+      state.lastSeq = next
+      next++
+    }
+  }
+
+  function scheduleGapRecovery(sessionId: string) {
+    if (seqGapRecoveryTimers.has(sessionId)) return
+    const timer = setTimeout(() => {
+      seqGapRecoveryTimers.delete(sessionId)
+      const liveState = seqStates.get(sessionId)
+      if (!liveState || liveState.buffer.size === 0) return
+      const minBufferedSeq = Math.min(...liveState.buffer.keys())
+      if (minBufferedSeq <= liveState.lastSeq+1) return
+      // Missing sequence never arrived. Skip the gap and continue delivering
+      // buffered messages to keep the timeline live.
+      liveState.lastSeq = minBufferedSeq - 1
+      dispatchOrderingWarning(
+        sessionId,
+        'Realtime ordering gap persisted; some delayed events were skipped to recover live updates. Refresh if this session looks stale.',
+      )
+      flushBufferedInOrder(liveState)
+      if (liveState.buffer.size > 0) {
+        scheduleGapRecovery(sessionId)
+      }
+    }, SEQ_GAP_RESYNC_MS)
+    seqGapRecoveryTimers.set(sessionId, timer)
+  }
+
   function deliverOrBuffer(msg: WSMessage) {
     // App-layer pong: reset heartbeat timeout and do not dispatch to handlers.
     if (msg.type === 'pong') {
@@ -183,21 +246,22 @@ export function useHuginnWS(token: string) {
     // Fetch or create the per-session state.
     let state = seqStates.get(sessionId)
     if (state == null) {
-      state = { epoch: 0, lastSeq: 0, buffer: new Map() }
+      state = { epoch: null, lastSeq: 0, buffer: new Map() }
       seqStates.set(sessionId, state)
     }
 
     // Epoch change → server restarted. Reset ordering state and deliver
     // the message immediately as the first message of the new stream.
-    const msgEpoch = msg.epoch ?? 0
-    if (msgEpoch !== 0 && msgEpoch !== state.epoch) {
+    const msgEpoch = typeof msg.epoch === 'number' ? msg.epoch : null
+    if (msgEpoch !== null && msgEpoch !== state.epoch) {
       console.info(
         `[WS] Server epoch changed for session ${sessionId}: ` +
-        `${state.epoch} → ${msgEpoch}. Resetting sequence buffer.`,
+        `${state.epoch ?? 'unset'} → ${msgEpoch}. Resetting sequence buffer.`,
       )
       state.epoch = msgEpoch
       state.lastSeq = seq
       state.buffer.clear()
+      clearGapRecoveryTimer(sessionId)
       dispatchMsg(msg)
       return
     }
@@ -205,20 +269,19 @@ export function useHuginnWS(token: string) {
     if (seq === state.lastSeq + 1) {
       dispatchMsg(msg)
       state.lastSeq = seq
-      let next = state.lastSeq + 1
-      while (state.buffer.has(next)) {
-        const buffered = state.buffer.get(next)!
-        state.buffer.delete(next)
-        dispatchMsg(buffered)
-        state.lastSeq = next
-        next++
-      }
+      flushBufferedInOrder(state)
+      if (state.buffer.size === 0) clearGapRecoveryTimer(sessionId)
     } else if (seq > state.lastSeq + 1) {
       if (state.buffer.size >= SEQ_BUFFER_MAX) {
         const oldest = Math.min(...state.buffer.keys())
         state.buffer.delete(oldest)
+        dispatchOrderingWarning(
+          sessionId,
+          'Realtime updates were delayed; some out-of-order events were dropped. Refresh if this session looks stale.',
+        )
       }
       state.buffer.set(seq, msg)
+      scheduleGapRecovery(sessionId)
     }
     // seq <= lastSeq → duplicate or replay; silently drop.
   }
@@ -249,6 +312,7 @@ export function useHuginnWS(token: string) {
     ws.onclose = (event) => {
       connected.value = false
       stopHeartbeat()
+      clearAllGapRecoveryTimers()
       if (!intentionallyClosed) {
         if (PERMANENT_CLOSE_CODES.has(event.code)) {
           connectionState.value = 'disconnected'
@@ -382,6 +446,7 @@ export function useHuginnWS(token: string) {
       reconnectTimer = null
     }
     stopCountdown()
+    clearAllGapRecoveryTimers()
     ws?.close()
   }
 

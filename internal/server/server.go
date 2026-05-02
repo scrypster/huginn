@@ -492,10 +492,101 @@ func (s *Server) SetMentionDelegate(fn func(ctx context.Context, sessionID, assi
 // BroadcastToSession sends a typed event to all WS clients subscribed to sessionID.
 // Used by the delegate tool to push thread lifecycle events from goroutines.
 func (s *Server) BroadcastToSession(sessionID, msgType string, payload map[string]any) {
-	if s.wsHub == nil || sessionID == "" {
+	if sessionID == "" {
+		return
+	}
+	s.persistThreadLifecycleEvent(sessionID, msgType, payload)
+	if s.wsHub == nil {
 		return
 	}
 	s.wsHub.broadcastToSession(sessionID, WSMessage{Type: msgType, Payload: payload})
+}
+
+func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload map[string]any) {
+	if s.store == nil {
+		return
+	}
+	switch msgType {
+	case "thread_started", "thread_help", "thread_done", "delegation_preview_timeout":
+	default:
+		return
+	}
+	threadID, _ := payload["thread_id"].(string)
+	if strings.TrimSpace(threadID) == "" {
+		return
+	}
+	agentID, _ := payload["agent_id"].(string)
+	task, _ := payload["task"].(string)
+	helpMsg, _ := payload["message"].(string)
+	summary, _ := payload["summary"].(string)
+	timeoutSeconds, _ := payload["timeout_seconds"].(int)
+	if s.tm != nil {
+		if t, ok := s.tm.Get(threadID); ok {
+			if agentID == "" {
+				agentID = t.AgentID
+			}
+			if task == "" {
+				task = t.Task
+			}
+			if summary == "" && t.Summary != nil {
+				summary = t.Summary.Summary
+			}
+		}
+	}
+	agentLabel := strings.TrimSpace(agentID)
+	if agentLabel == "" {
+		agentLabel = "delegate"
+	}
+	var content string
+	switch msgType {
+	case "thread_started":
+		taskText := strings.TrimSpace(task)
+		if taskText == "" {
+			content = fmt.Sprintf("Delegated to @%s", agentLabel)
+		} else {
+			content = fmt.Sprintf("Delegated to @%s: %s", agentLabel, taskText)
+		}
+	case "thread_help":
+		helpText := strings.TrimSpace(helpMsg)
+		if helpText == "" {
+			content = fmt.Sprintf("@%s needs input", agentLabel)
+		} else {
+			content = fmt.Sprintf("@%s needs input: %s", agentLabel, helpText)
+		}
+	case "thread_done":
+		doneSummary := strings.TrimSpace(summary)
+		if doneSummary == "" {
+			doneSummary = "Completed delegated work."
+		}
+		content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+	case "delegation_preview_timeout":
+		if timeoutSeconds <= 0 {
+			timeoutSeconds = 30
+		}
+		content = fmt.Sprintf("Delegation to @%s was auto-approved after %ds.", agentLabel, timeoutSeconds)
+	}
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+	sess, err := s.store.Load(sessionID)
+	if err != nil {
+		return
+	}
+	if appendErr := s.store.Append(sess, session.SessionMessage{
+		ID:         session.NewID(),
+		Role:       "assistant",
+		Content:    content,
+		Agent:      agentID,
+		ToolName:   msgType,
+		ToolCallID: threadID,
+		Type:       "thread_event",
+		Ts:         time.Now().UTC(),
+	}); appendErr != nil {
+		slog.Warn("server: failed to persist thread lifecycle event",
+			"session_id", sessionID, "type", msgType, "thread_id", threadID, "err", appendErr)
+		return
+	}
+	s.emitSpaceActivity(sess.SpaceID())
 }
 
 // ResolveAgent returns the primary agent for the given session, delegating to
@@ -924,6 +1015,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/providers/{provider}/models", api(s.handleProviderModels))
 	mux.HandleFunc("GET /api/v1/stats", api(s.handleStats))
 	mux.HandleFunc("GET /api/v1/stats/history", api(s.handleStatsHistory))
+	mux.HandleFunc("GET /api/v1/metrics", api(s.handleMetrics))
 	mux.HandleFunc("GET /api/v1/metrics/prometheus", s.handlePrometheusMetrics)
 	mux.HandleFunc("GET /api/v1/cost", api(s.handleCost))
 	mux.HandleFunc("GET /api/v1/logs", api(s.handleLogs))

@@ -251,6 +251,12 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"deleted": true, "permanent": false, "archived": true})
 		return
 	}
+	// Cancel and remove any in-flight threads for this session before
+	// deleting the session record. Guarded for nil to support minimal
+	// server configurations that don't wire up multi-agent.
+	if s.tm != nil {
+		s.tm.CleanupSession(id)
+	}
 	if err := s.store.Delete(id); err != nil {
 		jsonError(w, 500, "delete session: "+err.Error())
 		return
@@ -540,11 +546,49 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, []struct{}{})
 		return
 	}
+	if err := s.tm.LoadFromStore(r.Context(), sessionID); err != nil {
+		// Non-fatal: return whatever in-memory state exists, but log so operators
+		// can diagnose persistence regressions.
+		logger.Warn("threads: failed to load from durable store",
+			"session_id", sessionID, "err", err)
+	}
 	threads := s.tm.ListBySession(sessionID)
 	if threads == nil {
 		threads = []*threadmgr.Thread{}
 	}
-	jsonOK(w, threads)
+	type threadListItem struct {
+		ID              string                   `json:"ID"`
+		SessionID       string                   `json:"SessionID"`
+		AgentID         string                   `json:"AgentID"`
+		Task            string                   `json:"Task"`
+		Status          threadmgr.ThreadStatus   `json:"Status"`
+		StartedAt       time.Time                `json:"StartedAt"`
+		CompletedAt     time.Time                `json:"CompletedAt"`
+		Summary         *threadmgr.FinishSummary `json:"Summary,omitempty"`
+		TokensUsed      int                      `json:"TokensUsed"`
+		TokenBudget     int                      `json:"TokenBudget"`
+		ParentMessageID string                   `json:"ParentMessageID,omitempty"`
+	}
+	out := make([]threadListItem, 0, len(threads))
+	for _, t := range threads {
+		if t == nil {
+			continue
+		}
+		out = append(out, threadListItem{
+			ID:              t.ID,
+			SessionID:       t.SessionID,
+			AgentID:         t.AgentID,
+			Task:            t.Task,
+			Status:          t.Status,
+			StartedAt:       t.StartedAt,
+			CompletedAt:     t.CompletedAt,
+			Summary:         t.Summary,
+			TokensUsed:      t.TokensUsed,
+			TokenBudget:     t.TokenBudget,
+			ParentMessageID: t.ParentMessageID,
+		})
+	}
+	jsonOK(w, out)
 }
 
 // handleGetMessages returns the last N messages for the given session.

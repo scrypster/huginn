@@ -49,6 +49,19 @@ func validateWorkflow(wf *scheduler.Workflow) error {
 	}
 
 	for i, step := range wf.Steps {
+		// Rule 0: execution target must be explicit.
+		// A step must provide one of:
+		//   - routine (legacy)
+		//   - sub_workflow
+		//   - inline agent+prompt
+		if step.Routine == "" && step.SubWorkflow == "" && strings.TrimSpace(step.Prompt) == "" {
+			return fmt.Errorf("step[%d]: missing prompt (required for inline step)", i+1)
+		}
+		// Rule 0b: self-referential sub-workflow is always invalid.
+		if step.SubWorkflow != "" && step.SubWorkflow == wf.ID {
+			return fmt.Errorf("step[%d]: sub_workflow %q cannot reference the current workflow id", i+1, step.SubWorkflow)
+		}
+
 		// Rule 1: dangling from_step references and self-references.
 		for j, inp := range step.Inputs {
 			if inp.FromStep == "" {

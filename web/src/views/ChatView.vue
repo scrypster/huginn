@@ -142,6 +142,18 @@
           <span v-if="threadsError"
             class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-huginn-amber" />
         </button>
+        <button v-if="blockedThreadCount > 0"
+          @click="openBlockedThreadFocus()"
+          class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-all duration-200 hover:bg-huginn-surface"
+          style="color:rgba(227,179,65,0.96);border:1px solid rgba(210,153,34,0.28);background:rgba(210,153,34,0.10)"
+          title="Blocked delegated threads need attention"
+        >
+          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <span class="font-bold tabular-nums">{{ blockedThreadCount }}</span>
+          <span>blocked</span>
+        </button>
 
         <!-- Right side of header -->
         <div class="ml-auto flex items-center gap-2 flex-shrink-0">
@@ -423,6 +435,9 @@
                     <span class="text-[11px] text-huginn-muted/70">
                       · {{ delegatedThreadStatusLabel(d) }}
                     </span>
+                    <span v-if="delegatedThreadProgressLabel(d)" class="text-[11px] text-huginn-muted/60">
+                      · {{ delegatedThreadProgressLabel(d) }}
+                    </span>
                     <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate min-w-0 flex-1">
                       · {{ d.task }}
                     </span>
@@ -509,7 +524,9 @@
                     <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                       <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                     </svg>
-                    <span class="text-xs text-huginn-text">{{ activeToolCalls.length }} tool call{{ activeToolCalls.length === 1 ? '' : 's' }}</span>
+                    <span class="text-xs text-huginn-text">
+                      {{ activeMemoryChipText || `${activeToolCalls.length} tool call${activeToolCalls.length === 1 ? '' : 's'}` }}
+                    </span>
                     <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
                   </div>
                 </div>
@@ -548,6 +565,9 @@
                       </span>
                       <span class="text-[11px] text-huginn-muted/70">
                         · {{ delegatedThreadStatusLabel(d) }}
+                      </span>
+                      <span v-if="delegatedThreadProgressLabel(d)" class="text-[11px] text-huginn-muted/60">
+                        · {{ delegatedThreadProgressLabel(d) }}
                       </span>
                       <!-- Task description — shown when available, truncated to keep strip compact -->
                       <span v-if="d.task" class="text-[11px] text-huginn-muted/60 truncate min-w-0 flex-1">
@@ -654,7 +674,11 @@
                     <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                       <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                     </svg>
-                    <span class="text-xs text-huginn-text">{{ msg.toolCalls.length }} tool call{{ msg.toolCalls.length === 1 ? '' : 's' }}</span>
+                    <span class="text-xs text-huginn-text">
+                      {{ isMemoryOnlyToolCalls(msg.toolCalls)
+                        ? `🧠 Memory: ${summarizeMemoryToolCalls(msg.toolCalls)}`
+                        : `${msg.toolCalls.length} tool call${msg.toolCalls.length === 1 ? '' : 's'}` }}
+                    </span>
                     <span class="text-[11px] text-huginn-green">· done</span>
                     <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                       :class="expandedMsgCalls.has(msg.id) ? 'rotate-180' : ''"
@@ -741,17 +765,26 @@
               Delegate to <span class="font-bold">{{ preview.agentId }}</span>?
             </p>
             <p class="text-[11px] text-huginn-muted/70 truncate mt-0.5" data-testid="delegation-preview-task">{{ preview.task }}</p>
+            <p v-if="previewCountdownText(preview)" class="text-[10px] text-huginn-muted/55 mt-0.5">
+              {{ previewCountdownText(preview) }}
+            </p>
+            <div v-if="preview.expiresAtMs && preview.expiresInSeconds"
+              class="mt-1.5 h-1.5 rounded-full bg-huginn-surface/60 overflow-hidden">
+              <div class="h-full transition-all duration-500" :style="previewProgressStyle(preview)" />
+            </div>
           </div>
           <div class="flex gap-1.5 flex-shrink-0">
             <button
               data-testid="delegation-preview-allow"
+              :disabled="!!preview.pendingDecision"
               @click="wsRef && ackPreview(wsRef, preview, true)"
-              class="px-2 py-1 text-[10px] font-medium rounded border border-huginn-green/30 text-huginn-green hover:bg-huginn-green/15 transition-colors"
-            >Allow</button>
+              class="px-2 py-1 text-[10px] font-medium rounded border border-huginn-green/30 text-huginn-green hover:bg-huginn-green/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >{{ preview.pendingDecision ? 'Sending...' : 'Allow' }}</button>
             <button
               data-testid="delegation-preview-deny"
+              :disabled="!!preview.pendingDecision"
               @click="wsRef && ackPreview(wsRef, preview, false)"
-              class="px-2 py-1 text-[10px] font-medium rounded border border-huginn-red/30 text-huginn-red hover:bg-huginn-red/15 transition-colors"
+              class="px-2 py-1 text-[10px] font-medium rounded border border-huginn-red/30 text-huginn-red hover:bg-huginn-red/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >Deny</button>
           </div>
         </div>
@@ -1108,6 +1141,8 @@ const hydrationOverflowToastVisible = ref(false)
 let hydrationOverflowTimer: ReturnType<typeof setTimeout> | null = null
 const blockedThreadToasts = ref<{ threadId: string; agent: string; message: string }[]>([])
 const blockedThreadToastTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const previewNowMs = ref(Date.now())
+let previewTicker: ReturnType<typeof setInterval> | null = null
 
 watch(hydrationQueueOverflowed, (overflowed) => {
   if (!overflowed) return
@@ -1146,6 +1181,35 @@ function showBlockedThreadToast(payload: { threadId: string; agent: string; mess
     payload.threadId,
     setTimeout(() => dismissBlockedThreadToast(payload.threadId), 10_000),
   )
+}
+
+function dismissAllBlockedThreadToasts() {
+  blockedThreadToasts.value = []
+  blockedThreadToastTimers.forEach(t => clearTimeout(t))
+  blockedThreadToastTimers.clear()
+}
+
+function previewCountdownText(preview: { expiresAtMs?: number; mode?: string }): string {
+  if (preview.expiresAtMs == null) return ''
+  const secs = Math.max(0, Math.ceil((preview.expiresAtMs - previewNowMs.value) / 1000))
+  const modeLabel = preview.mode === 'conditional' ? ' (conditional policy)' : ''
+  if (secs === 0) return `Auto-approving now${modeLabel}`
+  return `Auto-approves in ${secs}s${modeLabel}`
+}
+
+function previewProgressStyle(preview: { expiresAtMs?: number; expiresInSeconds?: number }): string {
+  if (preview.expiresAtMs == null || !preview.expiresInSeconds || preview.expiresInSeconds <= 0) {
+    return 'width:100%;background:rgba(88,166,255,0.55)'
+  }
+  const remainingMs = Math.max(0, preview.expiresAtMs - previewNowMs.value)
+  const ratio = Math.max(0, Math.min(1, remainingMs / (preview.expiresInSeconds * 1000)))
+  const pct = ratio * 100
+  const color = ratio <= 0.2
+    ? 'rgba(248,81,73,0.75)'
+    : ratio <= 0.5
+      ? 'rgba(210,153,34,0.75)'
+      : 'rgba(88,166,255,0.75)'
+  return `width:${pct}%;background:${color}`
 }
 
 // ── Session-switch loading state ─────────────────────────────────────
@@ -1192,14 +1256,14 @@ function flushPendingToolResults(sessionId: string) {
 // so it works in both session mode and space mode.
 function applyPermissionDenied(threadId: string, agentId: string, tool: string) {
   const msgs = getSourceMessages()
-  const msg = msgs.find((m: any) =>
-    m.delegatedThreads?.some((d: any) => d.threadId === threadId)
+  const msg = msgs.find((m) =>
+    m.delegatedThreads?.some((d) => d.threadId === threadId)
   )
   if (!msg) return
   if (!msg.permissionDenials) msg.permissionDenials = []
   // Frontend dedup: one entry per threadId:tool pair
   const key = `${threadId}:${tool}`
-  if (msg.permissionDenials.some((d: any) => `${d.threadId}:${d.tool}` === key)) return
+  if (msg.permissionDenials.some((d) => `${d.threadId}:${d.tool}` === key)) return
   msg.permissionDenials.push({ agentId, tool, threadId })
 }
 
@@ -1213,6 +1277,31 @@ function delegatedThreadStatusLabel(d: DelegatedThread): string {
     return formatThreadStatus(status)
   }
   return 'working…'
+}
+
+function formatCompactDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const totalSeconds = Math.floor(ms / 1000)
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes < 60) return `${minutes}m ${seconds}s`
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  return `${hours}h ${mins}m`
+}
+
+function delegatedThreadProgressLabel(d: DelegatedThread): string {
+  const t = getThreadById(d.threadId)
+  if (!t) return ''
+  const parts: string[] = []
+  const elapsed = formatCompactDuration(t.elapsedMs ?? 0)
+  if (elapsed) parts.push(elapsed)
+  const toolCallCount = t.toolCalls?.length ?? 0
+  if (toolCallCount > 0) {
+    parts.push(`${toolCallCount} tool call${toolCallCount === 1 ? '' : 's'}`)
+  }
+  return parts.join(' · ')
 }
 
 // ── Agent state ──────────────────────────────────────────────────────
@@ -1234,7 +1323,7 @@ watch(() => swarmState.value?.sessionId, (id) => {
 const agentProfile      = ref<Agent | null>(null) // agent shown in read-only profile modal
 
 // ── Thread panel state ────────────────────────────────────────────────
-const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, ackPreview, threadsError } = useThreads()
+const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 const threadPanelOpen   = ref(false)
 const threadPanelPinned = ref(false) // true = don't auto-close when threads finish
 
@@ -1268,6 +1357,15 @@ function openThreadDetailById(threadId: string) {
   } else {
     threadPanelOpen.value = true
   }
+}
+
+function openBlockedThreadFocus() {
+  const blocked = sessionThreads.value.find(t => t.Status === 'blocked')
+  if (blocked) {
+    openThreadDetailById(blocked.ID)
+    return
+  }
+  threadPanelOpen.value = true
 }
 
 function closeThreadDetail() {
@@ -1361,9 +1459,9 @@ async function hydrateThreadBadges(sessionId: string) {
 // in session mode it's the session message array from useSessions. Thread
 // handlers must mutate these objects (not the adapted copies) so the data
 // survives computed re-evaluations.
-function getSourceMessages(): any[] {
+function getSourceMessages(): ChatMessage[] {
   if (props.spaceId) {
-    return (currentSpaceTimeline.value?.getState().messages ?? []) as any[]
+    return (currentSpaceTimeline.value?.getState().messages ?? []) as ChatMessage[]
   }
   return props.sessionId ? getMessages(props.sessionId) : []
 }
@@ -1481,6 +1579,10 @@ const activeThreadCount = computed(() =>
   props.sessionId ? getActiveThreadCount(props.sessionId) : 0
 )
 
+const blockedThreadCount = computed(() =>
+  sessionThreads.value.filter(t => t.Status === 'blocked').length
+)
+
 // Pending delegation previews for this session (shown as approval banners).
 const sessionPreviews = computed(() =>
   props.sessionId ? getSessionPreviews(props.sessionId) : []
@@ -1533,6 +1635,37 @@ const selectedToolCall = ref<ToolCallRecord | null>(null)
 function toggleToolCall(tc: ToolCallRecord) {
   selectedToolCall.value = tc
 }
+
+function isForActiveSession(msg: WSMessage): boolean {
+  if (!props.sessionId) return true
+  const sid = msg.session_id || props.sessionId
+  return sid === props.sessionId
+}
+
+function isMemoryToolName(name: string): boolean {
+  return name.startsWith('muninn_')
+}
+
+function summarizeMemoryToolCalls(calls: Array<{ name: string }>): string {
+  const names = calls.map(c => c.name)
+  if (names.some(n => n === 'muninn_remember' || n === 'muninn_remember_batch' || n === 'muninn_remember_tree')) {
+    return 'saved to memory'
+  }
+  if (names.some(n => n === 'muninn_session' || n === 'muninn_where_left_off')) {
+    return 'resumed session'
+  }
+  return 'checked context'
+}
+
+function isMemoryOnlyToolCalls(calls?: ToolCallRecord[]): boolean {
+  return !!calls?.length && calls.every(tc => isMemoryToolName(tc.name))
+}
+
+const activeMemoryChipText = computed(() => {
+  if (!activeToolCalls.value.length) return ''
+  if (!activeToolCalls.value.every(tc => isMemoryToolName(tc.name))) return ''
+  return `🧠 Memory: ${summarizeMemoryToolCalls(activeToolCalls.value)}`
+})
 
 // ── Thread helpers ────────────────────────────────────────────────────
 function getThreadById(threadId: string) {
@@ -1883,6 +2016,7 @@ watch(wsRef, (ws) => {
   })
 
 registerWS(ws, 'tool_call', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
     const p = msg.payload as Record<string, unknown>
     activeToolCalls.value.push({
       id: (p?.id as string) ?? Date.now().toString(),
@@ -1893,6 +2027,7 @@ registerWS(ws, 'tool_call', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'tool_result', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
     const p = msg.payload as Record<string, unknown>
     const id = p?.id as string
     // Find in activeToolCalls OR reconstruct from the payload itself (for late arrivals)
@@ -1918,11 +2053,13 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'permission_request', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
     pendingPermission.value = msg
     scrollToBottom()
   })
 
 registerWS(ws, 'done', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
     // Ignore stale done events from previous chat runs (e.g. buffered in the WS connection).
     // run_id was introduced alongside this guard; old messages without run_id are also ignored.
     if (!msg.run_id || msg.run_id !== currentRunId.value) {
@@ -1984,6 +2121,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'error', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
     if (msg.run_id && msg.run_id !== currentRunId.value) return
@@ -2001,6 +2139,7 @@ registerWS(ws, 'error', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'warning', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
     // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
     // Surface it inline so the user knows memory tools are disabled rather
     // than silently missing tool calls.
@@ -2284,7 +2423,7 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     const replyCount = p?.reply_count as number | undefined
     const msgs = getSourceMessages()
     for (const m of msgs) {
-      const dt = (m as any).delegatedThreads as Array<{ threadId: string; agentId: string; msgId?: string; done?: boolean; replyCount?: number; inlineSummary?: string }> | undefined
+      const dt = m.delegatedThreads
       if (dt) {
         const entry = dt.find(d => d.threadId === threadId)
         if (entry) {
@@ -2301,9 +2440,8 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
           }
         }
       }
-      if ((m as any).permissionDenials?.length) {
-        ;(m as any).permissionDenials = (m as any).permissionDenials
-          .filter((pd: PermissionDenial) => pd.threadId !== threadId)
+      if (m.permissionDenials?.length) {
+        m.permissionDenials = m.permissionDenials.filter((pd: PermissionDenial) => pd.threadId !== threadId)
       }
     }
     // Remove any stale streaming tool calls scoped to the completed thread's
@@ -2331,6 +2469,36 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
         msgs.push(completionMsg)
       }
     }
+  })
+
+registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
+    if (!props.sessionId && !props.spaceId) return
+    if (props.sessionId && msg.session_id !== props.sessionId) return
+    const p = (msg.payload as Record<string, unknown> | undefined) ?? {}
+    const threadId = typeof p.thread_id === 'string' ? p.thread_id : ''
+    if (!threadId) return
+    const timeoutSeconds = typeof p.timeout_seconds === 'number'
+      ? p.timeout_seconds
+      : (typeof p.timeout_seconds === 'string' ? Number.parseInt(p.timeout_seconds, 10) : 30)
+    const agentId = typeof p.agent_id === 'string'
+      ? p.agent_id
+      : (typeof p.agent === 'string' ? p.agent : 'Delegate')
+    const msgs = getSourceMessages()
+    const eventId = `preview-timeout-${threadId}`
+    if (msgs.some(m => m.id === eventId)) return
+    const timeoutLabel = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 30
+    msgs.push({
+      id: eventId,
+      role: 'assistant',
+      content: `Delegation to @${agentId} was auto-approved after ${timeoutLabel}s.`,
+      createdAt: new Date().toISOString(),
+      ...(props.spaceId && msg.session_id ? {
+        session_id: msg.session_id as string,
+        seq: -1,
+        ts: new Date().toISOString(),
+      } : {}),
+    })
+    scrollToBottom()
   })
 
   // thread_reply_updated: parent message reply count changed in persistence.
@@ -2435,6 +2603,10 @@ onUnmounted(() => {
   }
   blockedThreadToastTimers.forEach(t => clearTimeout(t))
   blockedThreadToastTimers.clear()
+  if (previewTicker) {
+    clearInterval(previewTicker)
+    previewTicker = null
+  }
   if (intersectionObs) { intersectionObs.disconnect(); intersectionObs = null }
   wsCleanupFns.forEach(fn => fn())
   wsCleanupFns.length = 0
@@ -2442,11 +2614,14 @@ onUnmounted(() => {
 })
 
 // Reset state and sync agent when switching sessions
-watch(() => props.sessionId, async () => {
+watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
+  if (oldSessionId && oldSessionId !== newSessionId) {
+    clearSessionPreviews(oldSessionId)
+  }
   resetStreaming()
   prestreamThinking.value = false
   queuedRunIds.value = []
-  dismissBlockedThreadToast()
+  dismissAllBlockedThreadToasts()
   pendingPermission.value = null
   agentDropdownOpen.value = false
   hydratingBadgesFor.clear()  // reset so new session can hydrate
@@ -2507,6 +2682,9 @@ function handleGlobalKeydown(e: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  previewTicker = setInterval(() => {
+    previewNowMs.value = Date.now()
+  }, 1000)
   await loadAgents()
   syncSessionAgent()
   fetchStatus()

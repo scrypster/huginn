@@ -18,6 +18,17 @@ import (
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
+type stubThreadStore struct {
+	threadsBySession map[string][]*threadmgr.Thread
+}
+
+func (s *stubThreadStore) SaveThread(_ context.Context, _ *threadmgr.Thread) error { return nil }
+func (s *stubThreadStore) DeleteThread(_ context.Context, _ string) error          { return nil }
+func (s *stubThreadStore) UpdateThreadStatus(_ context.Context, _, _ string) error { return nil }
+func (s *stubThreadStore) LoadThreads(_ context.Context, sessionID string) ([]*threadmgr.Thread, error) {
+	return s.threadsBySession[sessionID], nil
+}
+
 // ─── server.go setters ────────────────────────────────────────────────────────
 
 func TestSetThreadManager(t *testing.T) {
@@ -97,7 +108,6 @@ func TestHandleUpdateAgent_IncomingNameEmpty_UsePathName(t *testing.T) {
 	}
 }
 
-
 // ─── handleListAvailableModels with fake Ollama server ───────────────────────
 
 func TestHandleListAvailableModels_OllamaReachable(t *testing.T) {
@@ -174,6 +184,40 @@ func TestHandleListThreads_WithManager(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&threads) //nolint:errcheck
 	if threads == nil {
 		t.Error("expected non-nil (at least empty) array")
+	}
+}
+
+func TestHandleListThreads_LoadsFromStoreBeforeListing(t *testing.T) {
+	srv, ts := newTestServer(t)
+	tm := threadmgr.New()
+	tm.SetStore(&stubThreadStore{
+		threadsBySession: map[string][]*threadmgr.Thread{
+			"sess-load": {
+				{ID: "thr-load-1", SessionID: "sess-load", AgentID: "Coder", Task: "From durable store"},
+			},
+		},
+	})
+	srv.SetThreadManager(tm)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/sessions/sess-load/threads", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var threads []threadmgr.Thread
+	if err := json.NewDecoder(resp.Body).Decode(&threads); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("expected 1 thread loaded from store, got %d", len(threads))
+	}
+	if threads[0].ID != "thr-load-1" {
+		t.Fatalf("expected thread ID thr-load-1, got %q", threads[0].ID)
 	}
 }
 
@@ -374,6 +418,18 @@ func TestHandleWSMessage_DelegationPreviewAck_WithGate(t *testing.T) {
 		Payload:   map[string]any{"thread_id": "t-1", "approved": true},
 	}
 	srv.handleWSMessage(client, msg)
+	select {
+	case out := <-client.send:
+		if out.Type != "delegation_preview_ack_result" {
+			t.Fatalf("expected delegation_preview_ack_result, got %q", out.Type)
+		}
+		got, _ := out.Payload["status"].(string)
+		if got != "not_found" {
+			t.Fatalf("expected status=not_found, got %q", got)
+		}
+	default:
+		t.Fatal("expected delegation_preview_ack_result message")
+	}
 }
 
 func TestHandleWSMessage_DelegationPreviewAck_EmptyIDs(t *testing.T) {
@@ -398,6 +454,49 @@ func TestHandleWSMessage_DelegationPreviewAck_SessionIDFromPayload(t *testing.T)
 		Payload: map[string]any{"thread_id": "t-1", "approved": false, "session_id": "s-1"},
 	}
 	srv.handleWSMessage(client, msg)
+}
+
+func TestHandleWSMessage_DelegationPreviewAck_WithPendingPreview(t *testing.T) {
+	srv, _ := newTestServer(t)
+	gate := threadmgr.NewDelegationPreviewGate(true)
+	srv.previewGate = gate
+	client := &wsClient{send: make(chan WSMessage, 4), ctx: context.Background()}
+
+	approvedCh := make(chan bool, 1)
+	go func() {
+		approved := gate.Approve(context.Background(), "sess-2", "t-2", "Coder", "task", "", nil)
+		approvedCh <- approved
+	}()
+	time.Sleep(20 * time.Millisecond) // let Approve register pending ack channel
+
+	msg := WSMessage{
+		Type:      "delegation_preview_ack",
+		SessionID: "sess-2",
+		Payload:   map[string]any{"thread_id": "t-2", "approved": true},
+	}
+	srv.handleWSMessage(client, msg)
+
+	select {
+	case out := <-client.send:
+		if out.Type != "delegation_preview_ack_result" {
+			t.Fatalf("expected delegation_preview_ack_result, got %q", out.Type)
+		}
+		got, _ := out.Payload["status"].(string)
+		if got != "accepted" {
+			t.Fatalf("expected status=accepted, got %q", got)
+		}
+	default:
+		t.Fatal("expected delegation_preview_ack_result message")
+	}
+
+	select {
+	case approved := <-approvedCh:
+		if !approved {
+			t.Fatal("expected pending preview to be approved")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for preview gate approval result")
+	}
 }
 
 func TestHandleWSMessage_ParseBoolPayload_Variants(t *testing.T) {

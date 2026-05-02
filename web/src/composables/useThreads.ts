@@ -27,6 +27,10 @@ export interface PendingPreview {
   agentId: string
   task: string
   parentMessageId?: string
+  mode?: string
+  expiresInSeconds?: number
+  expiresAtMs?: number
+  pendingDecision?: boolean
 }
 const pendingPreviews = ref<PendingPreview[]>([])
 
@@ -181,6 +185,20 @@ purgeExpiredStorageEntries()
 
 // ── Composable factory ────────────────────────────────────────────────────────
 export function useThreads() {
+  function removePendingPreview(sessionId: string, threadId: string): void {
+    pendingPreviews.value = pendingPreviews.value.filter(
+      p => !(p.sessionId === sessionId && p.threadId === threadId),
+    )
+  }
+
+  function markPreviewPendingDecision(sessionId: string, threadId: string, pending: boolean): void {
+    pendingPreviews.value = pendingPreviews.value.map(p => {
+      if (p.sessionId === sessionId && p.threadId === threadId) {
+        return { ...p, pendingDecision: pending }
+      }
+      return p
+    })
+  }
 
   function getSessionThreads(sessionId: string): LiveThread[] {
     return Object.values(threadsBySession.value[sessionId] ?? {})
@@ -342,6 +360,7 @@ export function useThreads() {
       if (p.task) t.Task = p.task
       if (p.parent_message_id) t.parentMessageId = p.parent_message_id
       startTicker(sid, p.thread_id!)
+      removePendingPreview(sid, p.thread_id!)
       debouncedPersist(sid)
     }
 
@@ -409,6 +428,7 @@ export function useThreads() {
       }
       t.streamingContent = ''
       stopTicker(sid, tid)
+      removePendingPreview(sid, tid)
       debouncedPersist(sid)
     }
 
@@ -458,9 +478,16 @@ export function useThreads() {
     const onDelegationPreview = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
-      const p = msg.payload as Record<string, string>
+      const p = msg.payload as Record<string, unknown>
       const agentId = p.agent_id || p.agent
-      if (!p.thread_id || !agentId) return
+      if (typeof p.thread_id !== 'string' || typeof agentId !== 'string' || !agentId) return
+      let expiresInSeconds: number | undefined
+      if (typeof p.expires_in_seconds === 'number') {
+        expiresInSeconds = Math.max(0, Math.floor(p.expires_in_seconds))
+      } else if (typeof p.expires_in_seconds === 'string') {
+        const parsed = Number.parseInt(p.expires_in_seconds, 10)
+        if (!Number.isNaN(parsed)) expiresInSeconds = Math.max(0, parsed)
+      }
       // Avoid duplicates (idempotent on reconnect).
       const exists = pendingPreviews.value.some(
         pp => pp.threadId === p.thread_id && pp.sessionId === sid
@@ -470,10 +497,29 @@ export function useThreads() {
           sessionId: sid,
           threadId: p.thread_id,
           agentId,
-          task: p.task ?? '',
-          parentMessageId: p.parent_message_id,
+          task: typeof p.task === 'string' ? p.task : '',
+          parentMessageId: typeof p.parent_message_id === 'string' ? p.parent_message_id : undefined,
+          mode: typeof p.mode === 'string' ? p.mode : undefined,
+          expiresInSeconds,
+          expiresAtMs: expiresInSeconds != null ? Date.now() + (expiresInSeconds * 1000) : undefined,
         })
       }
+    }
+
+    const onDelegationPreviewTimeout = (msg: WSMessage) => {
+      const sid = msg.session_id ?? sessionId()
+      if (!sid) return
+      const p = msg.payload as Record<string, unknown>
+      if (typeof p.thread_id !== 'string') return
+      removePendingPreview(sid, p.thread_id)
+    }
+
+    const onDelegationPreviewAckResult = (msg: WSMessage) => {
+      const sid = msg.session_id ?? sessionId()
+      if (!sid) return
+      const p = msg.payload as Record<string, unknown>
+      if (typeof p.thread_id !== 'string') return
+      removePendingPreview(sid, p.thread_id)
     }
 
     ws.on('thread_started', onThreadStarted)
@@ -487,6 +533,8 @@ export function useThreads() {
     ws.on('thread_help_resolved', onThreadHelpResolved)
     ws.on('thread_reply_updated', onThreadReplyUpdated)
     ws.on('delegation_preview', onDelegationPreview)
+    ws.on('delegation_preview_timeout', onDelegationPreviewTimeout)
+    ws.on('delegation_preview_ack_result', onDelegationPreviewAckResult)
 
     return () => {
       ws.off?.('thread_started', onThreadStarted)
@@ -500,6 +548,8 @@ export function useThreads() {
       ws.off?.('thread_help_resolved', onThreadHelpResolved)
       ws.off?.('thread_reply_updated', onThreadReplyUpdated)
       ws.off?.('delegation_preview', onDelegationPreview)
+      ws.off?.('delegation_preview_timeout', onDelegationPreviewTimeout)
+      ws.off?.('delegation_preview_ack_result', onDelegationPreviewAckResult)
     }
   }
 
@@ -512,6 +562,7 @@ export function useThreads() {
       }
       delete threadsBySession.value[sessionId]
     }
+    pendingPreviews.value = pendingPreviews.value.filter(p => p.sessionId !== sessionId)
     const idx = sessionAccessOrder.indexOf(sessionId)
     if (idx !== -1) sessionAccessOrder.splice(idx, 1)
   }
@@ -534,10 +585,16 @@ export function useThreads() {
     return pendingPreviews.value.filter(p => p.sessionId === sessionId)
   }
 
+  function clearSessionPreviews(sessionId: string): void {
+    if (!sessionId) return
+    pendingPreviews.value = pendingPreviews.value.filter(p => p.sessionId !== sessionId)
+  }
+
   // ackPreview sends the user's approval/rejection to the server and removes
-  // the pending preview from the local list. ws is passed explicitly because
-  // the composable doesn't hold a WS reference itself.
+  // the pending preview once the server confirms with delegation_preview_ack_result.
+  // ws is passed explicitly because the composable doesn't hold a WS reference itself.
   function ackPreview(ws: HuginnWS, preview: PendingPreview, approved: boolean): void {
+    markPreviewPendingDecision(preview.sessionId, preview.threadId, true)
     ws.send({
       type: 'delegation_preview_ack',
       session_id: preview.sessionId,
@@ -547,9 +604,6 @@ export function useThreads() {
         approved,
       },
     })
-    pendingPreviews.value = pendingPreviews.value.filter(
-      p => !(p.threadId === preview.threadId && p.sessionId === preview.sessionId)
-    )
   }
 
   return {
@@ -562,6 +616,7 @@ export function useThreads() {
     wireWS,
     clearSession,
     getSessionPreviews,
+    clearSessionPreviews,
     ackPreview,
     isAgentActive,
     threadsError,
