@@ -169,9 +169,11 @@ const (
 )
 
 type authFailLimiter struct {
-	mu      sync.Mutex
-	window  map[string][]time.Time
-	clockFn func() time.Time
+	mu          sync.Mutex
+	window      map[string][]time.Time
+	bannedUntil map[string]time.Time // IPs that crossed the threshold; compact representation
+	lastSweep   time.Time            // last time a full map sweep was performed
+	clockFn     func() time.Time
 }
 
 func newAuthFailLimiter() *authFailLimiter {
@@ -180,22 +182,55 @@ func newAuthFailLimiter() *authFailLimiter {
 
 func newAuthFailLimiterWithClock(fn func() time.Time) *authFailLimiter {
 	return &authFailLimiter{
-		window:  make(map[string][]time.Time),
-		clockFn: fn,
+		window:      make(map[string][]time.Time),
+		bannedUntil: make(map[string]time.Time),
+		clockFn:     fn,
 	}
 }
 
 // recordFailure records an auth failure for ip and returns true if the IP has
 // now exceeded authFailMaxPerMinute failures within authFailWindow.
+// When the threshold is crossed the per-IP slice is moved to the compact
+// bannedUntil map so the window map does not accumulate large slices.
+// A periodic sweep purges stale entries from both maps to prevent unbounded
+// growth from one-shot IPs that never return.
 func (a *authFailLimiter) recordFailure(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.clockFn()
 	cutoff := now.Add(-authFailWindow)
+
+	// Periodically sweep both maps to remove entries whose windows have expired.
+	// This ensures one-shot IPs (that fail once and never return) don't accumulate
+	// forever; at most authFailWindow worth of stale entries can exist at any time.
+	if now.After(a.lastSweep.Add(authFailWindow)) {
+		a.sweep(now)
+		a.lastSweep = now
+	}
+
+	// If the IP is already in the ban list and the ban has not expired, report
+	// it as still blocked without touching the window map.
+	if exp, ok := a.bannedUntil[ip]; ok {
+		if now.Before(exp) {
+			return true
+		}
+		// Ban expired; remove it so the IP can accumulate failures again.
+		delete(a.bannedUntil, ip)
+	}
+
 	times := a.evict(ip, cutoff)
 	times = append(times, now)
+
+	if len(times) > authFailMaxPerMinute {
+		// Threshold crossed: store a compact ban record and remove the slice to
+		// keep the window map lean.
+		a.bannedUntil[ip] = now.Add(authFailWindow)
+		delete(a.window, ip)
+		return true
+	}
+
 	a.window[ip] = times
-	return len(times) > authFailMaxPerMinute
+	return false
 }
 
 // isBlocked returns true if ip currently exceeds the failure threshold.
@@ -205,6 +240,15 @@ func (a *authFailLimiter) isBlocked(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.clockFn()
+
+	// Fast path: check the compact ban record first.
+	if exp, ok := a.bannedUntil[ip]; ok {
+		if now.Before(exp) {
+			return true
+		}
+		delete(a.bannedUntil, ip)
+	}
+
 	cutoff := now.Add(-authFailWindow)
 	times := a.evict(ip, cutoff)
 	if len(times) == 0 {
@@ -213,6 +257,31 @@ func (a *authFailLimiter) isBlocked(ip string) bool {
 	}
 	a.window[ip] = times
 	return len(times) > authFailMaxPerMinute
+}
+
+// sweep removes all expired entries from both internal maps.
+// Caller must hold a.mu.
+func (a *authFailLimiter) sweep(now time.Time) {
+	cutoff := now.Add(-authFailWindow)
+	for ip, times := range a.window {
+		j := 0
+		for _, t := range times {
+			if t.After(cutoff) {
+				times[j] = t
+				j++
+			}
+		}
+		if j == 0 {
+			delete(a.window, ip)
+		} else {
+			a.window[ip] = times[:j]
+		}
+	}
+	for ip, exp := range a.bannedUntil {
+		if !now.Before(exp) {
+			delete(a.bannedUntil, ip)
+		}
+	}
 }
 
 // evict removes entries older than cutoff and returns the pruned slice.
