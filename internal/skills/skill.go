@@ -36,6 +36,7 @@ type VersionedSkill interface {
 // SkillDef is the on-disk skill.json format.
 type SkillDef struct {
 	Name           string   `json:"name"`
+	Description    string   `json:"description,omitempty"`
 	ProviderCompat []string `json:"provider_compat,omitempty"`
 	PromptFile     string   `json:"prompt_file,omitempty"`
 	RulesFile      string   `json:"rules_file,omitempty"`
@@ -93,7 +94,7 @@ func LoadFromDir(dir string) (*FilesystemSkill, error) {
 }
 
 func (s *FilesystemSkill) Name() string                 { return s.def.Name }
-func (s *FilesystemSkill) Description() string          { return "" }
+func (s *FilesystemSkill) Description() string          { return s.def.Description }
 func (s *FilesystemSkill) SystemPromptFragment() string { return s.promptFragment }
 func (s *FilesystemSkill) RuleContent() string          { return s.ruleContent }
 
