@@ -3,6 +3,7 @@ package scheduler
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,6 +136,16 @@ func redactTarget(raw, deliveryType string) string {
 	}
 }
 
+// runID generates a unique workflow run ID for the given workflow.
+// A 4-character random hex suffix (2 bytes from crypto/rand) is appended to
+// the millisecond timestamp to prevent collisions when two runs of the same
+// workflow start within the same millisecond (e.g. concurrent triggers).
+func runID(workflowID string) string {
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("wf-%s-%d-%x", workflowID, time.Now().UnixMilli(), b)
+}
+
 // MakeWorkflowRunner builds a WorkflowRunner that:
 //  1. Executes steps in Position order, calling agentFn for each inline step.
 //  2. Respects per-step on_failure: stop|continue.
@@ -203,7 +214,7 @@ func MakeWorkflowRunner(
 		var anyStepFailed bool
 
 		run := &WorkflowRun{
-			ID:         fmt.Sprintf("wf-%s-%d", w.ID, time.Now().UnixMilli()),
+			ID:         runID(w.ID),
 			WorkflowID: w.ID,
 			Status:     WorkflowRunStatusRunning,
 			StartedAt:  time.Now().UTC(),
