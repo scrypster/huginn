@@ -40,7 +40,7 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	case r.URL.Query().Get("workflow_id") != "":
 		notifications, err = store.ListByWorkflow(r.URL.Query().Get("workflow_id"))
 	default:
-		notifications, err = store.ListPending()
+		notifications, err = store.ListPendingN(limit)
 	}
 	if err != nil {
 		jsonError(w, 500, err.Error())
@@ -48,9 +48,6 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	}
 	if notifications == nil {
 		notifications = []*notification.Notification{}
-	}
-	if len(notifications) > limit {
-		notifications = notifications[:limit]
 	}
 	jsonOK(w, notifications)
 }
@@ -156,17 +153,13 @@ func (s *Server) handleInboxSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	// Load up to defaultNotificationLimit items to count urgent ones.
 	// Beyond this cap, urgent_count is a lower bound — acceptable for a badge.
-	pending, err := store.ListPending()
+	pending, err := store.ListPendingN(defaultNotificationLimit)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
 	}
 	urgentCount := 0
-	limit := defaultNotificationLimit
-	for i, n := range pending {
-		if i >= limit {
-			break
-		}
+	for _, n := range pending {
 		if n.Severity == notification.SeverityUrgent {
 			urgentCount++
 		}

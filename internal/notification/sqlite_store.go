@@ -138,6 +138,26 @@ func (s *SQLiteNotificationStore) ListPending() ([]*Notification, error) {
 	return scanNotifications(rows)
 }
 
+// ListPendingN returns up to limit pending notifications, newest first.
+// If limit <= 0 all pending notifications are returned.
+func (s *SQLiteNotificationStore) ListPendingN(limit int) ([]*Notification, error) {
+	if limit <= 0 {
+		return s.ListPending()
+	}
+	rows, err := s.db.Read().Query(`
+		SELECT id, routine_id, run_id, satellite_id, workflow_id, workflow_run_id,
+		       summary, detail, severity, status, session_id, proposed_actions,
+		       step_position, step_name, deliveries,
+		       created_at, updated_at, expires_at
+		FROM notifications WHERE status = ? ORDER BY id DESC LIMIT ?`,
+		string(StatusPending), limit)
+	if err != nil {
+		return nil, fmt.Errorf("notification: list pending n: %w", err)
+	}
+	defer rows.Close()
+	return scanNotifications(rows)
+}
+
 // ListByRoutine returns all notifications for a routine, newest first.
 func (s *SQLiteNotificationStore) ListByRoutine(routineID string) ([]*Notification, error) {
 	rows, err := s.db.Read().Query(`
