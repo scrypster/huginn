@@ -204,6 +204,7 @@ func MakeWorkflowRunner(
 		// (Phase 2) so an agent in step N can stash a value that step M reads.
 		// Lives only for the duration of this run; never persisted.
 		runScratch := map[string]string{}
+		var scratchMu sync.Mutex
 		// Phase 5: seed scratch from trigger-supplied inputs so the very first
 		// step can reference {{run.scratch.KEY}} without a predecessor step.
 		// Used by manual runs (POST /run with body) and webhook triggers.
@@ -544,11 +545,12 @@ func MakeWorkflowRunner(
 				}
 				// Plumb a scratchpad writer onto the step context. Tools (e.g.
 				// future set_scratch PromptTool) read this via ScratchSetter and
-				// can mutate the live runScratch map. Mutex-free is safe because
-				// linear workflows execute one step at a time; when fan-out lands
-				// (Phase 8) this needs a sync.Map or per-call mutex.
+				// can mutate the live runScratch map. scratchMu guards the write
+				// so this is safe under parallel fan-out (Phase 8).
 				scratchSetter := func(k, v string) error {
+					scratchMu.Lock()
 					runScratch[k] = v
+					scratchMu.Unlock()
 					return nil
 				}
 				stepCtx = WithScratchSetter(stepCtx, scratchSetter)
