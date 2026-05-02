@@ -355,6 +355,15 @@ func (h *WSHub) unregisterClient(c *wsClient) {
 	}
 }
 
+// DeleteSessionSeq removes the sequence counter for sessionID.
+// Call this when a session is permanently deleted so the entry does not
+// accumulate and so a recycled session ID starts fresh.
+func (h *WSHub) DeleteSessionSeq(sessionID string) {
+	h.seqMu.Lock()
+	delete(h.sessionSeq, sessionID)
+	h.seqMu.Unlock()
+}
+
 // isLocalhostOrigin returns true when the origin URL refers to a loopback
 // address (127.x.x.x / ::1 / localhost).
 func isLocalhostOrigin(origin string) bool {
