@@ -175,6 +175,7 @@ export interface WorkflowEvent {
 
 const workflows = ref<Workflow[]>([])
 const loading = ref(false)
+const fetchWorkflowsError = ref<string | null>(null)
 const liveEvents = ref<Record<string, WorkflowEvent[]>>({})
 
 export function useWorkflows() {
@@ -184,11 +185,14 @@ export function useWorkflows() {
 
   async function fetchWorkflows() {
     loading.value = true
+    fetchWorkflowsError.value = null
     try {
       const data = await fetch('/api/v1/workflows', {
         headers: authHeaders(),
       }).then(r => r.json())
       workflows.value = Array.isArray(data) ? data : []
+    } catch (err: unknown) {
+      fetchWorkflowsError.value = err instanceof Error ? err.message : 'Failed to load workflows'
     } finally {
       loading.value = false
     }
@@ -394,6 +398,7 @@ export function useWorkflows() {
   return {
     workflows,
     loading,
+    fetchWorkflowsError,
     liveEvents,
     fetchWorkflows,
     fetchTemplates,

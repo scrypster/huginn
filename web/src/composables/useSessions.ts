@@ -157,7 +157,10 @@ export function useSessions() {
 
   async function createSession(spaceId?: string): Promise<Session> {
     const data = await api.sessions.create(spaceId) as unknown as { session_id?: string; id?: string }
-    const id = data.id ?? data.session_id ?? crypto.randomUUID()
+    const id = data.id ?? data.session_id
+    if (!id) {
+      throw new Error('Server did not return a session ID')
+    }
     const session: Session = {
       id,
       agent_id: 'default',
