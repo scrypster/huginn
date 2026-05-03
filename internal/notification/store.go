@@ -158,18 +158,21 @@ func (s *Store) ExpireRun(runID string) error {
 	for _, id := range ids {
 		data, closer, err := snap.Get([]byte(pfxByID + id))
 		if err != nil {
+			slog.Warn("notification: expire run: failed to read notification", "id", id, "err", err)
 			continue
 		}
 		var n Notification
 		unmarshalErr := json.Unmarshal(data, &n)
 		closer.Close()
 		if unmarshalErr != nil {
+			slog.Warn("notification: expire run: corrupt record, skipping", "id", id, "err", unmarshalErr)
 			continue
 		}
 		n.ExpiresAt = &now
 		n.UpdatedAt = now
 		updated, err := json.Marshal(&n)
 		if err != nil {
+			slog.Warn("notification: expire run: failed to marshal updated notification", "id", id, "err", err)
 			continue
 		}
 		b.Set([]byte(pfxByID+id), updated, nil)
@@ -302,12 +305,14 @@ func (s *Store) PruneExpired(ctx context.Context) (int, error) {
 		for _, id := range batch {
 			data, closer, err := snap.Get([]byte(pfxByID + id))
 			if err != nil {
+				slog.Warn("notification: prune expired: failed to read notification", "id", id, "err", err)
 				continue
 			}
 			var n Notification
 			unmarshalErr := json.Unmarshal(data, &n)
 			closer.Close()
 			if unmarshalErr != nil {
+				slog.Warn("notification: prune expired: corrupt record, skipping", "id", id, "err", unmarshalErr)
 				continue
 			}
 			if n.ExpiresAt != nil && !n.ExpiresAt.IsZero() && n.ExpiresAt.Before(now) {
