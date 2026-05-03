@@ -919,6 +919,7 @@
       <div class="px-4 pb-4 flex-shrink-0">
         <ChatEditor
           ref="chatEditorRef"
+          :disabled="streaming"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
           @send="handleEditorSend"
         />
@@ -1154,7 +1155,13 @@ watch(hydrationQueueOverflowed, (overflowed) => {
   }, 8_000)
 })
 
-function dismissBlockedThreadToast(threadId: string) {
+function dismissBlockedThreadToast(threadId?: string) {
+  if (threadId === undefined) {
+    blockedThreadToasts.value = []
+    blockedThreadToastTimers.forEach(t => clearTimeout(t))
+    blockedThreadToastTimers.clear()
+    return
+  }
   blockedThreadToasts.value = blockedThreadToasts.value.filter(t => t.threadId !== threadId)
   const timer = blockedThreadToastTimers.get(threadId)
   if (timer) {

@@ -59,7 +59,7 @@ func SetLevel(level slog.Level) {
 }
 
 // Level returns the current minimum log level of the global logger.
-// Returns slog.LevelInfo if Init has not been called.
+// Returns slog.LevelWarn if Init/InitWithLevel has not been called yet.
 func Level() slog.Level {
 	globalMu.RLock()
 	l := globalLogger
@@ -67,7 +67,7 @@ func Level() slog.Level {
 	if l != nil {
 		return l.Level()
 	}
-	return slog.LevelInfo
+	return slog.LevelWarn
 }
 
 // L returns the global logger. Falls back to a no-op logger if Init was not called.
@@ -162,9 +162,9 @@ func (l *Logger) Level() slog.Level {
 	return slog.LevelWarn
 }
 
-// New creates a Logger writing to path at slog.LevelWarn. Rotates at 10 MB.
+// New creates a Logger writing to path at slog.LevelInfo. Rotates at 10 MB.
 func New(path string) (*Logger, error) {
-	return NewWithLevel(path, slog.LevelWarn)
+	return NewWithLevel(path, slog.LevelInfo)
 }
 
 // NewWithLevel creates a Logger writing to path at the given minimum level.

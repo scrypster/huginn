@@ -36,6 +36,13 @@ func (m *mockNotifStore) ExpireRun(id string) error  { return nil }
 func (m *mockNotifStore) ListPendingN(limit int) ([]*notification.Notification, error) {
 	return nil, nil
 }
+func (m *mockNotifStore) ListByRoutineN(routineID string, limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) ListByWorkflowN(workflowID string, limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) PruneExpired(ctx context.Context) (int, error) { return 0, nil }
 
 func newTestRunStore() *WorkflowRunStore {
 	dir, err := os.MkdirTemp("", "huginn-test-*")

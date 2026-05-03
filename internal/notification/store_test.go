@@ -188,13 +188,22 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 	s := notification.NewStore(db)
 
 	const total = 10
-	var lastID string
+	ids := make([]string, 0, total)
 	for i := 0; i < total; i++ {
 		n := makeNotif("routineA", "run1", notification.SeverityInfo)
 		if err := s.Put(n); err != nil {
 			t.Fatal(err)
 		}
-		lastID = n.ID
+		ids = append(ids, n.ID)
+	}
+	// Newest-first means lexicographically largest ULID first (ULID sorts by time).
+	// Find the max ID across all inserted notifications — that is what the store
+	// should return as got[0] regardless of insertion order within a millisecond.
+	maxID := ids[0]
+	for _, id := range ids[1:] {
+		if id > maxID {
+			maxID = id
+		}
 	}
 
 	got, err := s.ListPendingN(5)
@@ -204,9 +213,9 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 	if len(got) != 5 {
 		t.Fatalf("want 5, got %d", len(got))
 	}
-	// The first result should be the most recently created notification (newest first).
-	if got[0].ID != lastID {
-		t.Errorf("want first result to be newest ID %s, got %s", lastID, got[0].ID)
+	// The first result should be the lexicographically largest (newest) notification.
+	if got[0].ID != maxID {
+		t.Errorf("want first result to be newest ID %s, got %s", maxID, got[0].ID)
 	}
 
 	// limit=0 should return all
@@ -218,7 +227,7 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 		t.Fatalf("want %d with limit=0, got %d", total, len(all))
 	}
 	// limit=0 result should also be newest-first
-	if all[0].ID != lastID {
-		t.Errorf("want first result (no limit) to be newest ID %s, got %s", lastID, all[0].ID)
+	if all[0].ID != maxID {
+		t.Errorf("want first result (no limit) to be newest ID %s, got %s", maxID, all[0].ID)
 	}
 }
