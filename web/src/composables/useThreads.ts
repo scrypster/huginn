@@ -360,7 +360,6 @@ export function useThreads() {
       if (p.task) t.Task = p.task
       if (p.parent_message_id) t.parentMessageId = p.parent_message_id
       startTicker(sid, p.thread_id!)
-      removePendingPreview(sid, p.thread_id!)
       debouncedPersist(sid)
     }
 
@@ -428,7 +427,6 @@ export function useThreads() {
       }
       t.streamingContent = ''
       stopTicker(sid, tid)
-      removePendingPreview(sid, tid)
       debouncedPersist(sid)
     }
 
