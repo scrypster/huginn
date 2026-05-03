@@ -919,6 +919,7 @@
       <div class="px-4 pb-4 flex-shrink-0">
         <ChatEditor
           ref="chatEditorRef"
+          :disabled="streaming"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
           @send="handleEditorSend"
         />
