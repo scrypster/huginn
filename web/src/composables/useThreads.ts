@@ -602,6 +602,8 @@ export function useThreads() {
         approved,
       },
     })
+    // Remove immediately on user decision — don't wait for server ack_result.
+    removePendingPreview(preview.sessionId, preview.threadId)
   }
 
   return {
