@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -15,58 +17,57 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/scrypster/huginn/internal/agent"
+	agentsession "github.com/scrypster/huginn/internal/agent/session"
 	agentslib "github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
-	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/compact"
 	"github.com/scrypster/huginn/internal/config"
+	"github.com/scrypster/huginn/internal/connections"
+	"github.com/scrypster/huginn/internal/connections/broker"
+	connproviders "github.com/scrypster/huginn/internal/connections/providers"
+	conntools "github.com/scrypster/huginn/internal/connections/tools"
 	"github.com/scrypster/huginn/internal/headless"
+	"github.com/scrypster/huginn/internal/logger"
+	"github.com/scrypster/huginn/internal/mcp"
 	"github.com/scrypster/huginn/internal/memory"
 	"github.com/scrypster/huginn/internal/modelconfig"
-	"github.com/scrypster/huginn/internal/pricing"
-	"github.com/scrypster/huginn/internal/proactivity"
 	modelslib "github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notepad"
+	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/permissions"
+	"github.com/scrypster/huginn/internal/pricing"
+	"github.com/scrypster/huginn/internal/proactivity"
+	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/repo"
 	"github.com/scrypster/huginn/internal/runtime"
+	"github.com/scrypster/huginn/internal/scheduler"
 	"github.com/scrypster/huginn/internal/search"
 	"github.com/scrypster/huginn/internal/search/hnsw"
+	"github.com/scrypster/huginn/internal/server"
+	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/skills"
-	"github.com/scrypster/huginn/internal/workspace"
-	"github.com/scrypster/huginn/internal/stats"
+	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/sqlitedb"
+	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/storage"
 	"github.com/scrypster/huginn/internal/symbol"
 	"github.com/scrypster/huginn/internal/symbol/goext"
 	"github.com/scrypster/huginn/internal/symbol/heuristic"
 	"github.com/scrypster/huginn/internal/symbol/lsp"
 	"github.com/scrypster/huginn/internal/symbol/tsext"
-	"github.com/scrypster/huginn/internal/connections"
-	"github.com/scrypster/huginn/internal/connections/broker"
-	connproviders "github.com/scrypster/huginn/internal/connections/providers"
-	conntools "github.com/scrypster/huginn/internal/connections/tools"
-	"github.com/scrypster/huginn/internal/mcp"
-	"github.com/scrypster/huginn/internal/notification"
-	"github.com/scrypster/huginn/internal/relay"
-	"github.com/scrypster/huginn/internal/scheduler"
-	"github.com/scrypster/huginn/internal/server"
-	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/threadmgr"
-	"github.com/scrypster/huginn/internal/session"
-	agentsession "github.com/scrypster/huginn/internal/agent/session"
 	"github.com/scrypster/huginn/internal/tools"
 	traypkg "github.com/scrypster/huginn/internal/tray"
 	"github.com/scrypster/huginn/internal/tui"
-	"github.com/cockroachdb/pebble/v2"
+	"github.com/scrypster/huginn/internal/workspace"
 )
 
 // version is set at build time via -ldflags="-X main.version=<tag>".
@@ -75,20 +76,21 @@ var version = "dev"
 
 func main() {
 	// --- Flags ---
-	versionFlag                  := flag.Bool("version", false, "print version and exit")
-	headlessFlag                 := flag.Bool("headless", false, "run in headless mode (no TUI)")
-	cwdFlag                      := flag.String("cwd", "", "working directory (headless mode)")
-	commandFlag                  := flag.String("command", "", "slash command to run (headless mode)")
-	jsonFlag                     := flag.Bool("json", false, "output JSON (headless mode)")
-	workspaceFlag                := flag.String("workspace", "", "path to huginn.workspace.json")
-	dangerouslySkipPermissions   := flag.Bool("dangerously-skip-permissions", false, "skip all permission prompts (allows all tool use without approval)")
-	noToolsFlag                  := flag.Bool("no-tools", false, "disable tool use (plain chat mode)")
-	maxTurnsFlag                 := flag.Int("max-turns", 0, "max agentic loop turns (0 = use config default)")
-	modelFlag                    := flag.String("model", "", "set coder model (overrides config)")
-	printFlag                    := flag.String("print", "", "non-interactive: run message and print response, then exit")
-	endpointFlag                 := flag.String("endpoint", "", "OpenAI-compatible backend endpoint (overrides config)")
-	agentFlag                    := flag.String("agent", "", "run with a specific named agent (e.g. 'Chris'); omit message to launch TUI")
-	noTrayFlag                   := flag.Bool("no-tray", false, "disable system tray (headless/CI mode)")
+	versionFlag := flag.Bool("version", false, "print version and exit")
+	headlessFlag := flag.Bool("headless", false, "run in headless mode (no TUI)")
+	cwdFlag := flag.String("cwd", "", "working directory (headless mode)")
+	commandFlag := flag.String("command", "", "slash command to run (headless mode)")
+	jsonFlag := flag.Bool("json", false, "output JSON (headless mode)")
+	workspaceFlag := flag.String("workspace", "", "path to huginn.workspace.json")
+	dangerouslySkipPermissions := flag.Bool("dangerously-skip-permissions", false, "skip all permission prompts (allows all tool use without approval)")
+	noToolsFlag := flag.Bool("no-tools", false, "disable tool use (plain chat mode)")
+	maxTurnsFlag := flag.Int("max-turns", 0, "max agentic loop turns (0 = use config default)")
+	modelFlag := flag.String("model", "", "set coder model (overrides config)")
+	printFlag := flag.String("print", "", "non-interactive: run message and print response, then exit")
+	endpointFlag := flag.String("endpoint", "", "OpenAI-compatible backend endpoint (overrides config)")
+	agentFlag := flag.String("agent", "", "run with a specific named agent (e.g. 'Chris'); omit message to launch TUI")
+	noTrayFlag := flag.Bool("no-tray", false, "disable system tray (headless/CI mode)")
+	logLevelFlag := flag.String("log-level", "", "log verbosity: debug, info, warn, error (default: warn; env: HUGINN_LOG_LEVEL)")
 	flag.StringVar(printFlag, "p", "", "shorthand for --print")
 	flag.Parse()
 
@@ -193,7 +195,7 @@ func main() {
 				os.Exit(1)
 			}
 			return
-	case "skill":
+		case "skill":
 			if err := cmdSkill(flag.Args()[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "skill: %v\n", err)
 				os.Exit(1)
@@ -236,10 +238,15 @@ func main() {
 	// logger.Init sets the package-level global so that logger.Error() calls in ws.go
 	// and other packages write to the file rather than being silently discarded.
 	huginnHome, _ := huginnDir()
-	_ = logger.Init(huginnHome)
+	// Resolve log level: --log-level flag > HUGINN_LOG_LEVEL env var > default (warn).
+	resolvedLogLevel := resolveLogLevel(*logLevelFlag)
+	_ = logger.InitWithLevel(huginnHome, resolvedLogLevel)
+	// Also apply the level to the global slog default so package-level slog.*
+	// calls (e.g. in internal packages) respect the same threshold.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: resolvedLogLevel})))
 	appLog := logger.L()
 	defer appLog.Close()
-	appLog.Info("huginn starting", "version", version)
+	appLog.Info("huginn starting", "version", version, "log_level", resolvedLogLevel.String())
 
 	// 1d. Install crash handler — writes to ~/.huginn/crash/<timestamp>.txt on panic.
 	crashDir := filepath.Join(huginnHome, "crash")
@@ -968,8 +975,8 @@ func main() {
 					}
 					return nil
 				},
-				HTTPProxy:   makeLocalHTTPProxy(tuiServerAddr, tuiServerToken),
-				Active:      activeSessions,
+				HTTPProxy: makeLocalHTTPProxy(tuiServerAddr, tuiServerToken),
+				Active:    activeSessions,
 			}))
 			// Cancel all in-flight remote sessions on graceful shutdown.
 			defer activeSessions.CancelAll()
@@ -1275,6 +1282,28 @@ func sanitizePath(p string) string {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "huginn: error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// resolveLogLevel returns the slog.Level for the given flag value, falling back
+// to the HUGINN_LOG_LEVEL environment variable, then to slog.LevelWarn.
+// Unrecognised values are silently treated as slog.LevelWarn.
+func resolveLogLevel(flagVal string) slog.Level {
+	raw := strings.TrimSpace(flagVal)
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("HUGINN_LOG_LEVEL"))
+	}
+	switch strings.ToLower(raw) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelWarn
+	}
 }
 
 // needsOnboarding returns true if the managed runtime or at least one model is not yet installed.
@@ -2349,7 +2378,26 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	ca := threadmgr.NewCostAccumulator(0) // 0 = unlimited; no budget field in config
 	srv.SetCostAccumulator(ca)
 
-	previewGate := threadmgr.NewDelegationPreviewGate(false) // disabled by default; no config field
+	previewMode := strings.ToLower(strings.TrimSpace(os.Getenv("HUGINN_DELEGATION_PREVIEW_MODE")))
+	if previewMode == "" {
+		previewMode = "manual"
+	}
+	// Backward-compatible boolean env: off disables preview; true/1 forces manual mode.
+	if raw := strings.TrimSpace(os.Getenv("HUGINN_DELEGATION_PREVIEW")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "0", "false", "off", "no":
+			previewMode = "off"
+		default:
+			previewMode = "manual"
+		}
+	}
+	previewTimeout := 30 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("HUGINN_DELEGATION_PREVIEW_TIMEOUT_SECS")); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			previewTimeout = time.Duration(secs) * time.Second
+		}
+	}
+	previewGate := threadmgr.NewDelegationPreviewGateWithConfig(previewMode, previewTimeout)
 	srv.SetPreviewGate(previewGate)
 
 	// ── Spaces store ─────────────────────────────────────────────────────
@@ -2397,14 +2445,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 
 	// Use SQLite store if available; fall back to Pebble store.
 	var notifStore notification.StoreInterface
+	prunerCtx, prunerCancel := context.WithCancel(context.Background())
+	cleanupFns = append(cleanupFns, prunerCancel)
 	if sqlDB != nil {
-		notifStore = notification.NewSQLiteNotificationStore(sqlDB)
+		sqlNotifStore := notification.NewSQLiteNotificationStore(sqlDB)
 		// Purge expired notifications on startup (non-fatal).
-		sqlDB.Write().Exec(
-			`DELETE FROM notifications WHERE expires_at IS NOT NULL AND expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-		)
+		if _, pruneErr := sqlNotifStore.PruneExpired(context.Background()); pruneErr != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: startup notification prune: %v\n", pruneErr)
+		}
+		sqlNotifStore.StartPruner(prunerCtx, 15*time.Minute)
+		notifStore = sqlNotifStore
 	} else {
-		notifStore = notification.NewStore(notifDB)
+		pebbleNotifStore := notification.NewStore(notifDB)
+		pebbleNotifStore.StartPruner(prunerCtx, 15*time.Minute)
+		notifStore = pebbleNotifStore
 	}
 	srv.SetNotificationStore(notifStore)
 
@@ -2840,6 +2894,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				// Broadcast function routes events to WS clients.
 				broadcastFn := func(sid, msgType string, payload map[string]any) {
 					srv.BroadcastToSession(sid, msgType, payload)
+				}
+
+				// Optional pre-flight delegation gate (enabled by default). When rejected,
+				// cancel the thread before it can run and surface a clear tool error.
+				if !previewGate.Approve(ctx, sessionID, t.ID, p.AgentName, p.Task, parentMsgID, broadcastFn) {
+					tm.Cancel(t.ID)
+					return threadmgr.DelegateResult{
+						ThreadID: t.ID,
+						Err:      fmt.Errorf("delegation to %q was not approved", p.AgentName),
+					}
 				}
 
 				// Use the server's lifecycle context for spawned threads — NOT the
@@ -3288,8 +3352,12 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		srv.SetStatsPersister(servePersister)
 		// Forward CostAccumulator events to the persister for SQLite storage.
 		ca.SetCostSink(func(threadID string, costUSD float64, promptTokens, completionTokens int) {
+			sessionID := threadID // fallback: use threadID if thread not found
+			if t, ok := tm.Get(threadID); ok {
+				sessionID = t.SessionID
+			}
 			servePersister.EnqueueCost(stats.CostEvent{
-				SessionID:        threadID,
+				SessionID:        sessionID,
 				CostUSD:          costUSD,
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
@@ -3363,7 +3431,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					}
 				}()
 			}
-			
+
 			// Use relay.GetMachineID() (8-char hex) — NOT cfg.MachineID (full hostname-hex).
 			// The cloud hub registers satellites under relay.GetMachineID(); using cfg.MachineID
 			// causes the machine ID filter to silently drop all relayed messages.
@@ -3457,8 +3525,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					}
 					return nil
 				},
-				HTTPProxy:   makeLocalHTTPProxy(srv.Addr(), token),
-				Active:      activeSessions,
+				HTTPProxy: makeLocalHTTPProxy(srv.Addr(), token),
+				Active:    activeSessions,
 			}))
 			cleanupFns = append(cleanupFns, activeSessions.CancelAll)
 		}
@@ -3823,9 +3891,10 @@ func cmdCloud(cfg *config.Config, args []string) error {
 
 // cmdRelayRegister handles relay registration with optional fleet token support.
 // Usage:
-//   huginn relay register                           # Interactive browser flow
-//   huginn relay register --fleet-token <token>     # Pre-provisioned MDM token
-//   huginn relay register --fleet-token-file <path> # Read token from file
+//
+//	huginn relay register                           # Interactive browser flow
+//	huginn relay register --fleet-token <token>     # Pre-provisioned MDM token
+//	huginn relay register --fleet-token-file <path> # Read token from file
 func cmdRelayRegister() error {
 	fs := flag.NewFlagSet("relay register", flag.ContinueOnError)
 	fleetToken := fs.String("fleet-token", "", "pre-provisioned machine JWT for MDM/fleet deployment")

@@ -186,6 +186,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   const loadError = ref(false)
   const loadErrorMsg = ref('')
   const showDeleteConfirm = ref(false)
+  const wildcardStripped = ref(false)
   const availableModels = ref<OllamaModel[]>([])
   const modelsLoading = ref(false)
   const modelsError = ref('')
@@ -711,7 +712,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     form.value.local_tools = [...modalLocalTools.value]
     showLocalAccessModal.value = false
     if (agentName.value && agentName.value !== 'new') {
-      await save()
+      await save({ skipToolbeltValidation: true })
     } else {
       markDirty()
     }
@@ -791,6 +792,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   }
 
   async function loadAgent(name: string) {
+    wildcardStripped.value = false
     try {
       const data = await api.agents.get(name) as unknown as AgentForm
       const memType = deriveMemoryType(data)
@@ -806,12 +808,14 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         vault_name: (data as any).vault_name || '',
         memory_mode: (data.memory_mode as MemoryMode) || 'conversational',
         vault_description: (data as any).vault_description || '',
-        toolbelt: (data as any).toolbelt || [],
+        toolbelt: ((data as any).toolbelt || []).filter((e: any) => e.provider !== '*'),
         skills: (data as any).skills || [],
         local_tools: (data as any).local_tools ?? [],
         heartbeat_enabled: (data as any).heartbeat_enabled ?? false,
         heartbeat_cron: (data as any).heartbeat_cron ?? '',
       }
+      const hadWildcards = ((data as any).toolbelt || []).some((e: any) => e.provider === '*')
+      wildcardStripped.value = hadWildcards
       original.value = JSON.stringify(form.value)
       dirty.value = false
       saveMsg.value = ''
@@ -849,18 +853,20 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     return null
   }
 
-  async function save() {
+  async function save(options?: { skipToolbeltValidation?: boolean }) {
     const validationError = validateAgentForm()
     if (validationError) {
       saveMsg.value = validationError
       saveError.value = true
       return
     }
-    const toolbeltValid = await capabilityMatrix.validateToolbelt(form.value.toolbelt)
-    if (!toolbeltValid || capabilityMatrix.hasIssues(form.value.toolbelt)) {
-      saveMsg.value = capabilityMatrix.firstReason(form.value.toolbelt) || 'Invalid connection assignment.'
-      saveError.value = true
-      return
+    if (!options?.skipToolbeltValidation) {
+      const toolbeltValid = await capabilityMatrix.validateToolbelt(form.value.toolbelt)
+      if (!toolbeltValid || capabilityMatrix.hasIssues(form.value.toolbelt)) {
+        saveMsg.value = capabilityMatrix.firstReason(form.value.toolbelt) || 'Invalid connection assignment.'
+        saveError.value = true
+        return
+      }
     }
     saving.value = true
     saveMsg.value = ''
@@ -894,6 +900,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   function discard() {
     form.value = JSON.parse(original.value)
     dirty.value = false
+    wildcardStripped.value = false
   }
 
   function confirmDelete() { showDeleteConfirm.value = true }
@@ -1000,6 +1007,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     loadError,
     loadErrorMsg,
     showDeleteConfirm,
+    wildcardStripped,
     availableModels,
     modelsLoading,
     modelsError,

@@ -72,6 +72,6 @@ describe('useAgentCapabilityMatrix', () => {
     const state = useAgentCapabilityMatrix()
     expect(state.hasIssues([{ connection_id: '*', provider: '*', approval_gate: false }])).toBe(true)
     expect(state.firstReason([{ connection_id: '*', provider: '*', approval_gate: false }]))
-      .toContain('Wildcard provider assignment is not allowed')
+      .toContain('Legacy wildcard connection')
   })
 })

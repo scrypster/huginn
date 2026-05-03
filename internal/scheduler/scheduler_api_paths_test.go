@@ -121,8 +121,14 @@ func TestScheduler_RunWorkflowSyncWithInputs_ReturnsPersistedRun(t *testing.T) {
 		if InitialInputs(ctx)["from"] != "api" {
 			t.Fatalf("expected inputs to be forwarded to sync runner")
 		}
+		// Use the pre-generated run ID injected by RunWorkflowSyncWithInputs so
+		// the caller can look the run up by ID after the runner returns.
+		id := pregenRunIDFromContext(ctx)
+		if id == "" {
+			id = "run-sync-1"
+		}
 		run := &WorkflowRun{
-			ID:         "run-sync-1",
+			ID:         id,
 			WorkflowID: w.ID,
 			StartedAt:  time.Now().UTC(),
 			Status:     WorkflowRunStatusComplete,
@@ -135,7 +141,7 @@ func TestScheduler_RunWorkflowSyncWithInputs_ReturnsPersistedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunWorkflowSyncWithInputs: %v", err)
 	}
-	if run == nil || run.ID != "run-sync-1" {
+	if run == nil {
 		t.Fatalf("unexpected run: %+v", run)
 	}
 }

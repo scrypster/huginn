@@ -194,6 +194,12 @@ export function useEditor(options: {
     dom?.focus()
   }
 
+  function setText(content: string) {
+    if (!editor.value) return
+    editor.value.commands.setContent(content)
+    focus()
+  }
+
   function isEmpty(): boolean {
     return editor.value?.isEmpty ?? true
   }
@@ -202,5 +208,5 @@ export function useEditor(options: {
     editor.value?.destroy()
   })
 
-  return { editor, init, getMarkdown, clear, focus, isEmpty }
+  return { editor, init, getMarkdown, clear, focus, setText, isEmpty }
 }

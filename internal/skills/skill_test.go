@@ -101,6 +101,33 @@ func TestLoadFromDir_CustomPromptFile(t *testing.T) {
 	}
 }
 
+func TestFilesystemSkill_Description_FromManifest(t *testing.T) {
+	dir := makeSkillDir(t, map[string]string{
+		"skill.json": `{"name":"desc-skill","description":"A skill with a description"}`,
+		"prompt.md":  "Some prompt.",
+	})
+	s, err := LoadFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	if s.Description() != "A skill with a description" {
+		t.Errorf("Description() = %q, want %q", s.Description(), "A skill with a description")
+	}
+}
+
+func TestFilesystemSkill_Description_EmptyWhenNotSet(t *testing.T) {
+	dir := makeSkillDir(t, map[string]string{
+		"skill.json": `{"name":"no-desc-skill"}`,
+	})
+	s, err := LoadFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	if s.Description() != "" {
+		t.Errorf("Description() = %q, want empty string", s.Description())
+	}
+}
+
 func TestLoadFromDir_InvalidJSON_ReturnsError(t *testing.T) {
 	dir := makeSkillDir(t, map[string]string{
 		"skill.json": `{not valid json`,

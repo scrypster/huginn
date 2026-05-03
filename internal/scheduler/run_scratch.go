@@ -74,3 +74,28 @@ func ScratchSetter(ctx context.Context) ScratchSetterFunc {
 	v, _ := ctx.Value(scratchKey{}).(ScratchSetterFunc)
 	return v
 }
+
+// pregenRunIDKey is the context key for a pre-generated run ID injected by
+// RunWorkflowSyncWithInputs before it launches a sub-workflow. The runner
+// checks this key when creating a new WorkflowRun; if present it uses the
+// supplied ID instead of generating a fresh one, so the caller can look up
+// the run by ID after the runner returns without relying on a time-window
+// heuristic.
+type pregenRunIDKey struct{}
+
+// WithPregenRunID returns a derived context carrying the given run ID string.
+// Used exclusively by RunWorkflowSyncWithInputs to inject a deterministic ID
+// before invoking the workflow runner.
+func WithPregenRunID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, pregenRunIDKey{}, id)
+}
+
+// pregenRunIDFromContext returns the pre-generated run ID from the context, or
+// "" if none was set.
+func pregenRunIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(pregenRunIDKey{}).(string)
+	return v
+}

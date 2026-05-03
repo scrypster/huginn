@@ -129,6 +129,51 @@ func TestStore_Delete_InvalidIDReturnsError(t *testing.T) {
 	}
 }
 
+// TestStore_Delete_EvictsAppendMutexEntries verifies that Delete removes all
+// appendMu entries for the session — both the bare session key and any
+// per-thread keys created by AppendToThread — so that the sync.Map does not
+// grow unboundedly over the process lifetime.
+func TestStore_Delete_EvictsAppendMutexEntries(t *testing.T) {
+	store := NewStore(t.TempDir())
+	sess := store.New("evict-mu-test", "/ws", "model")
+	if err := store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	// Trigger creation of the session-level mutex via Append.
+	if err := store.Append(sess, SessionMessage{Role: "user", Content: "hello"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Trigger creation of a per-thread mutex via AppendToThread.
+	const threadID = "01THREADIDXXXXXXXXXXXXX"
+	if err := store.AppendToThread(sess.ID, threadID, SessionMessage{Role: "assistant", Content: "reply"}); err != nil {
+		t.Fatalf("AppendToThread: %v", err)
+	}
+
+	// Both entries must now exist in the map.
+	if _, ok := store.appendMu.Load(sess.ID); !ok {
+		t.Fatal("expected session-level appendMu entry to exist before Delete")
+	}
+	threadKey := sess.ID + "/thread/" + threadID
+	if _, ok := store.appendMu.Load(threadKey); !ok {
+		t.Fatal("expected per-thread appendMu entry to exist before Delete")
+	}
+
+	// Delete the session.
+	if err := store.Delete(sess.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Both entries must now be gone.
+	if _, ok := store.appendMu.Load(sess.ID); ok {
+		t.Error("session-level appendMu entry was not evicted after Delete")
+	}
+	if _, ok := store.appendMu.Load(threadKey); ok {
+		t.Error("per-thread appendMu entry was not evicted after Delete")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Store.Load edge cases
 // ---------------------------------------------------------------------------

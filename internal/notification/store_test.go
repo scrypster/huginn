@@ -181,3 +181,53 @@ func TestStore_ListByWorkflow(t *testing.T) {
 		t.Error("WorkflowRunID mismatch")
 	}
 }
+
+func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	s := notification.NewStore(db)
+
+	const total = 10
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		n := makeNotif("routineA", "run1", notification.SeverityInfo)
+		if err := s.Put(n); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, n.ID)
+	}
+	// Newest-first means lexicographically largest ULID first (ULID sorts by time).
+	// Find the max ID across all inserted notifications — that is what the store
+	// should return as got[0] regardless of insertion order within a millisecond.
+	maxID := ids[0]
+	for _, id := range ids[1:] {
+		if id > maxID {
+			maxID = id
+		}
+	}
+
+	got, err := s.ListPendingN(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("want 5, got %d", len(got))
+	}
+	// The first result should be the lexicographically largest (newest) notification.
+	if got[0].ID != maxID {
+		t.Errorf("want first result to be newest ID %s, got %s", maxID, got[0].ID)
+	}
+
+	// limit=0 should return all
+	all, err := s.ListPendingN(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != total {
+		t.Fatalf("want %d with limit=0, got %d", total, len(all))
+	}
+	// limit=0 result should also be newest-first
+	if all[0].ID != maxID {
+		t.Errorf("want first result (no limit) to be newest ID %s, got %s", maxID, all[0].ID)
+	}
+}

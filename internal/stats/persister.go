@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -126,10 +127,14 @@ func (p *Persister) flushRegistry() {
 	}
 	defer stmt.Close()
 	for _, r := range snap.Records {
-		stmt.Exec(ts, r.Metric, "record", r.Value) //nolint:errcheck
+		if _, err := stmt.Exec(ts, r.Metric, "record", r.Value); err != nil {
+			slog.Warn("stats: flush registry counter", "metric", r.Metric, "err", err)
+		}
 	}
 	for _, h := range snap.Histograms {
-		stmt.Exec(ts, h.Metric, "histogram", h.Value) //nolint:errcheck
+		if _, err := stmt.Exec(ts, h.Metric, "histogram", h.Value); err != nil {
+			slog.Warn("stats: flush registry histogram", "metric", h.Metric, "err", err)
+		}
 	}
 }
 
@@ -149,7 +154,9 @@ func (p *Persister) drainCostChannel() {
 	for {
 		select {
 		case e := <-p.costCh:
-			stmt.Exec(time.Now().Unix(), e.SessionID, e.CostUSD, e.PromptTokens, e.CompletionTokens) //nolint:errcheck
+			if _, err := stmt.Exec(time.Now().Unix(), e.SessionID, e.CostUSD, e.PromptTokens, e.CompletionTokens); err != nil {
+				slog.Warn("stats: drain cost event", "session", e.SessionID, "err", err)
+			}
 		default:
 			return
 		}
@@ -166,13 +173,20 @@ func (p *Persister) pruneOldData() {
 	}
 	statsTs := time.Now().AddDate(0, 0, -statsRetentionDays).Unix()
 	auditTs := time.Now().AddDate(0, 0, -auditRetentionDays).Unix()
-	db.Exec(`DELETE FROM stats_snapshots WHERE ts < ?`, statsTs)     //nolint:errcheck
-	db.Exec(`DELETE FROM cost_history WHERE ts < ?`, statsTs)        //nolint:errcheck
-	db.Exec(`DELETE FROM audit_log WHERE ts < ?`, auditTs)           //nolint:errcheck
+	if _, err := db.Exec(`DELETE FROM stats_snapshots WHERE ts < ?`, statsTs); err != nil {
+		slog.Warn("stats: prune old stats_snapshots", "err", err)
+	}
+	if _, err := db.Exec(`DELETE FROM cost_history WHERE ts < ?`, statsTs); err != nil {
+		slog.Warn("stats: prune old cost_history", "err", err)
+	}
+	if _, err := db.Exec(`DELETE FROM audit_log WHERE ts < ?`, auditTs); err != nil {
+		slog.Warn("stats: prune old audit_log by time", "err", err)
+	}
 	// Safety cap for audit_log after time prune (avoids full-scan per insert).
-	//nolint:errcheck
-	db.Exec(`DELETE FROM audit_log WHERE id IN (
+	if _, err := db.Exec(`DELETE FROM audit_log WHERE id IN (
 		SELECT id FROM audit_log ORDER BY id ASC
 		LIMIT MAX(0, (SELECT count(*) FROM audit_log) - ?)
-	)`, auditMaxRows)
+	)`, auditMaxRows); err != nil {
+		slog.Warn("stats: prune audit_log row cap", "err", err)
+	}
 }

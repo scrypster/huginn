@@ -326,7 +326,7 @@ func TestBuildSpaceContextBlock_LeadAgent_ContainsAllElements(t *testing.T) {
 		{"Delegation protocol", "Delegation protocol"},
 		{"Delegation tool instruction", "delegate_to_agent"},
 		{"GOOD example with Sam", "GOOD: Call delegate_to_agent with agent=\"Sam\""},
-		{"GOOD example with Adam", "GOOD: Call delegate_to_agent with agent=\"Adam\""},
+		{"GOOD example with Dave", "GOOD: Call delegate_to_agent with agent=\"Dave\""},
 		{"Sam listed", "Sam"},
 		{"Sam description", "Backend engineer"},
 		{"Dave listed", "Dave"},

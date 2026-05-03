@@ -446,8 +446,8 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls_json TEXT,                           -- JSON array of tool calls (for assistant msgs)
 
     -- Cost record fields (populated when type='cost')
-    type            TEXT    NOT NULL DEFAULT ''      -- 'cost' for cost records, '' for normal
-                        CHECK (type IN ('', 'cost')),
+    type            TEXT    NOT NULL DEFAULT ''      -- 'cost' for cost records, 'thread_event' for lifecycle events, '' for normal
+                        CHECK (type IN ('', 'cost', 'thread_event')),
     prompt_tokens   INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd        REAL    NOT NULL DEFAULT 0.0,

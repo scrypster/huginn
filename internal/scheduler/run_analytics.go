@@ -13,12 +13,33 @@ import (
 	"strings"
 )
 
-// cloneWorkflow returns a deep copy of w via JSON round-trip. Returns nil if
-// the input is nil. The Workflow struct is JSON-tagged end-to-end so this is
-// the simplest correct deep-copy that also strips runtime-only fields like
-// FilePath (yaml:"-" json:"file_path"). On marshal/unmarshal failure we fall
-// back to a shallow copy so the runner never panics — the snapshot becomes
-// "best-effort" rather than mandatory.
+// cloneWorkflow returns a deep copy of w via JSON marshal+unmarshal
+// (a "JSON round-trip"). Returns nil if the input is nil.
+//
+// Why JSON round-trip instead of a struct copy?
+//
+// A plain struct copy (`out := *w`) would produce a shallow clone: every
+// slice and map field (Steps, Vars, Connections, Inputs, Notify.DeliverTo,
+// etc.) would still point at the original backing arrays. Mutations in the
+// runner — retries rewriting step state, scrubWorkflowSecrets zeroing
+// credential fields — would then corrupt the original workflow definition.
+// reflect.DeepCopy isn't in the standard library, and a hand-rolled recursive
+// copier would drift any time a new nested-pointer field is added to the
+// struct. JSON round-trip is deliberately chosen because:
+//
+//  1. Workflow and all nested types are JSON-tagged end-to-end, so
+//     marshal/unmarshal is lossless for the fields we care about.
+//  2. Every slice, map, and interface{} field gets a fresh allocation on
+//     unmarshal, giving fully independent copies automatically.
+//  3. Fields tagged `json:"-"` (like runtime-only state) are naturally
+//     excluded from the snapshot — no extra handling needed.
+//
+// On marshal/unmarshal failure we fall back to a shallow copy so the runner
+// never panics — the snapshot becomes "best-effort" rather than mandatory.
+//
+// Secrets (e.g. smtp_pass) are scrubbed from the clone before it is returned
+// so that run snapshots, audit logs, and API responses never contain plaintext
+// credentials.
 func cloneWorkflow(w *Workflow) *Workflow {
 	if w == nil {
 		return nil
@@ -26,14 +47,36 @@ func cloneWorkflow(w *Workflow) *Workflow {
 	b, err := json.Marshal(w)
 	if err != nil {
 		shallow := *w
+		scrubWorkflowSecrets(&shallow)
 		return &shallow
 	}
 	var out Workflow
 	if err := json.Unmarshal(b, &out); err != nil {
 		shallow := *w
+		scrubWorkflowSecrets(&shallow)
 		return &shallow
 	}
+	scrubWorkflowSecrets(&out)
 	return &out
+}
+
+// scrubWorkflowSecrets zeroes all credential fields that must not appear
+// in run snapshots, audit logs, or API responses.
+func scrubWorkflowSecrets(w *Workflow) {
+	if w == nil {
+		return
+	}
+	scrubDeliveries := func(deliveries []NotificationDelivery) {
+		for i := range deliveries {
+			deliveries[i].SMTPPass = ""
+		}
+	}
+	for i := range w.Steps {
+		if w.Steps[i].Notify != nil {
+			scrubDeliveries(w.Steps[i].Notify.DeliverTo)
+		}
+	}
+	scrubDeliveries(w.Notification.DeliverTo)
 }
 
 // StepDiff is one row of a structured run diff. Status, Output, Error and

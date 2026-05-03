@@ -179,6 +179,76 @@ func TestSpawnThread_ContextCancellationPropagates(t *testing.T) {
 	t.Error("goroutine did not terminate after context cancellation propagated")
 }
 
+// TestSpawnThread_TimeoutCancel_NoLeak verifies that when a thread has Timeout > 0
+// and completes normally before the timeout fires, the thread still reaches a
+// terminal state cleanly (regression for the _ = timeoutCancel goroutine leak).
+func TestSpawnThread_TimeoutCancel_NoLeak(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("test-timeout-cancel-noleak", "/tmp", "claude-haiku-4")
+
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{
+		Name:    "LeakFreeBot",
+		ModelID: "claude-haiku-4",
+	})
+
+	// Backend that completes immediately via finish tool.
+	fb := &fakeBackend{
+		response: &backend.ChatResponse{
+			ToolCalls: []backend.ToolCall{
+				{
+					ID: "tc-leak-free",
+					Function: backend.ToolCallFunction{
+						Name: "finish",
+						Arguments: map[string]any{
+							"summary": "done before timeout",
+							"status":  "completed",
+						},
+					},
+				},
+			},
+			DoneReason:       "tool_calls",
+			PromptTokens:     10,
+			CompletionTokens: 5,
+		},
+	}
+
+	// Set a generous timeout so the thread completes before it fires.
+	thread, err := tm.Create(CreateParams{
+		SessionID: sess.ID,
+		AgentID:   "LeakFreeBot",
+		Task:      "complete before timeout",
+		Timeout:   5 * time.Second, // long enough to never fire in this test
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	broadcastFn := func(_, _ string, _ map[string]any) {}
+	ca := NewCostAccumulator(0)
+
+	tm.SpawnThread(context.Background(), thread.ID, store, sess, reg, fb, broadcastFn, ca, nil)
+
+	// Thread should complete (StatusDone) well before the 5s timeout.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := tm.Get(thread.ID)
+		if got != nil && got.Status == StatusDone {
+			return // success
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got, ok := tm.Get(thread.ID)
+	if !ok {
+		t.Fatal("thread not found")
+	}
+	if got.Status != StatusDone {
+		t.Errorf("expected StatusDone, got %s — thread may be stuck due to timeout cancel leak", got.Status)
+	}
+}
+
 // TestSpawnThread_DecoupledFromRequestContext verifies the key invariant:
 // SpawnThread decouples the thread goroutine from the caller's context.
 // This allows a thread spawned in a request handler (which finishes immediately)

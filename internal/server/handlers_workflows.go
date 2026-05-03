@@ -49,6 +49,19 @@ func validateWorkflow(wf *scheduler.Workflow) error {
 	}
 
 	for i, step := range wf.Steps {
+		// Rule 0: execution target must be explicit.
+		// A step must provide one of:
+		//   - routine (legacy)
+		//   - sub_workflow
+		//   - inline agent+prompt
+		if step.Routine == "" && step.SubWorkflow == "" && strings.TrimSpace(step.Prompt) == "" {
+			return fmt.Errorf("step[%d]: missing prompt (required for inline step)", i+1)
+		}
+		// Rule 0b: self-referential sub-workflow is always invalid.
+		if step.SubWorkflow != "" && step.SubWorkflow == wf.ID {
+			return fmt.Errorf("step[%d]: sub_workflow %q cannot reference the current workflow id", i+1, step.SubWorkflow)
+		}
+
 		// Rule 1: dangling from_step references and self-references.
 		for j, inp := range step.Inputs {
 			if inp.FromStep == "" {
@@ -172,6 +185,53 @@ func validateWorkflow(wf *scheduler.Workflow) error {
 	return nil
 }
 
+// validateSubWorkflowCycles detects cycles in SubWorkflow cross-references
+// across the full workflow registry. A cycle (e.g. A→B→A) would cause
+// infinite recursion at runtime. wf is the workflow being saved (may be
+// new and not yet present in all). all is the current on-disk registry.
+func validateSubWorkflowCycles(wf *scheduler.Workflow, all []*scheduler.Workflow) error {
+	registry := make(map[string]*scheduler.Workflow, len(all)+1)
+	for _, w := range all {
+		registry[w.ID] = w
+	}
+	registry[wf.ID] = wf // include candidate (may override stale on-disk version)
+
+	const (
+		unvisited = 0
+		inStack   = 1
+		done      = 2
+	)
+	state := make(map[string]int, len(registry))
+
+	var dfs func(id string) error
+	dfs = func(id string) error {
+		state[id] = inStack
+		w, ok := registry[id]
+		if !ok {
+			state[id] = done
+			return nil // dangling ref — not a cycle
+		}
+		for _, step := range w.Steps {
+			ref := step.SubWorkflow
+			if ref == "" {
+				continue
+			}
+			if state[ref] == inStack {
+				return fmt.Errorf("circular sub_workflow reference: %q → %q creates a cycle", id, ref)
+			}
+			if state[ref] == unvisited {
+				if err := dfs(ref); err != nil {
+					return err
+				}
+			}
+		}
+		state[id] = done
+		return nil
+	}
+
+	return dfs(wf.ID)
+}
+
 // validateWorkflowAgentsAndConnections checks that every step in the workflow
 // references a known agent name and known connection IDs. It is a best-effort
 // check: if the agent loader or connection store are unavailable the check is
@@ -264,6 +324,14 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 422, "invalid workflow: "+err.Error())
 		return
 	}
+	// Check for cycles across the cross-workflow SubWorkflow call graph.
+	dir := filepath.Join(s.huginnDir, "workflows")
+	if allWFs, loadErr := scheduler.LoadWorkflows(dir); loadErr == nil {
+		if err := validateSubWorkflowCycles(&wf, allWFs); err != nil {
+			jsonError(w, 422, "invalid workflow: "+err.Error())
+			return
+		}
+	}
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	wf.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(wf.TimeoutMinutes)
 	if wf.ID == "" {
@@ -272,7 +340,6 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	wf.CreatedAt = now
 	wf.UpdatedAt = now
-	dir := filepath.Join(s.huginnDir, "workflows")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		jsonError(w, 500, "create workflows dir: "+err.Error())
 		return
@@ -340,6 +407,11 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updates.ID = id
+	// Check for cycles across the cross-workflow SubWorkflow call graph.
+	if err := validateSubWorkflowCycles(&updates, workflows); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
 	updates.FilePath = target.FilePath
 	updates.CreatedAt = target.CreatedAt
 	updates.UpdatedAt = time.Now().UTC()
@@ -347,7 +419,9 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	updates.Version = target.Version
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	updates.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(updates.TimeoutMinutes)
-	if err := scheduler.SaveWorkflow(dir, &updates); err != nil {
+	// Two-phase write: write to temp first, only commit after scheduler registration succeeds.
+	tmpPath, err := scheduler.WriteWorkflowTemp(dir, &updates)
+	if err != nil {
 		jsonError(w, 500, "save workflow: "+err.Error())
 		return
 	}
@@ -358,27 +432,28 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		sched.RemoveWorkflow(id)
 		if updates.Enabled {
 			if err := sched.RegisterWorkflow(&updates); err != nil {
-				// Scheduler registration failed — attempt compensating rollback to
-				// restore the previous workflow on disk and re-register it.
-				// TODO: replace with atomic save-then-register (temp file + rename) to
-				// eliminate the divergence window entirely.
-				rollbackMsg := "register workflow: " + err.Error()
-				if rerr := scheduler.SaveWorkflow(dir, target); rerr != nil {
-					slog.Error("workflow update: rollback save failed; workflow may be in inconsistent state",
-						"id", id, "save_err", rerr, "register_err", err)
-					jsonError(w, 500, rollbackMsg+"; rollback also failed — manual scheduler restart may be required")
-					return
-				}
+				// Registration failed — discard temp file (disk unchanged) and
+				// restore old version in scheduler.
+				_ = os.Remove(tmpPath)
 				if target.Enabled {
 					if rerr := sched.RegisterWorkflow(target); rerr != nil {
-						slog.Error("workflow update: rollback re-register failed; workflow may be in inconsistent state",
-							"id", id, "register_err", rerr)
+						slog.Error("workflow update: rollback re-register failed",
+							"id", id, "err", rerr)
 					}
 				}
-				jsonError(w, 500, rollbackMsg)
+				jsonError(w, 500, "register workflow: "+err.Error())
 				return
 			}
 		}
+	}
+	// Registration succeeded (or scheduler nil/disabled) — commit the file.
+	if err := os.Rename(tmpPath, updates.FilePath); err != nil {
+		// Rename failed after registration succeeded — scheduler and disk are now
+		// diverged. Log prominently and return 500.
+		slog.Error("workflow update: commit rename failed; scheduler registered but disk not updated",
+			"id", id, "tmp", tmpPath, "dest", updates.FilePath, "err", err)
+		jsonError(w, 500, "commit workflow: "+err.Error())
+		return
 	}
 	jsonOK(w, updates)
 }

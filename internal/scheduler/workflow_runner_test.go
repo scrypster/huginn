@@ -33,6 +33,16 @@ func (m *mockNotifStore) ListByWorkflow(id string) ([]*notification.Notification
 }
 func (m *mockNotifStore) PendingCount() (int, error) { return 0, nil }
 func (m *mockNotifStore) ExpireRun(id string) error  { return nil }
+func (m *mockNotifStore) ListPendingN(limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) ListByRoutineN(routineID string, limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) ListByWorkflowN(workflowID string, limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) PruneExpired(ctx context.Context) (int, error) { return 0, nil }
 
 func newTestRunStore() *WorkflowRunStore {
 	dir, err := os.MkdirTemp("", "huginn-test-*")
@@ -801,6 +811,29 @@ func (f *failingRunStore) List(workflowID string, n int) ([]*WorkflowRun, error)
 }
 func (f *failingRunStore) Get(workflowID, runID string) (*WorkflowRun, error) {
 	return nil, nil
+}
+
+// TestRunID_Uniqueness verifies that runID generates distinct values across
+// repeated calls for the same workflow, confirming that the random suffix
+// prevents millisecond-timestamp collisions.
+func TestRunID_Uniqueness(t *testing.T) {
+	const iterations = 100
+	seen := make(map[string]struct{}, iterations)
+	for i := 0; i < iterations; i++ {
+		id := runID("test-workflow")
+		if _, dup := seen[id]; dup {
+			t.Fatalf("runID collision on iteration %d: %q", i, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestRunID_Format verifies that runID includes the workflow ID and starts with "wf-".
+func TestRunID_Format(t *testing.T) {
+	id := runID("my-workflow")
+	if !strings.HasPrefix(id, "wf-my-workflow-") {
+		t.Errorf("expected runID to start with 'wf-my-workflow-', got %q", id)
+	}
 }
 
 // TestMakeWorkflowRunner_RunStoreAppendFailure_ContinuesExecution confirms the

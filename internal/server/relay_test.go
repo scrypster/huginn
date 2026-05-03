@@ -372,6 +372,19 @@ func TestRelaySuccessHTML_ContainsProvider(t *testing.T) {
 	}
 }
 
+func TestRelaySuccessHTML_NoWildcardOrigin(t *testing.T) {
+	html := relaySuccessHTML("GitHub")
+	// The postMessage call must NOT use the wildcard '*' origin, which would
+	// allow any page that opened the popup to intercept the OAuth completion message.
+	// It should use window.location.origin to restrict delivery to the same origin.
+	if contains(html, "postMessage") && contains(html, ", '*')") {
+		t.Fatal("relaySuccessHTML must not use wildcard '*' as postMessage target origin")
+	}
+	if !contains(html, "window.location.origin") {
+		t.Fatal("relaySuccessHTML should use window.location.origin as postMessage target origin")
+	}
+}
+
 func TestRelayErrorHTML_ContainsMessage(t *testing.T) {
 	msg := "test error message"
 	html := relayErrorHTML(msg)

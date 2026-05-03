@@ -240,6 +240,18 @@ describe('ThreadDetail — message rendering', () => {
     })
     expect(wrapper.html()).toContain('2 tool calls')
   })
+
+  it('renders internal muninn tool groups as memory summary', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({ id: 'm1', role: 'tool_call', content: JSON.stringify({ name: 'muninn_recall' }), tool_name: 'muninn_recall' }),
+        makeMessage({ id: 'm2', role: 'tool_result', content: '{"memories":[]}', tool_name: 'muninn_recall' }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory:')
+    expect(wrapper.html()).toContain('checked context')
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
 })
 
 describe('ThreadDetail — artifact card', () => {
@@ -431,6 +443,79 @@ describe('ThreadDetail — consult_agent card', () => {
   })
 })
 
+// ── Internal memory tool rendering ────────────────────────────────────────────
+
+describe('ThreadDetail — internal memory tool rendering', () => {
+  it('renders muninn_recall as 🧠 Memory: checked context (not an expandable chip)', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-1',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_recall' }),
+          tool_name: 'muninn_recall',
+        }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory: checked context')
+    // Must NOT render as an expandable chip button — chip renders "1 tool call"
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
+
+  it('renders muninn_remember as 🧠 Memory: saved to memory', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-2',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_remember' }),
+          tool_name: 'muninn_remember',
+        }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory: saved to memory')
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
+
+  it('renders muninn_session as 🧠 Memory: resumed session', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-3',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_session' }),
+          tool_name: 'muninn_session',
+        }),
+      ],
+    })
+    expect(wrapper.html()).toContain('🧠 Memory: resumed session')
+    expect(wrapper.html()).not.toContain('1 tool call')
+  })
+
+  it('renders a mixed group (muninn_recall + read_file) as a regular expandable chip (not internal)', () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({
+          id: 'mt-4',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'muninn_recall' }),
+          tool_name: 'muninn_recall',
+        }),
+        makeMessage({
+          id: 'mt-5',
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'read_file' }),
+          tool_name: 'read_file',
+        }),
+      ],
+    })
+    // Mixed group — has at least one non-internal tool, so it must be a regular chip
+    expect(wrapper.html()).toContain('tool call')
+    // Must NOT render as a memory summary
+    expect(wrapper.html()).not.toContain('🧠 Memory:')
+  })
+})
+
 // ── Tool call chip (persisted toolCalls) ──────────────────────────────────────
 
 describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
@@ -509,5 +594,100 @@ describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
     expect(wrapper.html()).toContain('tool call')
     // Old toolgroup uses wrench + count but NOT "· done"
     expect(wrapper.html()).not.toContain('· done')
+  })
+})
+
+describe('ThreadDetail — blocked-only thread input', () => {
+  it('shows thread input when status is blocked', () => {
+    const wrapper = mountComponent({
+      threadId: 'thr-1',
+      threadStatus: 'blocked',
+      messages: [makeMessage()],
+    })
+    expect(wrapper.html()).toContain('Reply to unblock this thread')
+    expect(wrapper.html()).toContain('Help requested')
+  })
+
+  it('hides input and shows read-only hint when status is not blocked', () => {
+    const wrapper = mountComponent({
+      threadId: 'thr-1',
+      threadStatus: 'done',
+      messages: [makeMessage()],
+    })
+    expect(wrapper.html()).not.toContain('Reply to unblock this thread')
+    expect(wrapper.html()).toContain('Thread input is available only when the agent explicitly requests help.')
+    expect(wrapper.html()).toContain('Start follow-up task in chat')
+  })
+
+  it('emits start-follow-up for terminal threads', async () => {
+    const wrapper = mountComponent({
+      threadId: 'thr-1',
+      threadStatus: 'done',
+      messages: [makeMessage()],
+    })
+    const btn = wrapper.findAll('button').find(b => b.text().includes('Start follow-up task in chat'))
+    expect(btn).toBeDefined()
+    await btn!.trigger('click')
+    expect(wrapper.emitted('start-follow-up')).toBeTruthy()
+    expect(wrapper.emitted('start-follow-up')?.[0]).toEqual(['thr-1', 'Follow up on thread thr-1: '])
+  })
+
+  it('maps not_waiting inject error reason to user-facing copy', async () => {
+    const wrapper = mountComponent({
+      threadId: 'thr-1',
+      threadStatus: 'blocked',
+      messages: [makeMessage()],
+    })
+    ;(wrapper.vm as any).onInjectError('not_waiting')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.html()).toContain('This thread is no longer waiting for input.')
+  })
+
+  it('shows inject delivery receipt on ack with routing metadata', async () => {
+    const wrapper = mountComponent({
+      threadId: 'thr-1',
+      threadStatus: 'blocked',
+      messages: [makeMessage()],
+    })
+    ;(wrapper.vm as any).onInjectAck({ delivered_to_agent: 'atlas', shared_with_active: 2 })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.html()).toContain('Delivered to @atlas; shared with 2 active delegates.')
+  })
+})
+
+describe('ThreadDetail — lifecycle and lanes', () => {
+  it('shows agent-lane mode with grouped lane headers', async () => {
+    const wrapper = mountComponent({
+      messages: [
+        makeMessage({ id: 'm1', role: 'assistant', agent: 'atlas', content: 'Alpha update' }),
+        makeMessage({ id: 'm2', role: 'assistant', agent: 'hermes', content: 'Beta update' }),
+      ],
+    })
+    const laneToggle = wrapper.findAll('button').find(b => b.text() === 'Agent lanes')
+    expect(laneToggle).toBeDefined()
+    await laneToggle!.trigger('click')
+    expect(wrapper.html()).toContain('atlas')
+    expect(wrapper.html()).toContain('hermes')
+    expect(wrapper.html()).toContain('Tool-call rows remain in Timeline mode')
+  })
+
+  it('marks stale terminal threads as expired and offers reopen CTA', () => {
+    const oldTs = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString()
+    const wrapper = mountComponent({
+      threadId: 'thr-1',
+      threadStatus: 'done',
+      messages: [makeMessage({ created_at: oldTs })],
+    })
+    expect(wrapper.html()).toContain('Expired')
+    expect(wrapper.html()).toContain('Reopen thread in chat')
+  })
+
+  it('treats missing live status as resolved-by-default', () => {
+    const wrapper = mountComponent({
+      threadId: 'thr-legacy',
+      threadStatus: undefined,
+      messages: [makeMessage()],
+    })
+    expect(wrapper.html()).toContain('Resolved')
   })
 })

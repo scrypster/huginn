@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,6 +73,14 @@ func (s *stubNotifStore) ListPending() ([]*notification.Notification, error) {
 	return out, nil
 }
 
+func (s *stubNotifStore) ListPendingN(limit int) ([]*notification.Notification, error) {
+	all, err := s.ListPending()
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
 func (s *stubNotifStore) ListByRoutine(routineID string) ([]*notification.Notification, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +107,22 @@ func (s *stubNotifStore) ListByWorkflow(workflowID string) ([]*notification.Noti
 	return out, nil
 }
 
+func (s *stubNotifStore) ListByRoutineN(routineID string, limit int) ([]*notification.Notification, error) {
+	all, err := s.ListByRoutine(routineID)
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
+func (s *stubNotifStore) ListByWorkflowN(workflowID string, limit int) ([]*notification.Notification, error) {
+	all, err := s.ListByWorkflow(workflowID)
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
 func (s *stubNotifStore) PendingCount() (int, error) {
 	ns, err := s.ListPending()
 	return len(ns), err
@@ -114,6 +139,8 @@ func (s *stubNotifStore) ExpireRun(runID string) error {
 	}
 	return nil
 }
+
+func (s *stubNotifStore) PruneExpired(ctx context.Context) (int, error) { return 0, nil }
 
 // Compile-time assertion.
 var _ notification.StoreInterface = (*stubNotifStore)(nil)

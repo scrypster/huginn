@@ -176,6 +176,210 @@ describe('useHuginnWS', () => {
     ws.destroy()
   })
 
+  it('intercepts pong heartbeat messages without dispatching', async () => {
+    const ws = await createWS()
+    const socket = MockWebSocket.latest()
+    socket.simulateOpen()
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    expect(socket.sentMessages.length).toBeGreaterThan(0)
+    expect(JSON.parse(socket.sentMessages[0] ?? '{}')).toEqual({ type: 'ping' })
+
+    socket.simulateMessage({ type: 'pong' })
+    expect(ws.messages.value).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(10_100)
+    expect(socket.closed).toBe(false)
+    ws.destroy()
+  })
+
+  it('buffers out-of-order sequenced session messages and delivers in order', async () => {
+    const ws = await createWS()
+    MockWebSocket.latest().simulateOpen()
+
+    const seen: number[] = []
+    ws.on('thread_done', (msg) => { seen.push(msg.seq ?? -1) })
+
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-1',
+      epoch: 123,
+      seq: 1,
+      payload: { thread_id: 't-1' },
+    })
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-1',
+      epoch: 123,
+      seq: 3,
+      payload: { thread_id: 't-1' },
+    })
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-1',
+      epoch: 123,
+      seq: 2,
+      payload: { thread_id: 't-1' },
+    })
+
+    expect(seen).toEqual([1, 2, 3])
+    ws.destroy()
+  })
+
+  it('drops duplicate sequenced messages for a session', async () => {
+    const ws = await createWS()
+    MockWebSocket.latest().simulateOpen()
+
+    const handler = vi.fn()
+    ws.on('thread_done', handler)
+
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-dup',
+      epoch: 123,
+      seq: 1,
+      payload: { thread_id: 't-1' },
+    })
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-dup',
+      epoch: 123,
+      seq: 1,
+      payload: { thread_id: 't-1' },
+    })
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    ws.destroy()
+  })
+
+  it('resets per-session sequence state when epoch changes', async () => {
+    const ws = await createWS()
+    MockWebSocket.latest().simulateOpen()
+
+    const seen: Array<{ epoch?: number; seq?: number }> = []
+    ws.on('thread_done', (msg) => { seen.push({ epoch: msg.epoch, seq: msg.seq }) })
+
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-epoch',
+      epoch: 100,
+      seq: 5,
+      payload: { thread_id: 't-1' },
+    })
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-epoch',
+      epoch: 200,
+      seq: 1,
+      payload: { thread_id: 't-2' },
+    })
+
+    expect(seen).toEqual([
+      { epoch: 100, seq: 5 },
+      { epoch: 200, seq: 1 },
+    ])
+    ws.destroy()
+  })
+
+  it('treats epoch=0 as a valid epoch value', async () => {
+    const ws = await createWS()
+    MockWebSocket.latest().simulateOpen()
+
+    const seen: Array<{ epoch?: number; seq?: number }> = []
+    ws.on('thread_done', (msg) => { seen.push({ epoch: msg.epoch, seq: msg.seq }) })
+
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-zero-epoch',
+      epoch: 0,
+      seq: 1,
+      payload: { thread_id: 't-1' },
+    })
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-zero-epoch',
+      epoch: 0,
+      seq: 2,
+      payload: { thread_id: 't-2' },
+    })
+
+    expect(seen).toEqual([
+      { epoch: 0, seq: 1 },
+      { epoch: 0, seq: 2 },
+    ])
+    ws.destroy()
+  })
+
+  it('emits warning when out-of-order buffer overflows', async () => {
+    const ws = await createWS()
+    MockWebSocket.latest().simulateOpen()
+
+    const warningHandler = vi.fn()
+    ws.on('warning', warningHandler)
+
+    // Prime contiguous sequence at 1, then flood out-of-order events that all
+    // depend on missing seq=2 so they accumulate in the gap buffer.
+    MockWebSocket.latest().simulateMessage({
+      type: 'thread_done',
+      session_id: 'sess-overflow',
+      epoch: 321,
+      seq: 1,
+      payload: { thread_id: 't-1' },
+    })
+    for (let seq = 3; seq <= 24; seq++) {
+      MockWebSocket.latest().simulateMessage({
+        type: 'thread_done',
+        session_id: 'sess-overflow',
+        epoch: 321,
+        seq,
+        payload: { thread_id: `t-${seq}` },
+      })
+    }
+
+    expect(warningHandler).toHaveBeenCalled()
+    expect(warningHandler.mock.calls[0]?.[0]?.content).toContain('out-of-order events were dropped')
+    ws.destroy()
+  })
+
+  it('recovers from a persistent sequence gap after timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const ws = await createWS()
+      MockWebSocket.latest().simulateOpen()
+
+      const seen: number[] = []
+      const warningHandler = vi.fn()
+      ws.on('thread_done', (msg) => { seen.push(msg.seq ?? -1) })
+      ws.on('warning', warningHandler)
+
+      MockWebSocket.latest().simulateMessage({
+        type: 'thread_done',
+        session_id: 'sess-gap',
+        epoch: 444,
+        seq: 1,
+        payload: { thread_id: 't-1' },
+      })
+      MockWebSocket.latest().simulateMessage({
+        type: 'thread_done',
+        session_id: 'sess-gap',
+        epoch: 444,
+        seq: 3,
+        payload: { thread_id: 't-3' },
+      })
+      // No seq=2 arrives; timer-based recovery should eventually flush seq=3.
+      await vi.advanceTimersByTimeAsync(3_100)
+
+      expect(seen).toEqual([1, 3])
+      expect(warningHandler).toHaveBeenCalled()
+      expect(warningHandler.mock.calls.some(
+        call => String(call[0]?.content ?? '').includes('ordering gap persisted'),
+      )).toBe(true)
+      ws.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('ignores malformed JSON in incoming messages', async () => {
     const ws = await createWS()
     MockWebSocket.latest().simulateOpen()

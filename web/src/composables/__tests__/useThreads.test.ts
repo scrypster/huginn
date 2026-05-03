@@ -297,6 +297,34 @@ describe('useThreads — wireWS', () => {
     expect(threads[0]!.Status).toBe('blocked')
     expect(threads[0]!.Summary?.Summary).toBe('Need clarification on requirements')
   })
+
+  it('returns cleanup function that unregisters all handlers', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const removed: string[] = []
+    const ws = {
+      on: (event: string, handler: (msg: unknown) => void) => { handlers[event] = handler },
+      off: (event: string) => { removed.push(event) },
+    }
+
+    const cleanup = wireWS(ws as any, () => 'sess-clean')
+    expect(typeof cleanup).toBe('function')
+    cleanup()
+
+    expect(removed).toContain('thread_started')
+    expect(removed).toContain('thread_status')
+    expect(removed).toContain('thread_token')
+    expect(removed).toContain('thread_tool_call')
+    expect(removed).toContain('thread_tool_done')
+    expect(removed).toContain('thread_done')
+    expect(removed).toContain('thread_help')
+    expect(removed).toContain('thread_help_resolving')
+    expect(removed).toContain('thread_help_resolved')
+    expect(removed).toContain('thread_reply_updated')
+    expect(removed).toContain('delegation_preview')
+    expect(removed).toContain('delegation_preview_ack_result')
+  })
 })
 
 describe('useThreads — clearSession', () => {
@@ -325,6 +353,23 @@ describe('useThreads — clearSession', () => {
     const { clearSession, getSessionThreads } = useThreads()
     expect(() => clearSession('sess-nonexistent')).not.toThrow()
     expect(getSessionThreads('sess-nonexistent')).toEqual([])
+  })
+
+  it('clearSession removes pending previews for that session', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionPreviews, clearSession } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-clear-prev')
+
+    handlers['delegation_preview']!({
+      session_id: 'sess-clear-prev',
+      payload: { thread_id: 'thread-clear-prev', agent_id: 'qa', task: 'verify' },
+    })
+    expect(getSessionPreviews('sess-clear-prev')).toHaveLength(1)
+
+    clearSession('sess-clear-prev')
+    expect(getSessionPreviews('sess-clear-prev')).toHaveLength(0)
   })
 })
 
@@ -528,6 +573,48 @@ describe('useThreads — getSessionPreviews / ackPreview', () => {
     expect(previews[0]!.task).toBe('run tests')
   })
 
+  it('delegation_preview captures mode and expiry metadata', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionPreviews } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-prev-exp')
+
+    handlers['delegation_preview']!({
+      session_id: 'sess-prev-exp',
+      payload: {
+        thread_id: 'thread-exp1',
+        agent_id: 'qa',
+        task: 'run tests',
+        mode: 'manual',
+        expires_in_seconds: 25,
+      },
+    })
+
+    const previews = getSessionPreviews('sess-prev-exp')
+    expect(previews).toHaveLength(1)
+    expect(previews[0]!.mode).toBe('manual')
+    expect(previews[0]!.expiresInSeconds).toBe(25)
+    expect(typeof previews[0]!.expiresAtMs).toBe('number')
+  })
+
+  it('delegation_preview accepts legacy payload key "agent"', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionPreviews } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-prev-legacy')
+
+    handlers['delegation_preview']!({
+      session_id: 'sess-prev-legacy',
+      payload: { thread_id: 'thread-p2', agent: 'qa', task: 'run tests' },
+    })
+
+    const previews = getSessionPreviews('sess-prev-legacy')
+    expect(previews).toHaveLength(1)
+    expect(previews[0]!.agentId).toBe('qa')
+  })
+
   it('duplicate delegation_preview is deduplicated', async () => {
     const { useThreads } = await freshUseThreads()
     const { wireWS, getSessionPreviews } = useThreads()
@@ -542,7 +629,7 @@ describe('useThreads — getSessionPreviews / ackPreview', () => {
     expect(getSessionPreviews('sess-dup')).toHaveLength(1)
   })
 
-  it('ackPreview sends WS message and removes preview', async () => {
+  it('ackPreview sends WS message and marks preview pending', async () => {
     const { useThreads } = await freshUseThreads()
     const { wireWS, getSessionPreviews, ackPreview } = useThreads()
     const handlers: Record<string, (msg: unknown) => void> = {}
@@ -564,10 +651,17 @@ describe('useThreads — getSessionPreviews / ackPreview', () => {
     const sentMsg = sent[0] as any
     expect(sentMsg.type).toBe('delegation_preview_ack')
     expect(sentMsg.payload.approved).toBe(true)
+    expect(getSessionPreviews('sess-ack')).toHaveLength(1)
+    expect(getSessionPreviews('sess-ack')[0]?.pendingDecision).toBe(true)
+
+    handlers['delegation_preview_ack_result']!({
+      session_id: 'sess-ack',
+      payload: { thread_id: 'thread-ack1', approved: true, status: 'accepted' },
+    })
     expect(getSessionPreviews('sess-ack')).toHaveLength(0)
   })
 
-  it('ackPreview with approved=false sends denial and removes preview', async () => {
+  it('ackPreview with approved=false sends denial and clears on ack_result', async () => {
     const { useThreads } = await freshUseThreads()
     const { wireWS, getSessionPreviews, ackPreview } = useThreads()
     const handlers: Record<string, (msg: unknown) => void> = {}
@@ -587,7 +681,52 @@ describe('useThreads — getSessionPreviews / ackPreview', () => {
 
     const sentMsg = sent[0] as any
     expect(sentMsg.payload.approved).toBe(false)
+    expect(getSessionPreviews('sess-deny')).toHaveLength(1)
+    handlers['delegation_preview_ack_result']!({
+      session_id: 'sess-deny',
+      payload: { thread_id: 'thread-deny1', approved: false, status: 'accepted' },
+    })
     expect(getSessionPreviews('sess-deny')).toHaveLength(0)
+  })
+
+  it('thread_started clears matching pending delegation preview', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionPreviews } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-prev-clear')
+
+    handlers['delegation_preview']!({
+      session_id: 'sess-prev-clear',
+      payload: { thread_id: 'thread-pc1', agent_id: 'qa', task: 'run tests' },
+    })
+    expect(getSessionPreviews('sess-prev-clear')).toHaveLength(1)
+
+    handlers['thread_started']!({
+      session_id: 'sess-prev-clear',
+      payload: { thread_id: 'thread-pc1', agent_id: 'qa', task: 'run tests' },
+    })
+    expect(getSessionPreviews('sess-prev-clear')).toHaveLength(0)
+  })
+
+  it('delegation_preview_timeout clears matching pending preview', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionPreviews } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-prev-timeout')
+
+    handlers['delegation_preview']!({
+      session_id: 'sess-prev-timeout',
+      payload: { thread_id: 'thread-pt1', agent_id: 'qa', task: 'run tests' },
+    })
+    expect(getSessionPreviews('sess-prev-timeout')).toHaveLength(1)
+
+    handlers['delegation_preview_timeout']!({
+      session_id: 'sess-prev-timeout',
+      payload: { thread_id: 'thread-pt1', agent_id: 'qa', timeout_seconds: 30 },
+    })
+    expect(getSessionPreviews('sess-prev-timeout')).toHaveLength(0)
   })
 })
 

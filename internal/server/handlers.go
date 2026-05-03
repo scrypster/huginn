@@ -251,10 +251,17 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"deleted": true, "permanent": false, "archived": true})
 		return
 	}
+	// Cancel and remove any in-flight threads for this session before
+	// deleting the session record. Guarded for nil to support minimal
+	// server configurations that don't wire up multi-agent.
+	if s.tm != nil {
+		s.tm.CleanupSession(id)
+	}
 	if err := s.store.Delete(id); err != nil {
 		jsonError(w, 500, "delete session: "+err.Error())
 		return
 	}
+	s.wsHub.DeleteSessionSeq(id)
 	jsonOK(w, map[string]any{"deleted": true})
 }
 
@@ -440,9 +447,11 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	if baseURL == "" {
 		baseURL = "http://localhost:11434"
 	}
-	resp, err := http.Get(baseURL + "/api/tags") //nolint:noctx
-	if err != nil {
-		ollamaErr = "Ollama not reachable: " + err.Error()
+	ollamaReq, ollamaReqErr := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"/api/tags", nil)
+	if ollamaReqErr != nil {
+		ollamaErr = "build request: " + ollamaReqErr.Error()
+	} else if resp, doErr := http.DefaultClient.Do(ollamaReq); doErr != nil {
+		ollamaErr = "Ollama not reachable: " + doErr.Error()
 	} else {
 		defer resp.Body.Close()
 		var result struct {
@@ -540,11 +549,49 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, []struct{}{})
 		return
 	}
+	if err := s.tm.LoadFromStore(r.Context(), sessionID); err != nil {
+		// Non-fatal: return whatever in-memory state exists, but log so operators
+		// can diagnose persistence regressions.
+		logger.Warn("threads: failed to load from durable store",
+			"session_id", sessionID, "err", err)
+	}
 	threads := s.tm.ListBySession(sessionID)
 	if threads == nil {
 		threads = []*threadmgr.Thread{}
 	}
-	jsonOK(w, threads)
+	type threadListItem struct {
+		ID              string                   `json:"ID"`
+		SessionID       string                   `json:"SessionID"`
+		AgentID         string                   `json:"AgentID"`
+		Task            string                   `json:"Task"`
+		Status          threadmgr.ThreadStatus   `json:"Status"`
+		StartedAt       time.Time                `json:"StartedAt"`
+		CompletedAt     time.Time                `json:"CompletedAt"`
+		Summary         *threadmgr.FinishSummary `json:"Summary,omitempty"`
+		TokensUsed      int                      `json:"TokensUsed"`
+		TokenBudget     int                      `json:"TokenBudget"`
+		ParentMessageID string                   `json:"ParentMessageID,omitempty"`
+	}
+	out := make([]threadListItem, 0, len(threads))
+	for _, t := range threads {
+		if t == nil {
+			continue
+		}
+		out = append(out, threadListItem{
+			ID:              t.ID,
+			SessionID:       t.SessionID,
+			AgentID:         t.AgentID,
+			Task:            t.Task,
+			Status:          t.Status,
+			StartedAt:       t.StartedAt,
+			CompletedAt:     t.CompletedAt,
+			Summary:         t.Summary,
+			TokensUsed:      t.TokensUsed,
+			TokenBudget:     t.TokenBudget,
+			ParentMessageID: t.ParentMessageID,
+		})
+	}
+	jsonOK(w, out)
 }
 
 // handleGetMessages returns the last N messages for the given session.
@@ -838,6 +885,31 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGetLogLevel returns the current log level.
+func (s *Server) handleGetLogLevel(w http.ResponseWriter, r *http.Request) {
+	level := logger.Level()
+	jsonOK(w, map[string]string{"level": level.String()})
+}
+
+// handleSetLogLevel sets the log level at runtime (no restart needed).
+func (s *Server) handleSetLogLevel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(body.Level)); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid level: use debug, info, warn, or error")
+		return
+	}
+	logger.SetLevel(level)
+	slog.Info("log level changed", "level", level.String())
+	jsonOK(w, map[string]string{"level": level.String()})
+}
+
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	n := 100
 	if qs := r.URL.Query().Get("n"); qs != "" {
@@ -997,7 +1069,13 @@ func (s *Server) handlePullModel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, "marshal error: "+err.Error())
 		return
 	}
-	resp, err := http.Post(baseURL+"/api/pull", "application/json", bytes.NewReader(payload)) //nolint:noctx
+	pullReq, pullReqErr := http.NewRequestWithContext(r.Context(), http.MethodPost, baseURL+"/api/pull", bytes.NewReader(payload))
+	if pullReqErr != nil {
+		jsonError(w, http.StatusInternalServerError, "build request: "+pullReqErr.Error())
+		return
+	}
+	pullReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(pullReq)
 	if err != nil {
 		jsonError(w, 502, "Ollama not reachable: "+err.Error())
 		return

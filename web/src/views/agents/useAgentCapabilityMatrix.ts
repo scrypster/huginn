@@ -5,7 +5,7 @@ const DENY_REASON_COPY: Record<string, string> = {
   missing_connection_id: 'Connection is missing from this assignment.',
   duplicate_connection_id: 'Duplicate tool assignment detected for the same connection/profile.',
   unknown_connection_id: 'Connection is no longer available. Remove it or reconnect it.',
-  wildcard_provider_forbidden: 'Wildcard provider assignment is not allowed.',
+  wildcard_provider_forbidden: 'Legacy wildcard connection — click Remove to fix and unlock save.',
   provider_mismatch: 'Assigned provider does not match the selected connection.',
   single_account_provider: 'This provider can only have one assigned connection for an agent.',
 }

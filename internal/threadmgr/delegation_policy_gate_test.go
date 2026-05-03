@@ -171,6 +171,144 @@ func TestSpawnThread_HighRiskToolBlockedWithOutOfScopeToken(t *testing.T) {
 	}
 }
 
+func TestSpawnThread_HighRiskToolBroadcastsPermissionDenied(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("policy-gate-broadcast", "/tmp", "claude-haiku-4")
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Worker", ModelID: "claude-haiku-4", LocalTools: []string{"github_delete_issue"}})
+
+	tm.SetToolExecutor(func(_ context.Context, name string, _ map[string]any) (string, error) {
+		return "ok", nil
+	})
+
+	thread, err := tm.Create(CreateParams{SessionID: sess.ID, AgentID: "Worker", Task: "delete an issue"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	backend := &scriptedToolBackend{toolName: "github_delete_issue", args: map[string]any{"issue": 123}}
+
+	var mu sync.Mutex
+	var deniedEvents []map[string]any
+	done := make(chan struct{})
+	tm.SpawnThread(context.Background(), thread.ID, store, sess, reg, backend, func(_ string, msgType string, payload map[string]any) {
+		if msgType == "thread_permission_denied" {
+			mu.Lock()
+			deniedEvents = append(deniedEvents, payload)
+			mu.Unlock()
+		}
+		if msgType == "thread_done" {
+			close(done)
+		}
+	}, NewCostAccumulator(0), nil)
+
+	waitDone(t, done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deniedEvents) != 1 {
+		t.Fatalf("expected exactly 1 thread_permission_denied event, got %d", len(deniedEvents))
+	}
+	tool, _ := deniedEvents[0]["tool"].(string)
+	if tool != "github_delete_issue" {
+		t.Fatalf("expected denied tool to be github_delete_issue, got %q", tool)
+	}
+	if deniedEvents[0]["thread_id"] == nil {
+		t.Fatal("expected thread_id in thread_permission_denied payload")
+	}
+	if deniedEvents[0]["agent_id"] == nil {
+		t.Fatal("expected agent_id in thread_permission_denied payload")
+	}
+}
+
+func TestSpawnThread_HighRiskToolDedupPermissionDeniedBroadcast(t *testing.T) {
+	tm := New()
+	store := session.NewStore(t.TempDir())
+	sess := store.New("policy-gate-dedup", "/tmp", "claude-haiku-4")
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "Worker", ModelID: "claude-haiku-4", LocalTools: []string{"github_delete_issue"}})
+
+	tm.SetToolExecutor(func(_ context.Context, name string, _ map[string]any) (string, error) {
+		return "ok", nil
+	})
+
+	thread, err := tm.Create(CreateParams{SessionID: sess.ID, AgentID: "Worker", Task: "delete issues"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	// Backend that returns the same denied tool twice in a single turn response.
+	backend := &scriptedDualToolBackend{toolName: "github_delete_issue"}
+
+	var mu sync.Mutex
+	var deniedEvents []map[string]any
+	done := make(chan struct{})
+	tm.SpawnThread(context.Background(), thread.ID, store, sess, reg, backend, func(_ string, msgType string, payload map[string]any) {
+		if msgType == "thread_permission_denied" {
+			mu.Lock()
+			deniedEvents = append(deniedEvents, payload)
+			mu.Unlock()
+		}
+		if msgType == "thread_done" {
+			close(done)
+		}
+	}, NewCostAccumulator(0), nil)
+
+	waitDone(t, done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Even though the same tool was denied twice in one turn, only one broadcast should fire.
+	if len(deniedEvents) != 1 {
+		t.Fatalf("expected dedup to emit exactly 1 thread_permission_denied event, got %d", len(deniedEvents))
+	}
+}
+
+// scriptedDualToolBackend returns two calls to the same high-risk tool on the
+// first turn, then a finish on the second — used to exercise dedup logic.
+type scriptedDualToolBackend struct {
+	toolName string
+	calls    int
+}
+
+func (b *scriptedDualToolBackend) ChatCompletion(_ context.Context, _ backend.ChatRequest) (*backend.ChatResponse, error) {
+	b.calls++
+	if b.calls == 1 {
+		return &backend.ChatResponse{
+			DoneReason: "tool_use",
+			ToolCalls: []backend.ToolCall{
+				{
+					ID: "tool-a",
+					Function: backend.ToolCallFunction{
+						Name:      b.toolName,
+						Arguments: map[string]any{"issue": 1},
+					},
+				},
+				{
+					ID: "tool-b",
+					Function: backend.ToolCallFunction{
+						Name:      b.toolName,
+						Arguments: map[string]any{"issue": 2},
+					},
+				},
+			},
+		}, nil
+	}
+	return &backend.ChatResponse{
+		DoneReason: "tool_use",
+		ToolCalls: []backend.ToolCall{{
+			ID: "finish-1",
+			Function: backend.ToolCallFunction{
+				Name:      "finish",
+				Arguments: map[string]any{"summary": "done", "status": "completed"},
+			},
+		}},
+	}, nil
+}
+
+func (b *scriptedDualToolBackend) Health(_ context.Context) error   { return nil }
+func (b *scriptedDualToolBackend) Shutdown(_ context.Context) error { return nil }
+func (b *scriptedDualToolBackend) ContextWindow() int               { return 8192 }
+
 func TestDelegatedToolRisk(t *testing.T) {
 	provider, action, highRisk := delegatedToolRisk("github_delete_issue")
 	if !highRisk || provider != "github" || action != "delete_issue" {

@@ -83,9 +83,9 @@ func TestWSThreadInject_EmptyThreadID_IsNoop(t *testing.T) {
 	}
 }
 
-// TestWSThreadInject_UnknownThread_IsNoop verifies that an unknown thread ID
-// (GetInputCh returns ok=false) produces no response.
-func TestWSThreadInject_UnknownThread_IsNoop(t *testing.T) {
+// TestWSThreadInject_UnknownThread_SendsError verifies unknown thread IDs
+// return a structured thread_inject_error (reason=not_found).
+func TestWSThreadInject_UnknownThread_SendsError(t *testing.T) {
 	srv, ts := newTestServer(t)
 	tm := threadmgr.New()
 	srv.SetThreadManager(tm)
@@ -93,15 +93,33 @@ func TestWSThreadInject_UnknownThread_IsNoop(t *testing.T) {
 	conn := dialWS(t, ts.URL)
 	sendInject(t, conn, "thread-does-not-exist", "hello")
 
-	msg := readWSMsg(t, conn)
-	if msg != nil {
-		t.Errorf("expected no response for unknown thread, got type %q", msg["type"])
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var resp map[string]any
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: expected thread_inject_error, got error: %v", err)
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			continue
+		}
+		if resp["type"] == "thread_inject_error" {
+			break
+		}
+	}
+
+	if resp["type"] != "thread_inject_error" {
+		t.Errorf("expected type thread_inject_error, got %q", resp["type"])
+	}
+	payload, _ := resp["payload"].(map[string]any)
+	if payload["reason"] != "not_found" {
+		t.Errorf("error payload reason = %v, want %q", payload["reason"], "not_found")
 	}
 }
 
-// TestWSThreadInject_ChannelAccepts_SendsAck verifies the happy path:
-// when the thread's InputCh has capacity, the server sends thread_inject_ack.
-func TestWSThreadInject_ChannelAccepts_SendsAck(t *testing.T) {
+// TestWSThreadInject_NotBlocked_SendsError verifies that thread input is
+// accepted only while blocked; otherwise reason=not_waiting.
+func TestWSThreadInject_NotBlocked_SendsError(t *testing.T) {
 	srv, ts := newTestServer(t)
 	tm := threadmgr.New()
 	srv.SetThreadManager(tm)
@@ -118,60 +136,7 @@ func TestWSThreadInject_ChannelAccepts_SendsAck(t *testing.T) {
 	conn := dialWS(t, ts.URL)
 	sendInject(t, conn, thread.ID, "please check this")
 
-	// Must receive thread_inject_ack
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	var resp map[string]any
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read: expected thread_inject_ack, got error: %v", err)
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
-			continue
-		}
-		if resp["type"] == "thread_inject_ack" {
-			break
-		}
-		// Skip unrelated messages (e.g. pong)
-	}
-
-	if resp["type"] != "thread_inject_ack" {
-		t.Errorf("expected type thread_inject_ack, got %q", resp["type"])
-	}
-	payload, _ := resp["payload"].(map[string]any)
-	if payload["thread_id"] != thread.ID {
-		t.Errorf("ack payload thread_id = %v, want %q", payload["thread_id"], thread.ID)
-	}
-}
-
-// TestWSThreadInject_ChannelFull_SendsError verifies that when the InputCh
-// is full (buffer=1, already occupied), the server sends thread_inject_error.
-func TestWSThreadInject_ChannelFull_SendsError(t *testing.T) {
-	srv, ts := newTestServer(t)
-	tm := threadmgr.New()
-	srv.SetThreadManager(tm)
-
-	thread, err := tm.Create(threadmgr.CreateParams{
-		SessionID: "sess-full",
-		AgentID:   "agent-y",
-		Task:      "fill channel",
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Pre-fill the InputCh (buffer size = 1) so the next send will hit the
-	// default branch and return an error.
-	ch, ok := tm.GetInputCh(thread.ID)
-	if !ok || ch == nil {
-		t.Fatal("expected InputCh to exist after Create")
-	}
-	ch <- "pre-existing content"
-
-	conn := dialWS(t, ts.URL)
-	sendInject(t, conn, thread.ID, "this will overflow")
-
-	// Must receive thread_inject_error
+	// Must receive thread_inject_error (not_waiting)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	var resp map[string]any
 	for {
@@ -185,7 +150,7 @@ func TestWSThreadInject_ChannelFull_SendsError(t *testing.T) {
 		if resp["type"] == "thread_inject_error" {
 			break
 		}
-		// Skip unrelated messages
+		// Skip unrelated messages (e.g. pong)
 	}
 
 	if resp["type"] != "thread_inject_error" {
@@ -195,7 +160,8 @@ func TestWSThreadInject_ChannelFull_SendsError(t *testing.T) {
 	if payload["thread_id"] != thread.ID {
 		t.Errorf("error payload thread_id = %v, want %q", payload["thread_id"], thread.ID)
 	}
-	if payload["reason"] != "buffer_full" {
-		t.Errorf("error payload reason = %v, want %q", payload["reason"], "buffer_full")
+	if payload["reason"] != "not_waiting" {
+		t.Errorf("error payload reason = %v, want %q", payload["reason"], "not_waiting")
 	}
 }
+

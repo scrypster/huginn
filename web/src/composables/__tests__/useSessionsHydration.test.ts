@@ -148,7 +148,12 @@ describe('useSessions - Hydration & Message Fetching', () => {
       await expect(fetchMessages('sess-7')).resolves.not.toThrow()
 
       const msgs = getMessages('sess-7')
-      expect(msgs).toHaveLength(0) // empty array, session marked hydrated
+      // On error a synthetic hydration-error message is injected so the user
+      // sees a visible explanation rather than silently empty history.
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('hydration-error-sess-7')
+      expect(msgs[0].role).toBe('assistant')
+      expect(msgs[0].content).toContain('history could not be loaded')
     })
   })
 

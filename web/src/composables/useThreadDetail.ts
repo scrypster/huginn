@@ -5,6 +5,8 @@ import type { ToolCallRecord } from './useSessions'
 
 export interface ThreadMessage {
   id: string
+  thread_id?: string
+  container_id?: string
   role: 'user' | 'assistant' | 'tool_call' | 'tool_result'
   content: string
   agent: string
@@ -43,6 +45,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const artifact = ref<ThreadArtifact | null>(null)
 const delegationChain = ref<string[]>([])
+let scopedThreadIDs = new Set<string>()
 
 // Debounce timer for WS-triggered refetches.
 let refetchTimer: ReturnType<typeof setTimeout> | null = null
@@ -70,6 +73,8 @@ async function fetchThreadMessages(messageId: string): Promise<MessageThreadAPIR
   const rawMsgs: unknown[] = Array.isArray(data.messages) ? data.messages : []
   const messages: ThreadMessage[] = rawMsgs.map((m: unknown) => {
     const msg = m as Record<string, unknown>
+    const containerId = String(msg['container_id'] ?? '')
+    const threadId = String(msg['thread_id'] ?? containerId)
     const rawToolCalls = Array.isArray(msg['tool_calls']) ? msg['tool_calls'] : undefined
     const toolCalls: ToolCallRecord[] | undefined =
       rawToolCalls && rawToolCalls.length > 0
@@ -83,6 +88,8 @@ async function fetchThreadMessages(messageId: string): Promise<MessageThreadAPIR
         : undefined
     return {
       ...(msg as unknown as ThreadMessage),
+      container_id: containerId || undefined,
+      thread_id: threadId || undefined,
       toolCalls,
     }
   })
@@ -159,6 +166,7 @@ function scheduleRefetch(): void {
     try {
       const result = await fetchThreadMessages(id)
       messages.value = result.messages
+      scopedThreadIDs = collectScopedThreadIDs(result.messages)
       if (result.delegation_chain && result.delegation_chain.length > 0) {
         delegationChain.value = result.delegation_chain
       }
@@ -171,6 +179,20 @@ function scheduleRefetch(): void {
 // streamingMsgId tracks the synthetic streaming message currently being built
 // from thread_token events. Reset on thread_done or panel close.
 let streamingMsgId: string | null = null
+
+function collectScopedThreadIDs(msgs: ThreadMessage[]): Set<string> {
+  const ids = new Set<string>()
+  for (const m of msgs) {
+    const tid = m.thread_id || m.container_id
+    if (tid) ids.add(tid)
+  }
+  return ids
+}
+
+function isScopedThreadEvent(threadID: string | undefined): boolean {
+  if (!isOpen.value || !threadMessageId.value || !threadID) return false
+  return scopedThreadIDs.has(threadID)
+}
 
 // wireThreadDetailWS registers WS listeners for thread lifecycle events.
 // Call once from App.vue initApp() after creating the WS connection.
@@ -185,8 +207,10 @@ let streamingMsgId: string | null = null
 export function wireThreadDetailWS(ws: HuginnWS): () => void {
   const onStarted = (msg: WSMessage): void => {
     const tid = msg.payload?.['thread_id'] as string | undefined
+    const parentMessageID = msg.payload?.['parent_message_id'] as string | undefined
     const agentId = msg.payload?.['agent_id'] as string | undefined
-    if (!tid || !threadMessageId.value) return
+    if (!tid || !threadMessageId.value || parentMessageID !== threadMessageId.value) return
+    scopedThreadIDs.add(tid)
     // Append agent to delegationChain for the currently-open message thread.
     // The chain is accumulated from successive thread_started events.
     if (agentId && !delegationChain.value.includes(agentId)) {
@@ -196,7 +220,8 @@ export function wireThreadDetailWS(ws: HuginnWS): () => void {
 
   const onToken = (msg: WSMessage): void => {
     // Only stream into the panel if it's open.
-    if (!isOpen.value || !threadMessageId.value) return
+    const tid = msg.payload?.['thread_id'] as string | undefined
+    if (!isScopedThreadEvent(tid)) return
     const token = msg.payload?.['token'] as string | undefined
     const agentId = (msg.payload?.['agent_id'] as string | undefined) ?? ''
     if (!token) return
@@ -226,7 +251,7 @@ export function wireThreadDetailWS(ws: HuginnWS): () => void {
 
   const onDone = (msg: WSMessage): void => {
     const tid = msg.payload?.['thread_id'] as string | undefined
-    if (!tid || !threadMessageId.value) return
+    if (!isScopedThreadEvent(tid)) return
     // Finalize the streaming bubble (mark not streaming), then refetch to get the
     // persisted version from the server with correct ID and timestamp.
     if (streamingMsgId) {
@@ -241,7 +266,7 @@ export function wireThreadDetailWS(ws: HuginnWS): () => void {
   const onStatus = (msg: WSMessage): void => {
     const tid = msg.payload?.['thread_id'] as string | undefined
     const status = msg.payload?.['status'] as string | undefined
-    if (!tid || !threadMessageId.value) return
+    if (!isScopedThreadEvent(tid)) return
     if (status && ['done', 'error', 'cancelled'].includes(status)) {
       scheduleRefetch()
     }
@@ -250,7 +275,8 @@ export function wireThreadDetailWS(ws: HuginnWS): () => void {
   // Live tool call display: add a temporary tool_call bubble when Sam uses a tool.
   // These are replaced by persisted rows on the next refetch after thread_done.
   const onToolCall = (msg: WSMessage): void => {
-    if (!isOpen.value || !threadMessageId.value) return
+    const tid = msg.payload?.['thread_id'] as string | undefined
+    if (!isScopedThreadEvent(tid)) return
     const toolName = msg.payload?.['tool'] as string | undefined
     const args = msg.payload?.['args'] as Record<string, unknown> | undefined
     if (!toolName) return
@@ -287,6 +313,7 @@ export function wireThreadDetailWS(ws: HuginnWS): () => void {
 export function useThreadDetail() {
   async function open(messageId: string, agentName = ''): Promise<void> {
     threadMessageId.value = messageId
+    scopedThreadIDs = new Set<string>()
     isOpen.value = true
     loading.value = true
     error.value = null
@@ -297,6 +324,7 @@ export function useThreadDetail() {
     try {
       const result = await fetchThreadMessages(messageId)
       messages.value = result.messages
+      scopedThreadIDs = collectScopedThreadIDs(result.messages)
       delegationChain.value = result.delegation_chain ?? []
       // Try to load artifact for thread
       const firstAgent = agentName || result.messages.find(m => m.role === 'assistant')?.agent || ''
@@ -317,6 +345,7 @@ export function useThreadDetail() {
     }
     isOpen.value = false
     threadMessageId.value = null
+    scopedThreadIDs = new Set<string>()
     messages.value = []
     error.value = null
     artifact.value = null

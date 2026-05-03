@@ -705,19 +705,21 @@ func (tm *ThreadManager) GetInputCh(id string) (chan string, bool) {
 }
 
 // TrySendInput attempts to deliver input to a thread that is waiting for user
-// input (StatusBlocked). Returns (sent, found). sent is false if the thread
-// exists but is not in StatusBlocked (i.e. not waiting for input). found is
-// false if the thread does not exist or belongs to a different session.
-func (tm *ThreadManager) TrySendInput(threadID, sessionID, input string) (sent bool, found bool) {
+// input (StatusBlocked). Returns (sent, found, reason):
+//   - sent=true, found=true, reason="" on successful delivery
+//   - sent=false, found=false, reason="not_found" if missing or wrong-session
+//   - sent=false, found=true, reason="not_waiting" if thread is not blocked
+//   - sent=false, found=true, reason="buffer_full" if blocked but input queue is full
+func (tm *ThreadManager) TrySendInput(threadID, sessionID, input string) (sent bool, found bool, reason string) {
 	tm.mu.RLock()
 	t, ok := tm.threads[threadID]
 	if !ok || (sessionID != "" && t.SessionID != sessionID) {
 		tm.mu.RUnlock()
-		return false, false
+		return false, false, "not_found"
 	}
 	if t.Status != StatusBlocked {
 		tm.mu.RUnlock()
-		return false, true // found but not waiting
+		return false, true, "not_waiting"
 	}
 	ch := t.InputCh
 	tm.mu.RUnlock()
@@ -725,10 +727,96 @@ func (tm *ThreadManager) TrySendInput(threadID, sessionID, input string) (sent b
 	// Non-blocking send — InputCh is buffered with capacity 1.
 	select {
 	case ch <- input:
-		return true, true
+		// Share operator guidance with sibling delegated workers so concurrent
+		// threads can adapt without waiting for final synthesis.
+		trimmed := strings.TrimSpace(input)
+		if trimmed != "" {
+			if len(trimmed) > 200 {
+				trimmed = trimmed[:200] + "…"
+			}
+			tm.PublishSiblingContext(threadID, "user guidance: "+trimmed)
+		}
+		return true, true, ""
 	default:
-		return false, true
+		return false, true, "buffer_full"
 	}
+}
+
+// InjectReceipt returns UI-facing delivery metadata for a successful thread
+// input injection:
+//   - deliveredToAgent: target delegated agent for the injected thread
+//   - sharedWithActive: number of sibling active delegates in the same session
+//     that can consume the published "user guidance" context update
+//
+// ok is false when the thread is not found.
+func (tm *ThreadManager) InjectReceipt(threadID string) (deliveredToAgent string, sharedWithActive int, ok bool) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	target, exists := tm.threads[threadID]
+	if !exists {
+		return "", 0, false
+	}
+	for id, candidate := range tm.threads {
+		if id == threadID || candidate.SessionID != target.SessionID {
+			continue
+		}
+		switch candidate.Status {
+		case StatusDone, StatusError, StatusCancelled:
+			// terminal; do not count as an active delegate
+		default:
+			sharedWithActive++
+		}
+	}
+	return target.AgentID, sharedWithActive, true
+}
+
+// PublishSessionGuidance broadcasts operator guidance into the session thread bus
+// so all active delegated workers can adapt while the lead run is still active.
+// Returns the number of active delegated threads in the session at publish time.
+func (tm *ThreadManager) PublishSessionGuidance(sessionID, actor, content string) int {
+	return tm.PublishSessionGuidanceTarget(sessionID, actor, "", content)
+}
+
+// PublishSessionGuidanceTarget broadcasts operator guidance into the session
+// thread bus. When targetAgentID is non-empty, only that delegate will consume
+// the update from sibling context.
+func (tm *ThreadManager) PublishSessionGuidanceTarget(sessionID, actor, targetAgentID, content string) int {
+	content = strings.TrimSpace(content)
+	if sessionID == "" || content == "" {
+		return 0
+	}
+	targetAgentID = strings.TrimSpace(targetAgentID)
+	tm.mu.RLock()
+	bus := tm.threadBus
+	active := 0
+	for _, t := range tm.threads {
+		if t.SessionID != sessionID {
+			continue
+		}
+		if targetAgentID != "" && !strings.EqualFold(t.AgentID, targetAgentID) {
+			continue
+		}
+		switch t.Status {
+		case StatusDone, StatusError, StatusCancelled:
+			// terminal; not active
+		default:
+			active++
+		}
+	}
+	tm.mu.RUnlock()
+	if bus == nil {
+		return active
+	}
+	if strings.TrimSpace(actor) == "" {
+		actor = "operator"
+	}
+	bus.Publish(sessionID, ThreadContextMessage{
+		ThreadID:      "session-guidance",
+		AgentID:       actor,
+		TargetAgentID: targetAgentID,
+		Content:       clipResult(content, 240),
+	})
+	return active
 }
 
 // CancelIfOwned cancels a thread only if it belongs to the given session.
@@ -815,7 +903,7 @@ func (tm *ThreadManager) SiblingContext(threadID string, limit int) []ThreadCont
 	if !ok || bus == nil {
 		return nil
 	}
-	return bus.SiblingContext(t.SessionID, threadID, limit)
+	return bus.SiblingContext(t.SessionID, threadID, t.AgentID, limit)
 }
 
 // RequireApprovalToken validates a lead-issued token for a high-risk delegated
@@ -882,6 +970,29 @@ func (tm *ThreadManager) IsReady(id string) bool {
 		}
 	}
 	return true
+}
+
+// IsBlockedByFailure returns true if any upstream dependency has reached a
+// terminal failure state (StatusCancelled or StatusError), making it
+// impossible for this thread to ever become ready. Callers should cancel
+// or error the thread immediately rather than waiting for the watchdog.
+func (tm *ThreadManager) IsBlockedByFailure(id string) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	t, ok := tm.threads[id]
+	if !ok {
+		return false
+	}
+	for _, depID := range t.DependsOn {
+		dep, ok := tm.threads[depID]
+		if !ok {
+			continue // unknown dep treated conservatively
+		}
+		if dep.Status == StatusCancelled || dep.Status == StatusError {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectCycle returns true if there is a cycle in the dependency graph reachable
@@ -967,9 +1078,9 @@ func (tm *ThreadManager) StartPruner(ctx context.Context, interval, maxAge time.
 // still transitioned to StatusError so it does not block DAG evaluation.
 func (tm *ThreadManager) StartWatchdog(ctx context.Context, broadcast BroadcastFn) {
 	const (
-		scanInterval    = 60 * time.Second
-		queuedTimeout   = 10 * time.Minute
-		runningTimeout  = 30 * time.Minute
+		scanInterval   = 60 * time.Second
+		queuedTimeout  = 10 * time.Minute
+		runningTimeout = 30 * time.Minute
 	)
 	go func() {
 		ticker := time.NewTicker(scanInterval)

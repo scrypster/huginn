@@ -112,6 +112,98 @@ func TestGetMessageThread_WithReplies(t *testing.T) {
 	}
 }
 
+func TestGetMessageThread_WithMultipleThreads_OrdersByTimestamp(t *testing.T) {
+	srv := testServer(t)
+	db := openTestSQLiteDB(t)
+	srv.SetDB(db)
+
+	sqliteStore := session.NewSQLiteSessionStore(db)
+	sess := sqliteStore.New("thread-order-test", "/tmp", "model")
+	if err := sqliteStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	parentMsg := session.SessionMessage{
+		ID:      "parent-order-1",
+		Role:    "user",
+		Content: "parent message",
+		Ts:      time.Now().UTC(),
+	}
+	if err := sqliteStore.Append(sess, parentMsg); err != nil {
+		t.Fatalf("append parent: %v", err)
+	}
+
+	wdb := db.Write()
+	if wdb == nil {
+		t.Fatal("write db is nil")
+	}
+	threadLateID := "thread-order-late"
+	threadEarlyID := "thread-order-early"
+	now := time.Now().UTC()
+	for _, tid := range []string{threadLateID, threadEarlyID} {
+		_, err := wdb.Exec(`
+			INSERT OR IGNORE INTO threads
+				(id, parent_type, parent_id, agent_name, task, status,
+				 parent_msg_id, created_at, files_modified, key_decisions, artifacts)
+			VALUES (?, 'session', ?, 'Sam', 'test task', 'done',
+			        'parent-order-1', ?, '[]', '[]', '[]')`,
+			tid, sess.ID, now.Format(time.RFC3339),
+		)
+		if err != nil {
+			t.Fatalf("insert thread %s: %v", tid, err)
+		}
+	}
+
+	lateTS := now.Add(2 * time.Minute).Format(time.RFC3339)
+	earlyTS := now.Add(-2 * time.Minute).Format(time.RFC3339)
+
+	// Insert the later message first to prove deterministic timestamp ordering.
+	_, err := wdb.Exec(`
+		INSERT OR IGNORE INTO messages
+			(id, container_type, container_id, seq, ts, role, content, agent,
+			 tool_name, tool_call_id, type,
+			 prompt_tokens, completion_tokens, cost_usd, model)
+		VALUES (?, 'thread', ?, 1, ?, 'assistant', ?, 'Sam',
+		        '', '', '', 0, 0, 0.0, '')`,
+		"reply-late", threadLateID, lateTS, "late reply",
+	)
+	if err != nil {
+		t.Fatalf("insert late reply: %v", err)
+	}
+	_, err = wdb.Exec(`
+		INSERT OR IGNORE INTO messages
+			(id, container_type, container_id, seq, ts, role, content, agent,
+			 tool_name, tool_call_id, type,
+			 prompt_tokens, completion_tokens, cost_usd, model)
+		VALUES (?, 'thread', ?, 1, ?, 'assistant', ?, 'Sam',
+		        '', '', '', 0, 0, 0.0, '')`,
+		"reply-early", threadEarlyID, earlyTS, "early reply",
+	)
+	if err != nil {
+		t.Fatalf("insert early reply: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/parent-order-1/thread", nil)
+	req.SetPathValue("id", "parent-order-1")
+	w := httptest.NewRecorder()
+	srv.handleGetMessageThread(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result MessageThreadResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Messages) != 2 {
+		t.Fatalf("expected 2 replies, got %d", len(result.Messages))
+	}
+	if result.Messages[0].Content != "early reply" || result.Messages[1].Content != "late reply" {
+		t.Fatalf("unexpected order: got [%q, %q], want [early reply, late reply]",
+			result.Messages[0].Content, result.Messages[1].Content)
+	}
+}
+
 func TestGetContainerThreads_NoThreads(t *testing.T) {
 	srv := testServer(t)
 	db := openTestSQLiteDB(t)
@@ -242,6 +334,9 @@ func TestGetContainerThreads_ReplyAgentName(t *testing.T) {
 	}
 	if result[0].ID != "parent-tom" {
 		t.Errorf("thread root ID = %q, want \"parent-tom\"", result[0].ID)
+	}
+	if result[0].ThreadID != "thread-sam-1" {
+		t.Errorf("thread root ThreadID = %q, want \"thread-sam-1\"", result[0].ThreadID)
 	}
 }
 

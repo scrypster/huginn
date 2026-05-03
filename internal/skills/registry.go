@@ -33,6 +33,8 @@ type SkillRegistry struct {
 	toolOwners      map[string]string  // toolName → skillName
 	combinedCache   string             // cached CombinedPromptFragment result
 	combinedDirty   bool               // true when cache must be regenerated
+	rulesCache      string             // cached CombinedRuleContent result
+	rulesDirty      bool               // true when rules cache must be regenerated
 	reloadCallback  func()             // optional callback invoked after hot reload
 	invocations     map[string]int64   // toolName → invocation count
 	lastReloadedAt  int64              // unix nano of last hot reload; 0 = never
@@ -44,6 +46,7 @@ func NewSkillRegistry() *SkillRegistry {
 		toolOwners:    make(map[string]string),
 		invocations:   make(map[string]int64),
 		combinedDirty: true, // no skills yet → treat as dirty
+		rulesDirty:    true, // no skills yet → treat as dirty
 	}
 }
 
@@ -56,12 +59,13 @@ func (r *SkillRegistry) SetReloadCallback(fn func()) {
 	r.reloadCallback = fn
 }
 
-// NotifyReload marks the combined-fragment cache as stale, records the reload
-// timestamp, and invokes the registered reload callback (if any).
+// NotifyReload marks the combined-fragment and rules caches as stale, records
+// the reload timestamp, and invokes the registered reload callback (if any).
 // Call this after any bulk skill reload.
 func (r *SkillRegistry) NotifyReload() {
 	r.mu.Lock()
 	r.combinedDirty = true
+	r.rulesDirty = true
 	r.lastReloadedAt = time.Now().UnixNano()
 	cb := r.reloadCallback
 	r.mu.Unlock()
@@ -147,6 +151,7 @@ func (r *SkillRegistry) Register(s Skill) error {
 	}
 	r.skills = append(r.skills, s)
 	r.combinedDirty = true // invalidate the combined-fragment cache
+	r.rulesDirty = true    // invalidate the rules cache
 	return nil
 }
 
@@ -189,16 +194,35 @@ func (r *SkillRegistry) CombinedPromptFragment() string {
 	return r.combinedCache
 }
 
+// CombinedRuleContent returns the combined rule content for all registered
+// skills. The result is cached and only recomputed when a skill is added,
+// removed, or the registry is hot-reloaded (rulesDirty == true).
 func (r *SkillRegistry) CombinedRuleContent() string {
+	// Fast path: cache hit under read lock.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	if !r.rulesDirty {
+		cached := r.rulesCache
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	// Slow path: recompute under write lock.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Double-check after acquiring write lock.
+	if !r.rulesDirty {
+		return r.rulesCache
+	}
 	parts := make([]string, 0, len(r.skills))
 	for _, s := range r.skills {
 		if rc := s.RuleContent(); rc != "" {
 			parts = append(parts, rc)
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	r.rulesCache = strings.Join(parts, "\n\n")
+	r.rulesDirty = false
+	return r.rulesCache
 }
 
 // AllTools collects all tools from all registered skills into a single slice.

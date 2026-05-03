@@ -208,6 +208,27 @@ func TestSQLiteSession_Append_PreservesFields(t *testing.T) {
 	if got.PromptTok != 10 { t.Errorf("PromptTok: want 10, got %d", got.PromptTok) }
 }
 
+func TestSQLiteSession_Append_DuplicateMessageIDReturnsError(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+	s := session.NewSQLiteSessionStore(db)
+
+	sess := s.New("dup append", "", "")
+	if err := s.SaveManifest(sess); err != nil { t.Fatalf("SaveManifest: %v", err) }
+
+	msg := session.SessionMessage{
+		ID:      "msg-fixed-1",
+		Role:    "user",
+		Content: "first",
+	}
+	if err := s.Append(sess, msg); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if err := s.Append(sess, msg); err == nil {
+		t.Fatal("expected duplicate message append to return error, got nil")
+	}
+}
+
 func TestSQLiteSession_AppendToThread_TailThreadMessages(t *testing.T) {
 	t.Parallel()
 	db := openSessTestDB(t)
@@ -227,6 +248,28 @@ func TestSQLiteSession_AppendToThread_TailThreadMessages(t *testing.T) {
 	msgs, err := s.TailThreadMessages(sess.ID, threadID, 3)
 	if err != nil { t.Fatalf("TailThreadMessages: %v", err) }
 	if len(msgs) != 3 { t.Fatalf("want 3, got %d", len(msgs)) }
+}
+
+func TestSQLiteSession_AppendToThread_DuplicateMessageIDReturnsError(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+	s := session.NewSQLiteSessionStore(db)
+
+	sess := s.New("thread dup", "", "")
+	if err := s.SaveManifest(sess); err != nil { t.Fatalf("SaveManifest: %v", err) }
+
+	threadID := session.NewID()
+	msg := session.SessionMessage{
+		ID:      "thread-msg-fixed-1",
+		Role:    "assistant",
+		Content: "thread body",
+	}
+	if err := s.AppendToThread(sess.ID, threadID, msg); err != nil {
+		t.Fatalf("first append thread: %v", err)
+	}
+	if err := s.AppendToThread(sess.ID, threadID, msg); err == nil {
+		t.Fatal("expected duplicate thread message append to return error, got nil")
+	}
 }
 
 func TestSQLiteSession_TailThreadMessages_Missing(t *testing.T) {

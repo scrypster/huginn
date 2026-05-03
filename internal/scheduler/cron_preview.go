@@ -17,8 +17,10 @@ import (
 // cronPreviewParser is the same parser the live Scheduler uses so the preview
 // can never disagree with what gets scheduled at runtime. Both the standard
 // cron set and the @hourly / @daily / etc descriptors are supported.
+// SecondOptional is required so 6-field expressions ("*/5 * * * * *") are
+// accepted here just as they are by the scheduler's own cronParser.
 var cronPreviewParser = cron.NewParser(
-	cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
+	cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )
 
 // CronPreview returns the next `count` UTC instants at which the cron

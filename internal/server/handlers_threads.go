@@ -18,6 +18,7 @@ import (
 // GET /api/v1/containers/:id/threads).
 type threadMessageRow struct {
 	ID                  string                      `json:"id"`
+	ThreadID            string                      `json:"thread_id,omitempty"`
 	ContainerID         string                      `json:"container_id"`
 	Seq                 int64                       `json:"seq"`
 	Ts                  time.Time                   `json:"ts"`
@@ -97,7 +98,7 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		      SELECT id FROM threads WHERE parent_msg_id = ?
 		  )
 		  AND role NOT IN ('cost', 'system')
-		ORDER BY seq ASC`,
+		ORDER BY ts ASC, seq ASC, id ASC`,
 		messageID,
 	)
 	if err != nil {
@@ -156,7 +157,7 @@ func (s *Server) handleGetContainerThreads(w http.ResponseWriter, r *http.Reques
 	// This ensures the badge shows "Sam" (who ran the thread) not "Tom" (who
 	// authored the @mention).
 	rows, err := rdb.QueryContext(r.Context(), `
-		SELECT m.id, m.container_id, m.seq, m.ts, m.role, m.content,
+		SELECT m.id, COALESCE(t.id, ''), m.container_id, m.seq, m.ts, m.role, m.content,
 		       COALESCE(t.agent_name, COALESCE(m.agent, '')),
 		       COALESCE(m.tool_name, ''),
 		       COALESCE(m.parent_message_id, ''),
@@ -197,7 +198,7 @@ func scanContainerThreadRows(rows *sql.Rows) ([]threadMessageRow, error) {
 		var tsStr string
 		var toolCallsJSON string
 		if err := rows.Scan(
-			&m.ID, &m.ContainerID, &m.Seq, &tsStr,
+			&m.ID, &m.ThreadID, &m.ContainerID, &m.Seq, &tsStr,
 			&m.Role, &m.Content, &m.Agent, &m.ToolName,
 			&m.ParentMessageID, &m.TriggeringMessageID,
 			&m.ThreadReplyCount, &toolCallsJSON,
@@ -356,12 +357,16 @@ func (s *Server) handleReplyThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// withMaxBody(64<<10) is applied at the route level — input size already bounded.
-	sent, found := s.tm.TrySendInput(threadID, sessionID, body.Input)
+	sent, found, reason := s.tm.TrySendInput(threadID, sessionID, body.Input)
 	if !found {
 		jsonError(w, http.StatusNotFound, "thread not found")
 		return
 	}
 	if !sent {
+		if reason == "buffer_full" {
+			jsonError(w, http.StatusConflict, "thread input buffer is full")
+			return
+		}
 		jsonError(w, http.StatusConflict, "thread is not waiting for input")
 		return
 	}

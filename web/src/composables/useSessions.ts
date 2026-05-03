@@ -6,6 +6,22 @@ import { api, getToken } from './useApi'
 // to show a user-visible warning (e.g. an amber toast) and then reset it to
 // false once the warning has been acknowledged or auto-dismissed.
 export const hydrationQueueOverflowed = ref(false)
+const hydrationQueueOverflowBySession = ref<Record<string, true>>({})
+
+function setHydrationOverflow(sessionId: string, overflowed: boolean): void {
+  if (!sessionId) return
+  if (overflowed) {
+    hydrationQueueOverflowBySession.value = {
+      ...hydrationQueueOverflowBySession.value,
+      [sessionId]: true,
+    }
+  } else if (hydrationQueueOverflowBySession.value[sessionId]) {
+    const next = { ...hydrationQueueOverflowBySession.value }
+    delete next[sessionId]
+    hydrationQueueOverflowBySession.value = next
+  }
+  hydrationQueueOverflowed.value = Object.keys(hydrationQueueOverflowBySession.value).length > 0
+}
 
 export interface Session {
   id: string
@@ -41,6 +57,12 @@ export interface ThreadReply {
   content: string
 }
 
+export interface PermissionDenial {
+  threadId: string
+  agentId: string
+  tool: string
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -52,12 +74,21 @@ export interface ChatMessage {
   delegatedThreads?: DelegatedThread[]  // threads spawned by this message
   threadReplies?: ThreadReply[]         // inline thread replies from agent_follow_up (Slack-style)
   replyCount?: number     // thread reply count (for badge display after hydration)
+  permissionDenials?: PermissionDenial[]
+  threadSummary?: boolean       // true for synthetic completion cards injected on thread_done
+  threadSummaryThreadId?: string // thread ID this completion card belongs to (dedup guard)
+  // Space-mode fields present on messages fetched from container history
+  session_id?: string
+  seq?: number
+  ts?: string
 }
 
 // Module-level shared state (singleton across all component instances)
 const sessions = ref<Session[]>([])
 const loading = ref(false)
+const fetchSessionsError = ref<string | null>(null)
 const messagesBySession = ref<Record<string, ChatMessage[]>>({})
+const fetchErrorBySession = ref<Record<string, string | null>>({})
 // agentThinking: true from message send until first token/status/done/error
 const agentThinkingBySession = ref<Record<string, boolean>>({})
 // lastSeenMessageId: set when agent starts streaming to mark the last user message as "seen"
@@ -97,9 +128,8 @@ function queueIfHydrating(sessionId: string, handler: () => void): boolean {
       // Drop the oldest buffered event (FIFO eviction) to cap memory use.
       q.shift()
       console.warn(`[useSessions] hydration queue for session ${sessionId} exceeded ${MAX_HYDRATION_QUEUE_SIZE} events; dropping oldest`)
-      // Signal UI components to show a user-visible warning. Reset to false
-      // after the session finishes hydrating (see flushQueue below).
-      hydrationQueueOverflowed.value = true
+      // Signal UI components to show a user-visible warning for this session.
+      setHydrationOverflow(sessionId, true)
     }
     q.push(handler)
     return true
@@ -110,6 +140,7 @@ function queueIfHydrating(sessionId: string, handler: () => void): boolean {
 export function useSessions() {
   async function fetchSessions() {
     loading.value = true
+    fetchSessionsError.value = null
     try {
       const data = await api.sessions.list() as unknown
       if (Array.isArray(data)) {
@@ -117,8 +148,8 @@ export function useSessions() {
       } else {
         sessions.value = (data as { sessions?: Session[] }).sessions ?? []
       }
-    } catch {
-      // ignore — server may not be fully ready
+    } catch (err: unknown) {
+      fetchSessionsError.value = err instanceof Error ? err.message : 'Failed to load sessions'
     } finally {
       loading.value = false
     }
@@ -126,7 +157,10 @@ export function useSessions() {
 
   async function createSession(spaceId?: string): Promise<Session> {
     const data = await api.sessions.create(spaceId) as unknown as { session_id?: string; id?: string }
-    const id = data.id ?? data.session_id ?? crypto.randomUUID()
+    const id = data.id ?? data.session_id
+    if (!id) {
+      throw new Error('Server did not return a session ID')
+    }
     const session: Session = {
       id,
       agent_id: 'default',
@@ -139,17 +173,23 @@ export function useSessions() {
   }
 
   async function deleteSession(id: string) {
+    let deleted = false
     try {
-      await fetch(`/api/v1/sessions/${id}`, {
+      const resp = await fetch(`/api/v1/sessions/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
-    } catch { /* ignore */ }
+      deleted = resp.ok
+    } catch {
+      deleted = false
+    }
+    if (!deleted) return
     sessions.value = sessions.value.filter(s => s.id !== id)
     delete messagesBySession.value[id]
     // Clean up hydration state so the session can be re-fetched if re-created.
     hydrated.delete(id)
     preHydrationQueue.delete(id) // discard any buffered handlers — session is gone
+    setHydrationOverflow(id, false)
   }
 
   async function renameSession(id: string, title: string) {
@@ -186,6 +226,8 @@ export function useSessions() {
 
     // Begin buffering WS events for this session until the fetch completes.
     preHydrationQueue.set(sessionId, [])
+    // Reset any prior fetch error so stale errors don't persist on re-fetch.
+    clearFetchError(sessionId)
 
     // 30-second timeout: if the server hangs, we still flush the queue so that
     // live WS streaming is not permanently blocked for this session.
@@ -219,12 +261,29 @@ export function useSessions() {
             agent: (r.agent as string | undefined) || undefined,
             createdAt: (r.ts as string | undefined) || undefined,
             toolCalls,
+            threadSummary: (r.type === 'thread_event' && r.tool_name === 'thread_done') || undefined,
+            threadSummaryThreadId: (r.type === 'thread_event' && typeof r.tool_call_id === 'string')
+              ? r.tool_call_id as string
+              : undefined,
           }
         })
       messagesBySession.value[sessionId] = msgs
-    } catch {
-      // Ignore — server may not have messages for this session, or the
-      // 30-second timeout fired. Either way we fall through to flush the queue.
+    } catch (err: unknown) {
+      // AbortError is from our own 30s timeout — not a real error, silently continue.
+      // Any other error (network down, 401, 5xx) is surfaced so the UI can show it.
+      if (err instanceof Error && err.name !== 'AbortError') {
+        fetchErrorBySession.value = {
+          ...fetchErrorBySession.value,
+          [sessionId]: err.message || 'Failed to load messages',
+        }
+        // Inject a synthetic message so the user sees history failed to load
+        // rather than silently seeing an empty history before live WS events.
+        messagesBySession.value[sessionId] = [{
+          id: `hydration-error-${sessionId}`,
+          role: 'assistant' as const,
+          content: '⚠️ Message history could not be loaded. Showing live events only.',
+        }]
+      }
     } finally {
       clearTimeout(timeoutId)
     }
@@ -237,7 +296,7 @@ export function useSessions() {
     for (const fn of queue) fn()
     // Reset the overflow flag after flushing so the warning auto-clears once
     // the hydration backlog has been processed.
-    hydrationQueueOverflowed.value = false
+    setHydrationOverflow(sessionId, false)
   }
 
   function formatSessionLabel(session: Session): string {
@@ -268,6 +327,18 @@ export function useSessions() {
     lastSeenMessageIdBySession.value[sessionId] = id
   }
 
+  function getFetchError(sessionId: string): string | null {
+    return fetchErrorBySession.value[sessionId] ?? null
+  }
+
+  function clearFetchError(sessionId: string): void {
+    if (fetchErrorBySession.value[sessionId] !== undefined) {
+      const next = { ...fetchErrorBySession.value }
+      delete next[sessionId]
+      fetchErrorBySession.value = next
+    }
+  }
+
   return {
     sessions,
     loading,
@@ -283,5 +354,8 @@ export function useSessions() {
     setAgentThinking,
     getLastSeenMessageId,
     setLastSeenMessageId,
+    getFetchError,
+    clearFetchError,
+    fetchSessionsError,
   }
 }
