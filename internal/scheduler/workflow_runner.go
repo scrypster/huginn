@@ -214,8 +214,16 @@ func MakeWorkflowRunner(
 		var prevOutput string
 		var anyStepFailed bool
 
+		// Use the pre-generated run ID from the context when available (set by
+		// RunWorkflowSyncWithInputs). This replaces the time-window heuristic
+		// in the caller with a direct store.Get lookup by the known ID, removing
+		// the race condition that could correlate the wrong run under load.
+		effectiveRunID := pregenRunIDFromContext(ctx)
+		if effectiveRunID == "" {
+			effectiveRunID = runID(w.ID)
+		}
 		run := &WorkflowRun{
-			ID:         runID(w.ID),
+			ID:         effectiveRunID,
 			WorkflowID: w.ID,
 			Status:     WorkflowRunStatusRunning,
 			StartedAt:  time.Now().UTC(),

@@ -341,40 +341,25 @@ func (s *Scheduler) RunWorkflowSyncWithInputs(ctx context.Context, w *Workflow, 
 	if len(inputs) > 0 {
 		runCtx = WithInitialInputs(runCtx, inputs)
 	}
-	// Capture the timestamp BEFORE invoking the runner so we can pick the
-	// just-persisted run out of the store. The runner stamps StartedAt with
-	// time.Now().UTC(), so any run with StartedAt >= startedAtFloor that
-	// matches w.ID is ours. This is robust to other workflows running in
-	// parallel because we filter by workflow ID via store.List.
-	startedAtFloor := time.Now().UTC().Add(-time.Second)
-	// Run correlation: the child run is identified by finding the most recent run
-	// for this workflow started within the last second. This is a best-effort
-	// heuristic — in the rare case where two sub-workflow invocations for the same
-	// workflow ID start within the same wall-clock second, the wrong run may be
-	// correlated. In practice, sub-workflows are sequential per step so this
-	// window is effectively never hit.
+	// Pre-generate a deterministic run ID and inject it into the context.
+	// The runner checks for this key when creating the WorkflowRun and uses
+	// it instead of generating a new ID. After the runner returns we look up
+	// the run directly by ID via store.Get, eliminating the time-window
+	// heuristic that could correlate the wrong run under load.
+	pregenID := runID(w.ID)
+	runCtx = WithPregenRunID(runCtx, pregenID)
 	if err := wr(runCtx, w); err != nil {
 		return nil, err
 	}
 	if store == nil {
 		return nil, nil
 	}
-	// List returns runs newest-first; pull a small window so we can pick
-	// the freshest entry that was created during this call. 5 is plenty
-	// for the common case while keeping the query cheap.
-	recent, err := store.List(w.ID, 5)
+	// Direct lookup by the pre-generated ID — no time-window scanning needed.
+	run, err := store.Get(w.ID, pregenID)
 	if err != nil {
 		return nil, err
 	}
-	for _, r := range recent {
-		if r == nil {
-			continue
-		}
-		if !r.StartedAt.Before(startedAtFloor) {
-			return r, nil
-		}
-	}
-	return nil, nil
+	return run, nil
 }
 
 func (s *Scheduler) TriggerWorkflow(ctx context.Context, w *Workflow) error {
