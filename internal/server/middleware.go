@@ -124,13 +124,13 @@ func jsonError(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// loggingMiddleware wraps a handler and logs each HTTP request.
+// loggingMiddleware wraps a handler and logs each HTTP request at debug level.
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
 		next(rw, r)
-		slog.Info("http request",
+		slog.Debug("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rw.status,
@@ -453,15 +453,15 @@ func sanitizePath(path string) string {
 	return idSegmentRe.ReplaceAllString(path, "/:id")
 }
 
-// loggingMiddlewareWithStats wraps a handler, logs each request, and records
-// request duration in the Server's stats registry as "http.request.duration_ms".
+// loggingMiddlewareWithStats wraps a handler, logs each request at debug level,
+// and records request duration in the Server's stats registry as "http.request.duration_ms".
 func (s *Server) loggingMiddlewareWithStats(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
 		next(rw, r)
 		elapsed := time.Since(start)
-		slog.Info("http request",
+		slog.Debug("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rw.status,

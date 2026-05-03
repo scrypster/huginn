@@ -816,7 +816,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		}
 
 		chatOnToolCall := func(callID string, name string, args map[string]any) {
-			slog.Info("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
+			slog.Debug("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
 			toolArgsMu.Lock()
 			toolArgsCapture[callID] = args
 			toolArgsMu.Unlock()
@@ -855,7 +855,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 					o.memoryReplicator.Intercept(ctx, name, capturedArgs, result, ag.Name, replCtx)
 				}
 			}
-			slog.Info("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
+			slog.Debug("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 			if onToolEvent != nil {
 				payload := map[string]any{"tool": name, "result": result.Output}
 				if result.Metadata != nil {

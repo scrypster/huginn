@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -89,6 +90,7 @@ func main() {
 	endpointFlag := flag.String("endpoint", "", "OpenAI-compatible backend endpoint (overrides config)")
 	agentFlag := flag.String("agent", "", "run with a specific named agent (e.g. 'Chris'); omit message to launch TUI")
 	noTrayFlag := flag.Bool("no-tray", false, "disable system tray (headless/CI mode)")
+	logLevelFlag := flag.String("log-level", "", "log verbosity: debug, info, warn, error (default: warn; env: HUGINN_LOG_LEVEL)")
 	flag.StringVar(printFlag, "p", "", "shorthand for --print")
 	flag.Parse()
 
@@ -236,10 +238,15 @@ func main() {
 	// logger.Init sets the package-level global so that logger.Error() calls in ws.go
 	// and other packages write to the file rather than being silently discarded.
 	huginnHome, _ := huginnDir()
-	_ = logger.Init(huginnHome)
+	// Resolve log level: --log-level flag > HUGINN_LOG_LEVEL env var > default (warn).
+	resolvedLogLevel := resolveLogLevel(*logLevelFlag)
+	_ = logger.InitWithLevel(huginnHome, resolvedLogLevel)
+	// Also apply the level to the global slog default so package-level slog.*
+	// calls (e.g. in internal packages) respect the same threshold.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: resolvedLogLevel})))
 	appLog := logger.L()
 	defer appLog.Close()
-	appLog.Info("huginn starting", "version", version)
+	appLog.Info("huginn starting", "version", version, "log_level", resolvedLogLevel.String())
 
 	// 1d. Install crash handler — writes to ~/.huginn/crash/<timestamp>.txt on panic.
 	crashDir := filepath.Join(huginnHome, "crash")
@@ -1275,6 +1282,28 @@ func sanitizePath(p string) string {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "huginn: error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// resolveLogLevel returns the slog.Level for the given flag value, falling back
+// to the HUGINN_LOG_LEVEL environment variable, then to slog.LevelWarn.
+// Unrecognised values are silently treated as slog.LevelWarn.
+func resolveLogLevel(flagVal string) slog.Level {
+	raw := strings.TrimSpace(flagVal)
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("HUGINN_LOG_LEVEL"))
+	}
+	switch strings.ToLower(raw) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelWarn
+	}
 }
 
 // needsOnboarding returns true if the managed runtime or at least one model is not yet installed.
