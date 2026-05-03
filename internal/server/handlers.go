@@ -885,6 +885,31 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGetLogLevel returns the current log level.
+func (s *Server) handleGetLogLevel(w http.ResponseWriter, r *http.Request) {
+	level := logger.Level()
+	jsonOK(w, map[string]string{"level": level.String()})
+}
+
+// handleSetLogLevel sets the log level at runtime (no restart needed).
+func (s *Server) handleSetLogLevel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(body.Level)); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid level: use debug, info, warn, or error")
+		return
+	}
+	logger.SetLevel(level)
+	slog.Info("log level changed", "level", level.String())
+	jsonOK(w, map[string]string{"level": level.String()})
+}
+
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	n := 100
 	if qs := r.URL.Query().Get("n"); qs != "" {
