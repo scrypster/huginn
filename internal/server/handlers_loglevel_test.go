@@ -97,9 +97,12 @@ func TestHandleSetLogLevel_InvalidJSON(t *testing.T) {
 
 func TestLogLevelRoutes_AuthRequired(t *testing.T) {
 	_, ts := newTestServer(t)
+	// Use a fresh client per test to avoid shared connection-pool state when
+	// running the full server test suite in parallel on CI.
+	client := &http.Client{Transport: &http.Transport{}}
 
 	// GET without auth should return 401.
-	resp, err := http.Get(ts.URL + "/api/v1/log-level")
+	resp, err := client.Get(ts.URL + "/api/v1/log-level")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +114,7 @@ func TestLogLevelRoutes_AuthRequired(t *testing.T) {
 	// PUT without auth should return 401.
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/log-level",
 		strings.NewReader(`{"level":"info"}`))
-	resp2, err := http.DefaultClient.Do(req)
+	resp2, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
