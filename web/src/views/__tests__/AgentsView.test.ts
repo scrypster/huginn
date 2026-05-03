@@ -120,7 +120,11 @@ describe('AgentsView', () => {
   })
 
   it('openDM falls back to /agents/:name if DM fetch fails', async () => {
-    vi.mocked(apiFetch).mockRejectedValueOnce(new Error('fail'))
+    // Override the mock so DM fetch fails while other calls (e.g. skills load) succeed.
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/spaces/dm/')) throw new Error('fail')
+      return {}
+    })
     ;((_useAgents() as any).agents as any).value = [
       { name: 'Alpha', color: '#ff0', icon: 'A', model: 'gpt-4' },
     ]

@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from 'vue'
-import { getToken } from './useApi'
+import { apiFetch } from './useFetch'
 import { useOptimisticUpdate } from './useOptimisticUpdate'
 
 // Interfaces
@@ -34,25 +34,6 @@ export interface RegistryCollection {
   skills: string[]
 }
 
-/**
- * skillsFetch: simple fetch wrapper that delegates auth to useApi's shared token.
- */
-async function skillsFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${getToken()}`,
-      ...(opts.headers as Record<string, string> || {}),
-    },
-  })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`${path}: ${res.status} ${body}`)
-  }
-  return res.json()
-}
-
 // useInstalledSkills composable
 export function useInstalledSkills() {
   const skills = ref<InstalledSkill[]>([])
@@ -66,7 +47,7 @@ export function useInstalledSkills() {
     loading.value = true
     error.value = null
     try {
-      skills.value = await skillsFetch<InstalledSkill[]>('/api/v1/skills')
+      skills.value = await apiFetch<InstalledSkill[]>('/api/v1/skills')
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error'
     } finally {
@@ -81,7 +62,7 @@ export function useInstalledSkills() {
       : `/api/v1/skills/${encodeURIComponent(name)}/disable`
     try {
       await optimisticUpdate(name, { enabled }, () =>
-        skillsFetch(endpoint, { method: 'PUT' }),
+        apiFetch(endpoint, { method: 'PUT' }),
       )
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error'
@@ -93,7 +74,7 @@ export function useInstalledSkills() {
     error.value = null
     try {
       await optimisticRemove(name, () =>
-        skillsFetch(`/api/v1/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+        apiFetch(`/api/v1/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }),
       )
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error'
@@ -105,7 +86,7 @@ export function useInstalledSkills() {
     if (input.length > 32_000) {
       throw new Error('Input too large (max 32 000 characters)')
     }
-    const res = await skillsFetch<{ output: string; skill: string }>(
+    const res = await apiFetch<{ output: string; skill: string }>(
       `/api/v1/skills/${encodeURIComponent(name)}/execute`,
       { method: 'POST', body: JSON.stringify({ input }), signal },
     )
@@ -150,7 +131,7 @@ export function useRegistrySkills() {
     error.value = null
     try {
       const url = refresh ? '/api/v1/skills/registry/index?refresh=1' : '/api/v1/skills/registry/index'
-      const raw = await skillsFetch<any>(url)
+      const raw = await apiFetch<any>(url)
       index.value = Array.isArray(raw) ? raw : (raw?.skills ?? [])
       collections.value = raw?.collections ?? []
     } catch (e) {
@@ -170,7 +151,7 @@ export function useRegistrySkills() {
     error.value = null
     try {
       const params = new URLSearchParams({ q })
-      return await skillsFetch<RegistrySkill[]>(`/api/v1/skills/registry/search?${params.toString()}`)
+      return await apiFetch<RegistrySkill[]>(`/api/v1/skills/registry/search?${params.toString()}`)
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error'
       throw e
@@ -183,7 +164,7 @@ export function useRegistrySkills() {
     // Trigger reactivity by creating new Set
     installing.value = new Set(installing.value)
     try {
-      await skillsFetch('/api/v1/skills/install', {
+      await apiFetch('/api/v1/skills/install', {
         method: 'POST',
         body: JSON.stringify({ target: name }),
       })
@@ -217,7 +198,7 @@ export function useRegistrySkills() {
 
 // createSkill function
 export async function createSkill(content: string): Promise<string> {
-  const response = await skillsFetch<{ name: string }>('/api/v1/skills', {
+  const response = await apiFetch<{ name: string }>('/api/v1/skills', {
     method: 'POST',
     body: JSON.stringify({ content }),
   })
