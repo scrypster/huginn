@@ -58,6 +58,18 @@ func SetLevel(level slog.Level) {
 	}
 }
 
+// Level returns the current minimum log level of the global logger.
+// Returns slog.LevelInfo if Init has not been called.
+func Level() slog.Level {
+	globalMu.RLock()
+	l := globalLogger
+	globalMu.RUnlock()
+	if l != nil {
+		return l.Level()
+	}
+	return slog.LevelInfo
+}
+
 // L returns the global logger. Falls back to a no-op logger if Init was not called.
 func L() *Logger {
 	globalMu.RLock()
