@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -138,6 +139,8 @@ func (s *stubNotifStore) ExpireRun(runID string) error {
 	}
 	return nil
 }
+
+func (s *stubNotifStore) PruneExpired(ctx context.Context) (int, error) { return 0, nil }
 
 // Compile-time assertion.
 var _ notification.StoreInterface = (*stubNotifStore)(nil)

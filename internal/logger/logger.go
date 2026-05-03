@@ -162,9 +162,9 @@ func (l *Logger) Level() slog.Level {
 	return slog.LevelWarn
 }
 
-// New creates a Logger writing to path at slog.LevelWarn. Rotates at 10 MB.
+// New creates a Logger writing to path at slog.LevelInfo. Rotates at 10 MB.
 func New(path string) (*Logger, error) {
-	return NewWithLevel(path, slog.LevelWarn)
+	return NewWithLevel(path, slog.LevelInfo)
 }
 
 // NewWithLevel creates a Logger writing to path at the given minimum level.
