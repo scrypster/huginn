@@ -562,9 +562,14 @@ func MakeWorkflowRunner(
 				}
 				stepCtx = WithScratchSetter(stepCtx, scratchSetter)
 				stepStartedAt := time.Now().UTC()
+				slog.Debug("scheduler: workflow step starting",
+					"workflow_id", w.ID, "run_id", run.ID, "step", stepName, "position", step.Position, "agent", step.Agent)
 				output, agentErr := executeStepWithRetry(stepCtx, agentFn, opts, step)
 				stepCompletedAt := time.Now().UTC()
 				stepLatencyMs := stepCompletedAt.Sub(stepStartedAt).Milliseconds()
+				slog.Debug("scheduler: workflow step completed",
+					"workflow_id", w.ID, "run_id", run.ID, "step", stepName, "position", step.Position,
+					"latency_ms", stepLatencyMs, "success", agentErr == nil)
 				// Final flush: emit any tokens still buffered when the agent
 				// finished so the live UI sees the complete output.
 				flushTokens(true)

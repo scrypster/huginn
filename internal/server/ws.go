@@ -261,6 +261,7 @@ func (h *WSHub) stop() {
 }
 
 func (h *WSHub) broadcast(msg WSMessage) {
+	slog.Debug("ws: broadcasting message", "type", msg.Type)
 	select {
 	case h.broadcastC <- msg:
 	default:
