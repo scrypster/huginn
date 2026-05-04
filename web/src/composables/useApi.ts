@@ -351,6 +351,14 @@ export const api = {
 
   logs: (n = 100) => apiFetch<{ lines: string[] }>(`/api/v1/logs?n=${n}`),
 
+  logLevel: {
+    get: () => apiFetch<{ level: string }>('/api/v1/log-level'),
+    set: (level: string) => apiFetch<{ level: string }>('/api/v1/log-level', {
+      method: 'PUT',
+      body: JSON.stringify({ level }),
+    }),
+  },
+
   connections: {
     list: () => apiFetch<Connection[]>('/api/v1/connections'),
     providers: () => apiFetch<Provider[]>('/api/v1/providers'),

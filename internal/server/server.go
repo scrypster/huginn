@@ -1019,6 +1019,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/metrics/prometheus", s.handlePrometheusMetrics)
 	mux.HandleFunc("GET /api/v1/cost", api(s.handleCost))
 	mux.HandleFunc("GET /api/v1/logs", api(s.handleLogs))
+	mux.HandleFunc("GET /api/v1/log-level", api(s.handleGetLogLevel))
+	mux.HandleFunc("PUT /api/v1/log-level", api(s.handleSetLogLevel))
 	mux.HandleFunc("GET /api/v1/config", api(s.handleGetConfig))
 	mux.HandleFunc("PUT /api/v1/config", api(s.handleUpdateConfig))
 

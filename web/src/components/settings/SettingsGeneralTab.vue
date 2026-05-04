@@ -77,6 +77,26 @@
     </section>
     <div class="border-t border-huginn-border" />
     <section class="space-y-4">
+      <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Diagnostics</h3>
+      <SettingsFieldRow label="Log Level" hint="Changes take effect immediately. Use Debug to capture diagnostics.">
+        <div class="relative">
+          <select
+            v-model="logLevel"
+            class="w-full appearance-none bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 pr-8 text-sm text-huginn-text outline-none focus:border-huginn-blue/50 transition-colors cursor-pointer"
+            :disabled="logLevelLoading"
+            @change="applyLogLevel"
+          >
+            <option value="error">Error (least verbose)</option>
+            <option value="warn">Warn (default)</option>
+            <option value="info">Info</option>
+            <option value="debug">Debug (most verbose)</option>
+          </select>
+          <svg class="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-huginn-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9" /></svg>
+        </div>
+      </SettingsFieldRow>
+    </section>
+    <div class="border-t border-huginn-border" />
+    <section class="space-y-4">
       <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Behavior Flags</h3>
       <SettingsToggleRow
         :model-value="!!form.git_stage_on_write"
@@ -107,6 +127,8 @@
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { api } from '../../composables/useApi'
 import SettingsFieldRow from './SettingsFieldRow.vue'
 import SettingsToggleRow from './SettingsToggleRow.vue'
 
@@ -118,6 +140,31 @@ const emit = defineEmits<{
   (e: 'markDirty'): void
 }>()
 
+// ── Log Level state ────────────────────────────────────────────────────
+const logLevel = ref('warn')
+const logLevelLoading = ref(false)
+
+onMounted(async () => {
+  try {
+    const res = await api.logLevel.get()
+    logLevel.value = res.level.toLowerCase()
+  } catch {
+    // silently fall back to default
+  }
+})
+
+async function applyLogLevel() {
+  logLevelLoading.value = true
+  try {
+    await api.logLevel.set(logLevel.value)
+  } catch {
+    // silently ignore — the select already shows the intended value
+  } finally {
+    logLevelLoading.value = false
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
 function setBoolean(key: string, value: boolean) {
   props.form[key] = value
   emit('markDirty')
