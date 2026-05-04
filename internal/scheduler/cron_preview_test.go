@@ -44,6 +44,24 @@ func TestCronPreview_Descriptor(t *testing.T) {
 	}
 }
 
+func TestCronPreview_SecondPrecisionExpression(t *testing.T) {
+	t.Parallel()
+	from := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	got, err := CronPreview("*/5 * * * * *", 3, from)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d runs, want 3", len(got))
+	}
+	if !got[0].Equal(time.Date(2026, 4, 26, 12, 0, 5, 0, time.UTC)) {
+		t.Fatalf("first run = %s, want 2026-04-26T12:00:05Z", got[0].Format(time.RFC3339))
+	}
+	if got[1].Sub(got[0]) != 5*time.Second || got[2].Sub(got[1]) != 5*time.Second {
+		t.Fatalf("expected 5s spacing, got %s then %s", got[1].Sub(got[0]), got[2].Sub(got[1]))
+	}
+}
+
 func TestCronPreview_InvalidExpr(t *testing.T) {
 	t.Parallel()
 	if _, err := CronPreview("this is not cron", 3, time.Time{}); err == nil {

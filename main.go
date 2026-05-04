@@ -23,7 +23,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/cockroachdb/pebble/v2"
 	"github.com/scrypster/huginn/internal/agent"
 	agentsession "github.com/scrypster/huginn/internal/agent/session"
 	agentslib "github.com/scrypster/huginn/internal/agents"
@@ -49,8 +48,6 @@ import (
 	"github.com/scrypster/huginn/internal/repo"
 	"github.com/scrypster/huginn/internal/runtime"
 	"github.com/scrypster/huginn/internal/scheduler"
-	"github.com/scrypster/huginn/internal/search"
-	"github.com/scrypster/huginn/internal/search/hnsw"
 	"github.com/scrypster/huginn/internal/server"
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/skills"
@@ -659,44 +656,7 @@ func main() {
 
 	// 8a. Setup semantic search if enabled
 	if cfg.SemanticSearch {
-		embedder := search.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.EmbeddingModel)
-		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := embedder.Probe(probeCtx); err != nil {
-			fmt.Fprintf(os.Stderr, "huginn: semantic search disabled (Ollama not reachable: %v)\n", err)
-		} else {
-			// Index repo chunks
-			bm25 := search.NewBM25Searcher()
-			hnswIdx := hnsw.New(16, 200)
-
-			// Convert repo.FileChunk to search.Chunk and index
-			if idx != nil {
-				var searchChunks []search.Chunk
-				for i, chunk := range idx.Chunks {
-					searchChunks = append(searchChunks, search.Chunk{
-						ID:        uint64(i + 1),
-						Path:      chunk.Path,
-						Content:   chunk.Content,
-						StartLine: chunk.StartLine,
-					})
-				}
-
-				indexCtx, indexCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if err := bm25.Index(indexCtx, searchChunks); err != nil {
-					fmt.Fprintf(os.Stderr, "huginn: BM25 indexing failed: %v\n", err)
-					indexCancel()
-				} else {
-					// Create hybrid searcher and wire into orchestrator
-					hybrid := search.NewHybridSearcher(bm25, hnswIdx, embedder)
-					if err := hybrid.Index(indexCtx, searchChunks); err != nil {
-						fmt.Fprintf(os.Stderr, "huginn: hybrid search indexing failed: %v\n", err)
-					} else {
-						orch.SetSearcher(hybrid)
-					}
-					indexCancel()
-				}
-			}
-		}
+		initSemanticSearch(context.Background(), *cfg, idx, orch)
 	}
 
 	// 8b. Apply flag overrides to config
@@ -1247,6 +1207,33 @@ func buildSymbolRegistry() *symbol.Registry {
 	reg.Register(tsext.New(), ".ts", ".tsx", ".js", ".jsx")
 	reg.SetFallback(heuristic.New())
 	return reg
+}
+
+// storageSymbolQuerier adapts storage.Store graph edges into symbol.Edge records
+// for the /api/v1/symbols/* API handlers.
+type storageSymbolQuerier struct {
+	store *storage.Store
+}
+
+func (q storageSymbolQuerier) GetAllSymbolEdges() []symbol.Edge {
+	if q.store == nil {
+		return nil
+	}
+	return toSymbolEdges(q.store.GetAllEdges())
+}
+
+func toSymbolEdges(in []storage.Edge) []symbol.Edge {
+	out := make([]symbol.Edge, len(in))
+	for i, e := range in {
+		out[i] = symbol.Edge{
+			From:       e.From,
+			To:         e.To,
+			Symbol:     e.Symbol,
+			Confidence: symbol.Confidence(e.Confidence),
+			Kind:       symbol.EdgeKind(e.Kind),
+		}
+	}
+	return out
 }
 
 // storeDir returns the path to the Pebble store for a given repo root.
@@ -2207,6 +2194,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		return nil, "", nil, fmt.Errorf("server token: %w", err)
 	}
 
+	// Open Pebble symbol graph store used by /api/v1/symbols/* endpoints.
+	var symbolStore *storage.Store
+	if cwd, cwdErr := os.Getwd(); cwdErr != nil {
+		fmt.Fprintf(os.Stderr, "huginn: warning: symbol store skipped (cwd): %v\n", cwdErr)
+	} else {
+		detection := repo.Detect(cwd, cfg.WorkspacePath)
+		symStoreDir := storeDir(detection.Root)
+		if st, stErr := storage.Open(symStoreDir); stErr != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: symbol store unavailable: %v\n", stErr)
+		} else {
+			symbolStore = st
+		}
+	}
+
 	// Backend
 	endpoint := cfg.Backend.Endpoint
 	if endpoint == "" {
@@ -2327,25 +2328,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		connMgr = connections.NewManager(connStore, connSecrets, "")
 	}
 
-	// Wire built-in llama.cpp runtime + model store (always configured for the web UI).
-	runtimeMgr, runtimeMgrErr := runtime.NewManager(huginnHome)
-	if runtimeMgrErr == nil {
-		modelStore, modelStoreErr := modelslib.NewStore(huginnHome)
-		if modelStoreErr == nil {
-			// Start server
-			srv = server.New(*cfg, orch, sessStore, token, huginnHome, connMgr, connStore, connProviders)
-			srv.SetRuntimeManager(runtimeMgr)
-			srv.SetModelStore(modelStore)
-		} else {
-			srv = server.New(*cfg, orch, sessStore, token, huginnHome, connMgr, connStore, connProviders)
-		}
-	} else {
-		srv = server.New(*cfg, orch, sessStore, token, huginnHome, connMgr, connStore, connProviders)
-	}
+	srv = newServerWithRuntime(*cfg, orch, sessStore, token, huginnHome, connMgr, connStore, connProviders)
 
 	// Wire the BackendCache into the server so handleUpdateConfig can push key
 	// changes into running backends without requiring a restart.
 	srv.WithBackendCache(serveCache)
+
+	// Wire symbol graph queries for /api/v1/symbols/search and /impact endpoints.
+	if symbolStore != nil {
+		srv.SetSymbolStore(storageSymbolQuerier{store: symbolStore})
+	}
 
 	// Wire multi-agent subsystems.
 	tm := threadmgr.New()
@@ -2412,21 +2404,14 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 	}
 
-	// ── Notification store ──────────────────────────────────────────────
-	notifDir := filepath.Join(huginnHome, "store", "notifications")
-	if err := os.MkdirAll(notifDir, 0755); err != nil {
-		return nil, "", nil, fmt.Errorf("huginn: create notification store dir: %w", err)
-	}
-	notifDB, err := pebble.Open(notifDir, &pebble.Options{})
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("huginn: open notification store: %w", err)
-	}
 	// cleanup is built up incrementally below; callers must invoke it after srv.Stop.
 	var cleanupFns []func()
 	if sqlDB != nil {
 		cleanupFns = append(cleanupFns, func() { sqlDB.Close() })
 	}
-	cleanupFns = append(cleanupFns, func() { notifDB.Close() })
+	if symbolStore != nil {
+		cleanupFns = append(cleanupFns, func() { symbolStore.Close() })
+	}
 
 	// Wire cloud vault memory replicator — drains cloud_vault_queue and pushes agent
 	// memory writes to HuginnCloud so they persist across sessions and devices.
@@ -2436,31 +2421,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		cleanupFns = append(cleanupFns, srvVaultReplicator.Stop)
 	}
 
-	// Run one-time Pebble → SQLite migration if SQLite is available.
-	if sqlDB != nil {
-		if migrErr := notification.MigrateFromPebble(notifDB, sqlDB); migrErr != nil {
-			fmt.Fprintf(os.Stderr, "huginn: warning: notification migration: %v\n", migrErr)
-		}
+	notifStore, notifCleanup, notifErr := wireNotifications(huginnHome, sqlDB, srv)
+	if notifErr != nil {
+		return nil, "", nil, notifErr
 	}
-
-	// Use SQLite store if available; fall back to Pebble store.
-	var notifStore notification.StoreInterface
-	prunerCtx, prunerCancel := context.WithCancel(context.Background())
-	cleanupFns = append(cleanupFns, prunerCancel)
-	if sqlDB != nil {
-		sqlNotifStore := notification.NewSQLiteNotificationStore(sqlDB)
-		// Purge expired notifications on startup (non-fatal).
-		if _, pruneErr := sqlNotifStore.PruneExpired(context.Background()); pruneErr != nil {
-			fmt.Fprintf(os.Stderr, "huginn: warning: startup notification prune: %v\n", pruneErr)
-		}
-		sqlNotifStore.StartPruner(prunerCtx, 15*time.Minute)
-		notifStore = sqlNotifStore
-	} else {
-		pebbleNotifStore := notification.NewStore(notifDB)
-		pebbleNotifStore.StartPruner(prunerCtx, 15*time.Minute)
-		notifStore = pebbleNotifStore
-	}
-	srv.SetNotificationStore(notifStore)
+	cleanupFns = append(cleanupFns, notifCleanup...)
 
 	// ── Scheduler ───────────────────────────────────────────────────────
 	// bindWorkflowMetricsRegistry is populated inside the scheduler block so

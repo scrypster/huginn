@@ -42,8 +42,10 @@ test.describe('Delegation preview', () => {
 
   test('Allow button sends delegation_preview_ack with approved=true and removes banner', async ({ page }) => {
     const outbound: unknown[] = []
+    let serverSend: ((data: string) => void) | null = null
 
     await page.routeWebSocket('**/ws**', ws => {
+      serverSend = (data: string) => ws.send(data)
       ws.onMessage(raw => {
         try { outbound.push(JSON.parse(typeof raw === 'string' ? raw : raw.toString())) } catch { /* ignore */ }
       })
@@ -59,19 +61,29 @@ test.describe('Delegation preview', () => {
 
     await page.locator('[data-testid="delegation-preview-allow"]').click()
 
-    // Banner disappears
-    await expect(page.locator('[data-testid="delegation-preview-list"]')).not.toBeVisible()
-
     // Outbound includes delegation_preview_ack with approved=true
     await expect.poll(() => outbound, { timeout: 2_000 }).toContainEqual(
       expect.objectContaining({ type: 'delegation_preview_ack', payload: expect.objectContaining({ approved: true }) })
     )
+
+    // While waiting for server ack_result, preview remains visible in pending state.
+    await expect(page.locator('[data-testid="delegation-preview-allow"]')).toContainText('Sending...')
+
+    // Server confirms acknowledgement, preview list clears.
+    serverSend?.(wsMsg('delegation_preview_ack_result', {
+      thread_id: 'thread-allow-1',
+      approved: true,
+      status: 'accepted',
+    }))
+    await expect(page.locator('[data-testid="delegation-preview-list"]')).not.toBeVisible()
   })
 
   test('Deny button sends delegation_preview_ack with approved=false and removes banner', async ({ page }) => {
     const outbound: unknown[] = []
+    let serverSend: ((data: string) => void) | null = null
 
     await page.routeWebSocket('**/ws**', ws => {
+      serverSend = (data: string) => ws.send(data)
       ws.onMessage(raw => {
         try { outbound.push(JSON.parse(typeof raw === 'string' ? raw : raw.toString())) } catch { /* ignore */ }
       })
@@ -87,11 +99,18 @@ test.describe('Delegation preview', () => {
 
     await page.locator('[data-testid="delegation-preview-deny"]').click()
 
-    await expect(page.locator('[data-testid="delegation-preview-list"]')).not.toBeVisible()
-
     await expect.poll(() => outbound, { timeout: 2_000 }).toContainEqual(
       expect.objectContaining({ type: 'delegation_preview_ack', payload: expect.objectContaining({ approved: false }) })
     )
+
+    await expect(page.locator('[data-testid="delegation-preview-allow"]')).toContainText('Sending...')
+
+    serverSend?.(wsMsg('delegation_preview_ack_result', {
+      thread_id: 'thread-deny-1',
+      approved: false,
+      status: 'accepted',
+    }))
+    await expect(page.locator('[data-testid="delegation-preview-list"]')).not.toBeVisible()
   })
 
   test('multiple previews shown simultaneously', async ({ page }) => {

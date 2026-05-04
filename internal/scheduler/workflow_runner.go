@@ -716,6 +716,13 @@ func MakeWorkflowRunner(
 
 		now := time.Now().UTC()
 		run.CompletedAt = &now
+		// User cancellation can happen while a step is executing; in that case
+		// the loop may break via step failure/abort paths before hitting the
+		// pre-step ctx.Done() check above. Re-check the cancellation cause here
+		// so explicit CancelWorkflow always yields a cancelled terminal state.
+		if !cancelled && errors.Is(context.Cause(ctx), errUserCancelled) {
+			cancelled = true
+		}
 		if cancelled {
 			// Explicit user cancellation — distinct from a step-failure abort.
 			run.Status = WorkflowRunStatusCancelled

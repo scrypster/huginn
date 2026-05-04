@@ -79,7 +79,7 @@ func (s *SQLiteConnectionStore) Remove(id string) error {
 
 func (s *SQLiteConnectionStore) Get(id string) (Connection, bool) {
 	row := s.db.Read().QueryRow(`
-		SELECT id, provider, type, account_label, account_id, scopes, metadata, created_at, expires_at
+		SELECT id, provider, type, account_label, account_id, scopes, metadata, created_at, expires_at, refresh_failed_at, last_refresh_error
 		FROM connections WHERE id = ?`, id)
 	conn, err := scanConnection(row)
 	if err != nil {
@@ -90,7 +90,7 @@ func (s *SQLiteConnectionStore) Get(id string) (Connection, bool) {
 
 func (s *SQLiteConnectionStore) List() ([]Connection, error) {
 	rows, err := s.db.Read().Query(`
-		SELECT id, provider, type, account_label, account_id, scopes, metadata, created_at, expires_at
+		SELECT id, provider, type, account_label, account_id, scopes, metadata, created_at, expires_at, refresh_failed_at, last_refresh_error
 		FROM connections WHERE tenant_id = '' ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -101,7 +101,7 @@ func (s *SQLiteConnectionStore) List() ([]Connection, error) {
 
 func (s *SQLiteConnectionStore) ListByProvider(p Provider) ([]Connection, error) {
 	rows, err := s.db.Read().Query(`
-		SELECT id, provider, type, account_label, account_id, scopes, metadata, created_at, expires_at
+		SELECT id, provider, type, account_label, account_id, scopes, metadata, created_at, expires_at, refresh_failed_at, last_refresh_error
 		FROM connections WHERE tenant_id = '' AND provider = ? ORDER BY created_at`, string(p))
 	if err != nil {
 		return nil, err
@@ -182,13 +182,14 @@ func (s *SQLiteConnectionStore) UpdateRefreshError(id string, errMsg string) err
 func scanConnection(row *sql.Row) (Connection, error) {
 	var conn Connection
 	var providerStr, typeStr, scopesJSON, metaJSON, createdAtStr string
-	var expiresAtStr *string
+	var expiresAtStr, refreshFailedAtStr *string
+	var lastRefreshError string
 	err := row.Scan(&conn.ID, &providerStr, &typeStr, &conn.AccountLabel, &conn.AccountID,
-		&scopesJSON, &metaJSON, &createdAtStr, &expiresAtStr)
+		&scopesJSON, &metaJSON, &createdAtStr, &expiresAtStr, &refreshFailedAtStr, &lastRefreshError)
 	if err != nil {
 		return Connection{}, err
 	}
-	return hydrateConnection(conn, providerStr, typeStr, scopesJSON, metaJSON, createdAtStr, expiresAtStr)
+	return hydrateConnection(conn, providerStr, typeStr, scopesJSON, metaJSON, createdAtStr, expiresAtStr, refreshFailedAtStr, lastRefreshError)
 }
 
 // scanConnections reads all Connections from sql.Rows.
@@ -197,12 +198,13 @@ func scanConnections(rows *sql.Rows) ([]Connection, error) {
 	for rows.Next() {
 		var conn Connection
 		var providerStr, typeStr, scopesJSON, metaJSON, createdAtStr string
-		var expiresAtStr *string
+		var expiresAtStr, refreshFailedAtStr *string
+		var lastRefreshError string
 		if err := rows.Scan(&conn.ID, &providerStr, &typeStr, &conn.AccountLabel, &conn.AccountID,
-			&scopesJSON, &metaJSON, &createdAtStr, &expiresAtStr); err != nil {
+			&scopesJSON, &metaJSON, &createdAtStr, &expiresAtStr, &refreshFailedAtStr, &lastRefreshError); err != nil {
 			return nil, err
 		}
-		hydrated, err := hydrateConnection(conn, providerStr, typeStr, scopesJSON, metaJSON, createdAtStr, expiresAtStr)
+		hydrated, err := hydrateConnection(conn, providerStr, typeStr, scopesJSON, metaJSON, createdAtStr, expiresAtStr, refreshFailedAtStr, lastRefreshError)
 		if err != nil {
 			return nil, err
 		}
@@ -211,7 +213,7 @@ func scanConnections(rows *sql.Rows) ([]Connection, error) {
 	return out, rows.Err()
 }
 
-func hydrateConnection(conn Connection, providerStr, typeStr, scopesJSON, metaJSON, createdAtStr string, expiresAtStr *string) (Connection, error) {
+func hydrateConnection(conn Connection, providerStr, typeStr, scopesJSON, metaJSON, createdAtStr string, expiresAtStr, refreshFailedAtStr *string, lastRefreshError string) (Connection, error) {
 	conn.Provider = Provider(providerStr)
 	conn.Type = ConnectionType(typeStr)
 
@@ -230,6 +232,12 @@ func hydrateConnection(conn Connection, providerStr, typeStr, scopesJSON, metaJS
 			conn.ExpiresAt = t
 		}
 	}
+	if refreshFailedAtStr != nil {
+		if t, err := time.Parse(time.RFC3339, *refreshFailedAtStr); err == nil {
+			conn.RefreshFailedAt = &t
+		}
+	}
+	conn.LastRefreshError = lastRefreshError
 
 	return conn, nil
 }

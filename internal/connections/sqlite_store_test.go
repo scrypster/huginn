@@ -145,6 +145,45 @@ func TestSQLiteStore_UpdateExpiry(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_UpdateRefreshError_RoundTrip(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	s := connections.NewSQLiteConnectionStore(db)
+
+	conn := newTestConn("id-refresh")
+	if err := s.Add(conn); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if err := s.UpdateRefreshError("id-refresh", "token expired"); err != nil {
+		t.Fatalf("UpdateRefreshError set: %v", err)
+	}
+	got, ok := s.Get("id-refresh")
+	if !ok {
+		t.Fatal("Get: not found")
+	}
+	if got.RefreshFailedAt == nil {
+		t.Fatal("expected RefreshFailedAt to be set")
+	}
+	if got.LastRefreshError != "token expired" {
+		t.Fatalf("LastRefreshError = %q, want %q", got.LastRefreshError, "token expired")
+	}
+
+	if err := s.UpdateRefreshError("id-refresh", ""); err != nil {
+		t.Fatalf("UpdateRefreshError clear: %v", err)
+	}
+	got, ok = s.Get("id-refresh")
+	if !ok {
+		t.Fatal("Get after clear: not found")
+	}
+	if got.RefreshFailedAt != nil {
+		t.Fatalf("expected RefreshFailedAt to be nil after clear, got %v", got.RefreshFailedAt)
+	}
+	if got.LastRefreshError != "" {
+		t.Fatalf("expected LastRefreshError to be empty after clear, got %q", got.LastRefreshError)
+	}
+}
+
 func TestSQLiteStore_ScopesRoundTrip(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)

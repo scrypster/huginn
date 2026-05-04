@@ -13,19 +13,66 @@ import (
 
 const notifMigrationName = "M3_notifications"
 
+// MigrationOptions configures the Pebble -> SQLite migration behavior.
+type MigrationOptions struct {
+	// Strict causes malformed Pebble records to fail the migration instead of
+	// being skipped.
+	Strict bool
+	// DeleteSource controls whether notifications/* keys are removed from Pebble
+	// after a successful SQLite commit.
+	DeleteSource bool
+}
+
+// MigrationReport captures migration outcomes for operator observability.
+type MigrationReport struct {
+	Name             string
+	ScannedRecords   int
+	MigratedRecords  int
+	SkippedMalformed int
+	AlreadyComplete  bool
+	DeletedSource    bool
+	StartedAt        time.Time
+	CompletedAt      time.Time
+	Duration         time.Duration
+}
+
 // MigrateFromPebble migrates all notifications from Pebble KV into SQLite.
 // It is idempotent: if M3_notifications is already recorded in _migrations,
 // it returns nil immediately. After a successful commit, all notifications/
 // keys are deleted from Pebble (non-fatal if deletion fails).
 func MigrateFromPebble(pdb *pebble.DB, sqlDB *sqlitedb.DB) error {
+	_, err := MigrateFromPebbleWithOptions(pdb, sqlDB, MigrationOptions{DeleteSource: true})
+	return err
+}
+
+// MigrateFromPebbleWithOptions migrates all notifications from Pebble KV into SQLite.
+// Returns a structured report with counts and timing metadata.
+func MigrateFromPebbleWithOptions(pdb *pebble.DB, sqlDB *sqlitedb.DB, opts MigrationOptions) (report MigrationReport, err error) {
+	report = MigrationReport{
+		Name:      notifMigrationName,
+		StartedAt: time.Now().UTC(),
+	}
+	defer func() {
+		report.CompletedAt = time.Now().UTC()
+		report.Duration = report.CompletedAt.Sub(report.StartedAt)
+	}()
+
+	if pdb == nil {
+		return report, fmt.Errorf("notification migrate: nil pebble db")
+	}
+	if sqlDB == nil {
+		return report, fmt.Errorf("notification migrate: nil sqlite db")
+	}
+
 	// 1. Idempotency check.
 	done, err := notifMigDone(sqlDB.Read(), notifMigrationName)
 	if err != nil {
-		return fmt.Errorf("notification migrate: check: %w", err)
+		return report, fmt.Errorf("notification migrate: check: %w", err)
 	}
 	if done {
 		slog.Debug("notification migrate: already complete")
-		return nil
+		report.AlreadyComplete = true
+		return report, nil
 	}
 
 	// 2. Scan notifications/id/ prefix to collect all canonical records.
@@ -37,14 +84,19 @@ func MigrateFromPebble(pdb *pebble.DB, sqlDB *sqlitedb.DB) error {
 		UpperBound: upper,
 	})
 	if err != nil {
-		return fmt.Errorf("notification migrate: open iter: %w", err)
+		return report, fmt.Errorf("notification migrate: open iter: %w", err)
 	}
 	defer iter.Close()
 
 	var notifications []*Notification
 	for iter.First(); iter.Valid(); iter.Next() {
+		report.ScannedRecords++
 		var n Notification
 		if err := json.Unmarshal(iter.Value(), &n); err != nil {
+			report.SkippedMalformed++
+			if opts.Strict {
+				return report, fmt.Errorf("notification migrate: malformed record at key %q: %w", string(iter.Key()), err)
+			}
 			slog.Warn("notification migrate: skip malformed record",
 				"key", string(iter.Key()), "err", err)
 			continue
@@ -52,19 +104,20 @@ func MigrateFromPebble(pdb *pebble.DB, sqlDB *sqlitedb.DB) error {
 		notifications = append(notifications, &n)
 	}
 	if err := iter.Error(); err != nil {
-		return fmt.Errorf("notification migrate: iter error: %w", err)
+		return report, fmt.Errorf("notification migrate: iter error: %w", err)
 	}
+	report.MigratedRecords = len(notifications)
 
 	// 3. Single transaction: INSERT OR IGNORE all records + INSERT _migrations.
 	tx, err := sqlDB.Write().Begin()
 	if err != nil {
-		return fmt.Errorf("notification migrate: begin tx: %w", err)
+		return report, fmt.Errorf("notification migrate: begin tx: %w", err)
 	}
 
 	for _, n := range notifications {
 		if err := notifMigInsert(tx, n); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("notification migrate: insert %q: %w", n.ID, err)
+			return report, fmt.Errorf("notification migrate: insert %q: %w", n.ID, err)
 		}
 	}
 
@@ -73,29 +126,33 @@ func MigrateFromPebble(pdb *pebble.DB, sqlDB *sqlitedb.DB) error {
 		notifMigrationName, len(notifications), "pebble",
 	); err != nil {
 		tx.Rollback()
-		return fmt.Errorf("notification migrate: record migration: %w", err)
+		return report, fmt.Errorf("notification migrate: record migration: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("notification migrate: commit: %w", err)
+		return report, fmt.Errorf("notification migrate: commit: %w", err)
 	}
 
 	slog.Info("notification migrate: complete", "count", len(notifications))
 
 	// 4. Delete all notifications/ Pebble keys (non-fatal).
-	allPrefix := []byte("notifications/")
-	b := pdb.NewBatch()
-	if err := b.DeleteRange(allPrefix, keyUpperBound(allPrefix), pebble.Sync); err != nil {
+	if opts.DeleteSource {
+		allPrefix := []byte("notifications/")
+		b := pdb.NewBatch()
+		if err := b.DeleteRange(allPrefix, keyUpperBound(allPrefix), pebble.Sync); err != nil {
+			b.Close()
+			slog.Warn("notification migrate: failed to delete pebble keys", "err", err)
+			return report, nil
+		}
+		if err := b.Commit(pebble.Sync); err != nil {
+			slog.Warn("notification migrate: failed to commit pebble delete", "err", err)
+		} else {
+			report.DeletedSource = true
+		}
 		b.Close()
-		slog.Warn("notification migrate: failed to delete pebble keys", "err", err)
-		return nil
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		slog.Warn("notification migrate: failed to commit pebble delete", "err", err)
-	}
-	b.Close()
 
-	return nil
+	return report, nil
 }
 
 // notifMigDone checks whether a migration with the given name has been recorded.

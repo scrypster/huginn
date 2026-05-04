@@ -177,9 +177,10 @@ func TestWALCheckpointRace_NoDataLoss(t *testing.T) {
 	}
 }
 
-// TestClosedDB_ReadWrite_ReturnsNil verifies that Read() and Write() return nil
-// (not panic) when called on a closed database.
-func TestClosedDB_ReadWrite_ReturnsNil(t *testing.T) {
+// TestClosedDB_ReadWrite_ReturnsClosedHandle verifies that Read() and Write()
+// still return non-nil handles after Close(), and operations fail with regular
+// "database is closed" errors instead of nil-pointer panics.
+func TestClosedDB_ReadWrite_ReturnsClosedHandle(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
@@ -189,16 +190,22 @@ func TestClosedDB_ReadWrite_ReturnsNil(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Read() should return nil.
+	// Read() should return a non-nil closed handle.
 	readConn := db.Read()
-	if readConn != nil {
-		t.Error("Expected Read() to return nil after Close")
+	if readConn == nil {
+		t.Fatal("Expected Read() to return non-nil handle after Close")
+	}
+	if err := readConn.QueryRow(`SELECT 1`).Scan(new(int)); err == nil {
+		t.Error("Expected QueryRow on closed read handle to fail")
 	}
 
-	// Write() should return nil.
+	// Write() should return a non-nil closed handle.
 	writeConn := db.Write()
-	if writeConn != nil {
-		t.Error("Expected Write() to return nil after Close")
+	if writeConn == nil {
+		t.Fatal("Expected Write() to return non-nil handle after Close")
+	}
+	if _, err := writeConn.Exec(`CREATE TABLE _after_close(id TEXT)`); err == nil {
+		t.Error("Expected Exec on closed write handle to fail")
 	}
 }
 

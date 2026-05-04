@@ -350,6 +350,9 @@ func (s *Server) Context() context.Context { return s.ctx }
 // Start begins listening. Binds to cfg.WebUI.Bind (default 127.0.0.1).
 // If cfg.WebUI.Port == 0, uses a dynamically allocated port.
 func (s *Server) Start(ctx context.Context) error {
+	if err := s.ValidateWiring(); err != nil {
+		return err
+	}
 	s.ctx = ctx
 	bind := s.cfg.WebUI.Bind
 	if bind == "" {

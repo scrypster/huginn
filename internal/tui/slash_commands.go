@@ -172,6 +172,21 @@ func (a *App) handleNotepadCmd(raw string) tea.Cmd {
 			break
 		}
 		a.addLine("system", fmt.Sprintf("**%s**\n\n%s", np.Name, np.Content))
+	case "create":
+		if len(parts) < 3 {
+			a.addLine("error", "Usage: /notepad create <name>")
+			break
+		}
+		name := parts[2]
+		content := ""
+		if len(parts) > 3 {
+			content = strings.Join(parts[3:], " ")
+		}
+		if err := a.notepadMgr.Create(name, content); err != nil {
+			a.addLine("error", err.Error())
+			break
+		}
+		a.addLine("system", fmt.Sprintf("Created %q.", name))
 	case "delete":
 		if len(parts) < 3 {
 			a.addLine("error", "Usage: /notepad delete <name>")

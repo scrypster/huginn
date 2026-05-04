@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -34,15 +35,21 @@ func (s *Store) Put(n *Notification) error {
 	if err != nil {
 		return fmt.Errorf("notification: marshal: %w", err)
 	}
+
+	var previous *Notification
+	if existing, err := s.Get(n.ID); err == nil {
+		previous = existing
+	} else if !errors.Is(err, pebble.ErrNotFound) {
+		return fmt.Errorf("notification: read existing %s: %w", n.ID, err)
+	}
+
 	b := s.db.NewBatch()
 	defer b.Close()
-	b.Set([]byte(pfxByID+n.ID), data, nil)
-	b.Set([]byte(pfxByStatus+string(n.Status)+"/"+n.ID), []byte(n.ID), nil)
-	b.Set([]byte(pfxByRoutine+n.RoutineID+"/"+n.ID), []byte(n.ID), nil)
-	b.Set([]byte(pfxByRun+n.RunID+"/"+n.ID), []byte(n.ID), nil)
-	if n.WorkflowID != "" {
-		b.Set([]byte(pfxByWorkflow+n.WorkflowID+"/"+n.ID), []byte(n.ID), nil)
+	if previous != nil {
+		deleteIndexKeys(b, previous)
 	}
+	b.Set([]byte(pfxByID+n.ID), data, nil)
+	setIndexKeys(b, n)
 	return b.Commit(pebble.Sync)
 }
 
@@ -65,6 +72,9 @@ func (s *Store) Transition(id string, newStatus Status) error {
 	n, err := s.Get(id)
 	if err != nil {
 		return err
+	}
+	if err := ValidateTransition(n.Status, newStatus); err != nil {
+		return fmt.Errorf("notification: transition %s: %w", id, err)
 	}
 	oldStatus := n.Status
 	n.Status = newStatus
@@ -373,6 +383,24 @@ func (s *Store) StartPruner(ctx context.Context, interval time.Duration) {
 
 // Compile-time assertion: *Store must satisfy StoreInterface.
 var _ StoreInterface = (*Store)(nil)
+
+func setIndexKeys(b *pebble.Batch, n *Notification) {
+	b.Set([]byte(pfxByStatus+string(n.Status)+"/"+n.ID), []byte(n.ID), nil)
+	b.Set([]byte(pfxByRoutine+n.RoutineID+"/"+n.ID), []byte(n.ID), nil)
+	b.Set([]byte(pfxByRun+n.RunID+"/"+n.ID), []byte(n.ID), nil)
+	if n.WorkflowID != "" {
+		b.Set([]byte(pfxByWorkflow+n.WorkflowID+"/"+n.ID), []byte(n.ID), nil)
+	}
+}
+
+func deleteIndexKeys(b *pebble.Batch, n *Notification) {
+	b.Delete([]byte(pfxByStatus+string(n.Status)+"/"+n.ID), nil)
+	b.Delete([]byte(pfxByRoutine+n.RoutineID+"/"+n.ID), nil)
+	b.Delete([]byte(pfxByRun+n.RunID+"/"+n.ID), nil)
+	if n.WorkflowID != "" {
+		b.Delete([]byte(pfxByWorkflow+n.WorkflowID+"/"+n.ID), nil)
+	}
+}
 
 // keyUpperBound returns the smallest key greater than all keys with the given prefix.
 func keyUpperBound(prefix []byte) []byte {

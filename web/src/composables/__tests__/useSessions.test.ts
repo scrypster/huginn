@@ -406,5 +406,32 @@ describe('useSessions', () => {
       expect(sessions.value).toHaveLength(1)
       expect(getMessages('sess-del-3')).toHaveLength(1)
     })
+
+    it('clears per-session derived state on successful delete', async () => {
+      vi.mocked(api.sessions.getMessages).mockRejectedValueOnce(new Error('history failed'))
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+
+      const {
+        sessions,
+        fetchMessages,
+        deleteSession,
+        setAgentThinking,
+        getAgentThinking,
+        setLastSeenMessageId,
+        getLastSeenMessageId,
+        getFetchError,
+      } = useSessions()
+
+      sessions.value = [{ id: 'sess-del-state', title: 'Test', agent_id: 'a', state: 'idle', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }] as any
+      setAgentThinking('sess-del-state', true)
+      setLastSeenMessageId('sess-del-state', 'msg-1')
+      await fetchMessages('sess-del-state')
+      expect(getFetchError('sess-del-state')).toBe('history failed')
+
+      await deleteSession('sess-del-state')
+      expect(getAgentThinking('sess-del-state')).toBe(false)
+      expect(getLastSeenMessageId('sess-del-state')).toBeNull()
+      expect(getFetchError('sess-del-state')).toBeNull()
+    })
   })
 })

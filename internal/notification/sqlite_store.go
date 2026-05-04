@@ -107,8 +107,25 @@ func (s *SQLiteNotificationStore) Get(id string) (*Notification, error) {
 
 // Transition moves a Notification to newStatus, updating updated_at.
 func (s *SQLiteNotificationStore) Transition(id string, newStatus Status) error {
+	tx, err := s.db.Write().Begin()
+	if err != nil {
+		return fmt.Errorf("notification: transition %q: begin tx: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var current string
+	if err := tx.QueryRow(`SELECT status FROM notifications WHERE id = ?`, id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("notification: transition %q: not found", id)
+		}
+		return fmt.Errorf("notification: transition %q: load current status: %w", id, err)
+	}
+	if err := ValidateTransition(Status(current), newStatus); err != nil {
+		return fmt.Errorf("notification: transition %q: %w", id, err)
+	}
+
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.Write().Exec(`
+	res, err := tx.Exec(`
 		UPDATE notifications SET status = ?, updated_at = ? WHERE id = ?`,
 		string(newStatus), updatedAt, id)
 	if err != nil {
@@ -120,6 +137,9 @@ func (s *SQLiteNotificationStore) Transition(id string, newStatus Status) error 
 	}
 	if rows == 0 {
 		return fmt.Errorf("notification: transition %q: not found", id)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("notification: transition %q: commit: %w", id, err)
 	}
 	return nil
 }

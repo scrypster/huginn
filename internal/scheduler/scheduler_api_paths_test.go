@@ -38,6 +38,9 @@ func TestValidateCronSchedule_Validation(t *testing.T) {
 	if err := ValidateCronSchedule("0 9 * * 1-5"); err != nil {
 		t.Fatalf("valid schedule should pass: %v", err)
 	}
+	if err := ValidateCronSchedule("*/5 * * * * *"); err != nil {
+		t.Fatalf("valid second-precision schedule should pass: %v", err)
+	}
 	if err := ValidateCronSchedule("not-a-cron"); err == nil {
 		t.Fatal("invalid schedule should fail")
 	}
@@ -87,6 +90,47 @@ func TestScheduler_LoadWorkflows_SkipsInvalidSchedules(t *testing.T) {
 	}
 	if _, ok := s.workflowEntries["wf-bad"]; ok {
 		t.Fatal("wf-bad should not be registered")
+	}
+}
+
+func TestScheduler_LoadWorkflows_SkipsSubWorkflowCycles(t *testing.T) {
+	s := New()
+	s.SetWorkflowRunner(func(ctx context.Context, w *Workflow) error { return nil })
+	dir := t.TempDir()
+
+	writeWorkflowYAML(t, dir+"/wf-a.yaml", map[string]any{
+		"id": "wf-a", "name": "A", "enabled": true, "schedule": "0 9 * * *",
+		"steps": []map[string]any{
+			{"name": "call-b", "position": 0, "sub_workflow": "wf-b"},
+		},
+	})
+	writeWorkflowYAML(t, dir+"/wf-b.yaml", map[string]any{
+		"id": "wf-b", "name": "B", "enabled": true, "schedule": "0 10 * * *",
+		"steps": []map[string]any{
+			{"name": "call-a", "position": 0, "sub_workflow": "wf-a"},
+		},
+	})
+	writeWorkflowYAML(t, dir+"/wf-leaf.yaml", map[string]any{
+		"id": "wf-leaf", "name": "Leaf", "enabled": true, "schedule": "0 11 * * *",
+		"steps": []map[string]any{
+			{"name": "ok", "position": 0, "prompt": "leaf"},
+		},
+	})
+
+	if err := s.LoadWorkflows(dir); err != nil {
+		t.Fatalf("LoadWorkflows: %v", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.workflowEntries["wf-a"]; ok {
+		t.Fatal("wf-a should be skipped because it participates in a sub_workflow cycle")
+	}
+	if _, ok := s.workflowEntries["wf-b"]; ok {
+		t.Fatal("wf-b should be skipped because it participates in a sub_workflow cycle")
+	}
+	if _, ok := s.workflowEntries["wf-leaf"]; !ok {
+		t.Fatal("wf-leaf should still be registered")
 	}
 }
 

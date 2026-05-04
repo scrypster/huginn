@@ -80,6 +80,41 @@ func TestHandleNotepadCmd_List_WithEntries(t *testing.T) {
 	}
 }
 
+func TestHandleNotepadCmd_Create_NewNotepad(t *testing.T) {
+	a := newTestApp()
+	dir := t.TempDir()
+	mgr := notepad.NewManager(dir, dir)
+	a.notepadMgr = mgr
+
+	_ = a.handleNotepadCmd("/notepad create runbook")
+	if len(a.chat.history) == 0 {
+		t.Fatal("expected history entry after /notepad create")
+	}
+	last := a.chat.history[len(a.chat.history)-1]
+	if last.role != "system" {
+		t.Errorf("expected system role for create success, got %q", last.role)
+	}
+	if _, err := mgr.Get("runbook"); err != nil {
+		t.Fatalf("expected created notepad to exist, got error: %v", err)
+	}
+}
+
+func TestHandleNotepadCmd_Create_MissingName_ReturnsUsageError(t *testing.T) {
+	a := newTestApp()
+	dir := t.TempDir()
+	mgr := notepad.NewManager(dir, dir)
+	a.notepadMgr = mgr
+
+	_ = a.handleNotepadCmd("/notepad create")
+	if len(a.chat.history) == 0 {
+		t.Fatal("expected history entry after /notepad create with missing name")
+	}
+	last := a.chat.history[len(a.chat.history)-1]
+	if last.role != "error" {
+		t.Errorf("expected error role for missing create name, got %q", last.role)
+	}
+}
+
 // ============================================================
 // handleSlashCommand — radar path (no store/workspace)
 // ============================================================

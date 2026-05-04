@@ -84,6 +84,17 @@ func (cb *ContextBuilder) SetSearcher(s search.Searcher) {
 	cb.searcher = s
 }
 
+// SearchHealth returns search telemetry when the configured searcher reports it.
+func (cb *ContextBuilder) SearchHealth() (search.HealthSnapshot, bool) {
+	cb.mu.RLock()
+	searcher := cb.searcher
+	cb.mu.RUnlock()
+	if reporter, ok := searcher.(search.HealthReporter); ok {
+		return reporter.SearchHealth(), true
+	}
+	return search.HealthSnapshot{}, false
+}
+
 // Build assembles a context string for the given query and model slot.
 // It respects the model's context window, leaving room for the system prompt
 // and the user message.

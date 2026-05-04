@@ -64,6 +64,28 @@ func TestClose_Idempotent(t *testing.T) {
 	}
 }
 
+func TestReadWrite_AfterClose_ReturnsClosedDBErrorNotNilPointer(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if db.Write() == nil {
+		t.Fatal("Write() returned nil after close; callers may panic on chained method calls")
+	}
+	if db.Read() == nil {
+		t.Fatal("Read() returned nil after close; callers may panic on chained method calls")
+	}
+
+	if _, err := db.Write().Exec(`CREATE TABLE _after_close(id TEXT)`); err == nil {
+		t.Fatal("expected write Exec to fail after close")
+	}
+	if err := db.Read().QueryRow(`SELECT 1`).Scan(new(int)); err == nil {
+		t.Fatal("expected read QueryRow to fail after close")
+	}
+}
+
 func TestApplySchema_Idempotent(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
