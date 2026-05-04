@@ -103,8 +103,8 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 			jsonError(w, 404, "notification not found")
 			return
 		}
-		if len(n.ProposedActions) == 0 {
-			jsonError(w, 422, "notification has no proposed actions to approve")
+		if _, err := notification.ResolveApproveAction(n, body.ProposedActionID); err != nil {
+			jsonError(w, 422, err.Error())
 			return
 		}
 		newStatus = notification.StatusApproved

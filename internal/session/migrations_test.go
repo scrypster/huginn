@@ -11,8 +11,8 @@ import (
 
 func TestMigrationsRegistered(t *testing.T) {
 	migs := session.Migrations()
-	if len(migs) != 8 {
-		t.Fatalf("expected 8 migrations, got %d", len(migs))
+	if len(migs) != 9 {
+		t.Fatalf("expected 9 migrations, got %d", len(migs))
 	}
 }
 
@@ -197,5 +197,79 @@ func TestMessagesTypeMigration_AllowsThreadEvent(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expected 2 rows after migration, got %d", count)
+	}
+}
+
+func TestConnectionsRefreshErrorMigration_AddsColumns(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE connections (
+			id TEXT NOT NULL PRIMARY KEY,
+			tenant_id TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL,
+			type TEXT NOT NULL DEFAULT 'oauth',
+			account_label TEXT NOT NULL DEFAULT '',
+			account_id TEXT NOT NULL DEFAULT '',
+			scopes TEXT NOT NULL DEFAULT '[]',
+			metadata TEXT NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT '',
+			expires_at TEXT
+		)`)
+	if err != nil {
+		t.Fatalf("create old connections table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO connections(id, provider) VALUES ('c1', 'github')`); err != nil {
+		t.Fatalf("seed connections: %v", err)
+	}
+
+	var migrationFound bool
+	for _, m := range session.Migrations() {
+		if m.Name != "connections_refresh_error_columns_v1" {
+			continue
+		}
+		migrationFound = true
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("begin migration tx: %v", err)
+		}
+		if err := m.Up(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("run migration: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit migration: %v", err)
+		}
+		break
+	}
+	if !migrationFound {
+		t.Fatal("connections_refresh_error_columns_v1 migration not registered")
+	}
+
+	// Ensure new columns are present and writable.
+	if _, err := db.Exec(`
+		UPDATE connections
+		SET refresh_failed_at = '2026-01-01T00:00:00Z',
+		    last_refresh_error = 'token expired'
+		WHERE id = 'c1'`); err != nil {
+		t.Fatalf("update new columns: %v", err)
+	}
+
+	var failedAt, lastErr string
+	if err := db.QueryRow(`
+		SELECT refresh_failed_at, last_refresh_error
+		FROM connections WHERE id = 'c1'`).Scan(&failedAt, &lastErr); err != nil {
+		t.Fatalf("select migrated columns: %v", err)
+	}
+	if failedAt == "" {
+		t.Fatal("expected refresh_failed_at to be set")
+	}
+	if lastErr != "token expired" {
+		t.Fatalf("last_refresh_error = %q, want %q", lastErr, "token expired")
 	}
 }

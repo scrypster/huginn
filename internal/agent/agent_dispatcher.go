@@ -718,6 +718,9 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	onToken func(string),
 	onToolEvent func(eventType string, payload map[string]any),
 	onEvent func(backend.StreamEvent)) error {
+	if err := o.ValidateWiring(); err != nil {
+		return err
+	}
 	// Fast path: read lock — handles the common case where the session already exists.
 	o.mu.RLock()
 	var sess *Session
@@ -728,6 +731,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	}
 	reg := o.toolRegistry
 	gate := o.permGate
+	memReplicator := o.optionalMemoryReplicatorLocked()
 	o.mu.RUnlock()
 
 	// Slow path: named session not found — create it under write lock (double-check pattern).
@@ -850,9 +854,9 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 				}
 			}
 			// Replicate memory writes to other channel members' vaults.
-			if o.memoryReplicator != nil && isMemoryToolName(name) && !result.IsError {
+			if memReplicator != nil && isMemoryToolName(name) && !result.IsError {
 				if replCtx := workforce.GetReplicationContext(ctx); replCtx != nil {
-					o.memoryReplicator.Intercept(ctx, name, capturedArgs, result, ag.Name, replCtx)
+					memReplicator.Intercept(ctx, name, capturedArgs, result, ag.Name, replCtx)
 				}
 			}
 			slog.Debug("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")

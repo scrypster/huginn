@@ -92,7 +92,7 @@ func WithPendingFlowTTL(d time.Duration) ManagerOption {
 type Manager struct {
 	store          StoreInterface
 	secrets        SecretStore
-	redirectURL    string // e.g. "http://localhost:PORT/oauth/callback"
+	redirectURL    string        // e.g. "http://localhost:PORT/oauth/callback"
 	pendingFlowTTL time.Duration // how long a pending flow state is valid
 
 	mu           sync.Mutex
@@ -109,8 +109,8 @@ type Manager struct {
 	providersMu   sync.RWMutex
 	providers     map[Provider]IntegrationProvider // name → provider
 	refreshMu     sync.Mutex
-	refreshTimers map[string]*time.Timer  // connID → pending refresh timer
-	refreshNonces map[string]uint64       // connID → generation counter; guards against stale timer callbacks
+	refreshTimers map[string]*time.Timer // connID → pending refresh timer
+	refreshNonces map[string]uint64      // connID → generation counter; guards against stale timer callbacks
 	refreshCtx    context.Context
 	refreshCancel context.CancelFunc
 }
@@ -511,6 +511,38 @@ func (m *Manager) GetHTTPClient(ctx context.Context, connID string, p Integratio
 	}
 
 	cfg := p.OAuthConfig(m.redirectURL)
+
+	// Pre-flight refresh-or-fail-fast: if the token is already expired or inside
+	// the near-expiry buffer, refresh it now so callers get a deterministic error
+	// before starting work rather than a confusing mid-request failure.
+	if tokenNeedsRefresh(token.Expiry) {
+		refreshed, refreshErr := cfg.TokenSource(ctx, token).Token()
+		if refreshErr != nil {
+			slog.Warn("connections: pre-flight token refresh failed",
+				"conn_id", connID, "provider", conn.Provider, "err", refreshErr)
+			if updateErr := m.store.UpdateRefreshError(connID, refreshErr.Error()); updateErr != nil {
+				slog.Warn("connections: pre-flight refresh: persist failure state", "conn_id", connID, "err", updateErr)
+			}
+			if m.onRefreshEvent != nil {
+				m.onRefreshEvent("connection_token_refresh_failed", connID, conn.Provider, refreshErr.Error())
+			}
+			return nil, fmt.Errorf("oauth: pre-flight token refresh failed for %q: %w", connID, refreshErr)
+		}
+		token = refreshed
+		if err := m.secrets.StoreToken(connID, token); err != nil {
+			slog.Warn("connections: pre-flight refresh: store token failed", "conn_id", connID, "err", err)
+		}
+		if err := m.store.UpdateExpiry(connID, token.Expiry); err != nil {
+			slog.Warn("connections: pre-flight refresh: update expiry failed", "conn_id", connID, "err", err)
+		}
+		if err := m.store.UpdateRefreshError(connID, ""); err != nil {
+			slog.Warn("connections: pre-flight refresh: clear failure state", "conn_id", connID, "err", err)
+		}
+		if m.onRefreshEvent != nil {
+			m.onRefreshEvent("connection_token_refreshed", connID, conn.Provider, "")
+		}
+	}
+
 	ts := cfg.TokenSource(ctx, token)
 
 	// Wrap in a token-refreshing client that also persists refreshed tokens

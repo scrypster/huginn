@@ -34,15 +34,15 @@ const maxConcurrentWorkflows = 10
 type Scheduler struct {
 	cron             *cron.Cron
 	mu               sync.Mutex
-	workflowRunner   WorkflowRunner                   // nil if not configured
+	workflowRunner   WorkflowRunner                     // nil if not configured
 	workflowRunStore WorkflowRunStoreInterface          // optional; used by RunWorkflowSyncWithInputs (Phase 8)
-	workflowRunning  map[string]bool                  // workflow IDs currently executing
-	workflowEntries  map[string]cron.EntryID          // workflow ID → cron entry ID
+	workflowRunning  map[string]bool                    // workflow IDs currently executing
+	workflowEntries  map[string]cron.EntryID            // workflow ID → cron entry ID
 	workflowCancels  map[string]context.CancelCauseFunc // workflow ID → cancel-cause func for running goroutine
-	sem              chan struct{}                     // global concurrency semaphore
-	broadcastFn      WorkflowBroadcastFunc            // may be nil; emits WS events for skipped/lifecycle events
-	deliveryQueue    *DeliveryQueue                   // optional; started in Start() if set
-	workflowsDir     string                           // optional; enables WorkflowsWatcher when non-empty
+	sem              chan struct{}                      // global concurrency semaphore
+	broadcastFn      WorkflowBroadcastFunc              // may be nil; emits WS events for skipped/lifecycle events
+	deliveryQueue    *DeliveryQueue                     // optional; started in Start() if set
+	workflowsDir     string                             // optional; enables WorkflowsWatcher when non-empty
 }
 
 // New creates a Scheduler.
@@ -283,6 +283,11 @@ func (s *Scheduler) LoadWorkflows(dir string) error {
 		return err
 	}
 	for _, w := range workflows {
+		if err := ValidateSubWorkflowCycles(w, workflows); err != nil {
+			logger.Warn("scheduler: skipping workflow with sub_workflow cycle",
+				"workflow_id", w.ID, "err", err)
+			continue
+		}
 		if err := s.RegisterWorkflow(w); err != nil {
 			logger.Warn("scheduler: skipping workflow with invalid schedule", "workflow_id", w.ID, "err", err)
 			continue // skip bad schedules, don't fail all
@@ -382,22 +387,20 @@ func (s *Scheduler) TriggerWorkflow(ctx context.Context, w *Workflow) error {
 		return fmt.Errorf("%w: %q", ErrWorkflowAlreadyRunning, w.ID)
 	}
 	sem := s.sem
-	s.mu.Unlock()
-
-	// Try to acquire the global concurrency semaphore synchronously so the
-	// HTTP handler can return 503 immediately instead of silently dropping the run.
+	// Atomically acquire a global slot and mark this workflow as running while
+	// still under the same mutex. This closes the race where two concurrent
+	// TriggerWorkflow calls for the same ID could both pass the running check
+	// before either sets workflowRunning[w.ID] = true.
 	select {
 	case sem <- struct{}{}:
+		s.workflowRunning[w.ID] = true
+		s.mu.Unlock()
 	default:
+		s.mu.Unlock()
 		logger.Warn("scheduler: concurrency limit reached, rejecting manual workflow trigger",
 			"workflow_id", w.ID)
 		return ErrConcurrencyLimitReached
 	}
-
-	// Mark the workflow as running only after acquiring the semaphore.
-	s.mu.Lock()
-	s.workflowRunning[w.ID] = true
-	s.mu.Unlock()
 
 	// Launch asynchronously so the HTTP handler can return immediately.
 	// We must not use the HTTP request context here because it is cancelled

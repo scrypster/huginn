@@ -12,11 +12,10 @@ import (
 	"github.com/scrypster/huginn/internal/logger"
 )
 
-
 // loadAgentSummaries loads recent session summaries for an agent. Returns nil on error (non-fatal).
 func (o *Orchestrator) loadAgentSummaries(ctx context.Context, agentName string) []agents.SessionSummary {
 	o.mu.Lock()
-	ms := o.memoryStore
+	ms := o.optionalMemoryStoreLocked()
 	o.mu.Unlock()
 	if ms == nil {
 		return nil
@@ -33,7 +32,7 @@ func (o *Orchestrator) loadAgentSummaries(ctx context.Context, agentName string)
 // Called on shutdown to capture cross-session context.
 func (o *Orchestrator) SessionClose(ctx context.Context) error {
 	o.mu.Lock()
-	ms := o.memoryStore
+	ms := o.optionalMemoryStoreLocked()
 	reg := o.agentReg
 	sessionID := o.defaultSessionID
 	machineID := o.machineID
@@ -65,7 +64,6 @@ func (o *Orchestrator) SessionClose(ctx context.Context) error {
 	}
 	return nil
 }
-
 
 // summarizeAgent asks the LLM to produce a structured summary of an agent's session history.
 func (o *Orchestrator) summarizeAgent(ctx context.Context, ag *agents.Agent, sessionID, machineID, spaceID, spaceName string) (agents.SessionSummary, error) {

@@ -294,6 +294,63 @@ func TestHandleNotificationAction_ApproveWithProposedActions(t *testing.T) {
 	}
 }
 
+func TestHandleNotificationAction_ApproveWithUnknownProposedActionID(t *testing.T) {
+	srv, ts := newTestServer(t)
+	defer ts.Close()
+
+	store := newStubNotifStore()
+	actions := []notification.ProposedAction{
+		{ID: "a1", Label: "Merge PR #42", ToolName: "bash", ToolParams: map[string]any{"cmd": "gh pr merge 42"}},
+	}
+	n := makeStubNotification("routine-1", "run-1", "", actions)
+	if err := store.Put(n); err != nil {
+		t.Fatal(err)
+	}
+	srv.notifStore = store
+
+	body := `{"action":"approve","proposed_action_id":"does-not-exist"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/notifications/"+n.ID+"/action", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleNotificationAction_ApproveRequiresIDWhenMultipleActions(t *testing.T) {
+	srv, ts := newTestServer(t)
+	defer ts.Close()
+
+	store := newStubNotifStore()
+	actions := []notification.ProposedAction{
+		{ID: "a1", Label: "Action one", ToolName: "bash"},
+		{ID: "a2", Label: "Action two", ToolName: "bash"},
+	}
+	n := makeStubNotification("routine-1", "run-1", "", actions)
+	if err := store.Put(n); err != nil {
+		t.Fatal(err)
+	}
+	srv.notifStore = store
+
+	body := `{"action":"approve"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/notifications/"+n.ID+"/action", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+}
+
 // TestHandleNotificationAction_UnknownAction verifies that an unknown action
 // string returns 400 with a descriptive error.
 func TestHandleNotificationAction_UnknownAction(t *testing.T) {

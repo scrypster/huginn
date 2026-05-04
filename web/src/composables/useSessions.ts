@@ -112,6 +112,7 @@ const lastSeenMessageIdBySession = ref<Record<string, string | null>>({})
 //     streaming is never permanently blocked.
 const hydrated = new Set<string>()
 const preHydrationQueue = new Map<string, Array<() => void>>()
+const hydrationRequestTokenBySession = new Map<string, symbol>()
 
 /** Maximum WS events buffered per session while a history fetch is in flight. */
 const MAX_HYDRATION_QUEUE_SIZE = 500
@@ -186,9 +187,13 @@ export function useSessions() {
     if (!deleted) return
     sessions.value = sessions.value.filter(s => s.id !== id)
     delete messagesBySession.value[id]
+    delete agentThinkingBySession.value[id]
+    delete lastSeenMessageIdBySession.value[id]
+    delete fetchErrorBySession.value[id]
     // Clean up hydration state so the session can be re-fetched if re-created.
     hydrated.delete(id)
     preHydrationQueue.delete(id) // discard any buffered handlers — session is gone
+    hydrationRequestTokenBySession.delete(id)
     setHydrationOverflow(id, false)
   }
 
@@ -225,6 +230,8 @@ export function useSessions() {
     if (preHydrationQueue.has(sessionId)) return // fetch already in flight
 
     // Begin buffering WS events for this session until the fetch completes.
+    const hydrationToken = Symbol(sessionId)
+    hydrationRequestTokenBySession.set(sessionId, hydrationToken)
     preHydrationQueue.set(sessionId, [])
     // Reset any prior fetch error so stale errors don't persist on re-fetch.
     clearFetchError(sessionId)
@@ -290,6 +297,14 @@ export function useSessions() {
 
     // Mark session as hydrated regardless of success/timeout, then flush any
     // buffered WS events so live-streaming continues from the correct base state.
+    const currentHydrationToken = hydrationRequestTokenBySession.get(sessionId)
+    if (currentHydrationToken !== hydrationToken) {
+      // Session was deleted (or superseded by a newer hydration attempt) while
+      // this fetch was in flight. Do not re-mark it hydrated or flush stale
+      // buffered handlers.
+      return
+    }
+    hydrationRequestTokenBySession.delete(sessionId)
     hydrated.add(sessionId)
     const queue = preHydrationQueue.get(sessionId) ?? []
     preHydrationQueue.delete(sessionId)

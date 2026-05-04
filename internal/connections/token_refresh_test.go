@@ -41,7 +41,7 @@ func tokenRefreshErrorServer(t *testing.T) *httptest.Server {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 // TestGetHTTPClient_ExpiredToken_TokenSourceConfigured verifies that GetHTTPClient
-// succeeds for an expired token — the oauth2.TokenSource handles refresh lazily.
+// performs a pre-flight refresh for expired tokens and returns a usable client.
 func TestGetHTTPClient_ExpiredToken_TokenSourceConfigured(t *testing.T) {
 	refreshCount := 0
 	srv := tokenRefreshServer(t, &refreshCount)
@@ -79,7 +79,17 @@ func TestGetHTTPClient_ExpiredToken_TokenSourceConfigured(t *testing.T) {
 	if client == nil {
 		t.Fatal("expected non-nil http.Client")
 	}
-	// The client is returned successfully; token refresh happens lazily on first use.
+	// Pre-flight refresh should have happened during GetHTTPClient.
+	if refreshCount == 0 {
+		t.Fatal("expected at least one refresh call during pre-flight")
+	}
+	stored, err := secrets.GetToken(conn.ID)
+	if err != nil {
+		t.Fatalf("GetToken after pre-flight refresh: %v", err)
+	}
+	if stored.AccessToken != "new-access-token" {
+		t.Fatalf("stored access token = %q, want %q", stored.AccessToken, "new-access-token")
+	}
 }
 
 // TestGetHTTPClient_ValidToken_DoesNotRefreshImmediately verifies that a valid
@@ -165,6 +175,51 @@ func TestGetHTTPClient_NoToken_ReturnsError(t *testing.T) {
 	_, err = m.GetHTTPClient(context.Background(), conn.ID, p)
 	if err == nil {
 		t.Fatal("expected error when no token is stored")
+	}
+}
+
+func TestGetHTTPClient_ExpiredTokenRefreshFailure_FailFastAndPersistsError(t *testing.T) {
+	failSrv := tokenRefreshErrorServer(t)
+	defer failSrv.Close()
+
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "c.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := NewMemoryStore()
+	m := NewManager(store, secrets, "http://localhost/cb")
+	t.Cleanup(func() { m.Close() })
+
+	conn := makeConn("conn-expired-fail-fast", ProviderGoogle)
+	if err := store.Add(conn); err != nil {
+		t.Fatal(err)
+	}
+	expiredToken := &oauth2.Token{
+		AccessToken:  "expired-access",
+		RefreshToken: "revoked-refresh",
+		TokenType:    "Bearer",
+		Expiry:       time.Now().Add(-time.Hour),
+	}
+	if err := secrets.StoreToken(conn.ID, expiredToken); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakeTokenProvider{tokenURL: failSrv.URL}
+	_, err = m.GetHTTPClient(context.Background(), conn.ID, p)
+	if err == nil {
+		t.Fatal("expected fail-fast error from pre-flight refresh")
+	}
+
+	updated, ok := store.Get(conn.ID)
+	if !ok {
+		t.Fatal("connection missing after refresh failure")
+	}
+	if updated.RefreshFailedAt == nil {
+		t.Fatal("expected RefreshFailedAt to be set on pre-flight refresh failure")
+	}
+	if updated.LastRefreshError == "" {
+		t.Fatal("expected LastRefreshError to be populated on pre-flight refresh failure")
 	}
 }
 

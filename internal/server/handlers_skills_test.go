@@ -302,3 +302,59 @@ func TestInstallSkillReloadsOrchestrator(t *testing.T) {
 		t.Errorf("SkillsRegistry missing installed skill prompt text;\ngot skills: %v", reg.All())
 	}
 }
+
+func TestInstallSkill_RejectsUnsafeSkillNameFromRegistry(t *testing.T) {
+	const skillContent = "---\nname: ../escape\nauthor: test\n---\n\nunsafe\n"
+
+	registrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(skillContent))
+	}))
+	defer registrySrv.Close()
+
+	dir := t.TempDir()
+	sdir := filepath.Join(dir, "skills")
+	os.MkdirAll(sdir, 0755)
+	cacheDir := filepath.Join(dir, "cache")
+	os.MkdirAll(cacheDir, 0755)
+
+	indexEntry := skills.IndexEntry{
+		Name:      "unsafe-skill",
+		SourceURL: registrySrv.URL + "/skills/unsafe-skill/SKILL.md",
+	}
+	cachedIndex := map[string]any{
+		"fetched_at": time.Now().UTC().Format(time.RFC3339),
+		"entries":    []skills.IndexEntry{indexEntry},
+	}
+	cacheBytes, _ := json.Marshal(cachedIndex)
+	os.WriteFile(filepath.Join(cacheDir, "skills-index.json"), cacheBytes, 0644)
+
+	orch, err := agent.NewOrchestrator(&stubBackend{}, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("orch: %v", err)
+	}
+	srv := &Server{
+		huginnDir:     dir,
+		orch:          orch,
+		skillsBaseURL: registrySrv.URL,
+	}
+
+	body, _ := json.Marshal(map[string]string{"target": "unsafe-skill"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/install", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSkillsInstall(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body: %s", w.Code, w.Body.String())
+	}
+	entries, err := os.ReadDir(sdir)
+	if err != nil {
+		t.Fatalf("ReadDir(skills): %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".md") {
+			t.Fatalf("expected no installed skill markdown files, found %q", e.Name())
+		}
+	}
+}

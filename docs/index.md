@@ -60,6 +60,9 @@ Find what you need by what you want to do.
 ## If you need config file options
 → [Config Reference](reference/config.md) — complete config schema with defaults and examples
 
+## If you need the HTTP API contract
+→ [API Reference](reference/api.md) — OpenAPI scaffold for core REST endpoints
+
 ## If you need TUI keybindings and slash commands
 → [TUI Reference](reference/tui.md) — keyboard shortcuts, slash commands, app states
 

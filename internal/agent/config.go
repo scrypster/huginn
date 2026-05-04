@@ -173,6 +173,7 @@ func (o *Orchestrator) SetMemoryStore(ms agents.MemoryStoreIface) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.memoryStore = ms
+	o.optionals.memoryStore = ms
 }
 
 // SetMemoryReplicator injects the MemoryReplicator for channel vault replication.
@@ -181,6 +182,7 @@ func (o *Orchestrator) SetMemoryReplicator(mr *MemoryReplicator) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.memoryReplicator = mr
+	o.optionals.memoryReplicator = mr
 }
 
 // SetRelayHub sets the relay hub for remote agent routing.
@@ -189,6 +191,7 @@ func (o *Orchestrator) SetRelayHub(h relay.Hub) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.relayHub = h
+	o.optionals.relayHub = h
 }
 
 // SetWSBroadcast wires a function that emits typed WS events to browser clients
@@ -199,6 +202,7 @@ func (o *Orchestrator) SetWSBroadcast(fn func(sessionID, msgType string, payload
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.wsBroadcast = fn
+	o.optionals.wsBroadcast = fn
 }
 
 // ModelNames returns the deduplicated list of configured model IDs across all agents.
@@ -263,13 +267,14 @@ func (o *Orchestrator) SetSkillsRegistry(reg *skills.SkillRegistry) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.skillsReg = reg
+	o.optionals.skillsRegistry = reg
 }
 
 // SkillsRegistry returns the current skills registry. Primarily used in tests.
 func (o *Orchestrator) SkillsRegistry() *skills.SkillRegistry {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.skillsReg
+	return o.optionalSkillsRegistryLocked()
 }
 
 // skillsFragmentFor resolves the skills prompt fragment for the default agent
@@ -278,7 +283,7 @@ func (o *Orchestrator) SkillsRegistry() *skills.SkillRegistry {
 // Returns "" when no skills registry is set.
 func (o *Orchestrator) skillsFragmentFor(agReg *agents.AgentRegistry) string {
 	o.mu.RLock()
-	skillsReg := o.skillsReg
+	skillsReg := o.optionalSkillsRegistryLocked()
 	o.mu.RUnlock()
 
 	if skillsReg == nil {
@@ -305,7 +310,7 @@ func (o *Orchestrator) skillsFragmentFor(agReg *agents.AgentRegistry) string {
 // Returns "" when no skills registry is configured.
 func (o *Orchestrator) SkillsFragmentForAgent(ag *agents.Agent) string {
 	o.mu.RLock()
-	skillsReg := o.skillsReg
+	skillsReg := o.optionalSkillsRegistryLocked()
 	o.mu.RUnlock()
 
 	if skillsReg == nil {
@@ -364,6 +369,17 @@ func (o *Orchestrator) SetSearcher(s search.Searcher) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.contextBuilder.SetSearcher(s)
+}
+
+// SearchHealth returns semantic search telemetry for server health reporting.
+func (o *Orchestrator) SearchHealth() (search.HealthSnapshot, bool) {
+	o.mu.RLock()
+	cb := o.contextBuilder
+	o.mu.RUnlock()
+	if cb == nil {
+		return search.HealthSnapshot{}, false
+	}
+	return cb.SearchHealth()
 }
 
 // Backend returns the backend instance. Used for sub-tool wiring.

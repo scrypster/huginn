@@ -1,6 +1,7 @@
 package notification_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -282,5 +283,83 @@ func TestMigrateNotifFromPebble_PreservesFields(t *testing.T) {
 		if !pa.Destructive {
 			t.Error("ProposedAction.Destructive: got false, want true")
 		}
+	}
+}
+
+func TestMigrateNotifFromPebbleWithOptions_StrictMalformedAbortsAndKeepsSource(t *testing.T) {
+	t.Parallel()
+	pdb := openMigratePebble(t)
+	sqlDB := openMigrateSQLite(t)
+
+	// Write one valid record.
+	valid := makeTestNotif(notification.NewID(), "routine-1", "run-1")
+	rawValid, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if err := pdb.Set([]byte("notifications/id/"+valid.ID), rawValid, pebble.Sync); err != nil {
+		t.Fatalf("pebble.Set valid: %v", err)
+	}
+	// Write malformed record under canonical prefix.
+	if err := pdb.Set([]byte("notifications/id/bad-json"), []byte("{"), pebble.Sync); err != nil {
+		t.Fatalf("pebble.Set malformed: %v", err)
+	}
+
+	_, err = notification.MigrateFromPebbleWithOptions(pdb, sqlDB, notification.MigrationOptions{
+		Strict:       true,
+		DeleteSource: true,
+	})
+	if err == nil {
+		t.Fatal("expected strict migration to fail on malformed record")
+	}
+
+	// Source keyspace should still exist because migration aborted.
+	iter, ierr := pdb.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("notifications/id/"),
+		UpperBound: []byte("notifications/id0"),
+	})
+	if ierr != nil {
+		t.Fatalf("pdb.NewIter: %v", ierr)
+	}
+	defer iter.Close()
+	count := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		count++
+	}
+	if count == 0 {
+		t.Fatal("expected source records to remain after strict migration failure")
+	}
+}
+
+func TestMigrateNotifFromPebbleWithOptions_ReportFields(t *testing.T) {
+	t.Parallel()
+	pdb := openMigratePebble(t)
+	sqlDB := openMigrateSQLite(t)
+
+	pstore := notification.NewStore(pdb)
+	for i := 0; i < 2; i++ {
+		n := makeTestNotif(notification.NewID(), "routine-r", "run-r")
+		if err := pstore.Put(n); err != nil {
+			t.Fatalf("pstore.Put: %v", err)
+		}
+	}
+
+	report, err := notification.MigrateFromPebbleWithOptions(pdb, sqlDB, notification.MigrationOptions{
+		DeleteSource: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateFromPebbleWithOptions: %v", err)
+	}
+	if report.MigratedRecords != 2 {
+		t.Fatalf("MigratedRecords = %d, want 2", report.MigratedRecords)
+	}
+	if report.ScannedRecords < report.MigratedRecords {
+		t.Fatalf("ScannedRecords = %d, want >= %d", report.ScannedRecords, report.MigratedRecords)
+	}
+	if !report.DeletedSource {
+		t.Fatal("DeletedSource = false, want true")
+	}
+	if report.Duration <= 0 {
+		t.Fatalf("Duration = %v, want > 0", report.Duration)
 	}
 }

@@ -81,12 +81,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		ver = "dev"
 	}
 
-	jsonOK(w, map[string]any{
+	health := map[string]any{
 		"status":              "ok",
 		"version":             ver,
 		"satellite_connected": satConnected, // preserved for backward compatibility
 		"relay":               relayInfo,
-	})
+	}
+	if s.orch != nil {
+		if searchHealth, ok := s.orch.SearchHealth(); ok {
+			health["search"] = searchHealth
+		}
+	}
+	jsonOK(w, health)
 }
 
 // handleSearchSessions handles GET /api/v1/sessions/search?q=<query>.

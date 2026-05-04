@@ -700,7 +700,9 @@ CREATE TABLE IF NOT EXISTS connections (
     metadata        TEXT    NOT NULL DEFAULT '{}',  -- JSON object for provider-specific fields
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    expires_at      TEXT                            -- NULL = never expires; RFC3339 otherwise
+    expires_at      TEXT,                           -- NULL = never expires; RFC3339 otherwise
+    refresh_failed_at TEXT,                         -- NULL when last refresh succeeded
+    last_refresh_error TEXT NOT NULL DEFAULT ''     -- last proactive refresh error
 );
 
 -- List connections by provider ("show all GitHub connections")

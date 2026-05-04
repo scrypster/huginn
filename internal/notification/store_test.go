@@ -22,12 +22,12 @@ func makeNotif(routineID, runID string, sev notification.Severity) *notification
 		ID:        notification.NewID(),
 		RoutineID: routineID,
 		RunID:     runID,
-		Summary:      "test summary",
-		Detail:       "test detail",
-		Severity:     sev,
-		Status:       notification.StatusPending,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
+		Summary:   "test summary",
+		Detail:    "test detail",
+		Severity:  sev,
+		Status:    notification.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 }
 
@@ -229,5 +229,59 @@ func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
 	// limit=0 result should also be newest-first
 	if all[0].ID != maxID {
 		t.Errorf("want first result (no limit) to be newest ID %s, got %s", maxID, all[0].ID)
+	}
+}
+
+func TestStore_PutOverwrite_RemovesStaleIndexes(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	s := notification.NewStore(db)
+
+	n := makeNotif("routine-old", "run-old", notification.SeverityInfo)
+	n.ID = "notif-stale-index"
+	n.WorkflowID = "workflow-old"
+	if err := s.Put(n); err != nil {
+		t.Fatalf("Put old: %v", err)
+	}
+
+	n.RoutineID = "routine-new"
+	n.RunID = "run-new"
+	n.WorkflowID = "workflow-new"
+	n.Status = notification.StatusSeen
+	n.UpdatedAt = time.Now().UTC()
+	if err := s.Put(n); err != nil {
+		t.Fatalf("Put new: %v", err)
+	}
+
+	oldRoutine, err := s.ListByRoutine("routine-old")
+	if err != nil {
+		t.Fatalf("ListByRoutine(old): %v", err)
+	}
+	if len(oldRoutine) != 0 {
+		t.Fatalf("old routine index should be empty, got %d entries", len(oldRoutine))
+	}
+
+	oldWorkflow, err := s.ListByWorkflow("workflow-old")
+	if err != nil {
+		t.Fatalf("ListByWorkflow(old): %v", err)
+	}
+	if len(oldWorkflow) != 0 {
+		t.Fatalf("old workflow index should be empty, got %d entries", len(oldWorkflow))
+	}
+
+	pending, err := s.ListPending()
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending should be empty after overwrite to seen, got %d", len(pending))
+	}
+
+	got, err := s.Get(n.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.RoutineID != "routine-new" || got.WorkflowID != "workflow-new" || got.Status != notification.StatusSeen {
+		t.Fatalf("unexpected canonical record after overwrite: %+v", got)
 	}
 }

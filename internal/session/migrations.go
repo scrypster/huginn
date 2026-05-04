@@ -24,6 +24,7 @@ func Migrations() []sqlitedb.Migration {
 		{Name: "memory_replication_queue_v1", Up: migrateMemoryReplicationQueueV1},
 		{Name: "memory_replication_queue_v2", Up: migrateMemoryReplicationQueueV2},
 		{Name: "cloud_vault_queue_v1", Up: migrateCloudVaultQueueV1},
+		{Name: "connections_refresh_error_columns_v1", Up: migrateConnectionsRefreshErrorColumnsV1},
 	}
 }
 
@@ -159,6 +160,30 @@ func migrateDelegationsSessionIDV1(tx *sql.Tx) error {
 func migrateAddSpaceIDIndex(tx *sql.Tx) error {
 	_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_space_id ON sessions (space_id) WHERE space_id IS NOT NULL`)
 	return err
+}
+
+// migrateConnectionsRefreshErrorColumnsV1 adds persistent refresh-failure fields
+// to connections so proactive OAuth refresh failures can be surfaced and queried.
+func migrateConnectionsRefreshErrorColumnsV1(tx *sql.Tx) error {
+	var marker int
+	err := tx.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='connections' LIMIT 1`).Scan(&marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, ddl := range []string{
+		`ALTER TABLE connections ADD COLUMN refresh_failed_at TEXT`,
+		`ALTER TABLE connections ADD COLUMN last_refresh_error TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := tx.Exec(ddl); err != nil {
+			if !isColumnAlreadyExistsError(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // migrateSessionsFTSv2 drops the contentless sessions_fts virtual table

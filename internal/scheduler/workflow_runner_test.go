@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/notification"
 )
@@ -686,6 +687,46 @@ func TestMakeWorkflowRunner_ContextCancelledMidRun(t *testing.T) {
 	}
 	if runs[0].Status != WorkflowRunStatusFailed {
 		t.Errorf("want failed status on cancelled context, got %s", runs[0].Status)
+	}
+}
+
+func TestMakeWorkflowRunner_UserCancelDuringStep_MarksRunCancelled(t *testing.T) {
+	store := NewWorkflowRunStore(t.TempDir())
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	agentFn := func(ctx context.Context, opts RunOptions) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	runner := MakeWorkflowRunner(store, agentFn, nil, nil, nil, nil, "", nil, nil)
+	w := &Workflow{
+		ID:   "wf-user-cancel-mid-step",
+		Name: "UserCancelMidStep",
+		Steps: []WorkflowStep{
+			{Name: "s1", Agent: "A", Prompt: "step 1", Position: 0},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = runner(ctx, w)
+		close(done)
+	}()
+	cancel(errUserCancelled)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not exit after cancellation")
+	}
+
+	runs, _ := store.List("wf-user-cancel-mid-step", 10)
+	if len(runs) == 0 {
+		t.Fatal("expected run to be persisted")
+	}
+	if runs[0].Status != WorkflowRunStatusCancelled {
+		t.Fatalf("want cancelled status on user cancel during step, got %s", runs[0].Status)
 	}
 }
 

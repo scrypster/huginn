@@ -24,15 +24,15 @@ func openNotifTestDB(t *testing.T) *sqlitedb.DB {
 
 func makeSQLiteNotif(id, routineID, runID string) *notification.Notification {
 	return &notification.Notification{
-		ID:          id,
-		RoutineID:   routineID,
-		RunID:       runID,
-		Summary:     "Test summary for " + id,
-		Detail:      "Test detail body",
-		Severity:    notification.SeverityInfo,
-		Status:      notification.StatusPending,
-		CreatedAt:   time.Now().UTC().Truncate(time.Second),
-		UpdatedAt:   time.Now().UTC().Truncate(time.Second),
+		ID:        id,
+		RoutineID: routineID,
+		RunID:     runID,
+		Summary:   "Test summary for " + id,
+		Detail:    "Test detail body",
+		Severity:  notification.SeverityInfo,
+		Status:    notification.StatusPending,
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		UpdatedAt: time.Now().UTC().Truncate(time.Second),
 	}
 }
 
@@ -159,6 +159,62 @@ func TestSQLiteNotifStore_Transition_NotFound(t *testing.T) {
 	err := s.Transition("nonexistent-id", notification.StatusSeen)
 	if err == nil {
 		t.Fatal("Transition nonexistent: expected error, got nil")
+	}
+}
+
+func TestSQLiteNotifStore_Transition_AllLifecycleStatuses(t *testing.T) {
+	t.Parallel()
+	db := openNotifTestDB(t)
+	s := notification.NewSQLiteNotificationStore(db)
+
+	executed := makeSQLiteNotif(notification.NewID(), "routine-1", "run-1")
+	if err := s.Put(executed); err != nil {
+		t.Fatalf("Put executed seed: %v", err)
+	}
+	if err := s.Transition(executed.ID, notification.StatusApproved); err != nil {
+		t.Fatalf("Transition to approved: %v", err)
+	}
+	if err := s.Transition(executed.ID, notification.StatusExecuted); err != nil {
+		t.Fatalf("Transition to executed: %v", err)
+	}
+	gotExecuted, err := s.Get(executed.ID)
+	if err != nil {
+		t.Fatalf("Get executed: %v", err)
+	}
+	if gotExecuted.Status != notification.StatusExecuted {
+		t.Fatalf("Status = %q, want %q", gotExecuted.Status, notification.StatusExecuted)
+	}
+
+	failed := makeSQLiteNotif(notification.NewID(), "routine-1", "run-1")
+	if err := s.Put(failed); err != nil {
+		t.Fatalf("Put failed seed: %v", err)
+	}
+	if err := s.Transition(failed.ID, notification.StatusApproved); err != nil {
+		t.Fatalf("Transition to approved (failed branch): %v", err)
+	}
+	if err := s.Transition(failed.ID, notification.StatusFailed); err != nil {
+		t.Fatalf("Transition to failed: %v", err)
+	}
+	gotFailed, err := s.Get(failed.ID)
+	if err != nil {
+		t.Fatalf("Get failed branch: %v", err)
+	}
+	if gotFailed.Status != notification.StatusFailed {
+		t.Fatalf("Status = %q, want %q", gotFailed.Status, notification.StatusFailed)
+	}
+}
+
+func TestSQLiteNotifStore_Transition_InvalidLifecycleChange(t *testing.T) {
+	t.Parallel()
+	db := openNotifTestDB(t)
+	s := notification.NewSQLiteNotificationStore(db)
+
+	n := makeSQLiteNotif(notification.NewID(), "routine-1", "run-1")
+	if err := s.Put(n); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.Transition(n.ID, notification.StatusExecuted); err == nil {
+		t.Fatal("expected invalid transition pending->executed to fail")
 	}
 }
 

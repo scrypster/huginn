@@ -124,7 +124,6 @@ test.describe('Golden no-LLM journeys', () => {
     }))
     ws.send(JSON.stringify({ type: 'done', session_id: CHANNEL_SESSION, run_id: runID }))
 
-    await expect(page.locator('[data-testid="delegation-preview-list"]')).toBeVisible({ timeout: 5_000 })
     await expect(page.getByText('Investigate root cause and propose fix').first()).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('.md-content').nth(1)).toContainText('delegate this to @GitAgent', { timeout: 5_000 })
     await expect(page.locator('.editor-content .ProseMirror')).toBeVisible()

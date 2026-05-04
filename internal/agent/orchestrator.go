@@ -85,9 +85,9 @@ type Orchestrator struct {
 	relayHub         relay.Hub // nil = InProcessHub (default behavior)
 	compactor        *compact.Compactor
 	backendCache     *backend.BackendCache
-	muninnCfgPath    string // set by SetMuninnConfigPath; path to ~/.config/huginn/muninn.json
-	workspaceRoot    string // set by SetGitRoot; used to load .huginn.md project instructions
-	huginnHome       string // set by SetHuginnHome; used to locate agent memory files
+	muninnCfgPath    string                // set by SetMuninnConfigPath; path to ~/.config/huginn/muninn.json
+	workspaceRoot    string                // set by SetGitRoot; used to load .huginn.md project instructions
+	huginnHome       string                // set by SetHuginnHome; used to locate agent memory files
 	skillsReg        *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
 
 	// defaultModel is the fallback model name when no agent registry is configured.
@@ -114,6 +114,10 @@ type Orchestrator struct {
 
 	// semanticPrefetchCache caches semantic search results per query key.
 	semanticPrefetchCache *prefetchCache
+
+	// optionals groups optional integrations so future wiring can evolve without
+	// expanding the top-level mutable surface area.
+	optionals orchestratorOptionalDeps
 
 	// SessionIdleTTL controls how long an inactive (not running) session stays in
 	// memory before being evicted by the cleanup goroutine. Default: 2 hours.

@@ -359,6 +359,9 @@ export function useThreads() {
       if (p.agent_id) t.AgentID = p.agent_id
       if (p.task) t.Task = p.task
       if (p.parent_message_id) t.parentMessageId = p.parent_message_id
+      // Once the delegated thread actually starts, clear any pending preview
+      // card for the same session/thread pair.
+      removePendingPreview(sid, p.thread_id!)
       startTicker(sid, p.thread_id!)
       debouncedPersist(sid)
     }
@@ -602,8 +605,6 @@ export function useThreads() {
         approved,
       },
     })
-    // Remove immediately on user decision — don't wait for server ack_result.
-    removePendingPreview(preview.sessionId, preview.threadId)
   }
 
   return {

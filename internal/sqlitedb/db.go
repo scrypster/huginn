@@ -73,25 +73,19 @@ func openConn(path string, maxConns int) (*sql.DB, error) {
 	return db, nil
 }
 
-// Write returns the serialized write connection, or nil if the DB is closed.
+// Write returns the serialized write connection.
 // Use for INSERT, UPDATE, DELETE, CREATE, DROP.
+// Even after Close() this returns a non-nil *sql.DB handle; calls on it
+// fail with "sql: database is closed" rather than panicking on nil.
 func (d *DB) Write() *sql.DB {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.closed {
-		return nil
-	}
 	return d.write
 }
 
-// Read returns the read connection pool, or nil if the DB is closed.
+// Read returns the read connection pool.
 // Use for SELECT queries.
+// Even after Close() this returns a non-nil *sql.DB handle; calls on it
+// fail with "sql: database is closed" rather than panicking on nil.
 func (d *DB) Read() *sql.DB {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.closed {
-		return nil
-	}
 	return d.read
 }
 
