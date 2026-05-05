@@ -1375,15 +1375,31 @@ function openThreadDetail(d: { threadId: string; agentId: string; msgId?: string
   threadDetail.open(msgId, d.agentId)
 }
 
-function openThreadDetailById(threadId: string) {
+async function openThreadDetailById(threadId: string) {
   const thread = getThreadById(threadId)
   if (thread?.parentMessageId) {
     threadPanelOpen.value = false
     openThreadLiveId.value = threadId
-    threadDetail.open(thread.parentMessageId, thread.AgentID)
-  } else {
-    threadPanelOpen.value = true
+    threadDetail.open(thread.parentMessageId, thread.AgentID ?? '')
+    return
   }
+  // Thread not in live state — fetch from API to get parentMessageId
+  if (!props.sessionId) {
+    threadPanelOpen.value = true
+    return
+  }
+  try {
+    const fetched = await api.threads.get(props.sessionId, threadId)
+    if (fetched?.parentMessageId) {
+      threadPanelOpen.value = false
+      openThreadLiveId.value = threadId
+      threadDetail.open(fetched.parentMessageId, fetched.AgentID ?? '')
+      return
+    }
+  } catch {
+    // fall through to panel
+  }
+  threadPanelOpen.value = true
 }
 
 function openBlockedThreadFocus() {
