@@ -55,6 +55,7 @@ vi.mock('../../composables/useThreads', () => ({
     clearSessionPreviews: mockClearSessionPreviews,
     ackPreview: mockAckPreview,
   }),
+  isRunning: () => false,
 }))
 
 const mockActiveSpace = ref<any>(null)

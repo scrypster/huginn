@@ -308,6 +308,10 @@ export const api = {
   threads: {
     list: (sessionId: string) =>
       apiFetch<Thread[]>(`/api/v1/sessions/${sessionId}/threads`),
+    get: (sessionId: string, threadId: string) =>
+      apiFetch<{ ID: string; parentMessageId?: string; AgentID?: string }>(
+        `/api/v1/sessions/${sessionId}/threads/${threadId}`
+      ),
   },
 
   models: {
