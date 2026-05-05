@@ -149,6 +149,8 @@ vi.mock('../../composables/useApi', () => ({
     agents: {
       list: vi.fn().mockResolvedValue([]),
     },
+    health: vi.fn().mockResolvedValue({ status: 'ok', version: 'v0.0.0', stale: false }),
+    restart: vi.fn().mockResolvedValue({ status: 'restarting' }),
     spaces: {
       list: vi.fn().mockResolvedValue([]),
     },

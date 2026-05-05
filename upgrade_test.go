@@ -977,3 +977,120 @@ func TestUpgradeViaHomebrew_VerifiesNewBinary(t *testing.T) {
 		t.Errorf("expected Warning about verify failure:\n%s", out.String())
 	}
 }
+
+// ─── pidFileIsLive ────────────────────────────────────────────────────────────
+
+func TestPidFileIsLive_RunningProcess(t *testing.T) {
+	// Spawn a long-lived subprocess (sleep) so we have a live PID to probe.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start subprocess: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	pid := cmd.Process.Pid
+
+	pidFile := filepath.Join(t.TempDir(), "server.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	alive, got := pidFileIsLive(pidFile)
+	if !alive {
+		t.Errorf("expected alive=true for running process %d", pid)
+	}
+	if got != pid {
+		t.Errorf("expected pid=%d, got %d", pid, got)
+	}
+}
+
+func TestPidFileIsLive_DeadProcess(t *testing.T) {
+	// Spawn a subprocess, wait for it to exit, then probe its PID.
+	cmd := exec.Command("true") // exits immediately
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start subprocess: %v", err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait() // let it exit
+
+	pidFile := filepath.Join(t.TempDir(), "server.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	alive, got := pidFileIsLive(pidFile)
+	if alive {
+		t.Errorf("expected alive=false for exited process %d", pid)
+	}
+	if got != 0 {
+		t.Errorf("expected pid=0 for dead process, got %d", got)
+	}
+}
+
+func TestPidFileIsLive_MissingFile(t *testing.T) {
+	alive, pid := pidFileIsLive(filepath.Join(t.TempDir(), "nonexistent.pid"))
+	if alive || pid != 0 {
+		t.Errorf("expected (false, 0) for missing PID file, got (%v, %d)", alive, pid)
+	}
+}
+
+func TestPidFileIsLive_PIDWithPort(t *testing.T) {
+	// PID files may contain "PID PORT" — only PID should be used.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start subprocess: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	pid := cmd.Process.Pid
+	pidFile := filepath.Join(t.TempDir(), "server.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d 8421\n", pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	alive, got := pidFileIsLive(pidFile)
+	if !alive {
+		t.Errorf("expected alive=true for PID-with-port format, pid=%d", pid)
+	}
+	if got != pid {
+		t.Errorf("expected pid=%d, got %d", pid, got)
+	}
+}
+
+// ─── waitForServerHealth ──────────────────────────────────────────────────────
+
+func TestWaitForServerHealth_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Extract port from test server address.
+	addr := srv.Listener.Addr().String()
+	colonIdx := strings.LastIndex(addr, ":")
+	portStr := addr[colonIdx+1:]
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+		t.Fatalf("could not parse port from %q: %v", addr, err)
+	}
+
+	var out strings.Builder
+	u := &Upgrader{Stdout: &out}
+	u.waitForServerHealth(port)
+
+	if !strings.Contains(out.String(), "Server up") {
+		t.Errorf("expected 'Server up' in output, got: %q", out.String())
+	}
+}
+
+func TestWaitForServerHealth_Timeout(t *testing.T) {
+	// Use a port with no listener — health poll must time out and print a warning.
+	var out strings.Builder
+	u := &Upgrader{Stdout: &out}
+	// Port 1 is privileged and unreachable; the connections will fail fast.
+	u.waitForServerHealth(1)
+
+	if !strings.Contains(out.String(), "Warning") {
+		t.Errorf("expected Warning in output, got: %q", out.String())
+	}
+}

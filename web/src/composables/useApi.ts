@@ -264,7 +264,8 @@ export async function apiFetch<T = unknown>(path: string, opts: RequestInit = {}
 }
 
 export const api = {
-  health: () => apiFetch<{ status: string; version: string; satellite_connected: boolean; backend_status: string }>('/api/v1/health'),
+  health: () => apiFetch<{ status: string; version: string; stale?: boolean; satellite_connected: boolean; backend_status: string }>('/api/v1/health'),
+  restart: () => apiFetch<{ status: string }>('/api/v1/restart', { method: 'POST' }),
 
   sessions: {
     list: () => apiFetch<Array<Record<string, unknown>>>('/api/v1/sessions'),

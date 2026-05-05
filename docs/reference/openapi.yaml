@@ -44,6 +44,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+  /api/v1/restart:
+    post:
+      tags: [System]
+      summary: Replace running process with the current on-disk binary
+      responses:
+        "202":
+          description: Restart initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                required: [status]
+        "503":
+          description: Restart not supported on this platform
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/v1/stats:
     get:
       tags: [System]
@@ -1532,6 +1553,8 @@ components:
         relay:
           type: object
           additionalProperties: true
+        stale:
+          type: boolean
       required: [status, version]
     SessionManifest:
       type: object

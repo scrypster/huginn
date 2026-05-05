@@ -81,9 +81,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		ver = "dev"
 	}
 
+	stale := false
+	if s.staleWatcher != nil {
+		stale = s.staleWatcher.IsStale()
+	}
 	health := map[string]any{
 		"status":              "ok",
 		"version":             ver,
+		"stale":               stale,
 		"satellite_connected": satConnected, // preserved for backward compatibility
 		"relay":               relayInfo,
 	}
@@ -93,6 +98,31 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, health)
+}
+
+// handleRestart handles POST /api/v1/restart.
+// It replaces the current process in-place with the on-disk binary via
+// syscall.Exec (Unix only). On Windows it returns 503.
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if !execSupported {
+		jsonError(w, http.StatusServiceUnavailable,
+			"in-place restart is not supported on this platform; restart huginn manually")
+		return
+	}
+	exePath, err := currentExePath()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "could not resolve binary path: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(`{"status":"restarting"}` + "\n")) //nolint:errcheck
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	if err := platformExec(exePath, os.Args, os.Environ()); err != nil {
+		slog.Error("restart: exec failed", "err", err)
+	}
 }
 
 // handleSearchSessions handles GET /api/v1/sessions/search?q=<query>.
