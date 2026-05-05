@@ -5,7 +5,7 @@
  * useApi uses). vi.resetModules() between tests so the singleton cache
  * starts fresh.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 function ok(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -96,8 +96,10 @@ describe('useVersion', () => {
 })
 
 describe('useVersion stale and polling', () => {
+  beforeEach(() => vi.useFakeTimers())
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('stale is false when health returns stale:false', async () => {
@@ -116,5 +118,21 @@ describe('useVersion stale and polling', () => {
     const { stale, loadVersion } = await freshVersion()
     await loadVersion()
     expect(stale.value).toBe(true)
+  })
+
+  it('polls health every 60 seconds and updates stale', async () => {
+    let callCount = 0
+    // first call: not stale; second call (poll): stale
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      ok({ version: 'v0.3.1', stale: callCount++ > 0 })
+    )
+    const { stale, loadVersion, startPolling, stopPolling } = await freshVersion()
+    await loadVersion()
+    startPolling()
+    expect(stale.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(stale.value).toBe(true)
+    stopPolling()
+    fetchSpy.mockRestore()
   })
 })
