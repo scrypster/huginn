@@ -94,3 +94,27 @@ describe('useVersion', () => {
     expect(versionLabel.value.length).toBeGreaterThan(0)
   })
 })
+
+describe('useVersion stale and polling', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('stale is false when health returns stale:false', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      ok({ version: 'v0.3.1', stale: false }),
+    )
+    const { stale, loadVersion } = await freshVersion()
+    await loadVersion()
+    expect(stale.value).toBe(false)
+  })
+
+  it('stale becomes true when health returns stale:true', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      ok({ version: 'v0.3.1', stale: true }),
+    )
+    const { stale, loadVersion } = await freshVersion()
+    await loadVersion()
+    expect(stale.value).toBe(true)
+  })
+})
