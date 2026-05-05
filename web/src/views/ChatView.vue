@@ -790,6 +790,19 @@
         </div>
       </div>
 
+      <!-- ── Auto-approve notices ───────────────────────────────── -->
+      <div v-if="autoApproveNotices.length > 0" class="px-4 pb-2 flex flex-col gap-1.5">
+        <div
+          v-for="notice in autoApproveNotices"
+          :key="notice.id"
+          class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
+          style="background:rgba(46,160,67,0.12);border:1px solid rgba(46,160,67,0.3);color:rgba(46,160,67,0.9)"
+        >
+          <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Auto-approved — <span class="font-semibold ml-1">@{{ notice.agentName }}</span> took over
+        </div>
+      </div>
+
       <!-- ── Swarm status panel ─────────────────────────────────── -->
       <Transition
         enter-active-class="transition-all duration-200 ease-out"
@@ -1144,6 +1157,19 @@ const blockedThreadToasts = ref<{ threadId: string; agent: string; message: stri
 const blockedThreadToastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const previewNowMs = ref(Date.now())
 let previewTicker: ReturnType<typeof setInterval> | null = null
+
+const autoApproveNotices = ref<{ id: string; agentName: string }[]>([])
+const autoApproveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function showAutoApproveNotice(agentName: string) {
+  const id = `aa-${Date.now()}`
+  autoApproveNotices.value.push({ id, agentName })
+  const t = setTimeout(() => {
+    autoApproveNotices.value = autoApproveNotices.value.filter(n => n.id !== id)
+    autoApproveTimers.delete(id)
+  }, 4000)
+  autoApproveTimers.set(id, t)
+}
 
 watch(hydrationQueueOverflowed, (overflowed) => {
   if (!overflowed) return
@@ -2484,6 +2510,7 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
     const agentId = typeof p.agent_id === 'string'
       ? p.agent_id
       : (typeof p.agent === 'string' ? p.agent : 'Delegate')
+    showAutoApproveNotice(agentId)
     const msgs = getSourceMessages()
     const eventId = `preview-timeout-${threadId}`
     if (msgs.some(m => m.id === eventId)) return
