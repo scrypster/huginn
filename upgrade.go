@@ -733,6 +733,12 @@ func (u *Upgrader) upgradeViaHomebrew(latest string, yes bool, state runningStat
 			return u.DetachStart(cmd)
 		}); err != nil {
 			fmt.Fprintf(u.out(), "\n  Warning: server did not restart: %v\n  Run: huginn serve\n\n", err)
+		} else {
+			port := 8421
+			if u.ServerPortFn != nil {
+				port = u.ServerPortFn()
+			}
+			u.waitForServerHealth(port)
 		}
 	}
 	if state.trayRunning {
