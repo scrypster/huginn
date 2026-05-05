@@ -427,10 +427,10 @@
                         :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`" />
                     </div>
                     <span class="text-xs text-huginn-text/90 truncate">
-                      Delegated to
-                      <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                        @{{ d.agentId || 'agent' }}
-                      </span>
+                      <template v-if="d.agentId && d.agentId === msg.agent">Handling directly</template>
+                      <template v-else>Delegated to
+                        <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">@{{ d.agentId || 'agent' }}</span>
+                      </template>
                     </span>
                     <span class="text-[11px] text-huginn-muted/70">
                       · {{ delegatedThreadStatusLabel(d) }}
@@ -558,10 +558,10 @@
                           :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`" />
                       </div>
                       <span class="text-xs text-huginn-text/90 truncate">
-                        Delegated to
-                        <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                          @{{ d.agentId || 'agent' }}
-                        </span>
+                        <template v-if="d.agentId && d.agentId === msg.agent">Handling directly</template>
+                        <template v-else>Delegated to
+                          <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">@{{ d.agentId || 'agent' }}</span>
+                        </template>
                       </span>
                       <span class="text-[11px] text-huginn-muted/70">
                         · {{ delegatedThreadStatusLabel(d) }}
