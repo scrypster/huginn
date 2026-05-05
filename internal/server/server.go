@@ -118,8 +118,9 @@ type Server struct {
 	workflowRunStore scheduler.WorkflowRunStoreInterface // nil if not configured
 	deliveryQueue    *scheduler.DeliveryQueue            // optional
 
-	satellite *relay.Satellite // nil if not registered with HuginnCloud
-	outbox    *relay.Outbox    // nil if outbox not wired (no store path)
+	satellite    *relay.Satellite // nil if not registered with HuginnCloud
+	outbox       *relay.Outbox    // nil if outbox not wired (no store path)
+	staleWatcher *StaleWatcher    // nil on stat failure; detects silent binary replacement
 
 	// relayKeys maps provider name → base64url-encoded relay_key for in-progress cloud OAuth flows.
 	// Protected by relayKeysMu.
@@ -389,6 +390,19 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.srv.Serve(ln)
 	go s.wsHub.run()
 	go s.evictSwarmSnapshots(ctx)
+
+	// Start stale-binary watcher so the UI can prompt for restart after
+	// `brew upgrade huginn` or any silent binary replacement.
+	if exePath, err := currentExePath(); err == nil {
+		if sw, err := newStaleWatcher(exePath); err == nil {
+			s.staleWatcher = sw
+			s.staleWatcher.Start(ctx)
+			if s.staleWatcher.IsStale() {
+				slog.Warn("huginn binary on disk differs from running binary — restart to activate")
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -984,6 +998,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/health", loggingMiddleware(requestIDMiddleware(s.handleHealth)))
 
 	// REST API (auth required)
+	mux.HandleFunc("POST /api/v1/restart", api(s.handleRestart))
 	mux.HandleFunc("GET /api/v1/sessions", api(s.handleListSessions))
 	mux.HandleFunc("GET /api/v1/sessions/search", api(s.handleSearchSessions))
 	mux.HandleFunc("POST /api/v1/sessions", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.sessionCreateLimiter }, s.handleCreateSession)))
