@@ -3277,6 +3277,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	}
 	orch.StartSessionCleanup(ctx)
 
+	// Start agents directory watcher — hot-reloads agent config without restart.
+	agentsWatcher := agent.NewAgentsWatcher(huginnHome, func(reg *agentslib.AgentRegistry) {
+		orch.SetAgentRegistry(reg)
+		logger.Info("agent registry hot-reloaded")
+	})
+	go agentsWatcher.Start(ctx)
+
 	// Start thread watchdog: transitions stale queued/thinking threads to error
 	// and broadcasts thread_done so the frontend does not leave users waiting.
 	tm.StartWatchdog(ctx, func(sid, msgType string, payload map[string]any) {

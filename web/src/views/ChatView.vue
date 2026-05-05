@@ -427,10 +427,10 @@
                         :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`" />
                     </div>
                     <span class="text-xs text-huginn-text/90 truncate">
-                      Delegated to
-                      <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                        @{{ d.agentId || 'agent' }}
-                      </span>
+                      <template v-if="d.agentId && d.agentId === msg.agent">Handling directly</template>
+                      <template v-else>Delegated to
+                        <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">@{{ d.agentId || 'agent' }}</span>
+                      </template>
                     </span>
                     <span class="text-[11px] text-huginn-muted/70">
                       · {{ delegatedThreadStatusLabel(d) }}
@@ -447,6 +447,24 @@
                       <polyline points="9 18 15 12 9 6" />
                     </svg>
                   </button>
+                  <!-- Delegated agent thinking indicator -->
+                  <div
+                    v-if="isThreadThinking(d.threadId)"
+                    class="flex items-center gap-2 pl-2 py-0.5"
+                  >
+                    <div
+                      class="w-4 h-4 rounded flex-shrink-0 text-[9px] font-bold flex items-center justify-center"
+                      :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`"
+                    >
+                      {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                    </div>
+                    <span class="text-[11px] text-huginn-muted/70">thinking</span>
+                    <span class="flex gap-0.5 ml-0.5">
+                      <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:0ms" />
+                      <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:75ms" />
+                      <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:150ms" />
+                    </span>
+                  </div>
                   <div v-if="d.inlineSummary"
                     @click="openThreadDetail(d)"
                     class="ml-5 pl-3 py-2 border-l-2 rounded-r-lg cursor-pointer hover:bg-huginn-surface/40 transition-colors"
@@ -558,10 +576,10 @@
                           :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.4)'}`" />
                       </div>
                       <span class="text-xs text-huginn-text/90 truncate">
-                        Delegated to
-                        <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">
-                          @{{ d.agentId || 'agent' }}
-                        </span>
+                        <template v-if="d.agentId && d.agentId === msg.agent">Handling directly</template>
+                        <template v-else>Delegated to
+                          <span class="font-semibold" :style="`color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`">@{{ d.agentId || 'agent' }}</span>
+                        </template>
                       </span>
                       <span class="text-[11px] text-huginn-muted/70">
                         · {{ delegatedThreadStatusLabel(d) }}
@@ -580,6 +598,24 @@
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </button>
+                    <!-- Delegated agent thinking indicator -->
+                    <div
+                      v-if="isThreadThinking(d.threadId)"
+                      class="flex items-center gap-2 pl-2 py-0.5"
+                    >
+                      <div
+                        class="w-4 h-4 rounded flex-shrink-0 text-[9px] font-bold flex items-center justify-center"
+                        :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`"
+                      >
+                        {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                      </div>
+                      <span class="text-[11px] text-huginn-muted/70">thinking</span>
+                      <span class="flex gap-0.5 ml-0.5">
+                        <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:0ms" />
+                        <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:75ms" />
+                        <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:150ms" />
+                      </span>
+                    </div>
                     <!-- Inline thread reply preview: show agent's reply summary when thread completes -->
                     <div v-if="d.inlineSummary"
                       @click="openThreadDetail(d)"
@@ -787,6 +823,19 @@
               class="px-2 py-1 text-[10px] font-medium rounded border border-huginn-red/30 text-huginn-red hover:bg-huginn-red/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >Deny</button>
           </div>
+        </div>
+      </div>
+
+      <!-- ── Auto-approve notices ───────────────────────────────── -->
+      <div v-if="autoApproveNotices.length > 0" class="px-4 pb-2 flex flex-col gap-1.5">
+        <div
+          v-for="notice in autoApproveNotices"
+          :key="notice.id"
+          class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
+          style="background:rgba(46,160,67,0.12);border:1px solid rgba(46,160,67,0.3);color:rgba(46,160,67,0.9)"
+        >
+          <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Auto-approved — <span class="font-semibold ml-1">@{{ notice.agentName }}</span> took over
         </div>
       </div>
 
@@ -1041,7 +1090,7 @@ import MessageActions from '../components/MessageActions.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
-import { useThreads } from '../composables/useThreads'
+import { useThreads, isRunning } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
@@ -1144,6 +1193,19 @@ const blockedThreadToasts = ref<{ threadId: string; agent: string; message: stri
 const blockedThreadToastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const previewNowMs = ref(Date.now())
 let previewTicker: ReturnType<typeof setInterval> | null = null
+
+const autoApproveNotices = ref<{ id: string; agentName: string }[]>([])
+const autoApproveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function showAutoApproveNotice(agentName: string) {
+  const id = `aa-${Date.now()}`
+  autoApproveNotices.value.push({ id, agentName })
+  const t = setTimeout(() => {
+    autoApproveNotices.value = autoApproveNotices.value.filter(n => n.id !== id)
+    autoApproveTimers.delete(id)
+  }, 4000)
+  autoApproveTimers.set(id, t)
+}
 
 watch(hydrationQueueOverflowed, (overflowed) => {
   if (!overflowed) return
@@ -1349,15 +1411,31 @@ function openThreadDetail(d: { threadId: string; agentId: string; msgId?: string
   threadDetail.open(msgId, d.agentId)
 }
 
-function openThreadDetailById(threadId: string) {
+async function openThreadDetailById(threadId: string) {
   const thread = getThreadById(threadId)
   if (thread?.parentMessageId) {
     threadPanelOpen.value = false
     openThreadLiveId.value = threadId
-    threadDetail.open(thread.parentMessageId, thread.AgentID)
-  } else {
-    threadPanelOpen.value = true
+    threadDetail.open(thread.parentMessageId, thread.AgentID ?? '')
+    return
   }
+  // Thread not in live state — fetch from API to get parentMessageId
+  if (!props.sessionId) {
+    threadPanelOpen.value = true
+    return
+  }
+  try {
+    const fetched = await api.threads.get(props.sessionId, threadId)
+    if (fetched?.parentMessageId) {
+      threadPanelOpen.value = false
+      openThreadLiveId.value = threadId
+      threadDetail.open(fetched.parentMessageId, fetched.AgentID ?? '')
+      return
+    }
+  } catch {
+    // fall through to panel
+  }
+  threadPanelOpen.value = true
 }
 
 function openBlockedThreadFocus() {
@@ -1671,6 +1749,11 @@ const activeMemoryChipText = computed(() => {
 // ── Thread helpers ────────────────────────────────────────────────────
 function getThreadById(threadId: string) {
   return sessionThreads.value.find(t => t.ID === threadId)
+}
+
+function isThreadThinking(threadId: string): boolean {
+  const t = getThreadById(threadId)
+  return !!t && isRunning(t) && !t.streamingContent
 }
 
 function formatThreadStatus(status: string): string {
@@ -2484,6 +2567,7 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
     const agentId = typeof p.agent_id === 'string'
       ? p.agent_id
       : (typeof p.agent === 'string' ? p.agent : 'Delegate')
+    showAutoApproveNotice(agentId)
     const msgs = getSourceMessages()
     const eventId = `preview-timeout-${threadId}`
     if (msgs.some(m => m.id === eventId)) return
