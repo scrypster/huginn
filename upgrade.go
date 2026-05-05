@@ -16,7 +16,10 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/scrypster/huginn/internal/config"
 )
 
 const (
@@ -40,6 +43,7 @@ type Upgrader struct {
 	IsHomebrewFn  func() bool                        // if nil, defaults to isHomebrewInstall
 	BrewUpgrade   func(pkg string) error             // if nil, runs exec.Command("brew", "upgrade", pkg)
 	VerifyBinary  func(path, tag string) error       // if nil, defaults to verifyHuginnBinary
+	ServerPortFn  func() int                         // if nil, reads from config (default 8421)
 }
 
 func defaultUpgrader() *Upgrader {
@@ -50,7 +54,44 @@ func defaultUpgrader() *Upgrader {
 		PIDIsLiveFn:   pidFileIsLive,
 		StopProcess:   platformStopProcess,
 		DetachStart:   platformDetachStart,
+		ServerPortFn:  serverPortFromConfig,
 	}
+}
+
+// serverPortFromConfig reads the web_ui.port from the huginn config file.
+// Falls back to 8421 (the default) if the config cannot be read.
+func serverPortFromConfig() int {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil || cfg.WebUI.Port == 0 {
+		return 8421
+	}
+	return cfg.WebUI.Port
+}
+
+// waitForServerHealth polls GET /api/v1/health until the new server responds
+// or a 10-second deadline expires. Uses exponential backoff (200ms→2s).
+// Prints a confirmation line on success, a warning on timeout.
+func (u *Upgrader) waitForServerHealth(port int) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/health", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(10 * time.Second)
+	delay := 200 * time.Millisecond
+	for time.Now().Before(deadline) {
+		time.Sleep(delay)
+		resp, err := client.Get(url) //nolint:noctx
+		if err == nil && resp.StatusCode < 500 {
+			resp.Body.Close()
+			fmt.Fprintf(u.out(), "  %-32s ✓\n", fmt.Sprintf("Server up at http://localhost:%d", port))
+			return
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if delay < 2*time.Second {
+			delay *= 2
+		}
+	}
+	fmt.Fprintf(u.out(), "  Warning: server did not respond within 10s — run: huginn status\n")
 }
 
 // runningState captures which huginn daemons were live at the start of Run().
@@ -368,6 +409,13 @@ func (u *Upgrader) selfUpdateWithURLs(latest, assetURL, checksumURL, goos, goarc
 			return u.DetachStart(cmd)
 		}); err != nil {
 			fmt.Fprintf(u.out(), "\n  Warning: server did not restart: %v\n  Run: huginn serve\n\n", err)
+		} else {
+			// Verify the new server actually came up before declaring victory.
+			port := 8421
+			if u.ServerPortFn != nil {
+				port = u.ServerPortFn()
+			}
+			u.waitForServerHealth(port)
 		}
 	}
 	if state.trayRunning {
@@ -868,8 +916,10 @@ func pidFileIsLive(path string) (bool, int) {
 	if err != nil {
 		return false, 0
 	}
-	// On Unix, FindProcess always succeeds; we must send signal 0 to check liveness.
-	if err := proc.Signal(os.Signal(nil)); err != nil {
+	// On Unix, FindProcess always succeeds; send signal 0 to check liveness
+	// without actually signalling the process. syscall.Signal(0) is the correct
+	// probe — os.Signal(nil) is a nil interface and always returns an error.
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		return false, 0
 	}
 	return true, pid
