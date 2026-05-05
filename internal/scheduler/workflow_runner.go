@@ -137,11 +137,13 @@ func redactTarget(raw, deliveryType string) string {
 }
 
 // runID generates a unique workflow run ID for the given workflow.
-// A 4-character random hex suffix (2 bytes from crypto/rand) is appended to
+// An 8-character random hex suffix (4 bytes from crypto/rand) is appended to
 // the millisecond timestamp to prevent collisions when two runs of the same
 // workflow start within the same millisecond (e.g. concurrent triggers).
+// 4 bytes gives ~4B possibilities, making birthday collisions across 100
+// concurrent runs statistically impossible (~0.000001% chance).
 func runID(workflowID string) string {
-	var b [2]byte
+	var b [4]byte
 	_, _ = rand.Read(b[:])
 	return fmt.Sprintf("wf-%s-%d-%x", workflowID, time.Now().UnixMilli(), b)
 }
