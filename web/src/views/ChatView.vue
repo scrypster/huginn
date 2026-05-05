@@ -447,6 +447,24 @@
                       <polyline points="9 18 15 12 9 6" />
                     </svg>
                   </button>
+                  <!-- Delegated agent thinking indicator -->
+                  <div
+                    v-if="isThreadThinking(d.threadId)"
+                    class="flex items-center gap-2 pl-2 py-0.5"
+                  >
+                    <div
+                      class="w-4 h-4 rounded flex-shrink-0 text-[9px] font-bold flex items-center justify-center"
+                      :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`"
+                    >
+                      {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                    </div>
+                    <span class="text-[11px] text-huginn-muted/70">thinking</span>
+                    <span class="flex gap-0.5 ml-0.5">
+                      <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:0ms" />
+                      <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:75ms" />
+                      <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:150ms" />
+                    </span>
+                  </div>
                   <div v-if="d.inlineSummary"
                     @click="openThreadDetail(d)"
                     class="ml-5 pl-3 py-2 border-l-2 rounded-r-lg cursor-pointer hover:bg-huginn-surface/40 transition-colors"
@@ -580,6 +598,24 @@
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </button>
+                    <!-- Delegated agent thinking indicator -->
+                    <div
+                      v-if="isThreadThinking(d.threadId)"
+                      class="flex items-center gap-2 pl-2 py-0.5"
+                    >
+                      <div
+                        class="w-4 h-4 rounded flex-shrink-0 text-[9px] font-bold flex items-center justify-center"
+                        :style="`background:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.2)'}33;color:${agentColorMap[d.agentId] ?? 'rgba(88,166,255,0.8)'}`"
+                      >
+                        {{ agentIconMap[d.agentId] || d.agentId?.[0]?.toUpperCase() || '?' }}
+                      </div>
+                      <span class="text-[11px] text-huginn-muted/70">thinking</span>
+                      <span class="flex gap-0.5 ml-0.5">
+                        <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:0ms" />
+                        <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:75ms" />
+                        <span class="w-1 h-1 rounded-full bg-huginn-muted/50 animate-bounce" style="animation-delay:150ms" />
+                      </span>
+                    </div>
                     <!-- Inline thread reply preview: show agent's reply summary when thread completes -->
                     <div v-if="d.inlineSummary"
                       @click="openThreadDetail(d)"
@@ -1054,7 +1090,7 @@ import MessageActions from '../components/MessageActions.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
-import { useThreads } from '../composables/useThreads'
+import { useThreads, isRunning } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
@@ -1713,6 +1749,11 @@ const activeMemoryChipText = computed(() => {
 // ── Thread helpers ────────────────────────────────────────────────────
 function getThreadById(threadId: string) {
   return sessionThreads.value.find(t => t.ID === threadId)
+}
+
+function isThreadThinking(threadId: string): boolean {
+  const t = getThreadById(threadId)
+  return !!t && isRunning(t) && !t.streamingContent
 }
 
 function formatThreadStatus(status: string): string {
