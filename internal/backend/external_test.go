@@ -378,6 +378,8 @@ func TestChatCompletion_ContextCancelled(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error after context cancellation")
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ChatCompletion to return after context cancellation")
 	}
 }
 
