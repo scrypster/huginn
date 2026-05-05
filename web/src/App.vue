@@ -1,6 +1,52 @@
 <template>
   <div class="flex h-screen bg-huginn-bg text-huginn-text font-mono overflow-hidden">
 
+    <!-- Stale binary banner -->
+    <Transition name="slide-down">
+      <div
+        v-if="stale && !restartDismissed && !restarting"
+        class="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-between gap-3 bg-blue-600 px-4 py-2 text-sm text-white shadow-md"
+      >
+        <div class="flex items-center gap-2">
+          <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M12 12V4m0 0L8 8m4-4l4 4"/>
+          </svg>
+          <span>A new version of huginn has been installed.</span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <button
+            class="rounded bg-white/20 px-3 py-1 font-medium hover:bg-white/30 transition-colors"
+            @click="handleRestartNow"
+          >
+            Restart Now
+          </button>
+          <button
+            class="rounded p-1 hover:bg-white/20 transition-colors"
+            aria-label="Dismiss"
+            @click="restartDismissed = true"
+          >
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Restarting overlay -->
+    <Transition name="fade">
+      <div
+        v-if="restarting"
+        class="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-blue-600 px-4 py-2 text-sm text-white shadow-md"
+      >
+        <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+        </svg>
+        <span>Restarting huginn…</span>
+      </div>
+    </Transition>
+
     <!-- ── Column 1: Icon strip (48px) ─────────────────────────────── -->
     <nav class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
 
@@ -1176,7 +1222,33 @@ const cloudConnected = computed(() => cloudStatus.value.connected)
 // Build version surfaced in three places: the H-logo tooltip, the profile
 // popover footer, and Settings → About. The composable caches across the
 // app lifetime so all three render the same value with one network call.
-const { versionLabel, loadVersion } = useVersion()
+const { versionLabel, stale, loadVersion, startPolling, stopPolling } = useVersion()
+
+const restartDismissed = ref(false)
+const restarting = ref(false)
+
+async function handleRestartNow(): Promise<void> {
+  restarting.value = true
+  try {
+    await api.restart()
+  } catch {
+    // 202 Accepted may throw in some fetch implementations — continue polling
+  }
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 500))
+    try {
+      const h = await api.health()
+      if (!h.stale) {
+        window.location.reload()
+        return
+      }
+    } catch {
+      // server mid-restart — keep polling
+    }
+  }
+  window.location.reload()
+}
 
 // ── Spaces ───────────────────────────────────────────────────────────
 const {
@@ -1391,10 +1463,12 @@ onMounted(() => {
   // Fire-and-forget: the version is purely informational, no UI flow gates
   // on its arrival, and useVersion swallows errors gracefully.
   void loadVersion()
+  startPolling()
   document.addEventListener('click', onDocClick, true)
   document.addEventListener('keydown', handleGlobalAppKeydown)
 })
 onUnmounted(() => {
+  stopPolling()
   wsRef.value?.destroy()
   document.removeEventListener('click', onDocClick, true)
   document.removeEventListener('keydown', handleGlobalAppKeydown)
@@ -1424,5 +1498,22 @@ onUnmounted(() => {
 .ws-banner-leave-from {
   max-height: 48px;
   opacity: 1;
+}
+.slide-down-enter-active,
+.slide-down-leave-active {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.slide-down-enter-from,
+.slide-down-leave-to {
+  transform: translateY(-100%);
+  opacity: 0;
+}
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 </style>
