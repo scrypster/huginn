@@ -129,6 +129,35 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 	return schemas, agentGate
 }
 
+// toolGetter is the minimal interface needed to look up a registered tool by
+// name. *tools.Registry satisfies this interface.
+type toolGetter interface {
+	Get(name string) (tools.Tool, bool)
+}
+
+// injectDelegationTools appends delegation tool schemas to schemas when the
+// context carries a space context. It is a no-op when there is no space context
+// or when the tool is already present in schemas. The original slice is never
+// mutated if it is unchanged.
+func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg toolGetter) []backend.Tool {
+	if workforce.GetSpaceContext(ctx) == "" {
+		return schemas
+	}
+	delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
+	seen := make(map[string]bool, len(schemas))
+	for _, s := range schemas {
+		seen[s.Function.Name] = true
+	}
+	for _, name := range delegationToolNames {
+		if !seen[name] {
+			if t, ok := reg.Get(name); ok {
+				schemas = append(schemas, t.Schema())
+			}
+		}
+	}
+	return schemas
+}
+
 // agentToolbelt translates the agent's toolbelt entries into the session
 // package's ToolbeltEntry type, avoiding an import cycle between session
 // and agents.
@@ -335,7 +364,9 @@ func (o *Orchestrator) ExecuteAgentTool(ctx context.Context, model string, budge
 	// budgetTokens is accepted for future use but not yet propagated to ChatRequest,
 	// which does not expose a per-call MaxTokens field. When ChatRequest gains that
 	// field, wire budgetTokens through here.
-	_ = budgetTokens
+	if budgetTokens > 0 {
+		slog.Warn("agent: budgetTokens parameter is not yet enforced", "budget", budgetTokens)
+	}
 
 	o.mu.RLock()
 	b := o.backend
@@ -435,6 +466,174 @@ func (o *Orchestrator) Dispatch(
 	return true, nil
 }
 
+// errToolsNotSupported is returned by runAgentTurn when the underlying RunLoop
+// signals that the model does not support function calling. The caller
+// (ChatWithAgent) uses this sentinel to fall back to a plain single-turn
+// completion without tools.
+var errToolsNotSupported = fmt.Errorf("model does not support tools")
+
+// agentTurnOpts captures the parameters that differ between ChatWithAgent and
+// TaskWithAgent so that both can delegate their shared core logic to
+// runAgentTurn. Fields that are common to every turn (agent, userMsg, session,
+// registry, gate) are always required; optional callbacks may be nil.
+type agentTurnOpts struct {
+	// ag is the agent whose persona, model, and toolbelt are used.
+	ag *agents.Agent
+	// userMsg is the human turn to process.
+	userMsg string
+	// systemPromptBase is the fully-assembled system prompt that the caller
+	// has already built (persona + any extra fragments). runAgentTurn appends
+	// memory-mode instructions and prefetched memory context to this base.
+	systemPromptBase string
+	// history is a pre-snapshotted slice of prior conversation messages.
+	history []backend.Message
+	// sess is the session whose history will be updated after the loop.
+	sess *Session
+	// reg is the tool registry for this turn (never nil when runAgentTurn is called).
+	reg *tools.Registry
+	// gate is the permission gate (may be nil).
+	gate *permissions.Gate
+	// maxTurns caps the RunLoop iteration count.
+	maxTurns int
+	// errorPrefix is used in wrapped error messages ("chat" or "task").
+	errorPrefix string
+	// latencySlot is the stats slot passed to recordLLMLatency.
+	latencySlot string
+	// sessionID is propagated into ctx via SetSessionID. May be empty.
+	sessionID string
+	// prefetchCb is invoked for each pre-fetched memory event. Callers wire
+	// this differently: Chat routes through onToolEvent; Task routes through
+	// onToolCall/onToolDone. May be nil.
+	prefetchCb func(toolName string, args map[string]any, output string, cached bool)
+	// onToken, onToolCall, onToolDone, onPermDenied, onEvent are the streaming
+	// callbacks passed directly to RunLoopConfig.
+	onToken      func(string)
+	onToolCall   func(string, string, map[string]any)
+	onToolDone   func(string, string, tools.ToolResult)
+	onPermDenied func(string)
+	onEvent      func(backend.StreamEvent)
+	// ctxSetup, when non-nil, is called after the session environment has been
+	// injected and before RunLoop is invoked. It allows the caller to perform
+	// additional context mutations (e.g. SetSessionID, delegation context).
+	ctxSetup func(ctx context.Context) context.Context
+}
+
+// runAgentTurn is the shared core of ChatWithAgent (tool-registry path) and
+// TaskWithAgent. It:
+//  1. Connects the MuninnDB vault (forks the registry; always safe).
+//  2. Appends memory-mode instructions and pre-fetched memory context to the
+//     system prompt provided by the caller.
+//  3. Constructs the message list: [system] + history + [user].
+//  4. Applies the agent toolbelt and injects delegation tools.
+//  5. Builds and tears down an isolated session environment.
+//  6. Resolves the per-agent backend.
+//  7. Runs the tool-calling loop via RunLoop.
+//  8. Appends new messages to the session history and compacts it.
+//
+// All caller-specific differences (prompt augmentation, callback wiring,
+// error prefix, latency slot, maxTurns) are captured in opts.
+func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) error {
+	ag := opts.ag
+
+	// 1. Connect vault — forks the shared registry; safe to call even when vault
+	// is unconfigured (returns a no-op registry fork with cancel=func(){}).
+	vr := o.connectAgentVault(ctx, ag, opts.reg)
+	defer vr.cancel()
+
+	if vr.warning != "" {
+		slog.Warn("vault unavailable for agent session", "agent", ag.Name, "session_id", opts.sessionID, "warning", vr.warning)
+		if opts.onEvent != nil {
+			opts.onEvent(backend.StreamEvent{
+				Type:    backend.StreamWarning,
+				Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
+			})
+		}
+	}
+
+	// 2. Augment system prompt with memory-mode instructions and prefetched context.
+	systemPrompt := opts.systemPromptBase
+	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+		slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
+		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
+	}
+	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
+		systemPrompt += memCtx
+	}
+
+	// 3. Build message list: system + history snapshot + user turn.
+	messages := make([]backend.Message, 0, 2+len(opts.history))
+	messages = append(messages, backend.Message{Role: "system", Content: systemPrompt})
+	messages = append(messages, opts.history...)
+	messages = append(messages, backend.Message{Role: "user", Content: opts.userMsg})
+
+	// 4. Resolve tool schemas and permission gate for this agent run.
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
+	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg)
+
+	// 5. Create isolated session environment (temp dir, env vars).
+	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
+	if sessErr != nil {
+		slog.Warn("agent session setup failed", "agent", ag.Name, "err", sessErr)
+		agentSess = &session.Session{}
+	}
+	defer agentSess.Teardown()
+	ctx = session.WithEnv(ctx, agentSess.Env)
+
+	// Allow the caller to mutate ctx further (e.g. SetSessionID, delegation ctx).
+	if opts.ctxSetup != nil {
+		ctx = opts.ctxSetup(ctx)
+	}
+
+	// 6. Resolve the per-agent backend.
+	b, backendErr := o.backendFor(ag)
+	if backendErr != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, backendErr)
+	}
+
+	// 7. Run the tool-calling loop.
+	cfg := RunLoopConfig{
+		MaxTurns:           opts.maxTurns,
+		ModelName:          ag.GetModelID(),
+		Messages:           messages,
+		Tools:              vr.sessionReg,
+		ToolSchemas:        schemas,
+		Gate:               agentGate,
+		Backend:            b,
+		OnToken:            opts.onToken,
+		OnToolCall:         opts.onToolCall,
+		OnToolDone:         opts.onToolDone,
+		OnPermissionDenied: opts.onPermDenied,
+		OnEvent:            opts.onEvent,
+		VaultWarnOnce:      &sync.Once{},
+		VaultReconnector:   vr.reconnector,
+	}
+
+	start := time.Now().UnixNano()
+	loopResult, err := RunLoop(ctx, cfg)
+	o.recordLLMLatency(start, opts.latencySlot)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not support tools") {
+			// Signal to the caller (ChatWithAgent) that it should fall back to
+			// a plain single-turn completion without tool schemas.
+			return errToolsNotSupported
+		}
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
+	}
+
+	// 8. Persist new messages into session history.
+	initialCount := 1 + len(opts.history) + 1 // system + history + user
+	if loopResult.Messages != nil && len(loopResult.Messages) > initialCount {
+		opts.sess.appendHistory(loopResult.Messages[initialCount:]...)
+	} else {
+		opts.sess.appendHistory(
+			backend.Message{Role: "user", Content: opts.userMsg},
+			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
+		)
+	}
+	o.compactHistory(ctx, opts.sess)
+	return nil
+}
+
 // TaskWithAgent runs an agent on a bounded task with session isolation (isolated temp dir + env).
 // Use this for any @agent directive that needs tool-calling with clean workspace isolation —
 // coding, investigation, delegation, refactoring, etc.
@@ -455,34 +654,18 @@ func (o *Orchestrator) TaskWithAgent(
 	sess := o.defaultSession()
 	o.mu.RUnlock()
 	sess.setState(StateAgentLoop)
-
 	defer sess.setState(StateIdle)
 
 	if reg == nil {
 		return o.ChatWithAgent(ctx, ag, userMsg, GetSessionID(ctx), onToken, nil, onEvent)
 	}
 
-	// Connect to MuninnDB vault for this session — forks the shared registry so
-	// vault tools are isolated per session. Always safe; degrades gracefully.
-	vr := o.connectAgentVault(ctx, ag, reg)
-	defer vr.cancel()
-
-	if vr.warning != "" && onEvent != nil {
-		onEvent(backend.StreamEvent{
-			Type:    backend.StreamWarning,
-			Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-		})
-	}
-
 	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
 	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
-	systemPrompt := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
-	// Inject memory mode instructions only when vault tools are available this session.
-	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
-		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
-	}
-	// Pre-fetch memory orientation and inject into system prompt. Surface
-	// synthetic tool events so the UI can show that memory recall happened.
+	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+
+	history := sess.snapshotHistory()
+
 	taskPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
 		if cached {
 			return
@@ -495,85 +678,25 @@ func (o *Orchestrator) TaskWithAgent(
 			onToolDone(callID, toolName, tools.ToolResult{Output: output})
 		}
 	}
-	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, taskPrefetchCallback); memCtx != "" {
-		systemPrompt += memCtx
-	}
 
-	history := sess.snapshotHistory()
-
-	messages := []backend.Message{{Role: "system", Content: systemPrompt}}
-	messages = append(messages, history...)
-	messages = append(messages, backend.Message{Role: "user", Content: userMsg})
-
-	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
-
-	// Auto-inject team coordination tools when the agent is in a channel context.
-	// delegate_to_agent is the primary delegation path for capable models;
-	// list_team_status and recall_thread_result provide read access to the team.
-	if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-		delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
-		seen := make(map[string]bool, len(schemas))
-		for _, s := range schemas {
-			seen[s.Function.Name] = true
-		}
-		for _, name := range delegationToolNames {
-			if !seen[name] {
-				if t, ok := vr.sessionReg.Get(name); ok {
-					schemas = append(schemas, t.Schema())
-				}
-			}
-		}
-	}
-
-	// Create isolated session environment for this agent run.
-	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
-	if sessErr != nil {
-		// Non-fatal: log warning but continue without session isolation.
-		slog.Warn("agent session setup failed", "agent", ag.Name, "err", sessErr)
-		agentSess = &session.Session{} // empty session
-	}
-	defer agentSess.Teardown()
-	ctx = session.WithEnv(ctx, agentSess.Env)
-
-	agCodeBackend, agCodeErr := o.backendFor(ag)
-	if agCodeErr != nil {
-		return agCodeErr
-	}
-	cfg := RunLoopConfig{
-		MaxTurns:           maxTurns,
-		ModelName:          ag.GetModelID(),
-		Messages:           messages,
-		Tools:              vr.sessionReg,
-		ToolSchemas:        schemas,
-		Gate:               agentGate,
-		Backend:            agCodeBackend,
-		OnToken:            onToken,
-		OnToolCall:         onToolCall,
-		OnToolDone:         onToolDone,
-		OnPermissionDenied: onPermDenied,
-		OnEvent:            onEvent,
-		VaultWarnOnce:      &sync.Once{},
-		VaultReconnector:   vr.reconnector,
-	}
-
-	agentLoopStart := time.Now().UnixNano()
-	loopResult, err := RunLoop(ctx, cfg)
-	o.recordLLMLatency(agentLoopStart, "agent-loop")
-	if err != nil {
-		return fmt.Errorf("task(%s): %w", ag.Name, err)
-	}
-
-	initialCount := 1 + len(history) + 1 // system msg + history msgs + user msg
-	if loopResult.Messages != nil && len(loopResult.Messages) > initialCount {
-		sess.appendHistory(loopResult.Messages[initialCount:]...)
-	} else {
-		sess.appendHistory(
-			backend.Message{Role: "user", Content: userMsg},
-			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
-		)
-	}
-	o.compactHistory(ctx, sess)
-	return nil
+	return o.runAgentTurn(ctx, agentTurnOpts{
+		ag:               ag,
+		userMsg:          userMsg,
+		systemPromptBase: systemPromptBase,
+		history:          history,
+		sess:             sess,
+		reg:              reg,
+		gate:             gate,
+		maxTurns:         maxTurns,
+		errorPrefix:      "task",
+		latencySlot:      "agent-loop",
+		prefetchCb:       taskPrefetchCallback,
+		onToken:          onToken,
+		onToolCall:       onToolCall,
+		onToolDone:       onToolDone,
+		onPermDenied:     onPermDenied,
+		onEvent:          onEvent,
+	})
 }
 
 // ReasonWithAgent runs the reasoner using the given agent's persona and model.
@@ -595,11 +718,27 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	onToken func(string),
 	onToolEvent func(eventType string, payload map[string]any),
 	onEvent func(backend.StreamEvent)) error {
-	o.mu.Lock()
+	if err := o.ValidateWiring(); err != nil {
+		return err
+	}
+	// Fast path: read lock — handles the common case where the session already exists.
+	o.mu.RLock()
 	var sess *Session
 	if sessionID != "" {
+		sess = o.sessions[sessionID]
+	} else {
+		sess = o.defaultSession()
+	}
+	reg := o.toolRegistry
+	gate := o.permGate
+	memReplicator := o.optionalMemoryReplicatorLocked()
+	o.mu.RUnlock()
+
+	// Slow path: named session not found — create it under write lock (double-check pattern).
+	if sess == nil && sessionID != "" {
+		o.mu.Lock()
 		if s, ok := o.sessions[sessionID]; ok {
-			sess = s
+			sess = s // created by a concurrent goroutine between RUnlock and Lock
 		} else {
 			// Session not in memory (e.g. after server restart). Create a fresh
 			// in-memory session for this ID rather than falling back to the shared
@@ -608,13 +747,8 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			sess = newSession(sessionID)
 			o.sessions[sessionID] = sess
 		}
+		o.mu.Unlock()
 	}
-	if sess == nil {
-		sess = o.defaultSession()
-	}
-	reg := o.toolRegistry
-	gate := o.permGate
-	o.mu.Unlock()
 
 	// Guard against concurrent calls on the same session. Only one agentic loop
 	// may run at a time per session — concurrent calls would interleave history
@@ -634,23 +768,23 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 
 	ctxText := o.contextBuilder.Build(userMsg, ag.GetModelID())
 	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
-	systemPrompt := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
 
 	// Per-agent skills fragment. Non-default agents (workflow steps, delegated
 	// workers) need their assigned skills appended just like the default agent
 	// does in mcp_agent_chat.go. Without this they execute with no skills,
 	// which is a major parity gap for scheduled workflows.
 	if skillsFrag := o.SkillsFragmentForAgent(ag); skillsFrag != "" {
-		systemPrompt += "\n\n" + skillsFrag
+		systemPromptBase += "\n\n" + skillsFrag
 	}
 
 	// Inject space context (channel/DM metadata) if available.
 	if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-		systemPrompt += "\n\n" + spaceCtx
+		systemPromptBase += "\n\n" + spaceCtx
 	}
 	// Inject channel-recent summary (channels only, not DMs).
 	if recentCtx := workforce.GetChannelRecent(ctx); recentCtx != "" {
-		systemPrompt += "\n\n" + recentCtx
+		systemPromptBase += "\n\n" + recentCtx
 	}
 
 	// Inject per-step pre-authorised connection picks (Phase 1.4). When a
@@ -658,86 +792,16 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	// the runner places that map into ctx via WithStepConnections; surface it
 	// as a system addendum so the agent uses those account labels in tool calls.
 	if connHint := stepConnectionsAddendum(ctx); connHint != "" {
-		systemPrompt += "\n\n" + connHint
+		systemPromptBase += "\n\n" + connHint
 	}
 
 	history := sess.snapshotHistory()
 
-	msgs := []backend.Message{{Role: "system", Content: systemPrompt}}
-	msgs = append(msgs, history...)
-	msgs = append(msgs, backend.Message{Role: "user", Content: userMsg})
-
-	// When a tool registry is configured, use the full RunLoop so tools like
-	// delegate_to_agent can be called during the conversation. If the model
-	// rejects tool schemas (e.g. deepseek-r1 on Ollama), fall back to plain chat.
+	// When a tool registry is configured, delegate to the shared runAgentTurn
+	// core. If the model rejects tool schemas (e.g. deepseek-r1 on Ollama),
+	// runAgentTurn returns errToolsNotSupported and we fall through to the plain
+	// single-turn completion below.
 	if reg != nil {
-		// Connect to MuninnDB vault for this session — forks the shared registry so
-		// vault tools are isolated per session. Always safe; degrades gracefully.
-		vr := o.connectAgentVault(ctx, ag, reg)
-		defer vr.cancel()
-
-		if vr.warning != "" {
-			slog.Warn("vault unavailable for agent session", "agent", ag.Name, "session_id", sessionID, "warning", vr.warning)
-			if onEvent != nil {
-				onEvent(backend.StreamEvent{
-					Type:    backend.StreamWarning,
-					Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-				})
-			}
-		}
-		// Inject memory mode instructions only when vault tools are available this session.
-		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
-			slog.Info("vault tools available", "agent", ag.Name, "session_id", sessionID, "vault", ag.VaultName)
-			msgs[0].Content += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
-		}
-		// Pre-fetch memory orientation and inject into system prompt. Surface
-		// synthetic tool events so the UI can show that memory recall happened.
-		chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
-			if cached || onToolEvent == nil {
-				return
-			}
-			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
-			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
-		}
-		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, chatPrefetchCallback); memCtx != "" {
-			msgs[0].Content += memCtx
-		}
-
-		ctx = SetSessionID(ctx, sessionID)
-		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
-
-		// Auto-inject team coordination tools when the agent is in a channel context.
-		// delegate_to_agent is the primary delegation path for capable models;
-		// list_team_status and recall_thread_result provide read access to the team.
-		if spaceCtx := workforce.GetSpaceContext(ctx); spaceCtx != "" {
-			delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
-			seen := make(map[string]bool, len(schemas))
-			for _, s := range schemas {
-				seen[s.Function.Name] = true
-			}
-			for _, name := range delegationToolNames {
-				if !seen[name] {
-					if t, ok := vr.sessionReg.Get(name); ok {
-						schemas = append(schemas, t.Schema())
-					}
-				}
-			}
-		}
-
-		// Create isolated session environment for this agent run.
-		agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
-		if sessErr != nil {
-			// Non-fatal: log warning but continue without session isolation.
-			slog.Warn("agent session setup failed", "agent", ag.Name, "err", sessErr)
-			agentSess = &session.Session{} // empty session
-		}
-		defer agentSess.Teardown()
-		ctx = session.WithEnv(ctx, agentSess.Env)
-
-		agChatBackend, agChatErr := o.backendFor(ag)
-		if agChatErr != nil {
-			return fmt.Errorf("chat(%s): %w", ag.Name, agChatErr)
-		}
 		// toolArgsMu guards toolArgsCapture against concurrent writes from parallel
 		// tool dispatches. dispatchTools spawns one goroutine per tool call, so
 		// OnToolCall/OnToolDone can fire concurrently.
@@ -746,125 +810,132 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		// Entries are deleted in OnToolDone to prevent unbounded growth per turn.
 		// Keying by callID (not tool name) fixes the same-tool-twice collision.
 		toolArgsCapture := make(map[string]map[string]any)
-		loopCfg := RunLoopConfig{
-			MaxTurns:         50,
-			ModelName:        ag.GetModelID(),
-			Messages:         msgs,
-			Tools:            vr.sessionReg,
-			ToolSchemas:      schemas,
-			Gate:             agentGate,
-			Backend:          agChatBackend,
-			OnToken:          onToken,
-			OnEvent:          onEvent,
-			VaultWarnOnce:    &sync.Once{},
-			VaultReconnector: vr.reconnector,
-			OnToolCall: func(callID string, name string, args map[string]any) {
-				slog.Info("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
-				toolArgsMu.Lock()
-				toolArgsCapture[callID] = args
-				toolArgsMu.Unlock()
-				if onToolEvent != nil {
-					onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
-				} else if onEvent != nil {
-					onEvent(backend.StreamEvent{
-						Type:    backend.StreamToolCall,
-						Payload: map[string]any{"id": callID, "tool": name, "args": args},
-					})
-				}
-			},
-			OnToolDone: func(callID string, name string, result tools.ToolResult) {
-				toolArgsMu.Lock()
-				capturedArgs := toolArgsCapture[callID]
-				delete(toolArgsCapture, callID)
-				toolArgsMu.Unlock()
-				permissionDenied := false
-				reasonCode := ""
-				reason := ""
-				if result.Metadata != nil {
-					if denied, ok := result.Metadata["permission_denied"].(bool); ok {
-						permissionDenied = denied
-					}
-					if rc, ok := result.Metadata["reason_code"].(string); ok {
-						reasonCode = rc
-					}
-					if rs, ok := result.Metadata["reason"].(string); ok {
-						reason = rs
-					}
-				}
-				// Replicate memory writes to other channel members' vaults.
-				if o.memoryReplicator != nil && isMemoryToolName(name) && !result.IsError {
-					if replCtx := workforce.GetReplicationContext(ctx); replCtx != nil {
-						o.memoryReplicator.Intercept(ctx, name, capturedArgs, result, ag.Name, replCtx)
-					}
-				}
-				slog.Info("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
-				if onToolEvent != nil {
-					payload := map[string]any{"tool": name, "result": result.Output}
-					if result.Metadata != nil {
-						payload["metadata"] = result.Metadata
-					}
-					if permissionDenied {
-						payload["permission_denied"] = true
-						payload["reason_code"] = reasonCode
-						payload["reason"] = reason
-					}
-					onToolEvent("tool_result", payload)
-				} else if onEvent != nil {
-					payload := map[string]any{
-						"id":      callID,
-						"tool":    name,
-						"success": result.Error == "",
-						"result":  result.Output,
-						"args":    capturedArgs,
-					}
-					if result.Metadata != nil {
-						payload["metadata"] = result.Metadata
-					}
-					if permissionDenied {
-						payload["permission_denied"] = true
-						payload["reason_code"] = reasonCode
-						payload["reason"] = reason
-					}
-					onEvent(backend.StreamEvent{
-						Type:    backend.StreamToolResult,
-						Payload: payload,
-					})
-				}
-			},
-		}
-		// Build a DelegationContext so downstream code (e.g. threadmgr) can
-		// trace the delegation lineage through the Go context.
-		if GetDelegationContext(ctx) == nil {
-			dc := workforce.NewDelegationContext(sessionID, ag.Name, o.maxDelegationDepth())
-			ctx = WithDelegationContext(ctx, &dc)
+
+		chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
+			if cached || onToolEvent == nil {
+				return
+			}
+			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
+			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
 		}
 
-		agentChatStart := time.Now().UnixNano()
-		result, loopErr := RunLoop(ctx, loopCfg)
-		o.recordLLMLatency(agentChatStart, "agent-chat")
-		if loopErr != nil && strings.Contains(loopErr.Error(), "does not support tools") {
-			// Model doesn't support function calling — retry without tools.
-		} else if loopErr != nil {
-			return fmt.Errorf("chat(%s): %w", ag.Name, loopErr)
-		} else {
-			// Preserve full tool-call/tool-result history so subsequent turns have
-			// accurate context (tool names, arguments, results). Matches TaskWithAgent.
-			// initialCount = system msg (1) + history snapshot + user msg (1).
-			initialCount := 1 + len(history) + 1
-			if result.Messages != nil && len(result.Messages) > initialCount {
-				sess.appendHistory(result.Messages[initialCount:]...)
-			} else {
-				sess.appendHistory(
-					backend.Message{Role: "user", Content: userMsg},
-					backend.Message{Role: "assistant", Content: result.FinalContent},
-				)
+		chatOnToolCall := func(callID string, name string, args map[string]any) {
+			slog.Debug("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
+			toolArgsMu.Lock()
+			toolArgsCapture[callID] = args
+			toolArgsMu.Unlock()
+			if onToolEvent != nil {
+				onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
+			} else if onEvent != nil {
+				onEvent(backend.StreamEvent{
+					Type:    backend.StreamToolCall,
+					Payload: map[string]any{"id": callID, "tool": name, "args": args},
+				})
 			}
-			o.compactHistory(ctx, sess)
+		}
+
+		chatOnToolDone := func(callID string, name string, result tools.ToolResult) {
+			toolArgsMu.Lock()
+			capturedArgs := toolArgsCapture[callID]
+			delete(toolArgsCapture, callID)
+			toolArgsMu.Unlock()
+			permissionDenied := false
+			reasonCode := ""
+			reason := ""
+			if result.Metadata != nil {
+				if denied, ok := result.Metadata["permission_denied"].(bool); ok {
+					permissionDenied = denied
+				}
+				if rc, ok := result.Metadata["reason_code"].(string); ok {
+					reasonCode = rc
+				}
+				if rs, ok := result.Metadata["reason"].(string); ok {
+					reason = rs
+				}
+			}
+			// Replicate memory writes to other channel members' vaults.
+			if memReplicator != nil && isMemoryToolName(name) && !result.IsError {
+				if replCtx := workforce.GetReplicationContext(ctx); replCtx != nil {
+					memReplicator.Intercept(ctx, name, capturedArgs, result, ag.Name, replCtx)
+				}
+			}
+			slog.Debug("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
+			if onToolEvent != nil {
+				payload := map[string]any{"tool": name, "result": result.Output}
+				if result.Metadata != nil {
+					payload["metadata"] = result.Metadata
+				}
+				if permissionDenied {
+					payload["permission_denied"] = true
+					payload["reason_code"] = reasonCode
+					payload["reason"] = reason
+				}
+				onToolEvent("tool_result", payload)
+			} else if onEvent != nil {
+				payload := map[string]any{
+					"id":      callID,
+					"tool":    name,
+					"success": result.Error == "",
+					"result":  result.Output,
+					"args":    capturedArgs,
+				}
+				if result.Metadata != nil {
+					payload["metadata"] = result.Metadata
+				}
+				if permissionDenied {
+					payload["permission_denied"] = true
+					payload["reason_code"] = reasonCode
+					payload["reason"] = reason
+				}
+				onEvent(backend.StreamEvent{
+					Type:    backend.StreamToolResult,
+					Payload: payload,
+				})
+			}
+		}
+
+		turnErr := o.runAgentTurn(ctx, agentTurnOpts{
+			ag:               ag,
+			userMsg:          userMsg,
+			systemPromptBase: systemPromptBase,
+			history:          history,
+			sess:             sess,
+			reg:              reg,
+			gate:             gate,
+			maxTurns:         50,
+			errorPrefix:      "chat",
+			latencySlot:      "agent-chat",
+			sessionID:        sessionID,
+			prefetchCb:       chatPrefetchCallback,
+			onToken:          onToken,
+			onToolCall:       chatOnToolCall,
+			onToolDone:       chatOnToolDone,
+			onEvent:          onEvent,
+			// ctxSetup wires the session ID into ctx and establishes a delegation
+			// context so downstream code (e.g. threadmgr) can trace the lineage.
+			ctxSetup: func(c context.Context) context.Context {
+				c = SetSessionID(c, sessionID)
+				if GetDelegationContext(c) == nil {
+					dc := workforce.NewDelegationContext(sessionID, ag.Name, o.maxDelegationDepth())
+					c = WithDelegationContext(c, &dc)
+				}
+				return c
+			},
+		})
+		if turnErr == nil {
 			return nil
 		}
+		if turnErr != errToolsNotSupported {
+			return turnErr
+		}
+		// Model doesn't support function calling — fall through to plain chat.
 	}
 
 	// No tool registry, or model doesn't support tools — direct single-turn completion.
+	msgs := []backend.Message{{Role: "system", Content: systemPromptBase}}
+	msgs = append(msgs, history...)
+	msgs = append(msgs, backend.Message{Role: "user", Content: userMsg})
+
 	plainBackend, plainErr := o.backendFor(ag)
 	if plainErr != nil {
 		return fmt.Errorf("chat(%s): %w", ag.Name, plainErr)

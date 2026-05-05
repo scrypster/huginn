@@ -215,7 +215,7 @@ func TestHandlePutWorkflow_DanglingFromStep(t *testing.T) {
 	_, ts := newTestServer(t)
 
 	// Create a valid workflow first.
-	createPayload := `{"name":"wf","enabled":false,"schedule":"0 9 * * 1-5","steps":[{"name":"step-a","position":0}]}`
+	createPayload := `{"name":"wf","enabled":false,"schedule":"0 9 * * 1-5","steps":[{"name":"step-a","prompt":"initial","position":0}]}`
 	createReq, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows", strings.NewReader(createPayload))
 	createReq.Header.Set("Authorization", "Bearer "+testToken)
 	createReq.Header.Set("Content-Type", "application/json")
@@ -239,6 +239,7 @@ func TestHandlePutWorkflow_DanglingFromStep(t *testing.T) {
 		"steps": [
 			{
 				"name": "step-b",
+				"prompt": "use x",
 				"position": 0,
 				"inputs": [{"from_step": "nonexistent", "as": "x"}]
 			}
@@ -335,9 +336,10 @@ func TestHandleCreateWorkflow_ValidFromStep(t *testing.T) {
 		"enabled": false,
 		"schedule": "0 9 * * 1-5",
 		"steps": [
-			{"name": "step-a", "position": 0},
+			{"name": "step-a", "prompt": "do step a", "position": 0},
 			{
 				"name": "step-b",
+				"prompt": "consume output",
 				"position": 1,
 				"inputs": [{"from_step": "step-a", "as": "a_output"}]
 			}
@@ -461,6 +463,77 @@ func TestValidateWorkflow_NilSteps(t *testing.T) {
 	}
 }
 
+func TestHandleCreateWorkflow_InlineStepWithoutAgentPasses(t *testing.T) {
+	_, ts := newTestServer(t)
+	payload := `{
+		"name":"no-agent",
+		"enabled":false,
+		"steps":[{"name":"step-a","prompt":"do work","position":0}]
+	}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleCreateWorkflow_InlineStepMissingPromptRejected(t *testing.T) {
+	_, ts := newTestServer(t)
+	payload := `{
+		"name":"missing-prompt",
+		"enabled":false,
+		"steps":[{"name":"step-a","agent":"Chris","position":0}]
+	}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if !strings.Contains(body["error"].(string), "missing prompt") {
+		t.Fatalf("expected missing prompt error, got: %v", body["error"])
+	}
+}
+
+func TestHandleCreateWorkflow_SubWorkflowSelfReferenceRejected(t *testing.T) {
+	_, ts := newTestServer(t)
+	payload := `{
+		"id":"wf-self",
+		"name":"self-ref",
+		"enabled":false,
+		"steps":[{"name":"step-a","sub_workflow":"wf-self","position":0}]
+	}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if !strings.Contains(body["error"].(string), "cannot reference the current workflow id") {
+		t.Fatalf("expected self-reference error, got: %v", body["error"])
+	}
+}
+
 // TestHandleCreateWorkflow_ValidSpaceDelivery ensures that a space delivery
 // entry with a non-empty space_id passes validation and the workflow is saved.
 func TestHandleCreateWorkflow_ValidSpaceDelivery(t *testing.T) {
@@ -473,6 +546,7 @@ func TestHandleCreateWorkflow_ValidSpaceDelivery(t *testing.T) {
 		"steps": [
 			{
 				"name": "step-a",
+				"prompt": "notify only",
 				"position": 0,
 				"notify": {
 					"on_success": true,

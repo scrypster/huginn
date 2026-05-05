@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
+import { setToken } from '../useApi'
 
 function ok(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -29,6 +30,10 @@ const sampleRegistrySkills = [
     collection: 'core',
   },
 ]
+
+beforeAll(() => {
+  setToken('test-token')
+})
 
 afterEach(() => {
   vi.restoreAllMocks()

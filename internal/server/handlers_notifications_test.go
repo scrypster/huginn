@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,6 +73,14 @@ func (s *stubNotifStore) ListPending() ([]*notification.Notification, error) {
 	return out, nil
 }
 
+func (s *stubNotifStore) ListPendingN(limit int) ([]*notification.Notification, error) {
+	all, err := s.ListPending()
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
 func (s *stubNotifStore) ListByRoutine(routineID string) ([]*notification.Notification, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +107,22 @@ func (s *stubNotifStore) ListByWorkflow(workflowID string) ([]*notification.Noti
 	return out, nil
 }
 
+func (s *stubNotifStore) ListByRoutineN(routineID string, limit int) ([]*notification.Notification, error) {
+	all, err := s.ListByRoutine(routineID)
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
+func (s *stubNotifStore) ListByWorkflowN(workflowID string, limit int) ([]*notification.Notification, error) {
+	all, err := s.ListByWorkflow(workflowID)
+	if err != nil || limit <= 0 || len(all) <= limit {
+		return all, err
+	}
+	return all[:limit], nil
+}
+
 func (s *stubNotifStore) PendingCount() (int, error) {
 	ns, err := s.ListPending()
 	return len(ns), err
@@ -114,6 +139,8 @@ func (s *stubNotifStore) ExpireRun(runID string) error {
 	}
 	return nil
 }
+
+func (s *stubNotifStore) PruneExpired(ctx context.Context) (int, error) { return 0, nil }
 
 // Compile-time assertion.
 var _ notification.StoreInterface = (*stubNotifStore)(nil)
@@ -264,6 +291,63 @@ func TestHandleNotificationAction_ApproveWithProposedActions(t *testing.T) {
 	}
 	if got.Status != notification.StatusApproved {
 		t.Errorf("want status approved, got %s", got.Status)
+	}
+}
+
+func TestHandleNotificationAction_ApproveWithUnknownProposedActionID(t *testing.T) {
+	srv, ts := newTestServer(t)
+	defer ts.Close()
+
+	store := newStubNotifStore()
+	actions := []notification.ProposedAction{
+		{ID: "a1", Label: "Merge PR #42", ToolName: "bash", ToolParams: map[string]any{"cmd": "gh pr merge 42"}},
+	}
+	n := makeStubNotification("routine-1", "run-1", "", actions)
+	if err := store.Put(n); err != nil {
+		t.Fatal(err)
+	}
+	srv.notifStore = store
+
+	body := `{"action":"approve","proposed_action_id":"does-not-exist"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/notifications/"+n.ID+"/action", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleNotificationAction_ApproveRequiresIDWhenMultipleActions(t *testing.T) {
+	srv, ts := newTestServer(t)
+	defer ts.Close()
+
+	store := newStubNotifStore()
+	actions := []notification.ProposedAction{
+		{ID: "a1", Label: "Action one", ToolName: "bash"},
+		{ID: "a2", Label: "Action two", ToolName: "bash"},
+	}
+	n := makeStubNotification("routine-1", "run-1", "", actions)
+	if err := store.Put(n); err != nil {
+		t.Fatal(err)
+	}
+	srv.notifStore = store
+
+	body := `{"action":"approve"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/notifications/"+n.ID+"/action", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
 	}
 }
 

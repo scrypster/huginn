@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -67,8 +68,9 @@ func NewRegistry() *Registry {
 }
 
 // Histogram records a distribution sample directly on the Registry.
-// It populates histValues for percentile computation and enforces
-// per-key sample caps (maxHistogramSamples) and key count limits (maxHistogramKeys).
+// It updates histValues only (for percentile computation) and does NOT
+// append to the flat histograms event log. Use r.Collector().Histogram()
+// when you also need the sample to appear in Snapshot().Histograms.
 // Optional tags are accepted for API compatibility but not stored per-key.
 func (r *Registry) Histogram(metric string, value float64, tags ...string) {
 	_ = tags
@@ -77,7 +79,7 @@ func (r *Registry) Histogram(metric string, value float64, tags ...string) {
 	vals, exists := r.histValues[metric]
 	if !exists {
 		if len(r.histValues) >= maxHistogramKeys {
-			// Key cap exceeded — drop the new metric silently.
+			slog.Warn("stats: histogram key cap reached; dropping metric", "metric", metric, "cap", maxHistogramKeys)
 			return
 		}
 	}
@@ -140,9 +142,14 @@ func (c *registryCollector) Record(metric string, value float64, tags ...string)
 	}
 }
 
+// Histogram records a distribution sample via the Collector interface.
+// It updates BOTH the flat histograms event log (Snapshot().Histograms)
+// AND histValues (for Snapshot().HistValues percentile computation).
+// This is the recommended path for all production code.
 func (c *registryCollector) Histogram(metric string, value float64, tags ...string) {
 	c.r.mu.Lock()
 	defer c.r.mu.Unlock()
+	// Append to the flat event log (for chronological queries).
 	c.r.histograms = append(c.r.histograms, metricEntry{
 		Metric: metric,
 		Value:  value,
@@ -152,6 +159,19 @@ func (c *registryCollector) Histogram(metric string, value float64, tags ...stri
 	if len(c.r.histograms) > maxEntries {
 		c.r.histograms = c.r.histograms[len(c.r.histograms)-maxEntries:]
 	}
+	// Also update histValues for percentile computation (the bug fix).
+	vals, exists := c.r.histValues[metric]
+	if !exists {
+		if len(c.r.histValues) >= maxHistogramKeys {
+			slog.Warn("stats: histogram key cap reached; dropping metric", "metric", metric, "cap", maxHistogramKeys)
+			return
+		}
+	}
+	vals = append(vals, value)
+	if len(vals) > maxHistogramSamples {
+		vals = vals[len(vals)-histogramTrimTo:]
+	}
+	c.r.histValues[metric] = vals
 }
 
 // computePercentiles returns the p50, p95, and p99 percentiles of vals.

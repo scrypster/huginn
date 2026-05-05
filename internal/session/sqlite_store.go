@@ -274,6 +274,11 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 	if len(msg.Content) > maxMessageContentBytes {
 		return fmt.Errorf("session: message content exceeds %d byte limit (%d bytes)", maxMessageContentBytes, len(msg.Content))
 	}
+	var err error
+	msg.Type, err = normalizeMessageType(msg.Type)
+	if err != nil {
+		return err
+	}
 	if msg.ID == "" {
 		msg.ID = NewID()
 	}
@@ -311,7 +316,7 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 		}
 	}
 
-	_, err = tx.Exec(`
+	res, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages
 			(id, container_type, container_id, seq, ts, role, content,
 			 agent, tool_name, tool_call_id, type,
@@ -330,6 +335,10 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("session sqlite: append message %s: %w", msg.ID, err)
+	}
+	if err := ensureSingleInsert(res, "append message", msg.ID); err != nil {
+		_ = tx.Rollback()
+		return err
 	}
 
 	// If this is a thread reply, increment the parent's thread_reply_count.
@@ -491,6 +500,15 @@ func roleOrDefault(r string) string {
 	return r
 }
 
+func normalizeMessageType(typ string) (string, error) {
+	switch typ {
+	case "", "cost", "thread_event":
+		return typ, nil
+	default:
+		return "", fmt.Errorf("session sqlite: unsupported message type %q", typ)
+	}
+}
+
 // --- internal helpers ---
 
 func (s *SQLiteSessionStore) loadManifestRow(id string) (*Manifest, error) {
@@ -549,6 +567,11 @@ func scanManifestRow(row rowScanner) (*Manifest, error) {
 
 // AppendToThread appends a message to a thread. Creates the thread row if it doesn't exist.
 func (s *SQLiteSessionStore) AppendToThread(sessionID, threadID string, msg SessionMessage) error {
+	var err error
+	msg.Type, err = normalizeMessageType(msg.Type)
+	if err != nil {
+		return err
+	}
 	if msg.ID == "" {
 		msg.ID = NewID()
 	}
@@ -595,7 +618,7 @@ func (s *SQLiteSessionStore) AppendToThread(sessionID, threadID string, msg Sess
 		toolCallsJSON = &raw
 	}
 
-	if _, err := tx.Exec(`
+	res, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages
 			(id, container_type, container_id, seq, ts, role, content,
 			 agent, tool_name, tool_call_id, type,
@@ -608,9 +631,14 @@ func (s *SQLiteSessionStore) AppendToThread(sessionID, threadID string, msg Sess
 		msg.Agent, msg.ToolName, msg.ToolCallID,
 		msg.Type, msg.PromptTok, msg.CompTok, msg.CostUSD, msg.ModelName,
 		toolCallsJSON,
-	); err != nil {
+	)
+	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("session sqlite: append thread message: %w", err)
+	}
+	if err := ensureSingleInsert(res, "append thread message", msg.ID); err != nil {
+		tx.Rollback()
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -773,6 +801,11 @@ func (s *SQLiteSessionStore) LoadManifest(id string) (*PersistentSession, error)
 
 // AppendMessage inserts a PersistedMessage using INSERT OR IGNORE.
 func (s *SQLiteSessionStore) AppendMessage(sessionID string, msg *PersistedMessage) error {
+	var err error
+	msg.Type, err = normalizeMessageType(msg.Type)
+	if err != nil {
+		return err
+	}
 	if msg.ID == "" {
 		msg.ID = NewID()
 	}
@@ -780,7 +813,7 @@ func (s *SQLiteSessionStore) AppendMessage(sessionID string, msg *PersistedMessa
 		msg.Ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
-	_, err := s.db.Write().Exec(`
+	res, err := s.db.Write().Exec(`
 		INSERT OR IGNORE INTO messages
 			(id, container_type, container_id, seq, ts, role, content,
 			 agent, tool_name, tool_call_id, type,
@@ -793,6 +826,23 @@ func (s *SQLiteSessionStore) AppendMessage(sessionID string, msg *PersistedMessa
 	)
 	if err != nil {
 		return fmt.Errorf("session.AppendMessage: insert message %s: %w", msg.ID, err)
+	}
+	if err := ensureSingleInsert(res, "append persisted message", msg.ID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureSingleInsert(res sql.Result, op, id string) error {
+	if res == nil {
+		return fmt.Errorf("session sqlite: %s %s: no SQL result", op, id)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("session sqlite: %s %s: rows_affected: %w", op, id, err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("session sqlite: %s %s dropped by INSERT OR IGNORE (rows_affected=%d)", op, id, rows)
 	}
 	return nil
 }

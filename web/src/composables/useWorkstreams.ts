@@ -1,27 +1,11 @@
 import { ref } from 'vue'
-import { getToken } from './useApi'
+import { apiFetch } from './useFetch'
 
 export interface Workstream {
   id: string
   name: string
   description: string
   created_at: string
-}
-
-async function workstreamFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${getToken()}`,
-      ...(opts.headers as Record<string, string> || {}),
-    },
-  })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`API ${path}: ${res.status} ${body}`)
-  }
-  return res.json()
 }
 
 const workstreams = ref<Workstream[]>([])
@@ -33,7 +17,7 @@ export function useWorkstreams() {
     loading.value = true
     error.value = null
     try {
-      const data = await workstreamFetch<Workstream[] | { workstreams: Workstream[] }>('/api/v1/workstreams')
+      const data = await apiFetch<Workstream[] | { workstreams: Workstream[] }>('/api/v1/workstreams')
       if (Array.isArray(data)) {
         workstreams.value = data
       } else if (Array.isArray((data as { workstreams: Workstream[] }).workstreams)) {
@@ -51,7 +35,7 @@ export function useWorkstreams() {
   async function create(name: string, description = ''): Promise<Workstream | null> {
     error.value = null
     try {
-      const data = await workstreamFetch<Workstream>('/api/v1/workstreams', {
+      const data = await apiFetch<Workstream>('/api/v1/workstreams', {
         method: 'POST',
         body: JSON.stringify({ name, description }),
       })
@@ -66,7 +50,7 @@ export function useWorkstreams() {
   async function remove(id: string): Promise<boolean> {
     error.value = null
     try {
-      await workstreamFetch(`/api/v1/workstreams/${encodeURIComponent(id)}`, {
+      await apiFetch(`/api/v1/workstreams/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       })
       workstreams.value = workstreams.value.filter(w => w.id !== id)
@@ -80,7 +64,7 @@ export function useWorkstreams() {
   async function tagSession(workstreamId: string, sessionId: string): Promise<boolean> {
     error.value = null
     try {
-      await workstreamFetch(`/api/v1/workstreams/${encodeURIComponent(workstreamId)}/sessions`, {
+      await apiFetch(`/api/v1/workstreams/${encodeURIComponent(workstreamId)}/sessions`, {
         method: 'POST',
         body: JSON.stringify({ session_id: sessionId }),
       })

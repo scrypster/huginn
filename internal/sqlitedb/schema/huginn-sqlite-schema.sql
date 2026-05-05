@@ -446,8 +446,8 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls_json TEXT,                           -- JSON array of tool calls (for assistant msgs)
 
     -- Cost record fields (populated when type='cost')
-    type            TEXT    NOT NULL DEFAULT ''      -- 'cost' for cost records, '' for normal
-                        CHECK (type IN ('', 'cost')),
+    type            TEXT    NOT NULL DEFAULT ''      -- 'cost' for cost records, 'thread_event' for lifecycle events, '' for normal
+                        CHECK (type IN ('', 'cost', 'thread_event')),
     prompt_tokens   INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd        REAL    NOT NULL DEFAULT 0.0,
@@ -700,7 +700,9 @@ CREATE TABLE IF NOT EXISTS connections (
     metadata        TEXT    NOT NULL DEFAULT '{}',  -- JSON object for provider-specific fields
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    expires_at      TEXT                            -- NULL = never expires; RFC3339 otherwise
+    expires_at      TEXT,                           -- NULL = never expires; RFC3339 otherwise
+    refresh_failed_at TEXT,                         -- NULL when last refresh succeeded
+    last_refresh_error TEXT NOT NULL DEFAULT ''     -- last proactive refresh error
 );
 
 -- List connections by provider ("show all GitHub connections")

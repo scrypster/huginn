@@ -193,14 +193,14 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 		ctx = session.WithEnv(ctx, agentSess.Env)
 
 		loopCfg := RunLoopConfig{
-			MaxTurns:      50,
-			ModelName:     ag.GetModelID(),
-			Messages:      msgs,
-			Tools:         vr.sessionReg,
-			ToolSchemas:   schemas,
-			Gate:          agentGate,
-			Backend:       chatBackend,
-			OnToken:       onToken,
+			MaxTurns:         50,
+			ModelName:        ag.GetModelID(),
+			Messages:         msgs,
+			Tools:            vr.sessionReg,
+			ToolSchemas:      schemas,
+			Gate:             agentGate,
+			Backend:          chatBackend,
+			OnToken:          onToken,
 			OnEvent:          onEvent,
 			VaultWarnOnce:    &sync.Once{},
 			VaultReconnector: vr.reconnector,
@@ -318,6 +318,9 @@ func (o *Orchestrator) compactHistory(ctx context.Context, sess *Session) {
 // Chat sends a direct message to the coder model without planning.
 // onEvent is called for each StreamEvent (richer streaming; supersedes onToken if provided).
 func (o *Orchestrator) Chat(ctx context.Context, userMsg string, onToken func(string), onEvent func(backend.StreamEvent)) error {
+	if err := o.ValidateWiring(); err != nil {
+		return err
+	}
 	o.mu.RLock()
 	sess := o.defaultSession()
 	o.mu.RUnlock()

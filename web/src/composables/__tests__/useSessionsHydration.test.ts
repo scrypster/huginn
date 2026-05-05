@@ -148,7 +148,12 @@ describe('useSessions - Hydration & Message Fetching', () => {
       await expect(fetchMessages('sess-7')).resolves.not.toThrow()
 
       const msgs = getMessages('sess-7')
-      expect(msgs).toHaveLength(0) // empty array, session marked hydrated
+      // On error a synthetic hydration-error message is injected so the user
+      // sees a visible explanation rather than silently empty history.
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('hydration-error-sess-7')
+      expect(msgs[0].role).toBe('assistant')
+      expect(msgs[0].content).toContain('history could not be loaded')
     })
   })
 
@@ -248,6 +253,28 @@ describe('useSessions - Hydration & Message Fetching', () => {
 
       // Handler should NOT have been called (queue was discarded)
       expect(handler).not.toHaveBeenCalled()
+    })
+
+    it('does not re-mark session hydrated after delete when in-flight fetch resolves', async () => {
+      const { fetchMessages, deleteSession } = useSessions()
+
+      let resolveFetch: ((value: unknown[]) => void) | undefined
+      vi.mocked(api.sessions.getMessages)
+        .mockImplementationOnce(() => new Promise(resolve => { resolveFetch = resolve }))
+        .mockResolvedValueOnce([{ id: 'msg-1', role: 'user', content: 'fresh', type: 'text' }] as never)
+
+      const inFlight = fetchMessages('sess-12-race')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 200 }))
+      await deleteSession('sess-12-race')
+
+      resolveFetch?.([])
+      await inFlight
+      await flushPromises()
+
+      // If deleteSession truly cleared hydration state, a subsequent fetch should
+      // hit the API again for this session ID.
+      await fetchMessages('sess-12-race')
+      expect(vi.mocked(api.sessions.getMessages)).toHaveBeenCalledTimes(2)
     })
   })
 

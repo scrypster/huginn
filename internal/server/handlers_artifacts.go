@@ -41,15 +41,15 @@ type artifactStore interface {
 // artifactSummary is the list-response DTO. Content is omitted to keep list
 // responses small; callers retrieve content via the GET /{id} or /download endpoints.
 type artifactSummary struct {
-	ID        string                 `json:"id"`
-	Kind      workforce.ArtifactKind `json:"kind"`
-	Title     string                 `json:"title"`
-	MimeType  string                 `json:"mime_type,omitempty"`
-	AgentName string                 `json:"agent_name"`
-	SessionID string                 `json:"session_id"`
+	ID        string                   `json:"id"`
+	Kind      workforce.ArtifactKind   `json:"kind"`
+	Title     string                   `json:"title"`
+	MimeType  string                   `json:"mime_type,omitempty"`
+	AgentName string                   `json:"agent_name"`
+	SessionID string                   `json:"session_id"`
 	Status    workforce.ArtifactStatus `json:"status"`
-	CreatedAt time.Time              `json:"created_at"`
-	UpdatedAt time.Time              `json:"updated_at"`
+	CreatedAt time.Time                `json:"created_at"`
+	UpdatedAt time.Time                `json:"updated_at"`
 }
 
 func toArtifactSummary(a *workforce.Artifact) artifactSummary {
@@ -109,9 +109,10 @@ func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, []artifactSummary{})
 		return
 	}
+	astore := s.artifactStore
 	limit := parseIntQuery(r, "limit", 0)
 	afterID := r.URL.Query().Get("after")
-	arts, err := s.artifactStore.ListBySession(r.Context(), sessionID, limit, afterID)
+	arts, err := astore.ListBySession(r.Context(), sessionID, limit, afterID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "list artifacts: "+err.Error())
 		return
@@ -141,11 +142,11 @@ func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
-	a, err := s.artifactStore.Read(r.Context(), artifactID)
+	a, err := astore.Read(r.Context(), artifactID)
 	if errors.Is(err, workforce.ErrArtifactNotFound) {
 		jsonError(w, http.StatusNotFound, "artifact not found")
 		return
@@ -182,8 +183,8 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	var a workforce.Artifact
@@ -204,7 +205,7 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 	if a.Status == "" {
 		a.Status = workforce.StatusDraft
 	}
-	if err := s.artifactStore.Write(r.Context(), &a); err != nil {
+	if err := astore.Write(r.Context(), &a); err != nil {
 		jsonError(w, http.StatusInternalServerError, "create artifact: "+err.Error())
 		return
 	}
@@ -232,12 +233,12 @@ func (s *Server) handleUpdateArtifact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	// Verify ownership before accepting the update body.
-	meta, err := s.artifactStore.ReadMetaOnly(r.Context(), artifactID)
+	meta, err := astore.ReadMetaOnly(r.Context(), artifactID)
 	if errors.Is(err, workforce.ErrArtifactNotFound) {
 		jsonError(w, http.StatusNotFound, "artifact not found")
 		return
@@ -262,7 +263,7 @@ func (s *Server) handleUpdateArtifact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "status is required")
 		return
 	}
-	if err := s.artifactStore.UpdateStatus(r.Context(), artifactID, body.Status, body.Reason); err != nil {
+	if err := astore.UpdateStatus(r.Context(), artifactID, body.Status, body.Reason); err != nil {
 		jsonError(w, http.StatusInternalServerError, "update artifact: "+err.Error())
 		return
 	}
@@ -287,12 +288,12 @@ func (s *Server) handleDeleteArtifact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	// Verify ownership before deleting.
-	meta, err := s.artifactStore.ReadMetaOnly(r.Context(), artifactID)
+	meta, err := astore.ReadMetaOnly(r.Context(), artifactID)
 	if errors.Is(err, workforce.ErrArtifactNotFound) {
 		jsonError(w, http.StatusNotFound, "artifact not found")
 		return
@@ -305,7 +306,7 @@ func (s *Server) handleDeleteArtifact(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "artifact not found")
 		return
 	}
-	if err := s.artifactStore.UpdateStatus(r.Context(), artifactID, workforce.StatusDeleted, ""); err != nil {
+	if err := astore.UpdateStatus(r.Context(), artifactID, workforce.StatusDeleted, ""); err != nil {
 		jsonError(w, http.StatusInternalServerError, "delete artifact: "+err.Error())
 		return
 	}
@@ -332,8 +333,8 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 
@@ -344,7 +345,7 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 
-	meta, err := s.artifactStore.ReadMetaOnly(r.Context(), artifactID)
+	meta, err := astore.ReadMetaOnly(r.Context(), artifactID)
 	if errors.Is(err, workforce.ErrArtifactNotFound) {
 		jsonError(w, http.StatusNotFound, "artifact not found")
 		return
@@ -366,7 +367,7 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 
 	if meta.ContentRef != "" {
 		// File-backed: stream from disk.
-		rc, err := s.artifactStore.OpenContent(r.Context(), artifactID)
+		rc, err := astore.OpenContent(r.Context(), artifactID)
 		if errors.Is(err, workforce.ErrArtifactNotFound) {
 			jsonError(w, http.StatusNotFound, "artifact content not found")
 			return
@@ -405,7 +406,7 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Inline content: load via Read().
-	full, err := s.artifactStore.Read(r.Context(), artifactID)
+	full, err := astore.Read(r.Context(), artifactID)
 	if errors.Is(err, workforce.ErrArtifactNotFound) {
 		jsonError(w, http.StatusNotFound, "artifact not found")
 		return
@@ -426,8 +427,8 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 //
 //	POST /api/v1/artifacts
 func (s *Server) handleWorkforceCreateArtifact(w http.ResponseWriter, r *http.Request) {
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	var a workforce.Artifact
@@ -443,7 +444,7 @@ func (s *Server) handleWorkforceCreateArtifact(w http.ResponseWriter, r *http.Re
 	if a.Status == "" {
 		a.Status = workforce.StatusDraft
 	}
-	if err := s.artifactStore.Write(r.Context(), &a); err != nil {
+	if err := astore.Write(r.Context(), &a); err != nil {
 		jsonError(w, http.StatusInternalServerError, "write artifact: "+err.Error())
 		return
 	}
@@ -456,8 +457,8 @@ func (s *Server) handleWorkforceCreateArtifact(w http.ResponseWriter, r *http.Re
 //
 //	GET /api/v1/artifacts/{id}
 func (s *Server) handleWorkforceGetArtifact(w http.ResponseWriter, r *http.Request) {
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	id := r.PathValue("id")
@@ -465,7 +466,7 @@ func (s *Server) handleWorkforceGetArtifact(w http.ResponseWriter, r *http.Reque
 		jsonError(w, http.StatusBadRequest, "artifact id is required")
 		return
 	}
-	a, err := s.artifactStore.Read(r.Context(), id)
+	a, err := astore.Read(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, workforce.ErrArtifactNotFound) {
 			jsonError(w, http.StatusNotFound, "artifact not found")
@@ -490,9 +491,13 @@ func (s *Server) handleWorkforceListSessionArtifacts(w http.ResponseWriter, r *h
 		s.handleListArtifacts(w, r)
 		return
 	}
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
+		return
+	}
 	limit := parseIntQuery(r, "limit", 0)
 	afterID := r.URL.Query().Get("after")
-	arts, err := s.artifactStore.ListBySession(r.Context(), sessionID, limit, afterID)
+	arts, err := astore.ListBySession(r.Context(), sessionID, limit, afterID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "list artifacts: "+err.Error())
 		return
@@ -508,8 +513,8 @@ func (s *Server) handleWorkforceListSessionArtifacts(w http.ResponseWriter, r *h
 //
 //	PATCH /api/v1/artifacts/{id}/status
 func (s *Server) handleWorkforceUpdateArtifactStatus(w http.ResponseWriter, r *http.Request) {
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	id := r.PathValue("id")
@@ -529,7 +534,7 @@ func (s *Server) handleWorkforceUpdateArtifactStatus(w http.ResponseWriter, r *h
 		jsonError(w, http.StatusBadRequest, "status is required")
 		return
 	}
-	if err := s.artifactStore.UpdateStatus(r.Context(), id, body.Status, body.Reason); err != nil {
+	if err := astore.UpdateStatus(r.Context(), id, body.Status, body.Reason); err != nil {
 		if errors.Is(err, workforce.ErrArtifactNotFound) {
 			jsonError(w, http.StatusNotFound, "artifact not found")
 			return
@@ -545,8 +550,8 @@ func (s *Server) handleWorkforceUpdateArtifactStatus(w http.ResponseWriter, r *h
 //
 //	GET /api/v1/agents/{name}/artifacts
 func (s *Server) handleWorkforceListAgentArtifacts(w http.ResponseWriter, r *http.Request) {
-	if s.artifactStore == nil {
-		jsonError(w, http.StatusServiceUnavailable, "artifact store not available")
+	astore := s.requireArtifactStore(w, http.StatusServiceUnavailable)
+	if astore == nil {
 		return
 	}
 	agentName := r.PathValue("name")
@@ -562,7 +567,7 @@ func (s *Server) handleWorkforceListAgentArtifacts(w http.ResponseWriter, r *htt
 	}
 	limit := parseIntQuery(r, "limit", 0)
 	afterID := r.URL.Query().Get("after")
-	arts, err := s.artifactStore.ListByAgent(r.Context(), agentName, since, limit, afterID)
+	arts, err := astore.ListByAgent(r.Context(), agentName, since, limit, afterID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "list agent artifacts: "+err.Error())
 		return

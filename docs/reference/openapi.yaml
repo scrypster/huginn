@@ -1,0 +1,1952 @@
+openapi: 3.1.0
+info:
+  title: Huginn API
+  version: 0.1.0
+  description: |
+    Initial contract scaffold for Huginn's HTTP API.
+    This spec currently focuses on core session/chat, agent, workflow, connection,
+    and system endpoints used by the web app. It is intended to be expanded
+    incrementally as additional routes are hardened.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+security:
+  - bearerAuth: []
+tags:
+  - name: System
+  - name: Sessions
+  - name: Agents
+  - name: Workflows
+  - name: Connections
+  - name: Skills
+paths:
+  /api/v1/token:
+    get:
+      tags: [System]
+      summary: Fetch current API bearer token
+      security: []
+      responses:
+        "200":
+          description: Token returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+  /api/v1/health:
+    get:
+      tags: [System]
+      summary: Health and version status
+      security: []
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /api/v1/stats:
+    get:
+      tags: [System]
+      summary: Runtime token usage counters
+      responses:
+        "200":
+          description: Stats snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+  /api/v1/cost:
+    get:
+      tags: [System]
+      summary: Total session cost aggregate
+      responses:
+        "200":
+          description: Cost aggregate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostResponse"
+  /api/v1/logs:
+    get:
+      tags: [System]
+      summary: Tail application logs
+      parameters:
+        - in: query
+          name: n
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Log lines
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogsResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/config:
+    get:
+      tags: [System]
+      summary: Fetch current (redacted) config
+      responses:
+        "200":
+          description: Current config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigResponse"
+    put:
+      tags: [System]
+      summary: Update config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigUpdateRequest"
+      responses:
+        "200":
+          description: Config saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/models:
+    get:
+      tags: [System]
+      summary: Get configured model assignments
+      responses:
+        "200":
+          description: Model map
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelsMapResponse"
+  /api/v1/models/available:
+    get:
+      tags: [System]
+      summary: Discover available local and provider models
+      responses:
+        "200":
+          description: Available models
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailableModelsResponse"
+  /api/v1/sessions:
+    get:
+      tags: [Sessions]
+      summary: List sessions
+      parameters:
+        - in: query
+          name: include_archived
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: include_routine_sessions
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Session manifests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionManifest"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Sessions]
+      summary: Create session
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/sessions/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Sessions]
+      summary: Get session by id
+      responses:
+        "200":
+          description: Session payload
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Sessions]
+      summary: Update session metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSessionRequest"
+      responses:
+        "200":
+          description: Updated session manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionManifest"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Sessions]
+      summary: Delete (or archive) session
+      parameters:
+        - in: query
+          name: archive
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteSessionResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/sessions/{id}/messages:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Sessions]
+      summary: List session messages
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+        - in: query
+          name: before_seq
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Session timeline messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionMessage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Sessions]
+      summary: Send one message and get assistant reply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/agents:
+    get:
+      tags: [Agents]
+      summary: List agents
+      responses:
+        "200":
+          description: Agent definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Agent"
+  /api/v1/agents/{name}:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Agents]
+      summary: Get one agent
+      responses:
+        "200":
+          description: Agent definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      tags: [Agents]
+      summary: Create or update agent by name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Agent"
+      responses:
+        "200":
+          description: Save acknowledgement
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saved:
+                    type: string
+                required: [saved]
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Agents]
+      summary: Delete agent
+      responses:
+        "200":
+          description: Delete acknowledgement
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                required: [deleted]
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/workflows:
+    get:
+      tags: [Workflows]
+      summary: List workflows
+      responses:
+        "200":
+          description: Workflows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Workflow"
+    post:
+      tags: [Workflows]
+      summary: Create workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Workflow"
+      responses:
+        "200":
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/workflows/validate:
+    post:
+      tags: [Workflows]
+      summary: Validate workflow payload (no persistence)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Workflow"
+      responses:
+        "200":
+          description: Valid workflow
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                required: [valid]
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/workflows/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Workflows]
+      summary: Get workflow by id
+      responses:
+        "200":
+          description: Workflow
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      tags: [Workflows]
+      summary: Update workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Workflow"
+      responses:
+        "200":
+          description: Updated workflow
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Workflows]
+      summary: Delete workflow
+      responses:
+        "200":
+          description: Delete acknowledgement
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: string
+                required: [deleted]
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/workflows/{id}/run:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Workflows]
+      summary: Trigger workflow run
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowRunRequest"
+      responses:
+        "200":
+          description: Trigger accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowRunResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/connections:
+    get:
+      tags: [Connections]
+      summary: List configured connections
+      responses:
+        "200":
+          description: Connections
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Connection"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/connections/start:
+    post:
+      tags: [Connections]
+      summary: Start OAuth flow for provider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartOAuthRequest"
+      responses:
+        "200":
+          description: OAuth start response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartOAuthResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/skills:
+    get:
+      tags: [Skills]
+      summary: List installed skills
+      responses:
+        "200":
+          description: Installed skills
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SkillItem"
+    post:
+      tags: [Skills]
+      summary: Create skill from markdown content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+              required: [content]
+      responses:
+        "201":
+          description: Skill created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                required: [name]
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/skills/install:
+    post:
+      tags: [Skills]
+      summary: Install skill from registry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target:
+                  type: string
+              required: [target]
+      responses:
+        "201":
+          description: Skill installed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                required: [name]
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/skills/{name}:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Skills]
+      summary: Get installed skill details
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    put:
+      tags: [Skills]
+      summary: Update skill markdown
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Skills]
+      summary: Uninstall skill
+      responses:
+        "204":
+          description: Skill removed
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/skills/{name}/enable:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+    put:
+      tags: [Skills]
+      summary: Enable installed skill
+      responses:
+        "204":
+          description: Skill enabled
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/skills/{name}/disable:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+    put:
+      tags: [Skills]
+      summary: Disable installed skill
+      responses:
+        "204":
+          description: Skill disabled
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/sessions/search:
+    get:
+      tags: [Sessions]
+      summary: Search sessions
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/threads:
+    get:
+      tags: [Sessions]
+      summary: List session threads
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Sessions]
+      summary: Create session thread
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/chat/stream:
+    post:
+      tags: [Sessions]
+      summary: Stream chat response for session
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/agents/capability-matrix:
+    get:
+      tags: [Agents]
+      summary: Get agent capability matrix
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/agents/capability-matrix/validate:
+    post:
+      tags: [Agents]
+      summary: Validate toolbelt capability matrix
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/agents/{name}/clone:
+    post:
+      tags: [Agents]
+      summary: Clone agent
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/agents/{name}/vault/test:
+    post:
+      tags: [Agents]
+      summary: Test agent vault connection
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/agents/{name}/vault-status:
+    get:
+      tags: [Agents]
+      summary: Get agent vault status
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/models/pull:
+    post:
+      tags: [System]
+      summary: Pull model
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/models/{name}:
+    delete:
+      tags: [System]
+      summary: Delete model
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/runtime/status:
+    get:
+      tags: [System]
+      summary: Get runtime status
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/status:
+    get:
+      tags: [System]
+      summary: Get builtin runtime status
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/download:
+    post:
+      tags: [System]
+      summary: Download builtin runtime
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/models:
+    get:
+      tags: [System]
+      summary: List builtin installed models
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/catalog:
+    get:
+      tags: [System]
+      summary: List builtin model catalog
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/models/pull:
+    post:
+      tags: [System]
+      summary: Pull builtin model
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/activate:
+    post:
+      tags: [System]
+      summary: Activate builtin model
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/builtin/models/{name}:
+    delete:
+      tags: [System]
+      summary: Delete builtin model
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/providers/{provider}/models:
+    get:
+      tags: [Connections]
+      summary: List models for provider
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/stats/history:
+    get:
+      tags: [System]
+      summary: Get stats history
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/metrics:
+    get:
+      tags: [System]
+      summary: Get metrics snapshot
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/metrics/prometheus:
+    get:
+      tags: [System]
+      summary: Get Prometheus metrics
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/log-level:
+    get:
+      tags: [System]
+      summary: Get current log level
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    put:
+      tags: [System]
+      summary: Set current log level
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/secrets:
+    get:
+      tags: [System]
+      summary: List secret slots
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/secrets/{slot}:
+    put:
+      tags: [System]
+      summary: Set secret value
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [System]
+      summary: Delete secret value
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/active-state:
+    get:
+      tags: [System]
+      summary: Get active state snapshot
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/active-state/restore:
+    post:
+      tags: [System]
+      summary: Restore active state
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/active-state:
+    get:
+      tags: [Sessions]
+      summary: Get session active state
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/artifacts:
+    get:
+      tags: [Sessions]
+      summary: List session artifacts
+      responses:
+        "200":
+          description: Session artifact summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionArtifactSummary"
+    post:
+      tags: [Sessions]
+      summary: Create session artifact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionArtifactCreateRequest"
+      responses:
+        "201":
+          description: Artifact created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactCreateResponse"
+  /api/v1/sessions/{id}/artifacts/{artifact_id}:
+    get:
+      tags: [Sessions]
+      summary: Get session artifact
+      responses:
+        "200":
+          description: Artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionArtifact"
+    put:
+      tags: [Sessions]
+      summary: Update session artifact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactStatusUpdateRequest"
+      responses:
+        "200":
+          description: Artifact status update
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactStatusResponse"
+    delete:
+      tags: [Sessions]
+      summary: Delete session artifact
+      responses:
+        "204":
+          description: Artifact deleted
+  /api/v1/sessions/{id}/artifacts/{artifact_id}/download:
+    get:
+      tags: [Sessions]
+      summary: Download session artifact
+      responses:
+        "200":
+          description: Artifact content stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /api/v1/artifacts:
+    post:
+      tags: [Sessions]
+      summary: Create workforce artifact
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/artifacts/{id}:
+    get:
+      tags: [Sessions]
+      summary: Get workforce artifact
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/artifacts/{id}/status:
+    patch:
+      tags: [Sessions]
+      summary: Update workforce artifact status
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/agents/{name}/artifacts:
+    get:
+      tags: [Agents]
+      summary: List artifacts for agent
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/messages/{id}/thread:
+    get:
+      tags: [Sessions]
+      summary: Get message thread
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/containers/{id}/threads:
+    get:
+      tags: [Sessions]
+      summary: List container threads
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/threads/{thread_id}:
+    get:
+      tags: [Sessions]
+      summary: Get session thread
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Sessions]
+      summary: Cancel session thread
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/threads/{thread_id}/reply:
+    post:
+      tags: [Sessions]
+      summary: Reply in session thread
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/threads/{thread_id}/archive:
+    post:
+      tags: [Sessions]
+      summary: Archive session thread
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/delegations:
+    get:
+      tags: [Sessions]
+      summary: List session delegations
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/sessions/{id}/delegations/{delegation_id}:
+    get:
+      tags: [Sessions]
+      summary: Get session delegation
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workstreams:
+    get:
+      tags: [Workflows]
+      summary: List workstreams
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Workflows]
+      summary: Create workstream
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workstreams/{id}:
+    get:
+      tags: [Workflows]
+      summary: Get workstream
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Workflows]
+      summary: Delete workstream
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workstreams/{id}/sessions:
+    get:
+      tags: [Workflows]
+      summary: List workstream sessions
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Workflows]
+      summary: Tag session to workstream
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/templates:
+    get:
+      tags: [Workflows]
+      summary: List workflow templates
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/webhook:
+    post:
+      tags: [Workflows]
+      summary: Trigger workflow from webhook payload
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/cancel:
+    post:
+      tags: [Workflows]
+      summary: Cancel running workflow
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/runs:
+    get:
+      tags: [Workflows]
+      summary: List workflow runs
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/runs/{run_id}:
+    get:
+      tags: [Workflows]
+      summary: Get workflow run
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/runs/{run_id}/replay:
+    post:
+      tags: [Workflows]
+      summary: Replay workflow run
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/runs/{run_id}/fork:
+    post:
+      tags: [Workflows]
+      summary: Fork workflow run
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/{id}/runs/{run_id}/diff/{other_run_id}:
+    get:
+      tags: [Workflows]
+      summary: Diff two workflow runs
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/cron-preview:
+    get:
+      tags: [Workflows]
+      summary: Preview cron schedule
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/delivery-queue:
+    get:
+      tags: [Workflows]
+      summary: List delivery queue entries
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/delivery-queue/badge:
+    get:
+      tags: [Workflows]
+      summary: Get delivery queue badge count
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/delivery-queue/{id}/retry:
+    post:
+      tags: [Workflows]
+      summary: Retry delivery queue entry
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/delivery-queue/{id}:
+    delete:
+      tags: [Workflows]
+      summary: Dismiss delivery queue entry
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/notifications:
+    get:
+      tags: [Workflows]
+      summary: List notifications
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/notifications/{id}:
+    get:
+      tags: [Workflows]
+      summary: Get notification
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/notifications/{id}/action:
+    post:
+      tags: [Workflows]
+      summary: Run notification action
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/inbox/summary:
+    get:
+      tags: [Workflows]
+      summary: Get inbox summary
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/symbols/search:
+    get:
+      tags: [System]
+      summary: Search symbols
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/symbols/impact/{symbol}:
+    get:
+      tags: [System]
+      summary: Get symbol impact
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/connections/{id}/default:
+    put:
+      tags: [Connections]
+      summary: Set default connection for provider
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/providers:
+    get:
+      tags: [Connections]
+      summary: List configured integration providers
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/connections/oauth/relay:
+    post:
+      tags: [Connections]
+      summary: Complete brokered OAuth relay
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/connections/{id}:
+    delete:
+      tags: [Connections]
+      summary: Delete connection
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/connections/catalog:
+    get:
+      tags: [Connections]
+      summary: Get connection provider catalog
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/credentials/{provider}:
+    post:
+      tags: [Connections]
+      summary: Save provider credentials
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/credentials/{provider}/test:
+    post:
+      tags: [Connections]
+      summary: Test provider credentials
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/integrations/cli-status:
+    get:
+      tags: [Connections]
+      summary: List local CLI integration status
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/system/tools:
+    get:
+      tags: [Connections]
+      summary: List detected system tools
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/system/github/switch:
+    post:
+      tags: [Connections]
+      summary: Switch GitHub CLI active account
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/cloud/status:
+    get:
+      tags: [Connections]
+      summary: Get cloud registration status
+      responses:
+        "200":
+          description: Cloud status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloudStatusResponse"
+  /api/v1/cloud/connect:
+    post:
+      tags: [Connections]
+      summary: Connect to Huginn Cloud
+      responses:
+        "200":
+          description: Cloud connect request accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloudConnectResponse"
+    delete:
+      tags: [Connections]
+      summary: Disconnect from Huginn Cloud
+      responses:
+        "200":
+          description: Cloud disconnected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloudConnectResponse"
+  /api/v1/muninn/status:
+    get:
+      tags: [System]
+      summary: Get Muninn connection status
+      responses:
+        "200":
+          description: Muninn connectivity status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MuninnStatusResponse"
+  /api/v1/muninn/test:
+    post:
+      tags: [System]
+      summary: Test Muninn connection
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/muninn/connect:
+    post:
+      tags: [System]
+      summary: Connect Muninn
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/muninn/vaults:
+    get:
+      tags: [System]
+      summary: List Muninn vaults
+      responses:
+        "200":
+          description: Muninn vault metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MuninnVaultsResponse"
+    post:
+      tags: [System]
+      summary: Create Muninn vault
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MuninnCreateVaultRequest"
+      responses:
+        "200":
+          description: Created vault credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MuninnCreateVaultResponse"
+  /api/v1/memory/replication-status:
+    get:
+      tags: [System]
+      summary: Get memory replication status
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/muninn/tool:
+    post:
+      tags: [System]
+      summary: Run Muninn tool proxy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MuninnToolRequest"
+      responses:
+        "200":
+          description: Muninn tool result envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MuninnToolResponse"
+  /api/v1/spaces:
+    get:
+      tags: [Sessions]
+      summary: List spaces
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Sessions]
+      summary: Create space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/spaces/dm/{agent}:
+    get:
+      tags: [Sessions]
+      summary: Get or create DM space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/spaces/{id}:
+    get:
+      tags: [Sessions]
+      summary: Get space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    patch:
+      tags: [Sessions]
+      summary: Update space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Sessions]
+      summary: Delete space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/spaces/{id}/mark-read:
+    post:
+      tags: [Sessions]
+      summary: Mark space as read
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-sessions/{id}:
+    get:
+      tags: [Sessions]
+      summary: List sessions in space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}:
+    get:
+      tags: [Sessions]
+      summary: List timeline messages for space
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/skills/registry/search:
+    get:
+      tags: [Skills]
+      summary: Search skills registry index
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/skills/registry/index:
+    get:
+      tags: [Skills]
+      summary: Get skills registry index
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/skills/{name}/execute:
+    post:
+      tags: [Skills]
+      summary: Execute skill
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: HuginnToken
+  responses:
+    ErrorResponse:
+      description: Error payload
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    GenericObjectResponse:
+      description: Generic success response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericObject"
+  schemas:
+    GenericObject:
+      type: object
+      additionalProperties: true
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    TokenResponse:
+      type: object
+      properties:
+        token:
+          type: string
+      required: [token]
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        satellite_connected:
+          type: boolean
+        relay:
+          type: object
+          additionalProperties: true
+      required: [status, version]
+    SessionManifest:
+      type: object
+      properties:
+        session_id:
+          type: string
+        id:
+          type: string
+        title:
+          type: string
+        agent:
+          type: string
+        status:
+          type: string
+        source:
+          type: string
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    CreateSessionRequest:
+      type: object
+      properties:
+        space_id:
+          type: string
+    CreateSessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+      required: [session_id]
+    UpdateSessionRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 512
+      required: [title]
+    DeleteSessionResponse:
+      type: object
+      properties:
+        deleted:
+          type: boolean
+        permanent:
+          type: boolean
+        archived:
+          type: boolean
+      required: [deleted]
+    SessionMessage:
+      type: object
+      properties:
+        id:
+          type: string
+        seq:
+          type: integer
+        role:
+          type: string
+          enum: [user, assistant, tool, system, cost]
+        content:
+          type: string
+        ts:
+          type: string
+          format: date-time
+        agent:
+          type: string
+      additionalProperties: true
+    SendMessageRequest:
+      type: object
+      properties:
+        content:
+          type: string
+      required: [content]
+    SendMessageResponse:
+      type: object
+      properties:
+        content:
+          type: string
+      required: [content]
+    Agent:
+      type: object
+      properties:
+        name:
+          type: string
+        model:
+          type: string
+        provider:
+          type: string
+        endpoint:
+          type: string
+        system_prompt:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+        memory_enabled:
+          type: boolean
+        version:
+          type: integer
+      required: [name]
+      additionalProperties: true
+    WorkflowStep:
+      type: object
+      properties:
+        name:
+          type: string
+        agent:
+          type: string
+        prompt:
+          type: string
+        routine:
+          type: string
+        sub_workflow:
+          type: string
+        position:
+          type: integer
+      additionalProperties: true
+    Workflow:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        schedule:
+          type: string
+        version:
+          type: integer
+        timeout_minutes:
+          type: integer
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowStep"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [name, steps]
+      additionalProperties: true
+    WorkflowRunRequest:
+      type: object
+      properties:
+        inputs:
+          type: object
+          additionalProperties: true
+    WorkflowRunResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        workflow_id:
+          type: string
+      required: [status, workflow_id]
+    Connection:
+      type: object
+      properties:
+        id:
+          type: string
+        provider:
+          type: string
+        account_label:
+          type: string
+        account_id:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+      required: [id, provider]
+      additionalProperties: true
+    StartOAuthRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+      required: [provider]
+    StartOAuthResponse:
+      type: object
+      properties:
+        auth_url:
+          type: string
+      required: [auth_url]
+    ModelsMapResponse:
+      type: object
+      additionalProperties:
+        type: string
+    AvailableModelsResponse:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        builtin_models:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        provider_models:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        error:
+          type: string
+      additionalProperties: false
+    StatsResponse:
+      type: object
+      properties:
+        last_prompt_tokens:
+          type: integer
+        last_completion_tokens:
+          type: integer
+      additionalProperties: true
+    CostResponse:
+      type: object
+      properties:
+        session_total_usd:
+          type: number
+      required: [session_total_usd]
+    LogsResponse:
+      type: object
+      properties:
+        lines:
+          type: array
+          items:
+            type: string
+      required: [lines]
+    ConfigResponse:
+      type: object
+      additionalProperties: true
+    ConfigUpdateRequest:
+      type: object
+      additionalProperties: true
+    ConfigUpdateResponse:
+      type: object
+      properties:
+        saved:
+          type: boolean
+        requires_restart:
+          type: boolean
+      required: [saved, requires_restart]
+    SessionArtifactSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        kind:
+          type: string
+        status:
+          type: string
+        mime_type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, title]
+      additionalProperties: true
+    SessionArtifact:
+      type: object
+      properties:
+        id:
+          type: string
+        session_id:
+          type: string
+        title:
+          type: string
+        kind:
+          type: string
+        status:
+          type: string
+        content:
+          type: string
+      required: [id]
+      additionalProperties: true
+    SessionArtifactCreateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+      required: [title]
+      additionalProperties: true
+    ArtifactCreateResponse:
+      type: object
+      properties:
+        id:
+          type: string
+      required: [id]
+    ArtifactStatusUpdateRequest:
+      type: object
+      properties:
+        status:
+          type: string
+        reason:
+          type: string
+      required: [status]
+    ArtifactStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+    CloudStatusResponse:
+      type: object
+      properties:
+        registered:
+          type: boolean
+        connected:
+          type: boolean
+        machine_id:
+          type: string
+        cloud_url:
+          type: string
+      required: [registered, connected]
+    CloudConnectResponse:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+    MuninnStatusResponse:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        detected:
+          type: boolean
+        endpoint:
+          type: string
+        username:
+          type: string
+      required: [connected, detected]
+      additionalProperties: true
+    MuninnVaultsResponse:
+      type: object
+      properties:
+        vaults:
+          type: array
+          items:
+            type: string
+        endpoint:
+          type: string
+        username:
+          type: string
+        connected:
+          type: boolean
+      required: [vaults, connected]
+      additionalProperties: true
+    MuninnCreateVaultRequest:
+      type: object
+      properties:
+        vault_name:
+          type: string
+        agent_label:
+          type: string
+      required: [vault_name, agent_label]
+    MuninnCreateVaultResponse:
+      type: object
+      properties:
+        vault_name:
+          type: string
+        token:
+          type: string
+      required: [vault_name, token]
+    MuninnToolRequest:
+      type: object
+      properties:
+        vault:
+          type: string
+        tool:
+          type: string
+        args:
+          type: object
+          additionalProperties: true
+      required: [tool]
+    MuninnToolResponse:
+      type: object
+      properties:
+        result:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    SkillItem:
+      type: object
+      properties:
+        name:
+          type: string
+        author:
+          type: string
+        source:
+          type: string
+        enabled:
+          type: boolean
+        tool_count:
+          type: integer
+      required: [name, enabled, tool_count]

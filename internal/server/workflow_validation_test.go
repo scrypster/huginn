@@ -346,7 +346,7 @@ func TestHandleCreateWorkflow_AgentCaseInsensitive_Passes(t *testing.T) {
 		"enabled": false,
 		"schedule": "0 9 * * 1-5",
 		"steps": [
-			{"name": "step-a", "agent": "chris", "position": 0}
+			{"name": "step-a", "agent": "chris", "prompt":"do work", "position": 0}
 		]
 	}`
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/workflows", strings.NewReader(payload))

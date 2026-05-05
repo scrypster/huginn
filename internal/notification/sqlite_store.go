@@ -1,10 +1,12 @@
 package notification
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/scrypster/huginn/internal/sqlitedb"
@@ -105,8 +107,25 @@ func (s *SQLiteNotificationStore) Get(id string) (*Notification, error) {
 
 // Transition moves a Notification to newStatus, updating updated_at.
 func (s *SQLiteNotificationStore) Transition(id string, newStatus Status) error {
+	tx, err := s.db.Write().Begin()
+	if err != nil {
+		return fmt.Errorf("notification: transition %q: begin tx: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var current string
+	if err := tx.QueryRow(`SELECT status FROM notifications WHERE id = ?`, id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("notification: transition %q: not found", id)
+		}
+		return fmt.Errorf("notification: transition %q: load current status: %w", id, err)
+	}
+	if err := ValidateTransition(Status(current), newStatus); err != nil {
+		return fmt.Errorf("notification: transition %q: %w", id, err)
+	}
+
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.Write().Exec(`
+	res, err := tx.Exec(`
 		UPDATE notifications SET status = ?, updated_at = ? WHERE id = ?`,
 		string(newStatus), updatedAt, id)
 	if err != nil {
@@ -118,6 +137,9 @@ func (s *SQLiteNotificationStore) Transition(id string, newStatus Status) error 
 	}
 	if rows == 0 {
 		return fmt.Errorf("notification: transition %q: not found", id)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("notification: transition %q: commit: %w", id, err)
 	}
 	return nil
 }
@@ -133,6 +155,26 @@ func (s *SQLiteNotificationStore) ListPending() ([]*Notification, error) {
 		string(StatusPending))
 	if err != nil {
 		return nil, fmt.Errorf("notification: list pending: %w", err)
+	}
+	defer rows.Close()
+	return scanNotifications(rows)
+}
+
+// ListPendingN returns up to limit pending notifications, newest first.
+// If limit <= 0 all pending notifications are returned.
+func (s *SQLiteNotificationStore) ListPendingN(limit int) ([]*Notification, error) {
+	if limit <= 0 {
+		return s.ListPending()
+	}
+	rows, err := s.db.Read().Query(`
+		SELECT id, routine_id, run_id, satellite_id, workflow_id, workflow_run_id,
+		       summary, detail, severity, status, session_id, proposed_actions,
+		       step_position, step_name, deliveries,
+		       created_at, updated_at, expires_at
+		FROM notifications WHERE status = ? ORDER BY id DESC LIMIT ?`,
+		string(StatusPending), limit)
+	if err != nil {
+		return nil, fmt.Errorf("notification: list pending n: %w", err)
 	}
 	defer rows.Close()
 	return scanNotifications(rows)
@@ -168,6 +210,44 @@ func (s *SQLiteNotificationStore) ListByWorkflow(workflowID string) ([]*Notifica
 	return scanNotifications(rows)
 }
 
+// ListByRoutineN returns up to limit notifications for a routine, newest first.
+// If limit <= 0 all notifications are returned.
+func (s *SQLiteNotificationStore) ListByRoutineN(routineID string, limit int) ([]*Notification, error) {
+	if limit <= 0 {
+		return s.ListByRoutine(routineID)
+	}
+	rows, err := s.db.Read().Query(`
+		SELECT id, routine_id, run_id, satellite_id, workflow_id, workflow_run_id,
+		       summary, detail, severity, status, session_id, proposed_actions,
+		       step_position, step_name, deliveries,
+		       created_at, updated_at, expires_at
+		FROM notifications WHERE routine_id = ? ORDER BY id DESC LIMIT ?`, routineID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("notification: list by routine n %q: %w", routineID, err)
+	}
+	defer rows.Close()
+	return scanNotifications(rows)
+}
+
+// ListByWorkflowN returns up to limit notifications for a workflow, newest first.
+// If limit <= 0 all notifications are returned.
+func (s *SQLiteNotificationStore) ListByWorkflowN(workflowID string, limit int) ([]*Notification, error) {
+	if limit <= 0 {
+		return s.ListByWorkflow(workflowID)
+	}
+	rows, err := s.db.Read().Query(`
+		SELECT id, routine_id, run_id, satellite_id, workflow_id, workflow_run_id,
+		       summary, detail, severity, status, session_id, proposed_actions,
+		       step_position, step_name, deliveries,
+		       created_at, updated_at, expires_at
+		FROM notifications WHERE workflow_id = ? ORDER BY id DESC LIMIT ?`, workflowID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("notification: list by workflow n %q: %w", workflowID, err)
+	}
+	defer rows.Close()
+	return scanNotifications(rows)
+}
+
 // PendingCount returns the count of pending notifications.
 func (s *SQLiteNotificationStore) PendingCount() (int, error) {
 	var count int
@@ -190,6 +270,45 @@ func (s *SQLiteNotificationStore) ExpireRun(runID string) error {
 		return fmt.Errorf("notification: expire run %q: %w", runID, err)
 	}
 	return nil
+}
+
+// StartPruner launches a background goroutine that calls PruneExpired on the
+// given interval until ctx is cancelled. Log output is written at INFO level.
+// The goroutine exits cleanly when ctx is done.
+func (s *SQLiteNotificationStore) StartPruner(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := s.PruneExpired(ctx)
+				if err != nil && ctx.Err() == nil {
+					slog.Warn("notification: prune expired failed", "err", err)
+				} else if n > 0 {
+					slog.Info("notification: pruned expired notifications", "count", n)
+				}
+			}
+		}
+	}()
+}
+
+// PruneExpired deletes all notifications whose expires_at is set and in the past.
+// Returns the count of pruned notifications. Respects ctx.Done() for cancellation.
+func (s *SQLiteNotificationStore) PruneExpired(ctx context.Context) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.Write().ExecContext(ctx,
+		`DELETE FROM notifications WHERE expires_at IS NOT NULL AND expires_at <= ?`, now)
+	if err != nil {
+		return 0, fmt.Errorf("notification: prune expired: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("notification: prune expired rows affected: %w", err)
+	}
+	return int(rows), nil
 }
 
 // scanNotification reads a single Notification from a sql.Row.

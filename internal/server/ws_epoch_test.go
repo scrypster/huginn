@@ -11,10 +11,11 @@ import (
 // the package-level serverEpoch variable set at process startup.
 func TestWSMessageEpochSetByBroadcastToSession(t *testing.T) {
 	if serverEpoch == 0 {
-		// serverEpoch is set in init() via crypto/rand. A zero value indicates the
-		// init function failed, which cannot happen on any real platform. Skip rather
-		// than fail so tests are not flaky on unusual sandbox environments.
-		t.Skip("serverEpoch is zero — crypto/rand may be unavailable in this environment")
+		t.Fatal("serverEpoch must be non-zero")
+	}
+	const maxSafeJSEpoch = uint64(1<<53) - 1
+	if serverEpoch > maxSafeJSEpoch {
+		t.Fatalf("serverEpoch=%d exceeds JS safe integer max=%d", serverEpoch, maxSafeJSEpoch)
 	}
 
 	hub := newWSHub()

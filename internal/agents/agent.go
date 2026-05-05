@@ -86,28 +86,8 @@ func (a *Agent) WithExtraSystem(extraSystem string) *Agent {
 		return a
 	}
 	a.mu.Lock()
-	cp := Agent{
-		// mu is intentionally zero-valued in the copy.
-		Name:                a.Name,
-		SystemPrompt:        a.SystemPrompt + extraSystem,
-		Color:               a.Color,
-		Icon:                a.Icon,
-		IsDefault:           a.IsDefault,
-		ModelID:             a.ModelID,
-		Provider:            a.Provider,
-		Endpoint:            a.Endpoint,
-		APIKey:              a.APIKey,
-		VaultName:           a.VaultName,
-		Plasticity:          a.Plasticity,
-		MemoryEnabled:       a.MemoryEnabled,
-		ContextNotesEnabled: a.ContextNotesEnabled,
-		MemoryMode:          a.MemoryMode,
-		VaultDescription:    a.VaultDescription,
-		Toolbelt:            a.Toolbelt,
-		Skills:              a.Skills,
-		LocalTools:          a.LocalTools,
-		// History is intentionally not copied — the copy is request-scoped.
-	}
+	cp := a.cloneUnlocked()
+	cp.SystemPrompt = cp.SystemPrompt + extraSystem
 	a.mu.Unlock()
 	return &cp
 }
@@ -131,13 +111,23 @@ func (a *Agent) WithModelOverride(modelID string) *Agent {
 		return a
 	}
 	a.mu.Lock()
-	cp := Agent{
+	cp := a.cloneUnlocked()
+	cp.ModelID = modelID
+	a.mu.Unlock()
+	return &cp
+}
+
+// cloneUnlocked returns a request-scoped copy of the agent.
+// Caller must hold a.mu while reading source fields.
+func (a *Agent) cloneUnlocked() Agent {
+	return Agent{
+		// mu is intentionally zero-valued in the copy.
 		Name:                a.Name,
 		SystemPrompt:        a.SystemPrompt,
 		Color:               a.Color,
 		Icon:                a.Icon,
 		IsDefault:           a.IsDefault,
-		ModelID:             modelID,
+		ModelID:             a.ModelID,
 		Provider:            a.Provider,
 		Endpoint:            a.Endpoint,
 		APIKey:              a.APIKey,
@@ -147,12 +137,13 @@ func (a *Agent) WithModelOverride(modelID string) *Agent {
 		ContextNotesEnabled: a.ContextNotesEnabled,
 		MemoryMode:          a.MemoryMode,
 		VaultDescription:    a.VaultDescription,
-		Toolbelt:            a.Toolbelt,
-		Skills:              a.Skills,
-		LocalTools:          a.LocalTools,
+		// Clone slice-backed fields so request-scoped copies never alias shared
+		// registry state under concurrent workflow execution.
+		Toolbelt:   append([]ToolbeltEntry(nil), a.Toolbelt...),
+		Skills:     append([]string(nil), a.Skills...),
+		LocalTools: append([]string(nil), a.LocalTools...),
+		// History is intentionally not copied — the copy is request-scoped.
 	}
-	a.mu.Unlock()
-	return &cp
 }
 
 // DelegationContext returns the last MaxDelegationHistory messages for use as

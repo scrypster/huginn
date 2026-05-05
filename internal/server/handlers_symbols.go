@@ -94,16 +94,19 @@ func (s *Server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusServiceUnavailable, "symbol store not available")
 		return
 	}
-	q := r.URL.Query().Get("q")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
 		jsonError(w, http.StatusBadRequest, "query param q required")
 		return
 	}
 	limit := defaultLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = min(n, maxLimit)
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			jsonError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
 		}
+		limit = min(n, maxLimit)
 	}
 	idx := s.symbolCache.get(s.symbolStore)
 	var matches []string

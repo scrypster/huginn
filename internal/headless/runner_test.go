@@ -1,6 +1,7 @@
 package headless
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -316,4 +317,76 @@ func TestRun_RadarCommand_PlainDir(t *testing.T) {
 		t.Fatal("Run (radar) returned nil result")
 	}
 	// Radar may add an error entry (e.g. store DB nil) but must not panic.
+}
+
+func TestRun_WithAgentPrompt_PopulatesAgentOutputFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	cfg := HeadlessConfig{
+		CWD:       dir,
+		Prompt:    "Summarize recent changes",
+		Agent:     "Coder",
+		SessionID: "sess-1",
+		AgentRun: func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
+			called = true
+			if agentName != "Coder" || prompt != "Summarize recent changes" || sessionID != "sess-1" {
+				t.Fatalf("unexpected AgentRun args: agent=%q prompt=%q session=%q", agentName, prompt, sessionID)
+			}
+			return "summary output", []string{"search_code", "read_file"}, 321, nil
+		},
+	}
+
+	result, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run returned unexpected error: %v", err)
+	}
+	if !called {
+		t.Fatal("expected AgentRun callback to be invoked")
+	}
+	if result.AgentOutput != "summary output" {
+		t.Errorf("AgentOutput = %q, want %q", result.AgentOutput, "summary output")
+	}
+	if len(result.ToolsCalled) != 2 {
+		t.Errorf("ToolsCalled length = %d, want 2", len(result.ToolsCalled))
+	}
+	if result.TokensUsed != 321 {
+		t.Errorf("TokensUsed = %d, want 321", result.TokensUsed)
+	}
+}
+
+func TestRun_WithAgentPrompt_ErrorIsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := HeadlessConfig{
+		CWD:    dir,
+		Prompt: "Summarize recent changes",
+		AgentRun: func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
+			return "", nil, 0, context.DeadlineExceeded
+		},
+	}
+
+	result, err := Run(cfg)
+	if err != nil {
+		t.Fatalf("Run returned unexpected error: %v", err)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("expected agent error to be recorded")
+	}
+	found := false
+	for _, msg := range result.Errors {
+		if strings.Contains(msg, "agent: context deadline exceeded") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected agent error in result.Errors, got %v", result.Errors)
+	}
 }

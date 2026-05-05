@@ -11,30 +11,75 @@ import (
 // FIX 3: Auth-failure rate limiter
 // ---------------------------------------------------------------------------
 
-// TestExtractClientIP_XForwardedFor verifies that X-Forwarded-For is preferred
-// over RemoteAddr for IP extraction.
+// TestExtractClientIP_XForwardedFor verifies that X-Forwarded-For is only
+// trusted when the direct connection comes from a loopback address (local
+// reverse proxy). Non-loopback connections must not be allowed to spoof their IP.
 func TestExtractClientIP_XForwardedFor(t *testing.T) {
 	cases := []struct {
-		xff      string
-		remote   string
-		wantIP   string
+		desc   string
+		xff    string
+		remote string
+		wantIP string
 	}{
-		{xff: "203.0.113.1", remote: "10.0.0.1:1234", wantIP: "203.0.113.1"},
-		{xff: "203.0.113.1, 10.0.0.2", remote: "10.0.0.1:1234", wantIP: "203.0.113.1"},
-		{xff: "  203.0.113.1  ", remote: "10.0.0.1:1234", wantIP: "203.0.113.1"},
-		{xff: "", remote: "10.0.0.2:5678", wantIP: "10.0.0.2"},
+		// Non-loopback remote addresses: X-Forwarded-For is NOT trusted
+		{
+			desc:   "non-loopback remote, X-Forwarded-For ignored",
+			xff:    "203.0.113.1",
+			remote: "10.0.0.1:1234",
+			wantIP: "10.0.0.1",
+		},
+		{
+			desc:   "non-loopback remote with comma-separated X-Forwarded-For, ignored",
+			xff:    "203.0.113.1, 10.0.0.2",
+			remote: "10.0.0.1:1234",
+			wantIP: "10.0.0.1",
+		},
+		{
+			desc:   "non-loopback remote with whitespace in X-Forwarded-For, ignored",
+			xff:    "  203.0.113.1  ",
+			remote: "10.0.0.1:1234",
+			wantIP: "10.0.0.1",
+		},
+		// Loopback remote addresses: X-Forwarded-For IS trusted
+		{
+			desc:   "loopback IPv4 remote, X-Forwarded-For trusted",
+			xff:    "203.0.113.1",
+			remote: "127.0.0.1:1234",
+			wantIP: "203.0.113.1",
+		},
+		{
+			desc:   "loopback IPv6 remote, X-Forwarded-For trusted",
+			xff:    "203.0.113.1",
+			remote: "[::1]:1234",
+			wantIP: "203.0.113.1",
+		},
+		{
+			desc:   "loopback remote with comma-separated X-Forwarded-For, first IP trusted",
+			xff:    "203.0.113.1, 10.0.0.2",
+			remote: "127.0.0.1:1234",
+			wantIP: "203.0.113.1",
+		},
+		// No X-Forwarded-For: always use RemoteAddr
+		{
+			desc:   "no X-Forwarded-For, use remote",
+			xff:    "",
+			remote: "10.0.0.2:5678",
+			wantIP: "10.0.0.2",
+		},
 	}
 	for _, tc := range cases {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = tc.remote
-		if tc.xff != "" {
-			req.Header.Set("X-Forwarded-For", tc.xff)
-		}
-		got := extractClientIP(req)
-		if got != tc.wantIP {
-			t.Errorf("extractClientIP(xff=%q, remote=%q) = %q, want %q",
-				tc.xff, tc.remote, got, tc.wantIP)
-		}
+		t.Run(tc.desc, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = tc.remote
+			if tc.xff != "" {
+				req.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			got := extractClientIP(req)
+			if got != tc.wantIP {
+				t.Errorf("extractClientIP(xff=%q, remote=%q) = %q, want %q",
+					tc.xff, tc.remote, got, tc.wantIP)
+			}
+		})
 	}
 }
 
@@ -213,6 +258,36 @@ func TestAuthMiddleware_FirstFailureStillReturns401(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for first invalid token, got %d", rec.Code)
+	}
+}
+
+// TestAuthFailLimiter_IsBlocked_CleansUpEmptyKeys verifies that isBlocked
+// deletes the map key for an IP whose window has fully expired, preventing
+// unbounded map growth from stale entries.
+func TestAuthFailLimiter_IsBlocked_CleansUpEmptyKeys(t *testing.T) {
+	now := time.Now()
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		if calls <= 1 {
+			return now // recordFailure time
+		}
+		return now.Add(authFailWindow + time.Second) // isBlocked: past window
+	}
+	a := newAuthFailLimiterWithClock(clock)
+	a.recordFailure("1.2.3.4") // adds one entry at `now`
+
+	// Advance clock past the window — isBlocked should evict the entry and
+	// delete the key rather than storing an empty slice.
+	blocked := a.isBlocked("1.2.3.4")
+	if blocked {
+		t.Error("expected not blocked after window expired")
+	}
+	a.mu.Lock()
+	_, exists := a.window["1.2.3.4"]
+	a.mu.Unlock()
+	if exists {
+		t.Error("expected map key to be deleted after eviction emptied the slice")
 	}
 }
 

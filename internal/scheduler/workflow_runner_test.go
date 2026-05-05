@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/notification"
 )
@@ -33,6 +34,16 @@ func (m *mockNotifStore) ListByWorkflow(id string) ([]*notification.Notification
 }
 func (m *mockNotifStore) PendingCount() (int, error) { return 0, nil }
 func (m *mockNotifStore) ExpireRun(id string) error  { return nil }
+func (m *mockNotifStore) ListPendingN(limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) ListByRoutineN(routineID string, limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) ListByWorkflowN(workflowID string, limit int) ([]*notification.Notification, error) {
+	return nil, nil
+}
+func (m *mockNotifStore) PruneExpired(ctx context.Context) (int, error) { return 0, nil }
 
 func newTestRunStore() *WorkflowRunStore {
 	dir, err := os.MkdirTemp("", "huginn-test-*")
@@ -679,6 +690,46 @@ func TestMakeWorkflowRunner_ContextCancelledMidRun(t *testing.T) {
 	}
 }
 
+func TestMakeWorkflowRunner_UserCancelDuringStep_MarksRunCancelled(t *testing.T) {
+	store := NewWorkflowRunStore(t.TempDir())
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	agentFn := func(ctx context.Context, opts RunOptions) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	runner := MakeWorkflowRunner(store, agentFn, nil, nil, nil, nil, "", nil, nil)
+	w := &Workflow{
+		ID:   "wf-user-cancel-mid-step",
+		Name: "UserCancelMidStep",
+		Steps: []WorkflowStep{
+			{Name: "s1", Agent: "A", Prompt: "step 1", Position: 0},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = runner(ctx, w)
+		close(done)
+	}()
+	cancel(errUserCancelled)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not exit after cancellation")
+	}
+
+	runs, _ := store.List("wf-user-cancel-mid-step", 10)
+	if len(runs) == 0 {
+		t.Fatal("expected run to be persisted")
+	}
+	if runs[0].Status != WorkflowRunStatusCancelled {
+		t.Fatalf("want cancelled status on user cancel during step, got %s", runs[0].Status)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Round 2 hardening: step notification Detail for success path
 // ---------------------------------------------------------------------------
@@ -801,6 +852,29 @@ func (f *failingRunStore) List(workflowID string, n int) ([]*WorkflowRun, error)
 }
 func (f *failingRunStore) Get(workflowID, runID string) (*WorkflowRun, error) {
 	return nil, nil
+}
+
+// TestRunID_Uniqueness verifies that runID generates distinct values across
+// repeated calls for the same workflow, confirming that the random suffix
+// prevents millisecond-timestamp collisions.
+func TestRunID_Uniqueness(t *testing.T) {
+	const iterations = 100
+	seen := make(map[string]struct{}, iterations)
+	for i := 0; i < iterations; i++ {
+		id := runID("test-workflow")
+		if _, dup := seen[id]; dup {
+			t.Fatalf("runID collision on iteration %d: %q", i, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestRunID_Format verifies that runID includes the workflow ID and starts with "wf-".
+func TestRunID_Format(t *testing.T) {
+	id := runID("my-workflow")
+	if !strings.HasPrefix(id, "wf-my-workflow-") {
+		t.Errorf("expected runID to start with 'wf-my-workflow-', got %q", id)
+	}
 }
 
 // TestMakeWorkflowRunner_RunStoreAppendFailure_ContinuesExecution confirms the

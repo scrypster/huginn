@@ -124,13 +124,13 @@ func jsonError(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// loggingMiddleware wraps a handler and logs each HTTP request.
+// loggingMiddleware wraps a handler and logs each HTTP request at debug level.
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
 		next(rw, r)
-		slog.Info("http request",
+		slog.Debug("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rw.status,
@@ -169,9 +169,11 @@ const (
 )
 
 type authFailLimiter struct {
-	mu      sync.Mutex
-	window  map[string][]time.Time
-	clockFn func() time.Time
+	mu          sync.Mutex
+	window      map[string][]time.Time
+	bannedUntil map[string]time.Time // IPs that crossed the threshold; compact representation
+	lastSweep   time.Time            // last time a full map sweep was performed
+	clockFn     func() time.Time
 }
 
 func newAuthFailLimiter() *authFailLimiter {
@@ -180,33 +182,106 @@ func newAuthFailLimiter() *authFailLimiter {
 
 func newAuthFailLimiterWithClock(fn func() time.Time) *authFailLimiter {
 	return &authFailLimiter{
-		window:  make(map[string][]time.Time),
-		clockFn: fn,
+		window:      make(map[string][]time.Time),
+		bannedUntil: make(map[string]time.Time),
+		clockFn:     fn,
 	}
 }
 
 // recordFailure records an auth failure for ip and returns true if the IP has
 // now exceeded authFailMaxPerMinute failures within authFailWindow.
+// When the threshold is crossed the per-IP slice is moved to the compact
+// bannedUntil map so the window map does not accumulate large slices.
+// A periodic sweep purges stale entries from both maps to prevent unbounded
+// growth from one-shot IPs that never return.
 func (a *authFailLimiter) recordFailure(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.clockFn()
 	cutoff := now.Add(-authFailWindow)
+
+	// Periodically sweep both maps to remove entries whose windows have expired.
+	// This ensures one-shot IPs (that fail once and never return) don't accumulate
+	// forever; at most authFailWindow worth of stale entries can exist at any time.
+	if now.After(a.lastSweep.Add(authFailWindow)) {
+		a.sweep(now)
+		a.lastSweep = now
+	}
+
+	// If the IP is already in the ban list and the ban has not expired, report
+	// it as still blocked without touching the window map.
+	if exp, ok := a.bannedUntil[ip]; ok {
+		if now.Before(exp) {
+			return true
+		}
+		// Ban expired; remove it so the IP can accumulate failures again.
+		delete(a.bannedUntil, ip)
+	}
+
 	times := a.evict(ip, cutoff)
 	times = append(times, now)
+
+	if len(times) > authFailMaxPerMinute {
+		// Threshold crossed: store a compact ban record and remove the slice to
+		// keep the window map lean.
+		a.bannedUntil[ip] = now.Add(authFailWindow)
+		delete(a.window, ip)
+		return true
+	}
+
 	a.window[ip] = times
-	return len(times) > authFailMaxPerMinute
+	return false
 }
 
 // isBlocked returns true if ip currently exceeds the failure threshold.
+// If eviction empties the slice, the map key is deleted to prevent unbounded
+// map growth from IPs that have not been seen since their window expired.
 func (a *authFailLimiter) isBlocked(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.clockFn()
+
+	// Fast path: check the compact ban record first.
+	if exp, ok := a.bannedUntil[ip]; ok {
+		if now.Before(exp) {
+			return true
+		}
+		delete(a.bannedUntil, ip)
+	}
+
 	cutoff := now.Add(-authFailWindow)
 	times := a.evict(ip, cutoff)
+	if len(times) == 0 {
+		delete(a.window, ip)
+		return false
+	}
 	a.window[ip] = times
 	return len(times) > authFailMaxPerMinute
+}
+
+// sweep removes all expired entries from both internal maps.
+// Caller must hold a.mu.
+func (a *authFailLimiter) sweep(now time.Time) {
+	cutoff := now.Add(-authFailWindow)
+	for ip, times := range a.window {
+		j := 0
+		for _, t := range times {
+			if t.After(cutoff) {
+				times[j] = t
+				j++
+			}
+		}
+		if j == 0 {
+			delete(a.window, ip)
+		} else {
+			a.window[ip] = times[:j]
+		}
+	}
+	for ip, exp := range a.bannedUntil {
+		if !now.Before(exp) {
+			delete(a.bannedUntil, ip)
+		}
+	}
 }
 
 // evict removes entries older than cutoff and returns the pruned slice.
@@ -272,18 +347,20 @@ func (f *flowRateLimiter) allow(ip string) bool {
 // IPv6 addresses (which include colons) by using net.SplitHostPort.
 // Falls back to the raw RemoteAddr if parsing fails.
 func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header for proxied requests first.
-	// The server binds to 127.0.0.1 only, so this is low-risk, but we still
-	// sanitise: take only the first (leftmost) entry.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		if ip := strings.TrimSpace(parts[0]); ip != "" {
-			return ip
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	// Only trust X-Forwarded-For when the direct connection is from a loopback
+	// address (local reverse proxy). A client connecting directly must not be
+	// allowed to supply their own IP to bypass the rate limiter.
+	if parsed := net.ParseIP(host); parsed != nil && parsed.IsLoopback() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.SplitN(xff, ",", 2)
+			if ip := strings.TrimSpace(parts[0]); ip != "" {
+				return ip
+			}
+		}
 	}
 	return host
 }
@@ -295,22 +372,30 @@ type endpointRateLimiter struct {
 	window map[string][]time.Time
 	limit  int
 	dur    time.Duration
+	now    func() time.Time // injectable for testing; defaults to time.Now
 }
 
 // newEndpointRateLimiter creates a sliding-window limiter that allows at most
 // limit requests per IP within the given window duration.
 func newEndpointRateLimiter(limit int, dur time.Duration) *endpointRateLimiter {
+	return newEndpointRateLimiterWithClock(limit, dur, time.Now)
+}
+
+// newEndpointRateLimiterWithClock creates an endpointRateLimiter with a custom
+// clock, allowing tests to control time without real sleeps.
+func newEndpointRateLimiterWithClock(limit int, dur time.Duration, clock func() time.Time) *endpointRateLimiter {
 	return &endpointRateLimiter{
 		window: make(map[string][]time.Time),
 		limit:  limit,
 		dur:    dur,
+		now:    clock,
 	}
 }
 
 func (e *endpointRateLimiter) allow(ip string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	now := time.Now()
+	now := e.now()
 	cutoff := now.Add(-e.dur)
 	times := e.window[ip]
 	// Evict stale entries outside the window.
@@ -322,8 +407,12 @@ func (e *endpointRateLimiter) allow(ip string) bool {
 		}
 	}
 	times = times[:j]
-	if len(times) >= e.limit {
+	if len(times) == 0 {
+		delete(e.window, ip)
+	} else {
 		e.window[ip] = times
+	}
+	if len(times) >= e.limit {
 		return false
 	}
 	e.window[ip] = append(times, now)
@@ -364,15 +453,15 @@ func sanitizePath(path string) string {
 	return idSegmentRe.ReplaceAllString(path, "/:id")
 }
 
-// loggingMiddlewareWithStats wraps a handler, logs each request, and records
-// request duration in the Server's stats registry as "http.request.duration_ms".
+// loggingMiddlewareWithStats wraps a handler, logs each request at debug level,
+// and records request duration in the Server's stats registry as "http.request.duration_ms".
 func (s *Server) loggingMiddlewareWithStats(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
 		next(rw, r)
 		elapsed := time.Since(start)
-		slog.Info("http request",
+		slog.Debug("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rw.status,

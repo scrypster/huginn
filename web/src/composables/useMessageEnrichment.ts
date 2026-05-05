@@ -53,6 +53,9 @@ export function adaptSpaceMessages(msgs: SpaceMessage[]): ChatMessage[] {
     // Carry through follow-up streaming flags for token appending.
     followUpStreaming: (m as any).followUpStreaming,
     followUpThinking: (m as any).followUpThinking,
+    // Thread summary completion cards in main timeline.
+    threadSummary: (m as any).threadSummary,
+    threadSummaryThreadId: (m as any).threadSummaryThreadId,
   })) as ChatMessage[]
 }
 

@@ -1,5 +1,5 @@
 import { ref, onUnmounted, getCurrentInstance } from 'vue'
-import { getToken } from './useApi'
+import { apiFetch, getToken } from './useApi'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 
 export interface WorkflowConflictError extends Error {
@@ -175,20 +175,18 @@ export interface WorkflowEvent {
 
 const workflows = ref<Workflow[]>([])
 const loading = ref(false)
+const fetchWorkflowsError = ref<string | null>(null)
 const liveEvents = ref<Record<string, WorkflowEvent[]>>({})
 
 export function useWorkflows() {
-  function authHeaders(): Record<string, string> {
-    return { Authorization: `Bearer ${getToken()}` }
-  }
-
   async function fetchWorkflows() {
     loading.value = true
+    fetchWorkflowsError.value = null
     try {
-      const data = await fetch('/api/v1/workflows', {
-        headers: authHeaders(),
-      }).then(r => r.json())
+      const data = await apiFetch<unknown>('/api/v1/workflows')
       workflows.value = Array.isArray(data) ? data : []
+    } catch (err: unknown) {
+      fetchWorkflowsError.value = err instanceof Error ? err.message : 'Failed to load workflows'
     } finally {
       loading.value = false
     }
@@ -196,9 +194,7 @@ export function useWorkflows() {
 
   async function fetchTemplates(): Promise<WorkflowTemplate[]> {
     try {
-      const data = await fetch('/api/v1/workflows/templates', {
-        headers: authHeaders(),
-      }).then(r => r.json())
+      const data = await apiFetch<unknown>('/api/v1/workflows/templates')
       return Array.isArray(data) ? data : []
     } catch {
       return []
@@ -206,21 +202,22 @@ export function useWorkflows() {
   }
 
   async function createWorkflow(data: Partial<Workflow>): Promise<Workflow> {
-    const res = await fetch('/api/v1/workflows', {
+    const created = await apiFetch<Workflow>('/api/v1/workflows', {
       method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     })
-    if (!res.ok) throw new Error(`create failed: ${res.status}`)
-    const created: Workflow = await res.json()
     if (created.id) workflows.value.unshift(created)
     return created
   }
 
   async function updateWorkflow(id: string, data: Workflow): Promise<Workflow> {
+    // Uses raw fetch so we can inspect the 409 status before apiFetch throws.
     const res = await fetch(`/api/v1/workflows/${id}`, {
       method: 'PUT',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${getToken()}`,
+      },
       body: JSON.stringify(data),
     })
     if (res.status === 409) {
@@ -237,38 +234,22 @@ export function useWorkflows() {
   }
 
   async function deleteWorkflow(id: string) {
-    const res = await fetch(`/api/v1/workflows/${id}`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw new Error(`delete failed: ${res.status}`)
+    await apiFetch(`/api/v1/workflows/${id}`, { method: 'DELETE' })
     workflows.value = workflows.value.filter(w => w.id !== id)
   }
 
   async function triggerWorkflow(id: string) {
-    const res = await fetch(`/api/v1/workflows/${id}/run`, {
-      method: 'POST',
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw new Error(`trigger failed: ${res.status}`)
-    return res.json()
+    return apiFetch(`/api/v1/workflows/${id}/run`, { method: 'POST' })
   }
 
   async function cancelWorkflow(id: string): Promise<void> {
-    const res = await fetch(`/api/v1/workflows/${id}/cancel`, {
-      method: 'POST',
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw new Error(`cancel failed: ${res.status}`)
+    await apiFetch(`/api/v1/workflows/${id}/cancel`, { method: 'POST' })
   }
 
   async function replayWorkflowRun(workflowId: string, runId: string): Promise<Record<string, unknown>> {
-    const res = await fetch(`/api/v1/workflows/${workflowId}/runs/${runId}/replay`, {
+    return apiFetch<Record<string, unknown>>(`/api/v1/workflows/${workflowId}/runs/${runId}/replay`, {
       method: 'POST',
-      headers: authHeaders(),
     })
-    if (!res.ok) throw new Error(`replay failed: ${res.status}`)
-    return res.json() as Promise<Record<string, unknown>>
   }
 
   async function forkWorkflowRun(
@@ -276,13 +257,10 @@ export function useWorkflows() {
     runId: string,
     body?: ForkWorkflowRunBody,
   ): Promise<Record<string, unknown>> {
-    const res = await fetch(`/api/v1/workflows/${workflowId}/runs/${runId}/fork`, {
+    return apiFetch<Record<string, unknown>>(`/api/v1/workflows/${workflowId}/runs/${runId}/fork`, {
       method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body ?? {}),
     })
-    if (!res.ok) throw new Error(`fork failed: ${res.status}`)
-    return res.json() as Promise<Record<string, unknown>>
   }
 
   async function diffWorkflowRuns(
@@ -290,20 +268,14 @@ export function useWorkflows() {
     runId: string,
     otherRunId: string,
   ): Promise<Record<string, unknown>> {
-    const res = await fetch(`/api/v1/workflows/${workflowId}/runs/${runId}/diff/${otherRunId}`, {
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw new Error(`diff failed: ${res.status}`)
-    return res.json() as Promise<Record<string, unknown>>
+    return apiFetch<Record<string, unknown>>(
+      `/api/v1/workflows/${workflowId}/runs/${runId}/diff/${otherRunId}`,
+    )
   }
 
   async function fetchSessionArtifacts(sessionId: string): Promise<SessionArtifactSummary[]> {
     try {
-      const res = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`, {
-        headers: authHeaders(),
-      })
-      if (!res.ok) return []
-      const data = await res.json()
+      const data = await apiFetch<unknown>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`)
       return Array.isArray(data) ? (data as SessionArtifactSummary[]) : []
     } catch {
       return []
@@ -312,9 +284,7 @@ export function useWorkflows() {
 
   async function fetchWorkflowRuns(id: string): Promise<WorkflowRun[]> {
     try {
-      const data = await fetch(`/api/v1/workflows/${id}/runs`, {
-        headers: authHeaders(),
-      }).then(r => r.json())
+      const data = await apiFetch<unknown>(`/api/v1/workflows/${id}/runs`)
       return Array.isArray(data) ? data : []
     } catch {
       return []
@@ -364,8 +334,8 @@ export function useWorkflows() {
       } else {
         if (!liveEvents.value[wfId]) liveEvents.value[wfId] = []
         liveEvents.value[wfId]!.push(evt)
-        if (liveEvents.value[wfId]!.length > 100) {
-          liveEvents.value[wfId]!.shift()
+        if (liveEvents.value[wfId]!.length > 500) {
+          liveEvents.value[wfId] = liveEvents.value[wfId]!.slice(-500)
         }
       }
 
@@ -394,6 +364,7 @@ export function useWorkflows() {
   return {
     workflows,
     loading,
+    fetchWorkflowsError,
     liveEvents,
     fetchWorkflows,
     fetchTemplates,

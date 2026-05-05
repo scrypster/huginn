@@ -325,6 +325,36 @@ func TestListSpaceMessages_OrdersBySeqWhenTsIdentical(t *testing.T) {
 	}
 }
 
+// TestOpenDM_SameIDOnRepeatCalls verifies that calling OpenDM twice with the
+// same agent name returns the same Space ID (idempotency). This also exercises
+// the iterative retry path: the second call finds the row on the first iteration
+// rather than falling through to insert, implicitly validating the bounded-retry
+// loop introduced to replace the previous recursive implementation.
+func TestOpenDM_SameIDOnRepeatCalls(t *testing.T) {
+	db := openTestDB(t)
+	store := spaces.NewSQLiteSpaceStore(db)
+
+	sp1, err := store.OpenDM("retry-agent")
+	if err != nil {
+		t.Fatalf("first OpenDM: %v", err)
+	}
+	sp2, err := store.OpenDM("retry-agent")
+	if err != nil {
+		t.Fatalf("second OpenDM: %v", err)
+	}
+	if sp1.ID != sp2.ID {
+		t.Errorf("OpenDM should return same space ID on repeat calls; got %q vs %q", sp1.ID, sp2.ID)
+	}
+	// A third call should also return the same ID (retry loop terminates correctly).
+	sp3, err := store.OpenDM("retry-agent")
+	if err != nil {
+		t.Fatalf("third OpenDM: %v", err)
+	}
+	if sp1.ID != sp3.ID {
+		t.Errorf("OpenDM third call returned different ID: %q vs %q", sp1.ID, sp3.ID)
+	}
+}
+
 // TestSpacesByLeadAgent_ExcludesArchived verifies that SpacesByLeadAgent
 // does not return archived spaces.
 func TestSpacesByLeadAgent_ExcludesArchived(t *testing.T) {

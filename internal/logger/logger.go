@@ -23,21 +23,51 @@ var (
 	globalMu     sync.RWMutex
 )
 
-// Init initializes the global logger. Safe to call multiple times (idempotent after first call).
-// baseDir is ~/.huginn or equivalent.
+// Init initializes the global logger at slog.LevelWarn. Safe to call multiple
+// times (idempotent after first call). baseDir is ~/.huginn or equivalent.
+// To set a custom level call InitWithLevel instead, or call SetLevel after Init.
 func Init(baseDir string) error {
+	return InitWithLevel(baseDir, slog.LevelWarn)
+}
+
+// InitWithLevel initializes the global logger at the given level.
+// Safe to call multiple times (idempotent after first call).
+func InitWithLevel(baseDir string, level slog.Level) error {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 	if globalLogger != nil {
 		return nil
 	}
 	logPath := filepath.Join(baseDir, "logs", logFileName)
-	l, err := New(logPath)
+	l, err := NewWithLevel(logPath, level)
 	if err != nil {
 		return err
 	}
 	globalLogger = l
 	return nil
+}
+
+// SetLevel updates the minimum log level on the global logger at runtime.
+// No-op if Init/InitWithLevel has not been called yet.
+func SetLevel(level slog.Level) {
+	globalMu.RLock()
+	l := globalLogger
+	globalMu.RUnlock()
+	if l != nil {
+		l.SetLevel(level)
+	}
+}
+
+// Level returns the current minimum log level of the global logger.
+// Returns slog.LevelWarn if Init/InitWithLevel has not been called yet.
+func Level() slog.Level {
+	globalMu.RLock()
+	l := globalLogger
+	globalMu.RUnlock()
+	if l != nil {
+		return l.Level()
+	}
+	return slog.LevelWarn
 }
 
 // L returns the global logger. Falls back to a no-op logger if Init was not called.
@@ -113,11 +143,33 @@ type Logger struct {
 	path         string
 	file         *os.File
 	maxSizeBytes int64
+	levelVar     *slog.LevelVar // nil for Discard loggers
 	*slog.Logger
 }
 
-// New creates a Logger writing to path. Rotates at 10 MB.
+// SetLevel changes the minimum log level at runtime without restarting.
+func (l *Logger) SetLevel(level slog.Level) {
+	if l.levelVar != nil {
+		l.levelVar.Set(level)
+	}
+}
+
+// Level returns the current minimum log level.
+func (l *Logger) Level() slog.Level {
+	if l.levelVar != nil {
+		return l.levelVar.Level()
+	}
+	return slog.LevelWarn
+}
+
+// New creates a Logger writing to path at slog.LevelInfo. Rotates at 10 MB.
 func New(path string) (*Logger, error) {
+	return NewWithLevel(path, slog.LevelInfo)
+}
+
+// NewWithLevel creates a Logger writing to path at the given minimum level.
+// Rotates at 10 MB.
+func NewWithLevel(path string, level slog.Level) (*Logger, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("logger mkdir: %w", err)
 	}
@@ -125,8 +177,10 @@ func New(path string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("logger open: %w", err)
 	}
-	l := &Logger{path: path, file: f, maxSizeBytes: defaultMaxSizeBytes}
-	l.Logger = slog.New(slog.NewJSONHandler(l, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	lv := &slog.LevelVar{}
+	lv.Set(level)
+	l := &Logger{path: path, file: f, maxSizeBytes: defaultMaxSizeBytes, levelVar: lv}
+	l.Logger = slog.New(slog.NewJSONHandler(l, &slog.HandlerOptions{Level: lv}))
 	return l, nil
 }
 

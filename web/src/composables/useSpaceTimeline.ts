@@ -313,8 +313,8 @@ export function useSpaceTimeline(spaceId: string) {
     try {
       // Parallel fetch: messages + sessions (for routing map + activeSessionId).
       const [msgResult, sessions] = await Promise.all([
-        api.spaces.messages(spaceId, undefined, 20),
-        api.spaces.sessions(spaceId),
+        api.spaces.messages(spaceId, undefined, 20, { signal: controller.signal }),
+        api.spaces.sessions(spaceId, { signal: controller.signal }),
       ])
 
       // Replace messages in-place to preserve reactive array reference.

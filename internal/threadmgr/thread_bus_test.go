@@ -18,7 +18,7 @@ func TestThreadBus_SiblingContextIsSessionScoped(t *testing.T) {
 	bus.Publish("sess-a", ThreadContextMessage{ThreadID: "t-a2", AgentID: "Beta", Content: "beta update"})
 	bus.Publish("sess-b", ThreadContextMessage{ThreadID: "t-b1", AgentID: "Gamma", Content: "gamma update"})
 
-	got := bus.SiblingContext("sess-a", "t-a1", 10)
+	got := bus.SiblingContext("sess-a", "t-a1", "", 10)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 sibling message in sess-a, got %d", len(got))
 	}
@@ -29,7 +29,7 @@ func TestThreadBus_SiblingContextIsSessionScoped(t *testing.T) {
 		t.Fatal("expected no cross-session leakage into sess-a")
 	}
 
-	gotB := bus.SiblingContext("sess-b", "t-b1", 10)
+	gotB := bus.SiblingContext("sess-b", "t-b1", "", 10)
 	if len(gotB) != 0 {
 		t.Fatalf("expected no sibling messages in sess-b when excluding the only thread, got %d", len(gotB))
 	}
@@ -41,7 +41,7 @@ func TestThreadBus_BoundedCapacityKeepsNewestEntries(t *testing.T) {
 	bus.Publish("sess", ThreadContextMessage{ThreadID: "t2", Content: "second"})
 	bus.Publish("sess", ThreadContextMessage{ThreadID: "t3", Content: "third"})
 
-	got := bus.SiblingContext("sess", "", 10)
+	got := bus.SiblingContext("sess", "", "", 10)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 entries after capacity trim, got %d", len(got))
 	}
@@ -64,7 +64,7 @@ func TestThreadBus_ConcurrentPublishAndRead_NoDeadlock(t *testing.T) {
 					AgentID:  "Publisher",
 					Content:  "update",
 				})
-				_ = bus.SiblingContext("sess", "t-reader", 6)
+				_ = bus.SiblingContext("sess", "t-reader", "", 6)
 			}
 		}(i)
 	}

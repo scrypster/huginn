@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -418,5 +419,89 @@ func TestFormatTable_NegativeValue(t *testing.T) {
 	out := FormatTable(snap)
 	if !strings.Contains(out, "-5.5") {
 		t.Errorf("expected negative value in output: %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// registryCollector.Histogram – histValues population (bug fix tests)
+// ---------------------------------------------------------------------------
+
+func TestRegistryCollector_Histogram_PopulatesHistValues(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	c := r.Collector()
+
+	// Record via the Collector interface (the DI path).
+	c.Histogram("latency_ms", 10.0)
+	c.Histogram("latency_ms", 20.0)
+	c.Histogram("latency_ms", 30.0)
+
+	snap := r.Snapshot()
+	vals, ok := snap.HistValues["latency_ms"]
+	if !ok {
+		t.Fatal("expected HistValues[latency_ms] to be populated via Collector path, got missing key")
+	}
+	if len(vals) != 3 {
+		t.Errorf("expected 3 values, got %d", len(vals))
+	}
+
+	p50, p95, p99 := computePercentiles(vals)
+	if p50 == 0 && p95 == 0 && p99 == 0 {
+		t.Error("expected non-zero percentiles, got all zeros")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Registry.Histogram vs Collector.Histogram asymmetry contract tests
+// ---------------------------------------------------------------------------
+
+func TestRegistry_DirectHistogram_DoesNotPopulateEventLog(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	// Call Registry.Histogram directly (not via Collector)
+	r.Histogram("direct", 1.0)
+	snap := r.Snapshot()
+	// histValues should be populated
+	if _, ok := snap.HistValues["direct"]; !ok {
+		t.Error("expected HistValues to contain 'direct'")
+	}
+	// flat event log should NOT be populated (this is the documented asymmetry)
+	if len(snap.Histograms) != 0 {
+		t.Errorf("expected Histograms event log to be empty for direct Registry.Histogram, got %d entries", len(snap.Histograms))
+	}
+}
+
+func TestRegistry_CollectorHistogram_PopulatesBothPaths(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	c := r.Collector()
+	c.Histogram("via_collector", 1.0)
+	snap := r.Snapshot()
+	if _, ok := snap.HistValues["via_collector"]; !ok {
+		t.Error("expected HistValues populated via collector")
+	}
+	if len(snap.Histograms) != 1 {
+		t.Errorf("expected 1 entry in Histograms event log, got %d", len(snap.Histograms))
+	}
+}
+
+func TestRegistryCollector_Histogram_EnforcesKeyCap(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	c := r.Collector()
+
+	// Fill to the key cap.
+	for i := 0; i < maxHistogramKeys; i++ {
+		c.Histogram(fmt.Sprintf("metric_%d", i), float64(i))
+	}
+	// One more key — should be silently dropped.
+	c.Histogram("overflow_key", 99.0)
+
+	snap := r.Snapshot()
+	if _, ok := snap.HistValues["overflow_key"]; ok {
+		t.Error("expected overflow key to be silently dropped")
+	}
+	if len(snap.HistValues) > maxHistogramKeys {
+		t.Errorf("expected at most %d keys, got %d", maxHistogramKeys, len(snap.HistValues))
 	}
 }

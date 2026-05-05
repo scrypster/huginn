@@ -53,6 +53,71 @@ func TestScheduler_TriggerWorkflow_AlreadyRunning(t *testing.T) {
 	close(unblock) // let the first run finish
 }
 
+// TestScheduler_TriggerWorkflow_ConcurrentSameWorkflowSingleWinner verifies
+// that concurrent trigger attempts for the same workflow ID have exactly one
+// winner. All other callers must receive ErrWorkflowAlreadyRunning (not nil).
+func TestScheduler_TriggerWorkflow_ConcurrentSameWorkflowSingleWinner(t *testing.T) {
+	sched := New()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	sched.SetWorkflowRunner(func(ctx context.Context, w *Workflow) error {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+
+	wf := &Workflow{ID: "wf-concurrent-single-winner", Name: "SingleWinner", Enabled: true}
+	const callers = 32
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var successCount atomic.Int64
+	var alreadyRunningCount atomic.Int64
+	errs := make(chan error, callers)
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			err := sched.TriggerWorkflow(context.Background(), wf)
+			switch {
+			case err == nil:
+				successCount.Add(1)
+			case errors.Is(err, ErrWorkflowAlreadyRunning):
+				alreadyRunningCount.Add(1)
+			default:
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := successCount.Load(); got != 1 {
+		t.Fatalf("successful trigger count = %d, want 1", got)
+	}
+	if got := alreadyRunningCount.Load(); got != callers-1 {
+		t.Fatalf("already-running errors = %d, want %d", got, callers-1)
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("unexpected trigger error: %v", err)
+	default:
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workflow runner did not start")
+	}
+	close(release)
+}
+
 // TestScheduler_TriggerWorkflow_NoRunner verifies that TriggerWorkflow returns
 // an error when no WorkflowRunner has been configured.
 func TestScheduler_TriggerWorkflow_NoRunner(t *testing.T) {
@@ -297,4 +362,75 @@ func TestScheduler_MaxConcurrentWorkflows(t *testing.T) {
 	if observed > maxConcurrentWorkflows {
 		t.Errorf("concurrent workflows exceeded limit: max observed=%d, limit=%d", observed, maxConcurrentWorkflows)
 	}
+}
+
+// TestScheduler_TriggerWorkflow_ConcurrencyHammer saturates TriggerWorkflow with
+// many distinct workflow IDs at once and verifies the semaphore enforces a hard
+// cap without deadlocks or unexpected error classes.
+func TestScheduler_TriggerWorkflow_ConcurrencyHammer(t *testing.T) {
+	sched := New()
+
+	var concurrent atomic.Int64
+	var maxSeen atomic.Int64
+	release := make(chan struct{})
+	sched.SetWorkflowRunner(func(ctx context.Context, w *Workflow) error {
+		n := concurrent.Add(1)
+		for {
+			cur := maxSeen.Load()
+			if n <= cur || maxSeen.CompareAndSwap(cur, n) {
+				break
+			}
+		}
+		<-release
+		concurrent.Add(-1)
+		return nil
+	})
+
+	const attempts = 400
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var okCount atomic.Int64
+	var rejectedCount atomic.Int64
+	errs := make(chan error, attempts)
+
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		wf := &Workflow{
+			ID:      fmt.Sprintf("wf-hammer-%03d", i),
+			Name:    "Hammer",
+			Enabled: true,
+		}
+		go func(w *Workflow) {
+			defer wg.Done()
+			<-start
+			err := sched.TriggerWorkflow(context.Background(), w)
+			switch {
+			case err == nil:
+				okCount.Add(1)
+			case errors.Is(err, ErrConcurrencyLimitReached):
+				rejectedCount.Add(1)
+			default:
+				errs <- err
+			}
+		}(wf)
+	}
+	close(start)
+	wg.Wait()
+
+	if got := okCount.Load(); got != int64(maxConcurrentWorkflows) {
+		t.Fatalf("successful launches = %d, want %d (semaphore capacity)", got, maxConcurrentWorkflows)
+	}
+	if got := rejectedCount.Load(); got != attempts-int64(maxConcurrentWorkflows) {
+		t.Fatalf("rejected launches = %d, want %d", got, attempts-int64(maxConcurrentWorkflows))
+	}
+	if got := maxSeen.Load(); got > int64(maxConcurrentWorkflows) {
+		t.Fatalf("max concurrent runner calls = %d, want <= %d", got, maxConcurrentWorkflows)
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("unexpected TriggerWorkflow error class: %v", err)
+	default:
+	}
+
+	close(release)
 }

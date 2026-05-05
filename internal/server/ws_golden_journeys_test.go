@@ -27,14 +27,21 @@ func (b *mentionGoldenBackend) Health(_ context.Context) error   { return nil }
 func (b *mentionGoldenBackend) Shutdown(_ context.Context) error { return nil }
 func (b *mentionGoldenBackend) ContextWindow() int               { return 8192 }
 
-func TestHandleWSMessage_ChannelLeadDelegation_GoldenPath(t *testing.T) {
+func TestHandleWSMessage_ChannelLeadDelegation_MentionFallbackDisabledForLegacyModels(t *testing.T) {
 	srv, _ := newTestServer(t)
+
+	// Mention fallback is disabled globally; no model should use it.
+	registry := &modelconfig.ModelRegistry{
+		Available: []modelconfig.ModelInfo{
+			{Name: "legacy-no-tools", SupportsTools: false},
+		},
+	}
 
 	orch, err := agent.NewOrchestrator(
 		&mentionGoldenBackend{reply: "I'll ask @GitAgent to investigate this and report back."},
 		modelconfig.DefaultModels(),
 		nil,
-		nil,
+		registry,
 		nil,
 		nil,
 	)
@@ -45,13 +52,13 @@ func TestHandleWSMessage_ChannelLeadDelegation_GoldenPath(t *testing.T) {
 	srv.agentLoader = func() (*agents.AgentsConfig, error) {
 		return &agents.AgentsConfig{
 			Agents: []agents.AgentDef{
-				{Name: "Lead", Model: "claude-haiku-4", IsDefault: true},
-				{Name: "GitAgent", Model: "claude-haiku-4"},
+				{Name: "Lead", Model: "legacy-no-tools", IsDefault: true},
+				{Name: "GitAgent", Model: "legacy-no-tools"},
 			},
 		}, nil
 	}
 
-	sess := srv.store.New("golden-channel", "/workspace", "claude-haiku-4")
+	sess := srv.store.New("golden-channel", "/workspace", "legacy-no-tools")
 	sess.Manifest.Agent = "Lead"
 	sess.Manifest.SpaceID = "space-golden"
 	if err := srv.store.SaveManifest(sess); err != nil {
@@ -97,23 +104,9 @@ func TestHandleWSMessage_ChannelLeadDelegation_GoldenPath(t *testing.T) {
 
 	select {
 	case got := <-callCh:
-		if got.sessionID != sess.ID {
-			t.Fatalf("delegation session_id = %q, want %q", got.sessionID, sess.ID)
-		}
-		if !strings.Contains(got.assistant, "@GitAgent") {
-			t.Fatalf("delegation body %q does not include assistant @mention", got.assistant)
-		}
-		if got.parentMsgID == "" {
-			t.Fatal("expected non-empty parent message ID for mention delegation")
-		}
-		if doneMessageID == "" {
-			t.Fatal("expected done message payload to include message_id")
-		}
-		if got.parentMsgID != doneMessageID {
-			t.Fatalf("delegation parent message_id = %q, want done payload message_id %q", got.parentMsgID, doneMessageID)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for mention delegate callback")
+		t.Fatalf("mention fallback must remain disabled; unexpected callback: %+v", got)
+	case <-time.After(250 * time.Millisecond):
+		// Expected: no mention fallback callback.
 	}
 
 	// Persisted history must include both user and assistant messages.
@@ -132,5 +125,78 @@ func TestHandleWSMessage_ChannelLeadDelegation_GoldenPath(t *testing.T) {
 	}
 	if !strings.Contains(msgs[1].Content, "@GitAgent") {
 		t.Fatalf("assistant persisted content %q missing @GitAgent", msgs[1].Content)
+	}
+}
+
+func TestHandleWSMessage_ChannelLeadDelegation_ToolModelsSkipMentionFallback(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	registry := &modelconfig.ModelRegistry{
+		Available: []modelconfig.ModelInfo{
+			{Name: "tool-capable-model", SupportsTools: true},
+		},
+	}
+
+	orch, err := agent.NewOrchestrator(
+		&mentionGoldenBackend{reply: "I'll ask @GitAgent to investigate this and report back."},
+		modelconfig.DefaultModels(),
+		nil,
+		registry,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+	srv.orch = orch
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{
+			Agents: []agents.AgentDef{
+				{Name: "Lead", Model: "tool-capable-model", IsDefault: true},
+				{Name: "GitAgent", Model: "tool-capable-model"},
+			},
+		}, nil
+	}
+
+	sess := srv.store.New("golden-channel-tools", "/workspace", "tool-capable-model")
+	sess.Manifest.Agent = "Lead"
+	sess.Manifest.SpaceID = "space-golden-tools"
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	called := make(chan struct{}, 1)
+	srv.SetMentionDelegate(func(_ context.Context, _, _, _, _ string) {
+		called <- struct{}{}
+	})
+
+	client := &wsClient{send: make(chan WSMessage, 64), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   "please coordinate this",
+	})
+
+	doneSeen := false
+	deadline := time.After(5 * time.Second)
+	for !doneSeen {
+		select {
+		case msg := <-client.send:
+			if msg.Type == "error" {
+				t.Fatalf("unexpected error from websocket: %v", msg.Content)
+			}
+			if msg.Type == "done" {
+				doneSeen = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for done websocket message")
+		}
+	}
+
+	select {
+	case <-called:
+		t.Fatal("mention fallback should be skipped for tool-capable models")
+	case <-time.After(250 * time.Millisecond):
+		// Expected: no mention fallback callback.
 	}
 }

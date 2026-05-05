@@ -18,6 +18,7 @@ import (
 // GET /api/v1/containers/:id/threads).
 type threadMessageRow struct {
 	ID                  string                      `json:"id"`
+	ThreadID            string                      `json:"thread_id,omitempty"`
 	ContainerID         string                      `json:"container_id"`
 	Seq                 int64                       `json:"seq"`
 	Ts                  time.Time                   `json:"ts"`
@@ -97,7 +98,7 @@ func (s *Server) handleGetMessageThread(w http.ResponseWriter, r *http.Request) 
 		      SELECT id FROM threads WHERE parent_msg_id = ?
 		  )
 		  AND role NOT IN ('cost', 'system')
-		ORDER BY seq ASC`,
+		ORDER BY ts ASC, seq ASC, id ASC`,
 		messageID,
 	)
 	if err != nil {
@@ -156,7 +157,7 @@ func (s *Server) handleGetContainerThreads(w http.ResponseWriter, r *http.Reques
 	// This ensures the badge shows "Sam" (who ran the thread) not "Tom" (who
 	// authored the @mention).
 	rows, err := rdb.QueryContext(r.Context(), `
-		SELECT m.id, m.container_id, m.seq, m.ts, m.role, m.content,
+		SELECT m.id, COALESCE(t.id, ''), m.container_id, m.seq, m.ts, m.role, m.content,
 		       COALESCE(t.agent_name, COALESCE(m.agent, '')),
 		       COALESCE(m.tool_name, ''),
 		       COALESCE(m.parent_message_id, ''),
@@ -197,7 +198,7 @@ func scanContainerThreadRows(rows *sql.Rows) ([]threadMessageRow, error) {
 		var tsStr string
 		var toolCallsJSON string
 		if err := rows.Scan(
-			&m.ID, &m.ContainerID, &m.Seq, &tsStr,
+			&m.ID, &m.ThreadID, &m.ContainerID, &m.Seq, &tsStr,
 			&m.Role, &m.Content, &m.Agent, &m.ToolName,
 			&m.ParentMessageID, &m.TriggeringMessageID,
 			&m.ThreadReplyCount, &toolCallsJSON,
@@ -307,13 +308,12 @@ func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If thread manager is not available, return not found
-	if s.tm == nil {
-		jsonError(w, http.StatusNotFound, "thread not found")
+	tm := s.requireThreadManager(w, http.StatusNotFound)
+	if tm == nil {
 		return
 	}
 
-	t, ok := s.tm.Get(threadID)
+	t, ok := tm.Get(threadID)
 	if !ok || t.SessionID != sessionID {
 		jsonError(w, http.StatusNotFound, "thread not found")
 		return
@@ -336,9 +336,8 @@ func (s *Server) handleReplyThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If thread manager is not available, return error
-	if s.tm == nil {
-		jsonError(w, http.StatusServiceUnavailable, "thread manager not available")
+	tm := s.requireThreadManager(w, http.StatusServiceUnavailable)
+	if tm == nil {
 		return
 	}
 
@@ -356,12 +355,16 @@ func (s *Server) handleReplyThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// withMaxBody(64<<10) is applied at the route level — input size already bounded.
-	sent, found := s.tm.TrySendInput(threadID, sessionID, body.Input)
+	sent, found, reason := tm.TrySendInput(threadID, sessionID, body.Input)
 	if !found {
 		jsonError(w, http.StatusNotFound, "thread not found")
 		return
 	}
 	if !sent {
+		if reason == "buffer_full" {
+			jsonError(w, http.StatusConflict, "thread input buffer is full")
+			return
+		}
 		jsonError(w, http.StatusConflict, "thread is not waiting for input")
 		return
 	}
@@ -383,13 +386,12 @@ func (s *Server) handleCancelThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If thread manager is not available, return error
-	if s.tm == nil {
-		jsonError(w, http.StatusServiceUnavailable, "thread manager not available")
+	tm := s.requireThreadManager(w, http.StatusServiceUnavailable)
+	if tm == nil {
 		return
 	}
 
-	_, found := s.tm.CancelIfOwned(threadID, sessionID)
+	_, found := tm.CancelIfOwned(threadID, sessionID)
 	if !found {
 		jsonError(w, http.StatusNotFound, "thread not found")
 		return
@@ -426,8 +428,8 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Thread manager must be configured.
-	if s.tm == nil {
-		jsonError(w, http.StatusServiceUnavailable, "thread manager not available")
+	tm := s.requireThreadManager(w, http.StatusServiceUnavailable)
+	if tm == nil {
 		return
 	}
 
@@ -496,7 +498,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the thread record (synchronous — validates thread limits and dependencies).
-	t, createErr := s.tm.Create(threadmgr.CreateParams{
+	t, createErr := tm.Create(threadmgr.CreateParams{
 		SessionID: sessionID,
 		AgentID:   body.AgentID,
 		Task:      body.Task,
@@ -509,7 +511,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 			// 429 Too Many Requests: clear, actionable user-facing message.
 			// Also broadcast a WS error so any open session connections surface this
 			// to the user immediately (e.g. thread panel or notification area).
-			activeCount := s.tm.ActiveCount(sessionID)
+			activeCount := tm.ActiveCount(sessionID)
 			msg := createErr.Error()
 			s.wsHub.broadcastToSession(sessionID, WSMessage{
 				Type:      "error",
@@ -541,7 +543,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	broadcastFn := threadmgr.BroadcastFn(func(sid, msgType string, payload map[string]any) {
 		s.BroadcastToSession(sid, msgType, payload)
 	})
-	s.orch.SpawnThread(s.ctx, t.ID, sess, s.tm, broadcastFn, &s.spawnWg, s.ca)
+	s.orch.SpawnThread(s.ctx, t.ID, sess, tm, broadcastFn, &s.spawnWg, s.ca)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted) // 202: thread created and spawning initiated
@@ -567,13 +569,13 @@ func (s *Server) handleArchiveThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.tm == nil {
-		jsonError(w, http.StatusServiceUnavailable, "thread manager not initialized")
+	tm := s.requireThreadManager(w, http.StatusServiceUnavailable)
+	if tm == nil {
 		return
 	}
 
 	// Verify the thread belongs to the requested session before archiving.
-	t, ok := s.tm.Get(threadID)
+	t, ok := tm.Get(threadID)
 	if !ok {
 		jsonError(w, http.StatusNotFound, "thread not found")
 		return
@@ -583,7 +585,7 @@ func (s *Server) handleArchiveThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.tm.ArchiveThread(threadID); err != nil {
+	if err := tm.ArchiveThread(threadID); err != nil {
 		switch {
 		case errors.Is(err, threadmgr.ErrThreadNotFound):
 			jsonError(w, http.StatusNotFound, "thread not found")

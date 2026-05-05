@@ -540,7 +540,7 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
-    ws.emit('thread_started', { thread_id: 'thr-1', agent_id: 'builder' })
+    ws.emit('thread_started', { thread_id: 'thr-1', parent_message_id: 'msg-ww1', agent_id: 'builder' })
 
     expect(td.delegationChain.value).toContain('builder')
   })
@@ -554,8 +554,8 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
-    ws.emit('thread_started', { thread_id: 'thr-1', agent_id: 'builder' })
-    ws.emit('thread_started', { thread_id: 'thr-2', agent_id: 'builder' })
+    ws.emit('thread_started', { thread_id: 'thr-1', parent_message_id: 'msg-ww2', agent_id: 'builder' })
+    ws.emit('thread_started', { thread_id: 'thr-2', parent_message_id: 'msg-ww2', agent_id: 'builder' })
 
     expect(td.delegationChain.value.filter(a => a === 'builder')).toHaveLength(1)
   })
@@ -568,8 +568,21 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
-    ws.emit('thread_started', { thread_id: 'thr-1', agent_id: 'builder' })
+    ws.emit('thread_started', { thread_id: 'thr-1', parent_message_id: 'msg-closed', agent_id: 'builder' })
 
+    expect(td.delegationChain.value).toHaveLength(0)
+  })
+
+  it('thread_started ignores events for a different parent message', async () => {
+    const { useThreadDetail, wireThreadDetailWS } = await freshWithWire()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok(sampleMessages))
+    const td = useThreadDetail()
+    await td.open('msg-scope-1')
+
+    const ws = mockWS()
+    wireThreadDetailWS(ws as any)
+
+    ws.emit('thread_started', { thread_id: 'thr-x', parent_message_id: 'other-parent', agent_id: 'builder' })
     expect(td.delegationChain.value).toHaveLength(0)
   })
 
@@ -584,6 +597,7 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-done', parent_message_id: 'msg-ww3', agent_id: 'builder' })
     ws.emit('thread_done', { thread_id: 'thr-done' })
 
     // Before debounce settles, fetch should not have been called again
@@ -594,6 +608,23 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     await vi.runAllTimersAsync()
 
     expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('thread_done does not refetch for unscoped thread ids', async () => {
+    const { useThreadDetail, wireThreadDetailWS } = await freshWithWire()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok([]))
+    const td = useThreadDetail()
+    await td.open('msg-scope-2')
+
+    const callsAfterOpen = fetchSpy.mock.calls.length
+    const ws = mockWS()
+    wireThreadDetailWS(ws as any)
+
+    ws.emit('thread_done', { thread_id: 'thr-unknown' })
+    vi.advanceTimersByTime(300)
+    await vi.runAllTimersAsync()
+
+    expect(fetchSpy).toHaveBeenCalledTimes(callsAfterOpen)
   })
 
   it('thread_status "done" triggers a refetch', async () => {
@@ -607,6 +638,7 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-st', parent_message_id: 'msg-ww4', agent_id: 'builder' })
     ws.emit('thread_status', { thread_id: 'thr-st', status: 'done' })
     vi.advanceTimersByTime(300)
     await vi.runAllTimersAsync()
@@ -626,6 +658,7 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-thinking', parent_message_id: 'msg-ww5', agent_id: 'builder' })
     ws.emit('thread_status', { thread_id: 'thr-thinking', status: 'thinking' })
     vi.advanceTimersByTime(300)
     await vi.runAllTimersAsync()
@@ -646,6 +679,7 @@ describe('useThreadDetail — wireThreadDetailWS', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-closed', parent_message_id: 'msg-ww6', agent_id: 'builder' })
     ws.emit('thread_done', { thread_id: 'thr-closed' })
     td.close() // close before debounce fires
 
@@ -692,6 +726,7 @@ describe('useThreadDetail — debounced refetch', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-d1', parent_message_id: 'msg-debounce1', agent_id: 'builder' })
     // Fire three thread_done events without advancing timers
     ws.emit('thread_done', { thread_id: 'thr-d1' })
     ws.emit('thread_done', { thread_id: 'thr-d1' })
@@ -717,6 +752,7 @@ describe('useThreadDetail — debounced refetch', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-id1', parent_message_id: 'msg-current-id', agent_id: 'builder' })
     ws.emit('thread_done', { thread_id: 'thr-id1' })
     vi.advanceTimersByTime(300)
     await vi.runAllTimersAsync()
@@ -800,6 +836,7 @@ describe('useThreadDetail — error recovery', () => {
     const ws = mockWS()
     wireThreadDetailWS(ws as any)
 
+    ws.emit('thread_started', { thread_id: 'thr-rec1', parent_message_id: 'msg-recovery1', agent_id: 'builder' })
     ws.emit('thread_done', { thread_id: 'thr-rec1' })
     vi.advanceTimersByTime(300)
     await vi.runAllTimersAsync()

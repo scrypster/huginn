@@ -3,6 +3,7 @@ package scheduler
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,22 @@ import (
 // errUnresolvedPlaceholder is the prefix for step errors caused by template
 // placeholders that remain after variable resolution.
 const errUnresolvedPlaceholder = "step failed: unresolved template placeholders"
+
+// ancestorSetKey is the context key for the set of workflow IDs currently in
+// the sub-workflow call stack. Used by cycle detection at runtime.
+type ancestorSetKey struct{}
+
+// withAncestors returns a new context carrying the given ancestor set.
+func withAncestors(ctx context.Context, ancestors map[string]struct{}) context.Context {
+	return context.WithValue(ctx, ancestorSetKey{}, ancestors)
+}
+
+// ancestorsFromContext extracts the ancestor set from a context, returning nil
+// if none has been set (i.e. this is a top-level run).
+func ancestorsFromContext(ctx context.Context) map[string]struct{} {
+	v, _ := ctx.Value(ancestorSetKey{}).(map[string]struct{})
+	return v
+}
 
 // unresolvedPlaceholderRe matches any {{...}} token that was not substituted.
 var unresolvedPlaceholderRe = regexp.MustCompile(`\{\{[^}]+\}\}`)
@@ -119,6 +136,18 @@ func redactTarget(raw, deliveryType string) string {
 	}
 }
 
+// runID generates a unique workflow run ID for the given workflow.
+// An 8-character random hex suffix (4 bytes from crypto/rand) is appended to
+// the millisecond timestamp to prevent collisions when two runs of the same
+// workflow start within the same millisecond (e.g. concurrent triggers).
+// 4 bytes gives ~4B possibilities, making birthday collisions across 100
+// concurrent runs statistically impossible (~0.000001% chance).
+func runID(workflowID string) string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("wf-%s-%d-%x", workflowID, time.Now().UnixMilli(), b)
+}
+
 // MakeWorkflowRunner builds a WorkflowRunner that:
 //  1. Executes steps in Position order, calling agentFn for each inline step.
 //  2. Respects per-step on_failure: stop|continue.
@@ -145,6 +174,23 @@ func MakeWorkflowRunner(
 		opt(&cfg)
 	}
 	return func(ctx context.Context, w *Workflow) error {
+		// Cycle detection: if this workflow's ID is already in the ancestor set
+		// carried by the context, a sub-workflow cycle (A → B → A) has been
+		// detected. Return an error immediately rather than recursing.
+		ancestors := ancestorsFromContext(ctx)
+		if _, cycle := ancestors[w.ID]; cycle {
+			return fmt.Errorf("sub_workflow cycle detected: workflow %s is already executing in this call chain", w.ID)
+		}
+		// Build an updated ancestor set that includes the current workflow and
+		// attach it to the context. Any sub-workflow invoked from this run will
+		// see the full call chain so nested cycles are also caught.
+		newAncestors := make(map[string]struct{}, len(ancestors)+1)
+		for k := range ancestors {
+			newAncestors[k] = struct{}{}
+		}
+		newAncestors[w.ID] = struct{}{}
+		ctx = withAncestors(ctx, newAncestors)
+
 		// Sort steps by Position ascending.
 		steps := make([]WorkflowStep, len(w.Steps))
 		copy(steps, w.Steps)
@@ -160,6 +206,7 @@ func MakeWorkflowRunner(
 		// (Phase 2) so an agent in step N can stash a value that step M reads.
 		// Lives only for the duration of this run; never persisted.
 		runScratch := map[string]string{}
+		var scratchMu sync.Mutex
 		// Phase 5: seed scratch from trigger-supplied inputs so the very first
 		// step can reference {{run.scratch.KEY}} without a predecessor step.
 		// Used by manual runs (POST /run with body) and webhook triggers.
@@ -169,8 +216,16 @@ func MakeWorkflowRunner(
 		var prevOutput string
 		var anyStepFailed bool
 
+		// Use the pre-generated run ID from the context when available (set by
+		// RunWorkflowSyncWithInputs). This replaces the time-window heuristic
+		// in the caller with a direct store.Get lookup by the known ID, removing
+		// the race condition that could correlate the wrong run under load.
+		effectiveRunID := pregenRunIDFromContext(ctx)
+		if effectiveRunID == "" {
+			effectiveRunID = runID(w.ID)
+		}
 		run := &WorkflowRun{
-			ID:         fmt.Sprintf("wf-%s-%d", w.ID, time.Now().UnixMilli()),
+			ID:         effectiveRunID,
 			WorkflowID: w.ID,
 			Status:     WorkflowRunStatusRunning,
 			StartedAt:  time.Now().UTC(),
@@ -491,27 +546,32 @@ func MakeWorkflowRunner(
 				// Apply per-step timeout if set. The step context is always a child
 				// of the workflow context so the workflow-level deadline still wins.
 				stepCtx := ctx
+				stepCancel := func() {} // no-op default; replaced below when a per-step timeout is set
 				stepHadOwnTimeout := false
 				if d := step.TimeoutDuration(); d > 0 {
-					var stepCancel context.CancelFunc
 					stepCtx, stepCancel = context.WithTimeout(ctx, d)
-					defer stepCancel()
 					stepHadOwnTimeout = true
 				}
 				// Plumb a scratchpad writer onto the step context. Tools (e.g.
 				// future set_scratch PromptTool) read this via ScratchSetter and
-				// can mutate the live runScratch map. Mutex-free is safe because
-				// linear workflows execute one step at a time; when fan-out lands
-				// (Phase 8) this needs a sync.Map or per-call mutex.
+				// can mutate the live runScratch map. scratchMu guards the write
+				// so this is safe under parallel fan-out (Phase 8).
 				scratchSetter := func(k, v string) error {
+					scratchMu.Lock()
 					runScratch[k] = v
+					scratchMu.Unlock()
 					return nil
 				}
 				stepCtx = WithScratchSetter(stepCtx, scratchSetter)
 				stepStartedAt := time.Now().UTC()
+				slog.Debug("scheduler: workflow step starting",
+					"workflow_id", w.ID, "run_id", run.ID, "step", stepName, "position", step.Position, "agent", step.Agent)
 				output, agentErr := executeStepWithRetry(stepCtx, agentFn, opts, step)
 				stepCompletedAt := time.Now().UTC()
 				stepLatencyMs := stepCompletedAt.Sub(stepStartedAt).Milliseconds()
+				slog.Debug("scheduler: workflow step completed",
+					"workflow_id", w.ID, "run_id", run.ID, "step", stepName, "position", step.Position,
+					"latency_ms", stepLatencyMs, "success", agentErr == nil)
 				// Final flush: emit any tokens still buffered when the agent
 				// finished so the live UI sees the complete output.
 				flushTokens(true)
@@ -627,8 +687,10 @@ func MakeWorkflowRunner(
 
 				if agentErr != nil && step.EffectiveOnFailure() == "stop" {
 					aborted = true
+					stepCancel()
 					break
 				}
+				stepCancel()
 				continue
 			}
 
@@ -656,6 +718,13 @@ func MakeWorkflowRunner(
 
 		now := time.Now().UTC()
 		run.CompletedAt = &now
+		// User cancellation can happen while a step is executing; in that case
+		// the loop may break via step failure/abort paths before hitting the
+		// pre-step ctx.Done() check above. Re-check the cancellation cause here
+		// so explicit CancelWorkflow always yields a cancelled terminal state.
+		if !cancelled && errors.Is(context.Cause(ctx), errUserCancelled) {
+			cancelled = true
+		}
 		if cancelled {
 			// Explicit user cancellation — distinct from a step-failure abort.
 			run.Status = WorkflowRunStatusCancelled
@@ -789,7 +858,21 @@ func MakeWorkflowRunner(
 	}
 }
 
-// resolveInlineVars substitutes {{KEY}} placeholders in prompt with values from vars.
+// resolveInlineVars substitutes {{KEY}} placeholders in prompt with values
+// from vars using a single pass through the vars map.
+//
+// Why single-pass is sufficient:
+//
+// vars holds the static key/value pairs declared directly on a WorkflowStep
+// (step.Vars). These are literal string constants defined in the workflow YAML
+// — they never reference other vars entries or other steps' outputs. Because
+// there are no cross-variable dependencies and no circular references possible,
+// one iteration over the map is guaranteed to resolve every placeholder.
+//
+// Dynamic, cross-step substitutions ({{prev.output}}, {{inputs.alias}},
+// {{run.scratch.KEY}}) are handled separately by resolveRuntimeVars, which
+// runs after this function. The two-stage design keeps static substitution
+// cheap and free of any runtime state.
 func resolveInlineVars(prompt string, vars map[string]string) string {
 	result := prompt
 	for k, v := range vars {
@@ -975,6 +1058,9 @@ func parseOutput(output string) (summary, detail string) {
 			continue
 		}
 		// Try to parse JSON block.
+		// The double guard (valid JSON + non-empty "summary" field) ensures that
+		// arbitrary JSON output (objects without a "summary" key) falls through to
+		// the plain-text path instead of being mistakenly treated as a summary block.
 		if strings.HasPrefix(line, "{") {
 			var block struct {
 				Summary string `json:"summary"`

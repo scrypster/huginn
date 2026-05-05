@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -130,6 +133,7 @@ func (s *Server) handleSkillsGet(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/skills — create/save skill from UI (Create section)
 func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var body struct {
 		Content string `json:"content"`
 	}
@@ -156,13 +160,15 @@ func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write skill", http.StatusInternalServerError)
 		return
 	}
-	manifest, _ := skills.LoadManifest(filepath.Join(sdir, "installed.json"))
-	if manifest != nil {
-		manifest.Upsert(skills.InstalledEntry{Name: sk.Name(), Source: "local", Enabled: true})
-		if err := manifest.Save(); err != nil {
-			jsonError(w, http.StatusInternalServerError, "failed to save skill manifest: "+err.Error())
-			return
-		}
+	manifest, err := skills.LoadManifest(filepath.Join(sdir, "installed.json"))
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "load skill manifest: "+err.Error())
+		return
+	}
+	manifest.Upsert(skills.InstalledEntry{Name: sk.Name(), Source: "local", Enabled: true})
+	if err := manifest.Save(); err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to save skill manifest: "+err.Error())
+		return
 	}
 	s.reloadSkills()
 	s.BroadcastWS(WSMessage{Type: "skill_changed", Payload: map[string]any{"name": sk.Name(), "action": "created"}})
@@ -175,6 +181,7 @@ func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/skills/install
 func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var body struct {
 		Target string `json:"target"`
 	}
@@ -225,9 +232,22 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read skill content", http.StatusBadGateway)
 		return
 	}
+	// If the registry entry includes a SHA-256 hash, verify the downloaded content.
+	if found.SHA256 != "" {
+		sum := sha256.Sum256(rawBytes)
+		got := hex.EncodeToString(sum[:])
+		if got != strings.ToLower(found.SHA256) {
+			http.Error(w, fmt.Sprintf("skill integrity check failed: expected sha256 %s, got %s", found.SHA256, got), http.StatusBadGateway)
+			return
+		}
+	}
 	sk, err := skills.ParseMarkdownSkillBytes(rawBytes)
 	if err != nil {
 		http.Error(w, "invalid SKILL.md: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if !validSkillName(sk.Name()) {
+		http.Error(w, "invalid skill name in registry SKILL.md", http.StatusBadGateway)
 		return
 	}
 	sdir := s.skillsDirPath()
@@ -261,6 +281,7 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 // the old file is removed afterwards (atomic write-then-delete). The manifest is
 // updated accordingly and the skills registry is reloaded.
 func (s *Server) handleSkillsUpdate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	urlName := r.PathValue("name")
 	if !validSkillName(urlName) {
 		http.Error(w, "invalid skill name", http.StatusBadRequest)

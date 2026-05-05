@@ -164,6 +164,11 @@
           </div>
         </div>
 
+        <div v-if="installError"
+          class="mx-4 mt-3 px-3 py-2 rounded-lg bg-huginn-red/10 border border-huginn-red/30 text-huginn-red text-xs">
+          {{ installError }}
+        </div>
+
         <!-- Loading -->
         <div v-if="registry.loading.value" class="flex-1 flex items-center justify-center">
           <div class="w-5 h-5 border border-huginn-border border-t-huginn-blue rounded-full animate-spin" />

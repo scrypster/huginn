@@ -4,10 +4,14 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/relay"
 )
+
+const defaultNotificationLimit = 100
+const maxNotificationLimit = 1000
 
 func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
@@ -17,15 +21,26 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 		jsonOK(w, []any{})
 		return
 	}
+
+	limit := defaultNotificationLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxNotificationLimit {
+		limit = maxNotificationLimit
+	}
+
 	var notifications []*notification.Notification
 	var err error
 	switch {
 	case r.URL.Query().Get("routine_id") != "":
-		notifications, err = store.ListByRoutine(r.URL.Query().Get("routine_id"))
+		notifications, err = store.ListByRoutineN(r.URL.Query().Get("routine_id"), limit)
 	case r.URL.Query().Get("workflow_id") != "":
-		notifications, err = store.ListByWorkflow(r.URL.Query().Get("workflow_id"))
+		notifications, err = store.ListByWorkflowN(r.URL.Query().Get("workflow_id"), limit)
 	default:
-		notifications, err = store.ListPending()
+		notifications, err = store.ListPendingN(limit)
 	}
 	if err != nil {
 		jsonError(w, 500, err.Error())
@@ -88,8 +103,8 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 			jsonError(w, 404, "notification not found")
 			return
 		}
-		if len(n.ProposedActions) == 0 {
-			jsonError(w, 422, "notification has no proposed actions to approve")
+		if _, err := notification.ResolveApproveAction(n, body.ProposedActionID); err != nil {
+			jsonError(w, 422, err.Error())
 			return
 		}
 		newStatus = notification.StatusApproved
@@ -131,7 +146,14 @@ func (s *Server) handleInboxSummary(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]int{"pending_count": 0, "urgent_count": 0})
 		return
 	}
-	pending, err := store.ListPending()
+	pendingCount, err := store.PendingCount()
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	// Load up to defaultNotificationLimit items to count urgent ones.
+	// Beyond this cap, urgent_count is a lower bound — acceptable for a badge.
+	pending, err := store.ListPendingN(defaultNotificationLimit)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -143,7 +165,7 @@ func (s *Server) handleInboxSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, map[string]int{
-		"pending_count": len(pending),
+		"pending_count": pendingCount,
 		"urgent_count":  urgentCount,
 	})
 }

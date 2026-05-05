@@ -47,6 +47,36 @@ func TestBuildSpaceContextBlock_LeadAgentBlock_ContainsDelegationProtocol(t *tes
 	if !strings.Contains(result, "delegate_to_agent") {
 		t.Error("lead agent block missing delegate_to_agent tool reference")
 	}
+	if !strings.Contains(result, "Prefer delegate-first routing") {
+		t.Error("lead agent block missing delegate-first specialist routing rule")
+	}
+}
+
+func TestBuildSpaceContextBlock_LeadAgentBlock_UsesRosterExamples(t *testing.T) {
+	result := BuildSpaceContextBlock("Engineering", "channel", "Tom", "Tom", []SpaceMember{
+		{Name: "Sam", Description: "backend specialist"},
+		{Name: "Dave", Description: "devops specialist"},
+	})
+
+	if !strings.Contains(result, "agent=\"Sam\"") {
+		t.Error("lead agent examples should include first roster member")
+	}
+	if !strings.Contains(result, "agent=\"Dave\"") {
+		t.Error("lead agent examples should include second roster member")
+	}
+	if strings.Contains(result, "agent=\"Adam\"") {
+		t.Error("lead agent examples should not hardcode non-roster names")
+	}
+}
+
+func TestBuildSpaceContextBlock_LeadAgentBlock_UsesPlaceholderWhenNoDelegateMembers(t *testing.T) {
+	result := BuildSpaceContextBlock("Engineering", "channel", "Tom", "Tom", []SpaceMember{
+		{Name: "Tom", Description: "lead"},
+	})
+
+	if !strings.Contains(result, "agent=\"<teammate_name>\"") {
+		t.Error("expected placeholder delegation example when no delegate members exist")
+	}
 }
 
 func TestBuildSpaceContextBlock_LeadAgentBlock_ListsMembers(t *testing.T) {

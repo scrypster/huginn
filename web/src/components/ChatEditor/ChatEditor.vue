@@ -33,7 +33,7 @@ onMounted(async () => {
   try { agents.value = await api.agents.list() } catch { /* ignore */ }
 })
 
-const { editor, init, getMarkdown, clear, focus, isEmpty } = useEditor({
+const { editor, init, getMarkdown, clear, focus, setText, isEmpty } = useEditor({
   agents,
   onSend: handleSend,
   placeholder: props.placeholder ?? 'Message huginn...',
@@ -83,7 +83,7 @@ function handleSend() {
   focus()
 }
 
-defineExpose({ focus })
+defineExpose({ focus, setText })
 </script>
 
 <style>

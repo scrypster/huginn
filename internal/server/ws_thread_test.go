@@ -89,7 +89,7 @@ func TestHandleWSMessage_ThreadCancel(t *testing.T) {
 	}
 }
 
-func TestHandleWSMessage_ThreadInject_BufferFull(t *testing.T) {
+func TestHandleWSMessage_ThreadInject_NotWaiting(t *testing.T) {
 	tm := threadmgr.New()
 	thread, err := tm.Create(threadmgr.CreateParams{
 		SessionID: "sess-1",
@@ -100,12 +100,10 @@ func TestHandleWSMessage_ThreadInject_BufferFull(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Fill the buffer (capacity = 1)
 	ch, ok := tm.GetInputCh(thread.ID)
 	if !ok {
 		t.Fatal("thread not found")
 	}
-	ch <- "first message"
 
 	s := &Server{tm: tm}
 	c := &wsClient{send: make(chan WSMessage, 4), ctx: context.Background()}
@@ -116,60 +114,53 @@ func TestHandleWSMessage_ThreadInject_BufferFull(t *testing.T) {
 			"content":   "dropped message",
 		},
 	}
-	// Should not panic or block — message is silently dropped
 	s.handleWSMessage(c, msg)
 
-	// Drain the channel — should only have the first message
 	select {
-	case received := <-ch:
-		if received != "first message" {
-			t.Errorf("expected first message, got %q", received)
+	case got := <-c.send:
+		if got.Type != "thread_inject_error" {
+			t.Fatalf("expected thread_inject_error, got %q", got.Type)
 		}
-	default:
-		t.Error("expected first message in channel")
+		reason, _ := got.Payload["reason"].(string)
+		if reason != "not_waiting" {
+			t.Fatalf("expected reason not_waiting, got %q", reason)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout: expected thread_inject_error")
 	}
 
-	// Buffer should now be empty — dropped message was not queued
+	// No input should be delivered while thread is not blocked.
 	select {
 	case extra := <-ch:
-		t.Errorf("dropped message appeared in channel: %q", extra)
+		t.Errorf("unexpected input delivered while not waiting: %q", extra)
 	default:
-		// correct — buffer is empty
+		// expected
 	}
 }
 
-func TestHandleWSMessage_ThreadInject(t *testing.T) {
+func TestHandleWSMessage_ThreadInject_UnknownThread(t *testing.T) {
 	tm := threadmgr.New()
-	thread, err := tm.Create(threadmgr.CreateParams{
-		SessionID: "sess-1",
-		AgentID:   "Helper",
-		Task:      "help needed",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	s := &Server{tm: tm}
 	c := &wsClient{send: make(chan WSMessage, 4), ctx: context.Background()}
 	msg := WSMessage{
 		Type: "thread_inject",
 		Payload: map[string]any{
-			"thread_id": thread.ID,
+			"thread_id": "thread-does-not-exist",
 			"content":   "here is the clarification",
 		},
 	}
 	s.handleWSMessage(c, msg)
 
-	ch, ok := tm.GetInputCh(thread.ID)
-	if !ok {
-		t.Fatal("thread not found")
-	}
 	select {
-	case received := <-ch:
-		if received != "here is the clarification" {
-			t.Errorf("expected injected content, got %q", received)
+	case got := <-c.send:
+		if got.Type != "thread_inject_error" {
+			t.Fatalf("expected thread_inject_error, got %q", got.Type)
+		}
+		reason, _ := got.Payload["reason"].(string)
+		if reason != "not_found" {
+			t.Fatalf("expected reason not_found, got %q", reason)
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Error("timeout: no message delivered to thread InputCh")
+		t.Fatal("timeout: expected thread_inject_error")
 	}
 }

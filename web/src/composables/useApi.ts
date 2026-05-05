@@ -351,6 +351,14 @@ export const api = {
 
   logs: (n = 100) => apiFetch<{ lines: string[] }>(`/api/v1/logs?n=${n}`),
 
+  logLevel: {
+    get: () => apiFetch<{ level: string }>('/api/v1/log-level'),
+    set: (level: string) => apiFetch<{ level: string }>('/api/v1/log-level', {
+      method: 'PUT',
+      body: JSON.stringify({ level }),
+    }),
+  },
+
   connections: {
     list: () => apiFetch<Connection[]>('/api/v1/connections'),
     providers: () => apiFetch<Provider[]>('/api/v1/providers'),
@@ -399,14 +407,18 @@ export const api = {
     updateSpace: (id: string, patch: Record<string, unknown>) =>
       apiFetch<unknown>(`/api/v1/spaces/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
     markRead: (id: string) => apiFetch<unknown>(`/api/v1/spaces/${id}/mark-read`, { method: 'POST' }),
-    sessions: (id: string) => apiFetch<unknown[]>(`/api/v1/space-sessions/${id}`),
+    sessions: (id: string, opts?: { signal?: AbortSignal }) =>
+      apiFetch<unknown[]>(`/api/v1/space-sessions/${id}`, { signal: opts?.signal }),
     deleteSpace: (id: string) => apiFetch<unknown>(`/api/v1/spaces/${id}`, { method: 'DELETE' }),
     // Returns chronological messages across all sessions in a space.
     // Use `before` (cursor from a prior response) to load older messages.
-    messages: (spaceId: string, before?: string, limit = 20) => {
+    messages: (spaceId: string, before?: string, limit = 20, opts?: { signal?: AbortSignal }) => {
       const params = new URLSearchParams({ limit: String(limit) })
       if (before) params.set('before', before)
-      return apiFetch<{ messages: SpaceMessage[]; next_cursor: string }>(`/api/v1/space-messages/${spaceId}?${params}`)
+      return apiFetch<{ messages: SpaceMessage[]; next_cursor: string }>(
+        `/api/v1/space-messages/${spaceId}?${params}`,
+        { signal: opts?.signal },
+      )
     },
   },
 

@@ -36,6 +36,9 @@ jobs:
       - name: Build server (with embedded frontend)
         run: go build -tags embed_frontend -o huginn .
 
+      - name: Enforce OpenAPI route parity
+        run: python3 scripts/check_openapi_parity.py
+
       - name: Run Go tests
         run: go test -race -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
 

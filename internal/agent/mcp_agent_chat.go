@@ -25,6 +25,9 @@ func (o *Orchestrator) AgentChat(
 	onBeforeWrite func(path string, oldContent, newContent []byte) bool,
 	onEvent func(backend.StreamEvent),
 ) error {
+	if err := o.ValidateWiring(); err != nil {
+		return err
+	}
 	o.mu.Lock()
 	reg := o.toolRegistry
 	gate := o.permGate

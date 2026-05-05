@@ -27,6 +27,8 @@ afterEach(() => {
 
 async function createComposable() {
   // Re-import fresh to get a clean module state
+  const { setToken } = await import('../useApi')
+  setToken('test-token')
   const { useWorkstreams } = await import('../useWorkstreams')
   return useWorkstreams()
 }

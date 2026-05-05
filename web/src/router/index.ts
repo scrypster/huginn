@@ -31,5 +31,6 @@ export default createRouter({
     { path: '/workflows/:id/runs/:runId', component: WorkflowsView, props: true },
     { path: '/cloud', component: CloudView },
     { path: '/skills/:tab?', component: SkillsView, props: true },
+    { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

@@ -22,12 +22,12 @@ func makeNotif(routineID, runID string, sev notification.Severity) *notification
 		ID:        notification.NewID(),
 		RoutineID: routineID,
 		RunID:     runID,
-		Summary:      "test summary",
-		Detail:       "test detail",
-		Severity:     sev,
-		Status:       notification.StatusPending,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
+		Summary:   "test summary",
+		Detail:    "test detail",
+		Severity:  sev,
+		Status:    notification.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 }
 
@@ -179,5 +179,109 @@ func TestStore_ListByWorkflow(t *testing.T) {
 	}
 	if results[0].WorkflowRunID != "run1" {
 		t.Error("WorkflowRunID mismatch")
+	}
+}
+
+func TestStore_ListPendingN_RespectsLimit(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	s := notification.NewStore(db)
+
+	const total = 10
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		n := makeNotif("routineA", "run1", notification.SeverityInfo)
+		if err := s.Put(n); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, n.ID)
+	}
+	// Newest-first means lexicographically largest ULID first (ULID sorts by time).
+	// Find the max ID across all inserted notifications — that is what the store
+	// should return as got[0] regardless of insertion order within a millisecond.
+	maxID := ids[0]
+	for _, id := range ids[1:] {
+		if id > maxID {
+			maxID = id
+		}
+	}
+
+	got, err := s.ListPendingN(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("want 5, got %d", len(got))
+	}
+	// The first result should be the lexicographically largest (newest) notification.
+	if got[0].ID != maxID {
+		t.Errorf("want first result to be newest ID %s, got %s", maxID, got[0].ID)
+	}
+
+	// limit=0 should return all
+	all, err := s.ListPendingN(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != total {
+		t.Fatalf("want %d with limit=0, got %d", total, len(all))
+	}
+	// limit=0 result should also be newest-first
+	if all[0].ID != maxID {
+		t.Errorf("want first result (no limit) to be newest ID %s, got %s", maxID, all[0].ID)
+	}
+}
+
+func TestStore_PutOverwrite_RemovesStaleIndexes(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	s := notification.NewStore(db)
+
+	n := makeNotif("routine-old", "run-old", notification.SeverityInfo)
+	n.ID = "notif-stale-index"
+	n.WorkflowID = "workflow-old"
+	if err := s.Put(n); err != nil {
+		t.Fatalf("Put old: %v", err)
+	}
+
+	n.RoutineID = "routine-new"
+	n.RunID = "run-new"
+	n.WorkflowID = "workflow-new"
+	n.Status = notification.StatusSeen
+	n.UpdatedAt = time.Now().UTC()
+	if err := s.Put(n); err != nil {
+		t.Fatalf("Put new: %v", err)
+	}
+
+	oldRoutine, err := s.ListByRoutine("routine-old")
+	if err != nil {
+		t.Fatalf("ListByRoutine(old): %v", err)
+	}
+	if len(oldRoutine) != 0 {
+		t.Fatalf("old routine index should be empty, got %d entries", len(oldRoutine))
+	}
+
+	oldWorkflow, err := s.ListByWorkflow("workflow-old")
+	if err != nil {
+		t.Fatalf("ListByWorkflow(old): %v", err)
+	}
+	if len(oldWorkflow) != 0 {
+		t.Fatalf("old workflow index should be empty, got %d entries", len(oldWorkflow))
+	}
+
+	pending, err := s.ListPending()
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending should be empty after overwrite to seen, got %d", len(pending))
+	}
+
+	got, err := s.Get(n.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.RoutineID != "routine-new" || got.WorkflowID != "workflow-new" || got.Status != notification.StatusSeen {
+		t.Fatalf("unexpected canonical record after overwrite: %+v", got)
 	}
 }

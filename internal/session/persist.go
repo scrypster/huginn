@@ -25,9 +25,9 @@ type PersistentSession struct {
 	WsName    string    `json:"workspace_name,omitempty"`
 	Status    string    `json:"status"` // "active" | "closed"
 	Version   int       `json:"version"`
-	Source    string `json:"source,omitempty"`
-	RoutineID string `json:"routine_id,omitempty"`
-	RunID     string `json:"run_id,omitempty"`
+	Source    string    `json:"source,omitempty"`
+	RoutineID string    `json:"routine_id,omitempty"`
+	RunID     string    `json:"run_id,omitempty"`
 }
 
 // PersistedMessage is a single JSONL record in messages.jsonl.
@@ -41,7 +41,7 @@ type PersistedMessage struct {
 	ToolCalls    any     `json:"tool_calls,omitempty"`
 	ToolName     string  `json:"tool_name,omitempty"`
 	ToolCallID   string  `json:"tool_call_id,omitempty"`
-	Type         string  `json:"type,omitempty"` // "cost" for cost records
+	Type         string  `json:"type,omitempty"` // "cost" for cost records, "thread_event" for lifecycle timeline records
 	PromptTokens int     `json:"prompt_tokens,omitempty"`
 	CompTokens   int     `json:"completion_tokens,omitempty"`
 	CostUSD      float64 `json:"cost_usd,omitempty"`

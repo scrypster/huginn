@@ -49,6 +49,19 @@ func validateWorkflow(wf *scheduler.Workflow) error {
 	}
 
 	for i, step := range wf.Steps {
+		// Rule 0: execution target must be explicit.
+		// A step must provide one of:
+		//   - routine (legacy)
+		//   - sub_workflow
+		//   - inline agent+prompt
+		if step.Routine == "" && step.SubWorkflow == "" && strings.TrimSpace(step.Prompt) == "" {
+			return fmt.Errorf("step[%d]: missing prompt (required for inline step)", i+1)
+		}
+		// Rule 0b: self-referential sub-workflow is always invalid.
+		if step.SubWorkflow != "" && step.SubWorkflow == wf.ID {
+			return fmt.Errorf("step[%d]: sub_workflow %q cannot reference the current workflow id", i+1, step.SubWorkflow)
+		}
+
 		// Rule 1: dangling from_step references and self-references.
 		for j, inp := range step.Inputs {
 			if inp.FromStep == "" {
@@ -172,6 +185,14 @@ func validateWorkflow(wf *scheduler.Workflow) error {
 	return nil
 }
 
+// validateSubWorkflowCycles detects cycles in SubWorkflow cross-references
+// across the full workflow registry. A cycle (e.g. A→B→A) would cause
+// infinite recursion at runtime. wf is the workflow being saved (may be
+// new and not yet present in all). all is the current on-disk registry.
+func validateSubWorkflowCycles(wf *scheduler.Workflow, all []*scheduler.Workflow) error {
+	return scheduler.ValidateSubWorkflowCycles(wf, all)
+}
+
 // validateWorkflowAgentsAndConnections checks that every step in the workflow
 // references a known agent name and known connection IDs. It is a best-effort
 // check: if the agent loader or connection store are unavailable the check is
@@ -264,6 +285,17 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 422, "invalid workflow: "+err.Error())
 		return
 	}
+	// Check for cycles across the cross-workflow SubWorkflow call graph.
+	dir := filepath.Join(s.huginnDir, "workflows")
+	allWFs, loadErr := scheduler.LoadWorkflows(dir)
+	if loadErr != nil {
+		jsonError(w, 500, "load workflows: "+loadErr.Error())
+		return
+	}
+	if err := validateSubWorkflowCycles(&wf, allWFs); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	wf.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(wf.TimeoutMinutes)
 	if wf.ID == "" {
@@ -272,7 +304,6 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	wf.CreatedAt = now
 	wf.UpdatedAt = now
-	dir := filepath.Join(s.huginnDir, "workflows")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		jsonError(w, 500, "create workflows dir: "+err.Error())
 		return
@@ -340,6 +371,11 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updates.ID = id
+	// Check for cycles across the cross-workflow SubWorkflow call graph.
+	if err := validateSubWorkflowCycles(&updates, workflows); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
 	updates.FilePath = target.FilePath
 	updates.CreatedAt = target.CreatedAt
 	updates.UpdatedAt = time.Now().UTC()
@@ -347,7 +383,9 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	updates.Version = target.Version
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	updates.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(updates.TimeoutMinutes)
-	if err := scheduler.SaveWorkflow(dir, &updates); err != nil {
+	// Two-phase write: write to temp first, only commit after scheduler registration succeeds.
+	tmpPath, err := scheduler.WriteWorkflowTemp(dir, &updates)
+	if err != nil {
 		jsonError(w, 500, "save workflow: "+err.Error())
 		return
 	}
@@ -358,27 +396,28 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		sched.RemoveWorkflow(id)
 		if updates.Enabled {
 			if err := sched.RegisterWorkflow(&updates); err != nil {
-				// Scheduler registration failed — attempt compensating rollback to
-				// restore the previous workflow on disk and re-register it.
-				// TODO: replace with atomic save-then-register (temp file + rename) to
-				// eliminate the divergence window entirely.
-				rollbackMsg := "register workflow: " + err.Error()
-				if rerr := scheduler.SaveWorkflow(dir, target); rerr != nil {
-					slog.Error("workflow update: rollback save failed; workflow may be in inconsistent state",
-						"id", id, "save_err", rerr, "register_err", err)
-					jsonError(w, 500, rollbackMsg+"; rollback also failed — manual scheduler restart may be required")
-					return
-				}
+				// Registration failed — discard temp file (disk unchanged) and
+				// restore old version in scheduler.
+				_ = os.Remove(tmpPath)
 				if target.Enabled {
 					if rerr := sched.RegisterWorkflow(target); rerr != nil {
-						slog.Error("workflow update: rollback re-register failed; workflow may be in inconsistent state",
-							"id", id, "register_err", rerr)
+						slog.Error("workflow update: rollback re-register failed",
+							"id", id, "err", rerr)
 					}
 				}
-				jsonError(w, 500, rollbackMsg)
+				jsonError(w, 500, "register workflow: "+err.Error())
 				return
 			}
 		}
+	}
+	// Registration succeeded (or scheduler nil/disabled) — commit the file.
+	if err := os.Rename(tmpPath, updates.FilePath); err != nil {
+		// Rename failed after registration succeeded — scheduler and disk are now
+		// diverged. Log prominently and return 500.
+		slog.Error("workflow update: commit rename failed; scheduler registered but disk not updated",
+			"id", id, "tmp", tmpPath, "dest", updates.FilePath, "err", err)
+		jsonError(w, 500, "commit workflow: "+err.Error())
+		return
 	}
 	jsonOK(w, updates)
 }
@@ -429,11 +468,8 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, "workflow not found")
 		return
 	}
-	s.mu.Lock()
-	sched := s.sched
-	s.mu.Unlock()
+	sched := s.requireScheduler(w)
 	if sched == nil {
-		jsonError(w, 503, "scheduler not configured")
 		return
 	}
 	// Phase 5: optional `{"inputs": {...}}` body lets manual runs seed the
@@ -462,11 +498,8 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 //	POST /api/v1/workflows/{id}/cancel
 func (s *Server) handleCancelWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.mu.Lock()
-	sched := s.sched
-	s.mu.Unlock()
+	sched := s.requireScheduler(w)
 	if sched == nil {
-		jsonError(w, 503, "scheduler not configured")
 		return
 	}
 	if !sched.CancelWorkflow(id) {
@@ -500,11 +533,8 @@ func (s *Server) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	workflowID := r.PathValue("id")
 	runID := r.PathValue("run_id")
-	s.mu.Lock()
-	store := s.workflowRunStore
-	s.mu.Unlock()
+	store := s.requireWorkflowRunStore(w, http.StatusNotFound)
 	if store == nil {
-		jsonError(w, 404, "run not found")
 		return
 	}
 	run, err := store.Get(workflowID, runID)
@@ -581,11 +611,8 @@ func (s *Server) handleTriggerWebhook(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, "workflow not found")
 		return
 	}
-	s.mu.Lock()
-	sched := s.sched
-	s.mu.Unlock()
+	sched := s.requireScheduler(w)
 	if sched == nil {
-		jsonError(w, 503, "scheduler not configured")
 		return
 	}
 
@@ -647,12 +674,8 @@ func (s *Server) handleReplayWorkflowRun(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	runID := r.PathValue("run_id")
 
-	s.mu.Lock()
-	store := s.workflowRunStore
-	sched := s.sched
-	s.mu.Unlock()
+	store := s.requireWorkflowRunStore(w, http.StatusServiceUnavailable)
 	if store == nil {
-		jsonError(w, 503, "run store not configured")
 		return
 	}
 	// Look up the run BEFORE the scheduler check so a missing run id
@@ -666,8 +689,8 @@ func (s *Server) handleReplayWorkflowRun(w http.ResponseWriter, r *http.Request)
 		jsonError(w, 404, "run not found")
 		return
 	}
+	sched := s.requireScheduler(w)
 	if sched == nil {
-		jsonError(w, 503, "scheduler not configured")
 		return
 	}
 	if prior.WorkflowSnapshot == nil || prior.WorkflowSnapshot.ID == "" {
@@ -696,10 +719,10 @@ func (s *Server) handleReplayWorkflowRun(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		jsonOK(w, map[string]any{
-			"status":            "triggered",
-			"replayed_run_id":   runID,
-			"used_snapshot":     false,
-			"used_input_count":  len(prior.TriggerInputs),
+			"status":           "triggered",
+			"replayed_run_id":  runID,
+			"used_snapshot":    false,
+			"used_input_count": len(prior.TriggerInputs),
 		})
 		return
 	}
@@ -734,12 +757,8 @@ func (s *Server) handleForkWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	runID := r.PathValue("run_id")
 
-	s.mu.Lock()
-	store := s.workflowRunStore
-	sched := s.sched
-	s.mu.Unlock()
+	store := s.requireWorkflowRunStore(w, http.StatusServiceUnavailable)
 	if store == nil {
-		jsonError(w, 503, "run store not configured")
 		return
 	}
 	prior, err := store.Get(id, runID)
@@ -751,11 +770,10 @@ func (s *Server) handleForkWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, "run not found")
 		return
 	}
+	sched := s.requireScheduler(w)
 	if sched == nil {
-		jsonError(w, 503, "scheduler not configured")
 		return
 	}
-
 	var body struct {
 		Inputs            map[string]any `json:"inputs"`
 		UseLiveDefinition bool           `json:"use_live_definition"`
@@ -802,10 +820,10 @@ func (s *Server) handleForkWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"status":              "triggered",
-		"forked_run_id":       runID,
-		"source":              source,
-		"used_input_count":    len(merged),
+		"status":               "triggered",
+		"forked_run_id":        runID,
+		"source":               source,
+		"used_input_count":     len(merged),
 		"override_input_count": len(overrides),
 	})
 }
@@ -821,11 +839,8 @@ func (s *Server) handleDiffWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 	leftID := r.PathValue("run_id")
 	rightID := r.PathValue("other_run_id")
 
-	s.mu.Lock()
-	store := s.workflowRunStore
-	s.mu.Unlock()
+	store := s.requireWorkflowRunStore(w, http.StatusServiceUnavailable)
 	if store == nil {
-		jsonError(w, 503, "run store not configured")
 		return
 	}
 	left, err := store.Get(id, leftID)
@@ -1035,6 +1050,16 @@ func (s *Server) handleValidateWorkflow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.validateWorkflowAgentsAndConnections(&wf); err != nil {
+		jsonError(w, http.StatusUnprocessableEntity, "invalid workflow: "+err.Error())
+		return
+	}
+	dir := filepath.Join(s.huginnDir, "workflows")
+	allWFs, err := scheduler.LoadWorkflows(dir)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "load workflows: "+err.Error())
+		return
+	}
+	if err := validateSubWorkflowCycles(&wf, allWFs); err != nil {
 		jsonError(w, http.StatusUnprocessableEntity, "invalid workflow: "+err.Error())
 		return
 	}

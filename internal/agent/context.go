@@ -28,14 +28,14 @@ const (
 // It queries the workspace for relevant chunks and trims to fit the model's
 // context window. Injected into the Orchestrator.
 type ContextBuilder struct {
-	mu              sync.RWMutex
-	idx             *repo.Index
-	registry        *modelconfig.ModelRegistry
-	stats           stats.Collector
-	skillsFragment  string
-	notepads        []*notepad.Notepad
-	gitRoot         string
-	searcher        search.Searcher
+	mu             sync.RWMutex
+	idx            *repo.Index
+	registry       *modelconfig.ModelRegistry
+	stats          stats.Collector
+	skillsFragment string
+	notepads       []*notepad.Notepad
+	gitRoot        string
+	searcher       search.Searcher
 }
 
 // NewContextBuilder creates a ContextBuilder.
@@ -82,6 +82,17 @@ func (cb *ContextBuilder) SetSearcher(s search.Searcher) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.searcher = s
+}
+
+// SearchHealth returns search telemetry when the configured searcher reports it.
+func (cb *ContextBuilder) SearchHealth() (search.HealthSnapshot, bool) {
+	cb.mu.RLock()
+	searcher := cb.searcher
+	cb.mu.RUnlock()
+	if reporter, ok := searcher.(search.HealthReporter); ok {
+		return reporter.SearchHealth(), true
+	}
+	return search.HealthSnapshot{}, false
 }
 
 // Build assembles a context string for the given query and model slot.
@@ -244,6 +255,33 @@ type SpaceMember struct {
 	Description string
 }
 
+func delegationExampleAgents(selfName string, members []SpaceMember) (string, string) {
+	names := make([]string, 0, 2)
+	seen := map[string]struct{}{}
+	for _, m := range members {
+		name := strings.TrimSpace(m.Name)
+		if name == "" || strings.EqualFold(name, selfName) {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+		if len(names) == 2 {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return "<teammate_name>", "<another_teammate_name>"
+	}
+	if len(names) == 1 {
+		return names[0], "<another_teammate_name>"
+	}
+	return names[0], names[1]
+}
+
 // BuildSpaceContextBlock generates a system prompt addendum for a multi-agent channel.
 // selfName is the name of the agent receiving this context; leadAgent is the channel lead.
 // When selfName matches leadAgent, the block describes the agent as the lead with routing
@@ -266,8 +304,18 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 		sb.WriteString("**Delegation protocol — use the `delegate_to_agent` tool:**\n")
 		sb.WriteString("When you need a team member to handle a sub-task, call `delegate_to_agent` with their name and a clear, actionable task description.\n")
 		sb.WriteString("The tool spawns a thread automatically — the agent's reply will appear as a thread on your message, just like Slack.\n\n")
-		sb.WriteString("  GOOD: Call delegate_to_agent with agent=\"Sam\", task=\"Calculate 3+3 and return a one-sentence answer.\", rationale=\"Sam specialises in arithmetic\"\n")
-		sb.WriteString("  GOOD: Call delegate_to_agent with agent=\"Adam\", task=\"List the top 3 best practices for Go unit tests. Keep it brief.\", rationale=\"Adam is the Go expert\"\n")
+		sb.WriteString("Prefer delegate-first routing when a specialist exists for the request. Only do the task yourself when no specialist is clearly better suited.\n\n")
+		exampleAgentA, exampleAgentB := delegationExampleAgents(selfName, members)
+		fmt.Fprintf(&sb, "  GOOD: Call delegate_to_agent with agent=%q, task=%q, rationale=%q\n",
+			exampleAgentA,
+			"Calculate 3+3 and return a one-sentence answer.",
+			fmt.Sprintf("%s specialises in arithmetic", exampleAgentA),
+		)
+		fmt.Fprintf(&sb, "  GOOD: Call delegate_to_agent with agent=%q, task=%q, rationale=%q\n",
+			exampleAgentB,
+			"List the top 3 best practices for Go unit tests. Keep it brief.",
+			fmt.Sprintf("%s is the Go expert", exampleAgentB),
+		)
 		sb.WriteString("  BAD:  Mentioning a team member by name in your message without calling delegate_to_agent — this does nothing.\n")
 		sb.WriteString("  BAD:  A vague task like \"help with this\" — the agent needs a specific, complete description to act.\n\n")
 		sb.WriteString("**Main channel discipline — speak only when additive:**\n")
@@ -277,6 +325,7 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 		sb.WriteString("3. A blocker the user needs to know about.\n")
 		sb.WriteString("Do NOT summarize or narrate what team members said — the user can read the thread.\n\n")
 		sb.WriteString("**Team members:**\n")
+		sb.WriteString("Select delegates by matching each member card's Role, Tools, Connections, and Skills to the request; do not guess specialist fit.\n")
 	} else {
 		sb.WriteString("**Channel:** ")
 		sb.WriteString(spaceName)
@@ -316,7 +365,7 @@ func BuildDMCrossSpaceContextBlock(selfName string, channels []ChannelRoster) st
 	var sb strings.Builder
 	sb.WriteString("\n\n[Your Channels & Teams]\n")
 	sb.WriteString("You participate in the following team channels. When the user asks you to do something that involves a team member, ")
-	sb.WriteString("you can delegate work using the delegate_to_agent tool or @mention the agent.\n\n")
+	sb.WriteString("call the delegate_to_agent tool to spawn work and keep the handoff visible in thread activity.\n\n")
 	for _, ch := range channels {
 		sb.WriteString("**#")
 		sb.WriteString(ch.Name)
