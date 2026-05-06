@@ -20,26 +20,36 @@
 
     <!-- Save to Memory (assistant messages, vault configured) -->
     <template v-if="msg.role === 'assistant' && agentVaultName">
-      <!-- Agent already saved — show indicator, no button -->
+      <!-- Agent already saved or user just saved — show indicator -->
       <span
-        v-if="agentAlreadySaved"
+        v-if="agentAlreadySaved || saved"
+        data-testid="msg-saved-indicator"
         class="text-[10px] px-2 py-0.5 rounded"
         style="color:#3fb950"
       >Saved ✓</span>
+      <!-- Save failed -->
+      <span
+        v-else-if="saveError"
+        data-testid="msg-save-error"
+        class="text-[10px] px-2 py-0.5 rounded"
+        style="color:#f85149"
+      >Save failed</span>
       <!-- User can save -->
       <button
         v-else
         data-testid="msg-save-memory"
         @click="handleSaveMemory"
+        :disabled="saving"
         class="text-[10px] px-2 py-0.5 rounded transition-colors"
         style="background:rgba(255,255,255,0.06);color:#8b949e"
-      >Save to Memory</button>
+      >{{ saving ? 'Saving…' : 'Save to Memory' }}</button>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { api } from '../composables/useApi'
 import type { ChatMessage } from '../composables/useSessions'
 
 const MEMORY_TOOLS = ['muninn_remember', 'muninn_decide', 'muninn_evolve']
@@ -49,12 +59,14 @@ const props = defineProps<{
   agentVaultName: string
 }>()
 
-const emit = defineEmits<{
+defineEmits<{
   (e: 'retry', content: string): void
-  (e: 'save-memory', payload: { vault: string; content: string }): void
 }>()
 
 const copied = ref(false)
+const saving = ref(false)
+const saved = ref(false)
+const saveError = ref(false)
 
 // True when the agent already called a memory tool during this turn.
 const agentAlreadySaved = computed(() =>
@@ -69,7 +81,18 @@ async function handleCopy() {
   } catch { /* clipboard API not available */ }
 }
 
-function handleSaveMemory() {
-  emit('save-memory', { vault: props.agentVaultName, content: props.msg.content })
+async function handleSaveMemory() {
+  if (!props.agentVaultName || saving.value) return
+  saving.value = true
+  saveError.value = false
+  try {
+    await api.muninn.remember(props.agentVaultName, props.msg.content)
+    saved.value = true
+  } catch {
+    saveError.value = true
+    setTimeout(() => { saveError.value = false }, 3000)
+  } finally {
+    saving.value = false
+  }
 }
 </script>

@@ -753,7 +753,6 @@
                 class="mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
                 :agent-vault-name="activeAgentVaultName"
-                @save-memory="handleSaveMemory"
               />
               </div>
             </div>
@@ -1973,23 +1972,6 @@ function handleRetry(content: string) {
   scrollToBottom()
 }
 
-async function handleSaveMemory({ vault, content }: { vault: string; content: string }) {
-  if (!vault) return
-  try {
-    await apiFetch('/api/v1/muninn/tool', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        vault,
-        tool: 'muninn_remember',
-        args: {
-          concept: content.trim().slice(0, 60),
-          content,
-        },
-      }),
-    })
-  } catch { /* silent */ }
-}
 
 function cancelThread(threadId: string) {
   const ws = wsRef.value

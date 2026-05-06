@@ -440,6 +440,15 @@ export const api = {
         body: JSON.stringify(payload),
       }),
     vaults: () => apiFetch<{ vaults: string[] }>('/api/v1/muninn/vaults'),
+    remember: (vault: string, content: string) =>
+      apiFetch<{ id?: string }>('/api/v1/muninn/tool', {
+        method: 'POST',
+        body: JSON.stringify({
+          vault,
+          tool: 'muninn_remember',
+          args: { concept: content.trim().slice(0, 60), content },
+        }),
+      }),
     createVault: (payload: { vault_name: string; agent_label: string }) =>
       apiFetch<{ vault_name: string; token: string }>('/api/v1/muninn/vaults', {
         method: 'POST',
