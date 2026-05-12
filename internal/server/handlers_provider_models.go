@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -116,6 +117,41 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 			endpoint = strings.TrimSuffix(s.cfg.Backend.Endpoint, "/")
 		}
 		models, fetchErr = fetchAnthropicModels(endpoint, apiKey)
+
+	case "vertex":
+		// Live-fetch the publisher model listing from Vertex AI whenever
+		// project + credentials are wired — even when vertex is not the
+		// globally selected provider, so the UI can show what's available
+		// before the user commits to switching providers. Falls back to the
+		// curated vertexKnownModels list when credentials aren't configured.
+		project := s.cfg.Backend.Project
+		if project == "" {
+			project = os.Getenv("GOOGLE_CLOUD_PROJECT")
+		}
+		location := s.cfg.Backend.Location
+		if location == "" {
+			location = os.Getenv("GOOGLE_CLOUD_LOCATION")
+		}
+		credsRef := s.cfg.Backend.CredentialsPath
+		credsConfigured := credsRef != "" || os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != ""
+		if project == "" || !credsConfigured {
+			jsonOK(w, vertexKnownModels)
+			return
+		}
+		fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		live, listErr := backend.ListVertexPublisherModels(fetchCtx, project, location, credsRef)
+		cancel()
+		if listErr != nil || len(live) == 0 {
+			jsonOK(w, vertexKnownModels)
+			return
+		}
+		out := make([]providerModel, 0, len(live))
+		for _, m := range live {
+			out = append(out, vertexPublisherToProviderModel(m))
+		}
+		writeProviderModelsCache(provider, out)
+		jsonOK(w, out)
+		return
 
 	default:
 		jsonError(w, http.StatusBadRequest, "unknown provider: "+provider)
@@ -461,3 +497,45 @@ func anthropicTags(id string) []string {
 		return nil
 	}
 }
+
+// ── Vertex AI ────────────────────────────────────────────────────────────────
+
+// vertexKnownModels are the Gemini and Anthropic-on-Vertex models exposed
+// through the Vertex backend. The backend's ContextWindowForVertexModel
+// lookup is authoritative for context-window values.
+var vertexKnownModels = []providerModel{
+	{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", Description: "Google's flagship Gemini reasoning model via Vertex AI.", ContextLength: 1048576, Tags: []string{"recommended", "high-quality"}},
+	{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Description: "Fast, low-cost Gemini model via Vertex AI.", ContextLength: 1048576, Tags: []string{"fast", "lightweight"}},
+	{ID: "gemini-1.5-pro", Name: "Gemini 1.5 Pro", Description: "Previous-generation Gemini Pro with 2M context.", ContextLength: 2097152, Tags: []string{"long-context"}},
+	{ID: "gemini-1.5-flash", Name: "Gemini 1.5 Flash", Description: "Previous-generation Gemini Flash.", ContextLength: 1048576, Tags: []string{"fast"}},
+	{ID: "claude-opus-4", Name: "Claude Opus 4 (Vertex)", Description: "Anthropic Claude Opus served via Google Vertex AI.", ContextLength: 200000, Tags: []string{"high-quality"}},
+	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5 (Vertex)", Description: "Anthropic Claude Sonnet served via Google Vertex AI.", ContextLength: 200000, Tags: []string{"balanced", "recommended"}},
+	{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5 (Vertex)", Description: "Anthropic Claude Haiku served via Google Vertex AI.", ContextLength: 200000, Tags: []string{"fast", "lightweight"}},
+}
+
+// vertexPublisherToProviderModel converts a VertexPublisherModel from the
+// backend package into the UI-facing providerModel. Display names and
+// context-window sizes mirror the curated list where they overlap.
+func vertexPublisherToProviderModel(m backend.VertexPublisherModel) providerModel {
+	pm := providerModel{
+		ID:          m.ID,
+		Name:        backend.DisplayNameForVertexModel(m.ID),
+		Description: backend.DescriptionForVertexModel(m.ID),
+	}
+	for _, kn := range vertexKnownModels {
+		if kn.ID == m.ID {
+			pm.Name = kn.Name
+			pm.Description = kn.Description
+			break
+		}
+	}
+	// Context length + tags are derived from the backend doc-sourced lookup
+	// tables — the publisher catalog endpoint doesn't expose inputTokenLimit.
+	pm.ContextLength = backend.ContextWindowForVertexModel(m.ID)
+	pm.Tags = backend.TagsForVertexModel(m.ID)
+	if m.LaunchStage != "" && m.LaunchStage != "GA" {
+		pm.Tags = append(pm.Tags, strings.ToLower(strings.ReplaceAll(m.LaunchStage, "_", "-")))
+	}
+	return pm
+}
+

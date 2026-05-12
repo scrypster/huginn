@@ -95,8 +95,9 @@
               </span>
               <div class="flex-1" />
 
-              <!-- API key chip -->
-              <button @click="showApiKeyEditor = !showApiKeyEditor"
+              <!-- API key chip (API-key providers only — vertex uses SA JSON) -->
+              <button v-if="currentProvider !== 'vertex' && currentProvider !== 'ollama' && currentProvider !== 'builtin'"
+                @click="showApiKeyEditor = !showApiKeyEditor"
                 class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-all duration-150"
                 :class="showApiKeyEditor
                   ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/8'
@@ -112,8 +113,20 @@
                 </svg>
               </button>
 
-              <!-- Endpoint chip -->
-              <button @click="showEndpointEditor = !showEndpointEditor"
+              <!-- Vertex credentials chip -->
+              <span v-if="currentProvider === 'vertex'"
+                class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-all duration-150"
+                :class="isVertexCredentialsConfigured
+                  ? 'border-huginn-border text-huginn-muted'
+                  : 'border-huginn-yellow/40 text-huginn-yellow'">
+                <div class="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  :class="isVertexCredentialsConfigured ? 'bg-huginn-green' : 'bg-huginn-yellow'"
+                  :style="isVertexCredentialsConfigured ? 'box-shadow:0 0 4px rgba(63,185,80,0.6)' : 'box-shadow:0 0 4px rgba(210,153,34,0.6)'" />
+                {{ isVertexCredentialsConfigured ? 'Credentials configured' : 'Credentials needed' }}
+              </span>
+
+              <!-- Endpoint chip — hidden for vertex (host is built from location) -->
+              <button v-if="currentProvider !== 'vertex'" @click="showEndpointEditor = !showEndpointEditor"
                 class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-all duration-150"
                 :class="showEndpointEditor
                   ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/8'
@@ -196,11 +209,44 @@
               </div>
             </Transition>
 
+            <!-- Vertex AI config strip (project / location / credentials reference) -->
+            <div v-if="currentProvider === 'vertex'"
+              class="border-b border-huginn-border flex-shrink-0 px-5 py-3 space-y-2"
+              style="background:rgba(66,133,244,0.04)">
+              <div class="flex items-center gap-3">
+                <label class="text-xs text-huginn-muted flex-shrink-0 w-24">GCP Project</label>
+                <input v-model="form.backend_project" @input="dirty = true"
+                  placeholder="my-gcp-project (or $GOOGLE_CLOUD_PROJECT)"
+                  class="flex-1 bg-huginn-surface border border-huginn-border rounded-lg px-3 py-1.5 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors" />
+              </div>
+              <div class="flex items-center gap-3">
+                <label class="text-xs text-huginn-muted flex-shrink-0 w-24">Location</label>
+                <input v-model="form.backend_location" @input="dirty = true"
+                  placeholder="us-central1 (or $GOOGLE_CLOUD_LOCATION)"
+                  class="flex-1 bg-huginn-surface border border-huginn-border rounded-lg px-3 py-1.5 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors" />
+              </div>
+              <div class="flex items-center gap-3">
+                <label class="text-xs text-huginn-muted flex-shrink-0 w-24">Credentials</label>
+                <input v-model="form.backend_credentials_path" @input="dirty = true"
+                  placeholder="/path/to/sa.json — or $GOOGLE_APPLICATION_CREDENTIALS — or keyring:huginn:vertex"
+                  class="flex-1 bg-huginn-surface border border-huginn-border rounded-lg px-3 py-1.5 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors" />
+              </div>
+              <div class="flex items-center gap-3 pt-1">
+                <span class="text-[11px] text-huginn-muted flex-1">
+                  Service-account JSON path, <code class="text-huginn-blue">$ENV_VAR</code>, or <code class="text-huginn-blue">keyring:huginn:&lt;slot&gt;</code> reference.
+                </span>
+                <template v-if="dirty">
+                  <button @click="discardChanges" class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-muted border border-huginn-border hover:bg-white/5 transition-all flex-shrink-0">Discard</button>
+                  <button @click="save" :disabled="saving" class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green border border-huginn-green/30 hover:bg-huginn-green/15 transition-all disabled:opacity-50 flex-shrink-0">{{ saving ? 'Saving…' : 'Save' }}</button>
+                </template>
+              </div>
+            </div>
+
             <!-- Models content -->
             <div class="flex-1 overflow-y-auto px-5 py-5">
 
               <!-- Empty state: no API key configured -->
-              <div v-if="currentProvider !== 'openrouter' && !isApiKeyConfigured && !providerModelsLoading"
+              <div v-if="currentProvider !== 'openrouter' && currentProvider !== 'vertex' && !isApiKeyConfigured && !providerModelsLoading"
                 class="flex flex-col items-center justify-center h-full gap-5 text-center -mt-8">
                 <div class="w-16 h-16 rounded-2xl flex items-center justify-center"
                   style="background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.2)">
@@ -917,6 +963,7 @@ const {
   filteredModels,
   filteredCatalog,
   isApiKeyConfigured,
+  isVertexCredentialsConfigured,
   filteredProviderModels,
   providerDisplayName,
   endpointDisplay,

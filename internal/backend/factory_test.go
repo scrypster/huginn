@@ -1,6 +1,7 @@
 package backend_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/backend"
@@ -61,5 +62,17 @@ func TestNewFromConfig_Anthropic_ResolvesEnvAPIKey(t *testing.T) {
 	}
 	if b == nil {
 		t.Fatal("expected non-nil backend")
+	}
+}
+
+func TestFactory_VertexProvider_RequiresEnv(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	_, err := backend.NewFromConfig("vertex", "", "", "gemini-2.5-pro")
+	if err == nil {
+		t.Fatal("expected error without env vars")
+	}
+	if !strings.Contains(err.Error(), "project") && !strings.Contains(err.Error(), "credentials") {
+		t.Errorf("err = %v", err)
 	}
 }

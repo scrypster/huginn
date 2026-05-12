@@ -73,6 +73,13 @@ func initBackend(
 		}
 		res.Backend = b
 		slog.Info("backend: using cloud provider", "provider", cloudProvider)
+	case "vertex":
+		b, err := initVertexBackend(ctx, &cfg)
+		if err != nil {
+			return res, fmt.Errorf("backend (vertex): %w", err)
+		}
+		res.Backend = b
+		slog.Info("backend: using cloud provider", "provider", "vertex", "project", cfg.Backend.Project, "location", cfg.Backend.Location)
 	default:
 		switch cfg.Backend.Type {
 		case "managed":
@@ -143,6 +150,17 @@ func initBackend(
 	}
 	backendCache := backend.NewBackendCache(res.Backend)
 	backendCache.WithFallbackAPIKey(cfg.Backend.APIKey)
+	// Pre-register a VertexBackend whenever credentials are configured so that
+	// agents with provider="vertex" reuse it instead of going through the
+	// env-only factory case — see main.go startServer for the same wiring.
+	if cfg.Backend.CredentialsPath != "" || os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
+		vCfg := cfg
+		if vb, vbErr := initVertexBackend(ctx, &vCfg); vbErr == nil {
+			backendCache.SetProviderBackend("vertex", vb)
+		} else {
+			slog.Warn("vertex pre-resolution failed", "err", vbErr)
+		}
+	}
 	orch.SetBackendCache(backendCache)
 	orch.WithMachineID(relay.GetMachineID())
 	orch.SetGitRoot(detection.Root)
@@ -216,6 +234,28 @@ func initBackend(
 	res.PriceTracker = pricing.NewSessionTracker(pricing.DefaultTable)
 
 	return res, nil
+}
+
+// initVertexBackend resolves vertex configuration with config-file precedence
+// and falls back to GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION environment
+// variables for blank project / location fields. The credentials reference
+// is passed through unchanged — backend.ResolveVertexCredentials handles
+// "$ENV_VAR" / "keyring:..." / literal-path / empty-with-env-fallback.
+func initVertexBackend(ctx context.Context, cfg *config.Config) (backend.Backend, error) {
+	project := cfg.Backend.Project
+	if project == "" {
+		project = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+	location := cfg.Backend.Location
+	if location == "" {
+		location = os.Getenv("GOOGLE_CLOUD_LOCATION")
+	}
+	return backend.NewVertexBackend(ctx, backend.VertexConfig{
+		Project:         project,
+		Location:        location,
+		CredentialsPath: cfg.Backend.CredentialsPath,
+		Model:           cfg.DefaultModel,
+	})
 }
 
 // initManagedBackend starts the embedded llama-server runtime.
@@ -323,6 +363,12 @@ func selectBackend(ctx context.Context, cfg *config.Config, endpointOverride, mo
 		b, err = backend.NewFromConfig(cfg.Backend.Provider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
 		if err != nil {
 			return nil, nil, fmt.Errorf("backend (%s): %w", cfg.Backend.Provider, err)
+		}
+	case "vertex":
+		var err error
+		b, err = initVertexBackend(ctx, cfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("backend (vertex): %w", err)
 		}
 	default:
 		// "managed" requires a running process — not suitable for non-interactive modes.

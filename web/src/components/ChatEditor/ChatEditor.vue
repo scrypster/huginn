@@ -33,10 +33,15 @@ onMounted(async () => {
   try { agents.value = await api.agents.list() } catch { /* ignore */ }
 })
 
+// Pass a reactive ref to useEditor so the Placeholder extension re-reads
+// the value every render. Without this the placeholder set at editor init
+// gets baked in and never updates when activeSpace switches.
+const placeholderRef = computed(() => props.placeholder)
 const { editor, init, getMarkdown, clear, focus, setText, isEmpty } = useEditor({
   agents,
   onSend: handleSend,
   placeholder: props.placeholder ?? 'Message huginn...',
+  placeholderRef,
 })
 
 const editorInstance = computed(() => editor.value as Editor | null)
@@ -62,16 +67,14 @@ watch(() => props.disabled, (disabled, prevDisabled) => {
   }
 })
 
-// Update the TipTap placeholder when the prop changes (e.g. switching spaces).
-watch(() => props.placeholder, (newPlaceholder) => {
+// Force a no-op transaction when the prop changes so ProseMirror re-runs
+// the Placeholder extension's decorations (which now reads from a function
+// closure over placeholderRef).
+watch(() => props.placeholder, () => {
   const ed = editor.value
   if (!ed) return
-  const ext = ed.extensionManager.extensions.find(e => e.name === 'placeholder')
-  if (ext) {
-    ext.options.placeholder = newPlaceholder ?? 'Message huginn...'
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(ed.view as any).dispatch(ed.state.tr) // trigger a no-op transaction to re-render decorations
-  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(ed.view as any).dispatch(ed.state.tr)
 })
 
 function handleSend() {
@@ -83,7 +86,7 @@ function handleSend() {
   focus()
 }
 
-defineExpose({ focus, setText })
+defineExpose({ focus, setText, clear })
 </script>
 
 <style>

@@ -1793,7 +1793,16 @@ function syncSessionAgent() {
 }
 
 // ── Chat editor ───────────────────────────────────────────────────────
-const chatEditorRef = ref<{ focus: () => void; setText?: (content: string) => void } | null>(null)
+const chatEditorRef = ref<{ focus: () => void; setText?: (content: string) => void; clear?: () => void } | null>(null)
+
+// Clear the composer when the active DM / channel changes so the previous
+// space's draft + placeholder don't leak into the new one.
+watch(() => activeSpace.value?.id, (_newId, _oldId) => {
+  nextTick(() => {
+    chatEditorRef.value?.clear?.()
+    chatEditorRef.value?.focus()
+  })
+})
 type ChatIntent = 'update_active_work' | 'new_request'
 type UpdateRoute = 'all_active' | 'lead_only' | 'specific_delegate'
 const chatIntent = ref<ChatIntent>('update_active_work')

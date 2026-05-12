@@ -19,6 +19,7 @@ type MemoryMode = 'passive' | 'conversational' | 'immersive'
 interface AgentForm {
   name: string
   model: string
+  provider: string
   system_prompt: string
   color: string
   icon: string
@@ -163,6 +164,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   const form = ref<AgentForm>({
     name: '',
     model: '',
+    provider: '',
     system_prompt: '',
     color: '#58a6ff',
     icon: '',
@@ -277,7 +279,14 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   const colorPalette = ['#58a6ff', '#3fb950', '#d29922', '#f85149', '#bc8cff', '#79c0ff']
 
   function detectProvider(name: string, source?: string): { provider: string; icon: string; color: string; family: string } {
+    // Group by source first — this lets the same model id (e.g. gemini-2.5-pro)
+    // appear separately under "Vertex" and "Google AI Studio" when both
+    // providers are configured.
     if (source === 'built-in') return { provider: 'Built-in', icon: 'H', color: '#e3b341', family: 'llama.cpp' }
+    if (source === 'vertex') return { provider: 'Vertex AI', icon: 'V', color: '#4285f4', family: '' }
+    if (source === 'anthropic') return { provider: 'Anthropic', icon: 'A', color: '#cc785c', family: '' }
+    if (source === 'openai') return { provider: 'OpenAI', icon: 'O', color: '#10a37f', family: '' }
+    if (source === 'openrouter') return { provider: 'OpenRouter', icon: 'R', color: '#5b8def', family: '' }
     const n = name.toLowerCase()
     if (n.startsWith('claude')) return { provider: 'Anthropic', icon: 'A', color: '#cc785c', family: '' }
     if (n.startsWith('gpt') || n.startsWith('o1') || n.startsWith('o3') || n.startsWith('o4')) return { provider: 'OpenAI', icon: 'O', color: '#10a37f', family: '' }
@@ -306,7 +315,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       if (!groups[provider]) groups[provider] = { provider, icon, color, models: [] }
       groups[provider].models.push({ ...m, _family: family })
     }
-    const order: Record<string, number> = { Anthropic: 0, OpenAI: 1, Google: 2, OpenRouter: 3, Ollama: 4, 'Built-in': 5, Embeddings: 6 }
+    const order: Record<string, number> = { Anthropic: 0, OpenAI: 1, 'Vertex AI': 2, Google: 3, OpenRouter: 4, Ollama: 5, 'Built-in': 6, Embeddings: 7 }
     return Object.values(groups).sort((a, b) => {
       const oa = order[a.provider] ?? 3
       const ob = order[b.provider] ?? 3
@@ -314,8 +323,17 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     })
   })
 
-  function selectModel(name: string) {
+  function selectModel(name: string, source?: string) {
     form.value.model = name
+    // Stamp provider from the picker source so saving stores e.g. "vertex"
+    // for a Vertex-served claude-* model rather than letting the server's
+    // InferProvider fall back to "anthropic" (direct).
+    if (source && source !== 'built-in') {
+      form.value.provider = source
+    } else if (!source) {
+      // Ollama or local — clear so the orchestrator inherits the global backend.
+      form.value.provider = ''
+    }
     markDirty()
     showModelPicker.value = false
     modelSearch.value = ''
@@ -799,6 +817,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       form.value = {
         name: data.name || name,
         model: data.model || '',
+        provider: (data as any).provider || '',
         system_prompt: data.system_prompt || '',
         color: (data as AgentForm & { color?: string }).color || '#58a6ff',
         icon: (data as AgentForm & { icon?: string }).icon || '',
@@ -942,6 +961,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         form.value = {
           name: '',
           model: '',
+          provider: '',
           system_prompt: '',
           color: '#58a6ff',
           icon: '',
