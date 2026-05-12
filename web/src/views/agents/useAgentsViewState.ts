@@ -284,13 +284,14 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     // providers are configured.
     if (source === 'built-in') return { provider: 'Built-in', icon: 'H', color: '#e3b341', family: 'llama.cpp' }
     if (source === 'vertex') return { provider: 'Vertex AI', icon: 'V', color: '#4285f4', family: '' }
+    if (source === 'google') return { provider: 'Google AI Studio', icon: 'G', color: '#4285f4', family: '' }
     if (source === 'anthropic') return { provider: 'Anthropic', icon: 'A', color: '#cc785c', family: '' }
     if (source === 'openai') return { provider: 'OpenAI', icon: 'O', color: '#10a37f', family: '' }
     if (source === 'openrouter') return { provider: 'OpenRouter', icon: 'R', color: '#5b8def', family: '' }
     const n = name.toLowerCase()
     if (n.startsWith('claude')) return { provider: 'Anthropic', icon: 'A', color: '#cc785c', family: '' }
     if (n.startsWith('gpt') || n.startsWith('o1') || n.startsWith('o3') || n.startsWith('o4')) return { provider: 'OpenAI', icon: 'O', color: '#10a37f', family: '' }
-    if (n.startsWith('gemini')) return { provider: 'Google', icon: 'G', color: '#4285f4', family: '' }
+    if (n.startsWith('gemini')) return { provider: 'Google AI Studio', icon: 'G', color: '#4285f4', family: '' }
     if (n.startsWith('nomic') || n.startsWith('mxbai') || n.includes('embed')) return { provider: 'Embeddings', icon: 'E', color: '#64748b', family: '' }
     if (n.startsWith('llama')) return { provider: 'Ollama', icon: '◎', color: '#4a9eff', family: 'Meta' }
     if (n.startsWith('qwen')) return { provider: 'Ollama', icon: '◎', color: '#4a9eff', family: 'Qwen' }
@@ -315,7 +316,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       if (!groups[provider]) groups[provider] = { provider, icon, color, models: [] }
       groups[provider].models.push({ ...m, _family: family })
     }
-    const order: Record<string, number> = { Anthropic: 0, OpenAI: 1, 'Vertex AI': 2, Google: 3, OpenRouter: 4, Ollama: 5, 'Built-in': 6, Embeddings: 7 }
+    const order: Record<string, number> = { Anthropic: 0, OpenAI: 1, 'Vertex AI': 2, 'Google AI Studio': 3, Google: 4, OpenRouter: 5, Ollama: 6, 'Built-in': 7, Embeddings: 8 }
     return Object.values(groups).sort((a, b) => {
       const oa = order[a.provider] ?? 3
       const ob = order[b.provider] ?? 3

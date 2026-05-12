@@ -2216,7 +2216,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		endpoint = "http://localhost:11434"
 	}
 	switch cfg.Backend.Provider {
-	case "anthropic", "openai", "openrouter":
+	case "anthropic", "openai", "openrouter", "google":
 		cb, bErr := backend.NewFromConfig(cfg.Backend.Provider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
 		if bErr != nil {
 			return nil, "", nil, fmt.Errorf("backend (%s): %w", cfg.Backend.Provider, bErr)
@@ -4292,6 +4292,8 @@ func providerDisplayName(id string) string {
 		return "OpenAI"
 	case "openrouter":
 		return "OpenRouter"
+	case "google":
+		return "Google AI Studio"
 	case "vertex":
 		return "Google Vertex AI"
 	default:
