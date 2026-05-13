@@ -546,7 +546,11 @@ func InferProvider(model string) string {
 	case strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "o1") || strings.HasPrefix(lower, "o3"):
 		return "openai"
 	case strings.HasPrefix(lower, "gemini"):
-		return "google"
+		// Gemini models are served by both Vertex AI ("vertex") and Google AI
+		// Studio ("google"). Return "" so the agent inherits whichever backend
+		// is configured globally — the BackendCache falls back to that backend
+		// when provider is empty.
+		return ""
 	case strings.HasPrefix(lower, "llama") || strings.HasPrefix(lower, "mistral"):
 		return "ollama"
 	default:

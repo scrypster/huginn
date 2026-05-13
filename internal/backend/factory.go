@@ -1,7 +1,9 @@
 package backend
 
 import (
+	"context"
 	"fmt"
+	"os"
 )
 
 // NewKeyResolver creates a KeyResolver that calls ResolveAPIKey(raw) on each
@@ -45,6 +47,14 @@ func newFromResolvedConfig(provider, endpoint string, resolver KeyResolver, mode
 
 	case "openrouter":
 		return NewOpenRouterBackend(resolver, model), nil
+
+	case "vertex":
+		return NewVertexBackend(context.Background(), VertexConfig{
+			Project:         os.Getenv("GOOGLE_CLOUD_PROJECT"),
+			Location:        os.Getenv("GOOGLE_CLOUD_LOCATION"),
+			CredentialsPath: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+			Model:           model,
+		})
 
 	default:
 		return nil, fmt.Errorf("backend: unknown provider %q", provider)

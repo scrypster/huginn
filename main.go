@@ -2208,19 +2208,41 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 	}
 
-	// Backend
+	// Backend — honour the configured cloud provider, falling back to the
+	// OpenAI-compatible ExternalBackend for ollama / local endpoints.
+	var b backend.Backend
 	endpoint := cfg.Backend.Endpoint
 	if endpoint == "" {
 		endpoint = "http://localhost:11434"
 	}
-	b := backend.NewExternalBackend(endpoint)
-	go func(ep string, be backend.Backend) {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := be.Health(ctx); err != nil {
-			logger.Warn("backend: not reachable at startup", "endpoint", ep, "err", err)
+	switch cfg.Backend.Provider {
+	case "anthropic", "openai", "openrouter":
+		cb, bErr := backend.NewFromConfig(cfg.Backend.Provider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
+		if bErr != nil {
+			return nil, "", nil, fmt.Errorf("backend (%s): %w", cfg.Backend.Provider, bErr)
 		}
-	}(endpoint, b)
+		b = cb
+		logger.Info("backend: using cloud provider (serve mode)", "provider", cfg.Backend.Provider)
+	case "vertex":
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cb, bErr := initVertexBackend(ctx, cfg)
+		cancel()
+		if bErr != nil {
+			return nil, "", nil, fmt.Errorf("backend (vertex): %w", bErr)
+		}
+		b = cb
+		logger.Info("backend: using cloud provider (serve mode)", "provider", "vertex",
+			"project", cfg.Backend.Project, "location", cfg.Backend.Location)
+	default:
+		b = backend.NewExternalBackend(endpoint)
+		go func(ep string, be backend.Backend) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := be.Health(ctx); err != nil {
+				logger.Warn("backend: not reachable at startup", "endpoint", ep, "err", err)
+			}
+		}(endpoint, b)
+	}
 
 	// Models
 	models := modelconfig.DefaultModels()
@@ -2243,6 +2265,19 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// inherit the globally configured key instead of creating a broken backend.
 	if cfg.Backend.Provider != "" && cfg.Backend.APIKey != "" {
 		serveCache.SetProviderKey(cfg.Backend.Provider, cfg.Backend.APIKey)
+	}
+	// If Vertex AI credentials are configured (independently of which provider
+	// is set globally), pre-register a VertexBackend for agents that declare
+	// provider="vertex". Without this, BackendCache.For falls through to the
+	// factory case which only sees env vars and would fail with "project is
+	// required" for users who configured Vertex via the UI (cfg.Backend.Project
+	// + Location + CredentialsPath).
+	if cfg.Backend.CredentialsPath != "" || os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
+		if vb, vbErr := initVertexBackend(context.Background(), cfg); vbErr == nil {
+			serveCache.SetProviderBackend("vertex", vb)
+		} else {
+			logger.Warn("vertex pre-resolution failed; agents with provider=vertex will fail until config is fixed", "err", vbErr)
+		}
 	}
 	// Auto-register keychain convention keys for providers used by agents that
 	// don't carry a per-agent api_key and differ from the global backend provider.
@@ -4257,6 +4292,8 @@ func providerDisplayName(id string) string {
 		return "OpenAI"
 	case "openrouter":
 		return "OpenRouter"
+	case "vertex":
+		return "Google Vertex AI"
 	default:
 		return id
 	}

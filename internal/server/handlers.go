@@ -519,11 +519,56 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// Cloud provider models — included when a provider with an API key is configured
-	// so the agent model picker shows Anthropic/OpenAI/OpenRouter models alongside
-	// local Ollama models (issue #30).
+	// Cloud provider models — show every cloud provider that has credentials
+	// configured so the agent model picker covers all available backends, not
+	// just the one currently set as cfg.Backend.Provider. This lets a user
+	// configure both Vertex AI and (e.g.) Anthropic side by side and pick
+	// per-agent without re-saving the global config.
 	var cloudModels []any
-	if s.cfg.Backend.Provider != "" && s.cfg.Backend.Provider != "ollama" {
+	addProvider := func(name string, models []providerModel) {
+		for _, m := range models {
+			cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": name})
+		}
+	}
+
+	// --- Vertex AI: project + credentials reference signal that it's wired. ---
+	vProject := s.cfg.Backend.Project
+	if vProject == "" {
+		vProject = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+	vLocation := s.cfg.Backend.Location
+	if vLocation == "" {
+		vLocation = os.Getenv("GOOGLE_CLOUD_LOCATION")
+	}
+	// CredentialsPath supports literal path / "$ENV" / "keyring:..." / "".
+	// Treat "" as configured only when GOOGLE_APPLICATION_CREDENTIALS env is
+	// set (matches the gcloud convention that ResolveVertexCredentials uses).
+	vCreds := s.cfg.Backend.CredentialsPath
+	vCredsConfigured := vCreds != "" || os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != ""
+	if vProject != "" && vCredsConfigured {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		live, listErr := backend.ListVertexPublisherModels(ctx, vProject, vLocation, vCreds)
+		cancel()
+		if listErr == nil && len(live) > 0 {
+			fetched := make([]providerModel, 0, len(live))
+			for _, m := range live {
+				fetched = append(fetched, vertexPublisherToProviderModel(m))
+			}
+			writeProviderModelsCache("vertex", fetched)
+			addProvider("vertex", fetched)
+		} else {
+			if cached, cacheErr := readProviderModelsCache("vertex"); cacheErr == nil && len(cached) > 0 {
+				addProvider("vertex", cached)
+			} else {
+				addProvider("vertex", vertexKnownModels)
+			}
+		}
+	}
+
+	// --- Anthropic / OpenAI / OpenRouter / Google AI Studio: API key required.
+	//     Key lives on cfg.Backend.APIKey and applies to whichever provider is
+	//     configured globally. (Per-provider API-key storage is a future feature.)
+	if s.cfg.Backend.Provider != "" && s.cfg.Backend.Provider != "ollama" && s.cfg.Backend.Provider != "vertex" {
 		provider := s.cfg.Backend.Provider
 		apiKey, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey)
 		if apiKey != "" {
@@ -556,9 +601,7 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 			} else if fetched != nil {
 				writeProviderModelsCache(provider, fetched)
 			}
-			for _, m := range fetched {
-				cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": provider})
-			}
+			addProvider(provider, fetched)
 		}
 	}
 

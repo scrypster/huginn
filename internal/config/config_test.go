@@ -765,3 +765,25 @@ func TestConfigMigrationV9toV10(t *testing.T) {
 		t.Errorf("want WebUI.Port=8421 after migration, got %d", cfg.WebUI.Port)
 	}
 }
+
+func TestBackendConfig_VertexFields(t *testing.T) {
+	const blob = `{
+		"provider": "vertex",
+		"project": "my-gcp-project",
+		"location": "us-east5",
+		"credentials_path": "/etc/huginn/sa.json"
+	}`
+	var bc BackendConfig
+	if err := json.Unmarshal([]byte(blob), &bc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if bc.Project != "my-gcp-project" {
+		t.Errorf("Project = %q, want %q", bc.Project, "my-gcp-project")
+	}
+	if bc.Location != "us-east5" {
+		t.Errorf("Location = %q, want %q", bc.Location, "us-east5")
+	}
+	if bc.CredentialsPath != "/etc/huginn/sa.json" {
+		t.Errorf("CredentialsPath = %q, want %q", bc.CredentialsPath, "/etc/huginn/sa.json")
+	}
+}

@@ -24,6 +24,9 @@ export interface HuginnConfig {
     endpoint: string
     provider: string
     api_key: string
+    project?: string
+    location?: string
+    credentials_path?: string
   }
   theme: string
   context_limit_kb: number
