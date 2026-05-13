@@ -753,7 +753,6 @@
                 class="mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
                 :agent-vault-name="activeAgentVaultName"
-                @save-memory="handleSaveMemory"
               />
               </div>
             </div>
@@ -1794,7 +1793,16 @@ function syncSessionAgent() {
 }
 
 // ── Chat editor ───────────────────────────────────────────────────────
-const chatEditorRef = ref<{ focus: () => void; setText?: (content: string) => void } | null>(null)
+const chatEditorRef = ref<{ focus: () => void; setText?: (content: string) => void; clear?: () => void } | null>(null)
+
+// Clear the composer when the active DM / channel changes so the previous
+// space's draft + placeholder don't leak into the new one.
+watch(() => activeSpace.value?.id, (_newId, _oldId) => {
+  nextTick(() => {
+    chatEditorRef.value?.clear?.()
+    chatEditorRef.value?.focus()
+  })
+})
 type ChatIntent = 'update_active_work' | 'new_request'
 type UpdateRoute = 'all_active' | 'lead_only' | 'specific_delegate'
 const chatIntent = ref<ChatIntent>('update_active_work')
@@ -1973,23 +1981,6 @@ function handleRetry(content: string) {
   scrollToBottom()
 }
 
-async function handleSaveMemory({ vault, content }: { vault: string; content: string }) {
-  if (!vault) return
-  try {
-    await apiFetch('/api/v1/muninn/tool', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        vault,
-        tool: 'muninn_remember',
-        args: {
-          concept: content.trim().slice(0, 60),
-          content,
-        },
-      }),
-    })
-  } catch { /* silent */ }
-}
 
 function cancelThread(threadId: string) {
   const ws = wsRef.value

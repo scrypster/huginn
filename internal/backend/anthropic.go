@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -181,7 +180,7 @@ func (b *AnthropicBackend) ChatCompletion(ctx context.Context, req ChatRequest) 
 			continue
 		}
 
-		result, err := b.parseSSE(ctx, resp, req)
+		result, err := parseAnthropicSSE(ctx, resp, req, streamStallTimeout)
 		if err != nil {
 			b.cb.RecordFailure()
 			return nil, err
@@ -278,31 +277,25 @@ type anthropicToolUseBlock struct {
 	Input map[string]any `json:"input"` // always serialized, never omitted
 }
 
-func (b *AnthropicBackend) buildRequest(req ChatRequest) ([]byte, error) {
-	// Extract system message if present
-	var systemContent string
-	msgs := make([]anthropicMessage, 0)
-
+// anthropicMessagesAndTools converts a Huginn ChatRequest into the Anthropic
+// Messages-API message and tool shapes. Shared by AnthropicBackend (direct
+// /v1/messages call) and VertexBackend (Anthropic-on-Vertex streamRawPredict).
+// Returns the system message (extracted from "system"-role messages), the
+// converted messages, and the converted tools.
+func anthropicMessagesAndTools(req ChatRequest) (systemContent string, msgs []anthropicMessage, tools []anthropicTool, err error) {
+	msgs = make([]anthropicMessage, 0)
 	for _, m := range req.Messages {
 		if m.Role == "system" {
 			systemContent = m.Content
 			continue
 		}
-
 		am := anthropicMessage{Role: m.Role}
-
-		// Handle role-specific content formatting
 		if m.Role == "user" {
 			am.Content = m.Content
 		} else if m.Role == "assistant" {
-			// Assistant messages may have text or tool_use content blocks
 			if len(m.ToolCalls) > 0 {
 				blocks := make([]anthropicToolUseBlock, 0, len(m.ToolCalls))
 				for _, tc := range m.ToolCalls {
-					// Always provide a non-nil input map for tool_use blocks.
-					// Anthropic requires "input" to be present even for zero-arg tools.
-					// anthropicToolUseBlock has no omitempty on Input so {} serializes
-					// as "input":{} rather than being silently dropped.
 					input := tc.Function.Arguments
 					if input == nil {
 						input = map[string]any{}
@@ -319,7 +312,6 @@ func (b *AnthropicBackend) buildRequest(req ChatRequest) ([]byte, error) {
 				am.Content = m.Content
 			}
 		} else if m.Role == "tool" {
-			// Tool result messages are sent as user messages with tool_result content blocks
 			am.Role = "user"
 			block := anthropicContentBlock{
 				Type:      "tool_result",
@@ -330,16 +322,14 @@ func (b *AnthropicBackend) buildRequest(req ChatRequest) ([]byte, error) {
 		} else {
 			am.Content = m.Content
 		}
-
 		msgs = append(msgs, am)
 	}
 
-	// Convert tools to Anthropic format
-	tools := make([]anthropicTool, 0, len(req.Tools))
+	tools = make([]anthropicTool, 0, len(req.Tools))
 	for _, t := range req.Tools {
-		schema, err := json.Marshal(t.Function.Parameters)
-		if err != nil {
-			return nil, fmt.Errorf("marshal tool parameters: %w", err)
+		schema, schemaErr := json.Marshal(t.Function.Parameters)
+		if schemaErr != nil {
+			return "", nil, nil, fmt.Errorf("marshal tool parameters: %w", schemaErr)
 		}
 		tools = append(tools, anthropicTool{
 			Name:        t.Function.Name,
@@ -347,8 +337,14 @@ func (b *AnthropicBackend) buildRequest(req ChatRequest) ([]byte, error) {
 			InputSchema: schema,
 		})
 	}
+	return systemContent, msgs, tools, nil
+}
 
-	// Build request — use model registry for default, override if explicitly set.
+func (b *AnthropicBackend) buildRequest(req ChatRequest) ([]byte, error) {
+	sys, msgs, tools, err := anthropicMessagesAndTools(req)
+	if err != nil {
+		return nil, err
+	}
 	maxTok := modelconfig.MaxOutputTokensForModel(req.Model)
 	if b.maxOutputTokens > 0 {
 		maxTok = b.maxOutputTokens
@@ -356,321 +352,12 @@ func (b *AnthropicBackend) buildRequest(req ChatRequest) ([]byte, error) {
 	r := anthropicRequest{
 		Model:     req.Model,
 		MaxTokens: maxTok,
-		System:    systemContent,
+		System:    sys,
 		Messages:  msgs,
 		Tools:     tools,
 		Stream:    true,
 	}
 	return json.Marshal(r)
-}
-
-// toolBlockState tracks tool call blocks across SSE events.
-type toolBlockState struct {
-	id          string
-	name        string
-	partialJSON string
-}
-
-// parseSSE parses the Anthropic SSE stream and returns the ChatResponse.
-//
-// Idle stall detection: if no non-empty SSE line is received within
-// streamStallTimeout, the underlying response body is closed and the scan loop
-// exits. This prevents the scanner from blocking indefinitely when the server
-// returns 200 OK but stops sending data without closing the connection.
-func (b *AnthropicBackend) parseSSE(ctx context.Context, resp *http.Response, req ChatRequest) (*ChatResponse, error) {
-	// streamCtx is cancelled either by the parent ctx or by the idle-timeout
-	// watchdog goroutine below when no data arrives within streamStallTimeout.
-	streamCtx, streamCancel := context.WithCancel(ctx)
-	defer streamCancel()
-
-	// activityCh receives a signal every time a non-empty SSE line is processed.
-	// The watchdog goroutine resets its idle timer on each signal.
-	activityCh := make(chan struct{}, 1)
-
-	// Watchdog: cancel streamCtx (and therefore close resp.Body) if no activity
-	// is observed within streamStallTimeout. Capture the timeout once so the
-	// goroutine never races against test code mutating the global.
-	stallTimeout := streamStallTimeout
-	go func() {
-		timer := time.NewTimer(stallTimeout)
-		defer timer.Stop()
-		for {
-			select {
-			case <-streamCtx.Done():
-				return
-			case <-activityCh:
-				// Reset the idle timer on every received event.
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(stallTimeout)
-			case <-timer.C:
-				// No activity for stallTimeout — abort the stream.
-				slog.Warn("anthropic: SSE stream idle timeout, aborting",
-					"timeout", stallTimeout)
-				// Cancel the context BEFORE closing the body so that by the
-				// time the scanner sees an I/O error, streamCtx.Err() is
-				// already set and the caller can distinguish an idle-timeout
-				// abort from a genuine network error.
-				streamCancel()
-				resp.Body.Close()
-				return
-			}
-		}
-	}()
-
-	result := &ChatResponse{}
-	toolBlocks := make(map[int]*toolBlockState) // index -> block state
-
-	var currentEventType string
-	scanner := bufio.NewScanner(resp.Body)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Track event type from "event: X" lines
-		if strings.HasPrefix(line, "event: ") {
-			currentEventType = strings.TrimPrefix(line, "event: ")
-			// Signal activity so the watchdog resets its idle timer.
-			select {
-			case activityCh <- struct{}{}:
-			default:
-			}
-			continue
-		}
-
-		// Parse data lines
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "" {
-			continue
-		}
-
-		// Signal activity so the watchdog resets its idle timer.
-		select {
-		case activityCh <- struct{}{}:
-		default:
-		}
-
-		// Parse based on event type
-		switch currentEventType {
-		case "content_block_start":
-			b.parseContentBlockStart(data, toolBlocks)
-		case "content_block_delta":
-			b.parseContentBlockDelta(data, result, req, toolBlocks)
-		case "content_block_stop":
-			b.parseContentBlockStop(data, result, toolBlocks)
-		case "message_start":
-			b.parseMessageStart(data, result)
-		case "message_delta":
-			b.parseMessageDelta(data, result)
-		case "message_stop":
-			// Stream is ending
-		}
-	}
-
-	// Emit StreamDone event if OnEvent is set
-	if req.OnEvent != nil {
-		req.OnEvent(StreamEvent{Type: StreamDone})
-	}
-
-	if err := scanner.Err(); err != nil {
-		// If the stream was aborted due to an idle timeout, return a more
-		// descriptive error rather than the raw I/O error from the closed body.
-		if streamCtx.Err() != nil {
-			return nil, fmt.Errorf("SSE stream aborted: idle timeout after %s", stallTimeout)
-		}
-		return nil, fmt.Errorf("reading SSE stream: %w", err)
-	}
-
-	// If the scanner finished cleanly but the stream context was cancelled due
-	// to the idle watchdog, surface that as an error.
-	if streamCtx.Err() != nil {
-		return nil, fmt.Errorf("SSE stream aborted: idle timeout after %s", stallTimeout)
-	}
-
-	return result, nil
-}
-
-func (b *AnthropicBackend) parseContentBlockStart(data string, toolBlocks map[int]*toolBlockState) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
-	}
-
-	index, ok := event["index"].(float64)
-	if !ok {
-		return
-	}
-
-	contentBlock, ok := event["content_block"].(map[string]any)
-	if !ok {
-		return
-	}
-
-	blockType, _ := contentBlock["type"].(string)
-	if blockType != "tool_use" {
-		return
-	}
-
-	id, _ := contentBlock["id"].(string)
-	name, _ := contentBlock["name"].(string)
-
-	toolBlocks[int(index)] = &toolBlockState{
-		id:          id,
-		name:        name,
-		partialJSON: "",
-	}
-}
-
-func (b *AnthropicBackend) parseContentBlockDelta(data string, result *ChatResponse, req ChatRequest, toolBlocks map[int]*toolBlockState) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
-	}
-
-	delta, ok := event["delta"].(map[string]any)
-	if !ok {
-		return
-	}
-
-	deltaType, _ := delta["type"].(string)
-
-	switch deltaType {
-	case "text_delta":
-		text, _ := delta["text"].(string)
-		result.Content += text
-		if req.OnEvent != nil {
-			req.OnEvent(StreamEvent{Type: StreamText, Content: text})
-		}
-		// Always call OnToken when set — even when OnEvent is also set — so that
-		// callers relying on OnToken for content accumulation and WS "token"
-		// messages receive every text chunk. The external (OpenAI/Ollama) backend
-		// already does this; the Anthropic backend was using else-if which caused
-		// OnToken to be silently skipped, resulting in empty assistant messages
-		// after tool-call turns (no content persisted, no tokens streamed to UI).
-		if req.OnToken != nil {
-			req.OnToken(text)
-		}
-
-	case "thinking_delta":
-		thinking, _ := delta["thinking"].(string)
-		if req.OnEvent != nil {
-			req.OnEvent(StreamEvent{Type: StreamThought, Content: thinking})
-		}
-
-	case "input_json_delta":
-		partialJSON, _ := delta["partial_json"].(string)
-		index, ok := event["index"].(float64)
-		if !ok {
-			return
-		}
-		block, ok := toolBlocks[int(index)]
-		if ok {
-			block.partialJSON += partialJSON
-		}
-	}
-}
-
-func (b *AnthropicBackend) parseContentBlockStop(data string, result *ChatResponse, toolBlocks map[int]*toolBlockState) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		slog.Warn("anthropic: parseContentBlockStop: malformed event JSON", "err", err)
-		return
-	}
-
-	index, ok := event["index"].(float64)
-	if !ok {
-		return
-	}
-
-	block, ok := toolBlocks[int(index)]
-	if !ok {
-		return
-	}
-
-	// Parse the accumulated JSON as the tool arguments.
-	// When a tool takes no parameters Anthropic emits no input_json_delta
-	// events, leaving partialJSON empty. Treat "" as "{}" (empty args) so
-	// zero-argument tools (e.g. muninn_where_left_off) are not dropped.
-	//
-	// When partialJSON is non-empty but fails to parse (truncated SSE stream),
-	// fall back to "{}" so zero-arg tools still execute rather than being silently
-	// dropped. Tools that genuinely require parameters will fail at the server level
-	// with a descriptive error, which the LLM can handle; silent drops cannot.
-	raw := block.partialJSON
-	if raw == "" {
-		raw = "{}"
-	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		slog.Warn("anthropic: SSE tool call args truncated, retrying with empty args",
-			"tool", block.name, "id", block.id, "partial_len", len(raw), "err", err)
-		args = map[string]any{}
-	}
-
-	// Append to ToolCalls
-	tc := ToolCall{
-		ID: block.id,
-		Function: ToolCallFunction{
-			Name:      block.name,
-			Arguments: args,
-		},
-	}
-	result.ToolCalls = append(result.ToolCalls, tc)
-
-	// Clean up
-	delete(toolBlocks, int(index))
-}
-
-func (b *AnthropicBackend) parseMessageStart(data string, result *ChatResponse) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
-	}
-
-	message, ok := event["message"].(map[string]any)
-	if !ok {
-		return
-	}
-
-	usage, ok := message["usage"].(map[string]any)
-	if !ok {
-		return
-	}
-
-	if inputTokens, ok := usage["input_tokens"].(float64); ok {
-		result.PromptTokens = int(inputTokens)
-	}
-}
-
-func (b *AnthropicBackend) parseMessageDelta(data string, result *ChatResponse) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
-	}
-
-	// Extract stop_reason from delta
-	delta, ok := event["delta"].(map[string]any)
-	if ok {
-		if stopReason, ok := delta["stop_reason"].(string); ok {
-			result.DoneReason = stopReason
-		}
-	}
-
-	// Extract output tokens from usage
-	usage, ok := event["usage"].(map[string]any)
-	if ok {
-		if outputTokens, ok := usage["output_tokens"].(float64); ok {
-			result.CompletionTokens = int(outputTokens)
-		}
-	}
 }
 
 // maxRetryAfter is the maximum duration we will honour from a Retry-After header.

@@ -37,6 +37,11 @@ export function useEditor(options: {
   agents: Ref<Array<Record<string, unknown>>>
   onSend: () => void
   placeholder?: string
+  // Reactive placeholder source — when supplied, the placeholder shown in
+  // the editor reads from this ref on every render, so changing the prop on
+  // the wrapping component (e.g. when the active DM changes) updates the
+  // placeholder without re-creating the editor.
+  placeholderRef?: Ref<string | undefined>
 }) {
   const editor = ref<Editor | null>(null)
   let suggestionOpen = false
@@ -125,7 +130,7 @@ export function useEditor(options: {
           defaultLanguage: 'plaintext',
         }),
         Placeholder.configure({
-          placeholder: options.placeholder ?? 'Message huginn...',
+          placeholder: () => options.placeholderRef?.value ?? options.placeholder ?? 'Message huginn...',
         }),
         // Markdown must come before Link so that when tiptap-markdown registers its
         // own internal link extension (also named 'link'), the explicit Link.configure

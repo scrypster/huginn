@@ -1,7 +1,19 @@
-import { describe, it, expect, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
 import MessageActions from '../MessageActions.vue'
 import type { ChatMessage, ToolCallRecord } from '../../composables/useSessions'
+
+// Mock useApi so tests don't make real HTTP calls
+vi.mock('../../composables/useApi', () => ({
+  api: {
+    muninn: {
+      remember: vi.fn(),
+    },
+  },
+}))
+
+import { api } from '../../composables/useApi'
+const mockRemember = vi.mocked(api.muninn.remember)
 
 function makeMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -11,6 +23,10 @@ function makeMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
     ...overrides,
   }
 }
+
+beforeEach(() => {
+  vi.clearAllMocks()
+})
 
 describe('MessageActions', () => {
   it('shows copy button for all messages', () => {
@@ -48,7 +64,7 @@ describe('MessageActions', () => {
     const wrapper = mount(MessageActions, {
       props: { msg: makeMsg({ role: 'assistant', toolCalls }), agentVaultName: 'my-vault' },
     })
-    expect(wrapper.text()).toContain('Saved')
+    expect(wrapper.find('[data-testid="msg-saved-indicator"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="msg-save-memory"]').exists()).toBe(false)
   })
 
@@ -67,11 +83,83 @@ describe('MessageActions', () => {
     expect(wrapper.emitted('retry')?.[0]).toEqual(['retry me'])
   })
 
-  it('emits save-memory with vault and content on save click', async () => {
-    const wrapper = mount(MessageActions, {
-      props: { msg: makeMsg({ role: 'assistant', content: 'remember this' }), agentVaultName: 'vault-x' },
+  describe('Save to Memory button feedback', () => {
+    it('shows "Saving…" while the API call is in flight', async () => {
+      let resolve!: () => void
+      mockRemember.mockReturnValue(new Promise(r => { resolve = r }))
+
+      const wrapper = mount(MessageActions, {
+        props: { msg: makeMsg({ role: 'assistant', content: 'remember this' }), agentVaultName: 'vault-x' },
+      })
+
+      await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
+      // While in flight the button should show "Saving…"
+      expect(wrapper.find('[data-testid="msg-save-memory"]').text()).toBe('Saving…')
+
+      resolve()
+      await flushPromises()
     })
-    await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
-    expect(wrapper.emitted('save-memory')?.[0]).toEqual([{ vault: 'vault-x', content: 'remember this' }])
+
+    it('shows "Saved ✓" indicator after successful save', async () => {
+      mockRemember.mockResolvedValue({})
+
+      const wrapper = mount(MessageActions, {
+        props: { msg: makeMsg({ role: 'assistant', content: 'remember this' }), agentVaultName: 'vault-x' },
+      })
+
+      await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="msg-saved-indicator"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="msg-saved-indicator"]').text()).toContain('Saved')
+      expect(wrapper.find('[data-testid="msg-save-memory"]').exists()).toBe(false)
+    })
+
+    it('calls api.muninn.remember with correct vault and content', async () => {
+      mockRemember.mockResolvedValue({})
+
+      const wrapper = mount(MessageActions, {
+        props: { msg: makeMsg({ role: 'assistant', content: 'store this' }), agentVaultName: 'my-vault' },
+      })
+
+      await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
+      await flushPromises()
+
+      expect(mockRemember).toHaveBeenCalledOnce()
+      expect(mockRemember).toHaveBeenCalledWith('my-vault', 'store this')
+    })
+
+    it('shows "Save failed" on API error', async () => {
+      mockRemember.mockRejectedValue(new Error('network error'))
+
+      const wrapper = mount(MessageActions, {
+        props: { msg: makeMsg({ role: 'assistant', content: 'oops' }), agentVaultName: 'vault-x' },
+      })
+
+      await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="msg-save-error"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="msg-save-error"]').text()).toBe('Save failed')
+      expect(wrapper.find('[data-testid="msg-save-memory"]').exists()).toBe(false)
+    })
+
+    it('does not call API a second time if already saving', async () => {
+      let resolve!: () => void
+      mockRemember.mockReturnValue(new Promise(r => { resolve = r }))
+
+      const wrapper = mount(MessageActions, {
+        props: { msg: makeMsg({ role: 'assistant', content: 'double click' }), agentVaultName: 'vault-x' },
+      })
+
+      // Trigger two clicks rapidly
+      await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
+      await wrapper.find('[data-testid="msg-save-memory"]').trigger('click')
+
+      resolve()
+      await flushPromises()
+
+      expect(mockRemember).toHaveBeenCalledOnce()
+    })
   })
 })

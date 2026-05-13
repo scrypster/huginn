@@ -1001,7 +1001,7 @@
 
               <!-- Models in group — indented -->
               <button v-for="m in group.models" :key="m.name"
-                @click="selectModel(m.name)"
+                @click="selectModel(m.name, m.source)"
                 class="w-full flex items-center gap-3 pl-10 pr-4 py-2 text-left transition-colors hover:bg-huginn-surface/60"
                 :class="form.model === m.name ? 'bg-huginn-blue/8' : ''">
                 <div class="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" :style="{ background: group.color + '15' }">

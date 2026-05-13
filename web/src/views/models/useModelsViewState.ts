@@ -17,11 +17,20 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     { value: 'anthropic', label: 'Anthropic' },
     { value: 'openai', label: 'OpenAI' },
     { value: 'openrouter', label: 'OpenRouter' },
+    { value: 'google', label: 'Google AI Studio' },
+    { value: 'vertex', label: 'Google Vertex AI' },
     { value: 'builtin', label: 'Built-in (llama.cpp)' },
   ]
 
   const currentProvider = ref(providerFromRoute.value || 'ollama')
-  const form = ref({ backend_endpoint: '', backend_api_key: '' })
+  const form = ref({
+    backend_endpoint: '',
+    backend_api_key: '',
+    // Vertex AI fields (only meaningful when currentProvider === 'vertex')
+    backend_project: '',
+    backend_location: '',
+    backend_credentials_path: '',
+  })
   const perProviderForm = ref<Record<string, { endpoint: string; apiKey: string }>>({})
   const agentsList = ref<Array<{ name: string; model?: string }>>([])
   const dirty = ref(false)
@@ -84,6 +93,10 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     !!form.value.backend_api_key && form.value.backend_api_key !== '',
   )
 
+  const isVertexCredentialsConfigured = computed(() =>
+    !!form.value.backend_credentials_path && form.value.backend_credentials_path !== '',
+  )
+
   const filteredProviderModels = computed(() => {
     if (!providerSearch.value) return providerModels.value
     const q = providerSearch.value.toLowerCase()
@@ -101,6 +114,8 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
       case 'anthropic': return 'Anthropic'
       case 'openai': return 'OpenAI'
       case 'openrouter': return 'OpenRouter'
+      case 'google': return 'Google AI Studio'
+      case 'vertex': return 'Google Vertex AI'
       default: return currentProvider.value
     }
   })
@@ -116,6 +131,8 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
       case 'anthropic': return 'https://api.anthropic.com'
       case 'openai': return 'https://api.openai.com/v1'
       case 'openrouter': return 'https://openrouter.ai/api/v1'
+      case 'google': return 'https://generativelanguage.googleapis.com'
+      case 'vertex': return 'https://{LOCATION}-aiplatform.googleapis.com'
       default: return 'https://...'
     }
   })
@@ -285,6 +302,9 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     const cfg = await loadConfig()
     form.value.backend_endpoint = cfg.backend?.endpoint || ''
     form.value.backend_api_key = cfg.backend?.api_key || ''
+    form.value.backend_project = cfg.backend?.project || ''
+    form.value.backend_location = cfg.backend?.location || ''
+    form.value.backend_credentials_path = cfg.backend?.credentials_path || ''
     dirty.value = false
   }
 
@@ -401,6 +421,9 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
           provider: currentProvider.value,
           endpoint: form.value.backend_endpoint,
           api_key: form.value.backend_api_key,
+          project: form.value.backend_project,
+          location: form.value.backend_location,
+          credentials_path: form.value.backend_credentials_path,
         },
       }
       await saveConfig(updated)
@@ -431,6 +454,9 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     }
     form.value.backend_endpoint = cfg.backend?.endpoint || ''
     form.value.backend_api_key = cfg.backend?.api_key || ''
+    form.value.backend_project = cfg.backend?.project || ''
+    form.value.backend_location = cfg.backend?.location || ''
+    form.value.backend_credentials_path = cfg.backend?.credentials_path || ''
     await loadAvailableModels()
     await loadAgentsList()
     if (currentProvider.value === 'builtin') {
@@ -478,6 +504,7 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     filteredModels,
     filteredCatalog,
     isApiKeyConfigured,
+    isVertexCredentialsConfigured,
     filteredProviderModels,
     providerDisplayName,
     endpointDisplay,

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -116,6 +117,62 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 			endpoint = strings.TrimSuffix(s.cfg.Backend.Endpoint, "/")
 		}
 		models, fetchErr = fetchAnthropicModels(endpoint, apiKey)
+
+	case "vertex":
+		// Live-fetch the publisher model listing from Vertex AI whenever
+		// project + credentials are wired — even when vertex is not the
+		// globally selected provider, so the UI can show what's available
+		// before the user commits to switching providers. Falls back to the
+		// curated vertexKnownModels list when credentials aren't configured.
+		project := s.cfg.Backend.Project
+		if project == "" {
+			project = os.Getenv("GOOGLE_CLOUD_PROJECT")
+		}
+		location := s.cfg.Backend.Location
+		if location == "" {
+			location = os.Getenv("GOOGLE_CLOUD_LOCATION")
+		}
+		credsRef := s.cfg.Backend.CredentialsPath
+		credsConfigured := credsRef != "" || os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != ""
+		if project == "" || !credsConfigured {
+			jsonOK(w, vertexKnownModels)
+			return
+		}
+		fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		live, listErr := backend.ListVertexPublisherModels(fetchCtx, project, location, credsRef)
+		cancel()
+		if listErr != nil || len(live) == 0 {
+			jsonOK(w, vertexKnownModels)
+			return
+		}
+		out := make([]providerModel, 0, len(live))
+		for _, m := range live {
+			out = append(out, vertexPublisherToProviderModel(m))
+		}
+		writeProviderModelsCache(provider, out)
+		jsonOK(w, out)
+		return
+
+	case "google":
+		// Google AI Studio (Generative Language API). API-key auth. If a key
+		// is configured, attempt a live model-list fetch; otherwise return
+		// the curated known-models list.
+		apiKey := ""
+		if s.cfg.Backend.Provider == "google" {
+			apiKey, _ = backend.ResolveAPIKey(s.cfg.Backend.APIKey)
+		}
+		if apiKey == "" {
+			jsonOK(w, googleAIKnownModels)
+			return
+		}
+		live, fetchErr := fetchGoogleAIModels(apiKey)
+		if fetchErr != nil || len(live) == 0 {
+			jsonOK(w, googleAIKnownModels)
+			return
+		}
+		writeProviderModelsCache(provider, live)
+		jsonOK(w, live)
+		return
 
 	default:
 		jsonError(w, http.StatusBadRequest, "unknown provider: "+provider)
@@ -460,4 +517,118 @@ func anthropicTags(id string) []string {
 	default:
 		return nil
 	}
+}
+
+// ── Vertex AI ────────────────────────────────────────────────────────────────
+
+// vertexKnownModels are the Gemini and Anthropic-on-Vertex models exposed
+// through the Vertex backend. The backend's ContextWindowForVertexModel
+// lookup is authoritative for context-window values.
+var vertexKnownModels = []providerModel{
+	{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", Description: "Google's flagship Gemini reasoning model via Vertex AI.", ContextLength: 1048576, Tags: []string{"recommended", "high-quality"}},
+	{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Description: "Fast, low-cost Gemini model via Vertex AI.", ContextLength: 1048576, Tags: []string{"fast", "lightweight"}},
+	{ID: "gemini-1.5-pro", Name: "Gemini 1.5 Pro", Description: "Previous-generation Gemini Pro with 2M context.", ContextLength: 2097152, Tags: []string{"long-context"}},
+	{ID: "gemini-1.5-flash", Name: "Gemini 1.5 Flash", Description: "Previous-generation Gemini Flash.", ContextLength: 1048576, Tags: []string{"fast"}},
+	{ID: "claude-opus-4", Name: "Claude Opus 4 (Vertex)", Description: "Anthropic Claude Opus served via Google Vertex AI.", ContextLength: 200000, Tags: []string{"high-quality"}},
+	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5 (Vertex)", Description: "Anthropic Claude Sonnet served via Google Vertex AI.", ContextLength: 200000, Tags: []string{"balanced", "recommended"}},
+	{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5 (Vertex)", Description: "Anthropic Claude Haiku served via Google Vertex AI.", ContextLength: 200000, Tags: []string{"fast", "lightweight"}},
+}
+
+// vertexPublisherToProviderModel converts a VertexPublisherModel from the
+// backend package into the UI-facing providerModel. Display names and
+// context-window sizes mirror the curated list where they overlap.
+func vertexPublisherToProviderModel(m backend.VertexPublisherModel) providerModel {
+	pm := providerModel{
+		ID:          m.ID,
+		Name:        backend.DisplayNameForVertexModel(m.ID),
+		Description: backend.DescriptionForVertexModel(m.ID),
+	}
+	for _, kn := range vertexKnownModels {
+		if kn.ID == m.ID {
+			pm.Name = kn.Name
+			pm.Description = kn.Description
+			break
+		}
+	}
+	// Context length + tags are derived from the backend doc-sourced lookup
+	// tables — the publisher catalog endpoint doesn't expose inputTokenLimit.
+	pm.ContextLength = backend.ContextWindowForVertexModel(m.ID)
+	pm.Tags = backend.TagsForVertexModel(m.ID)
+	if m.LaunchStage != "" && m.LaunchStage != "GA" {
+		pm.Tags = append(pm.Tags, strings.ToLower(strings.ReplaceAll(m.LaunchStage, "_", "-")))
+	}
+	return pm
+}
+
+// ── Google AI Studio ─────────────────────────────────────────────────────────
+
+// googleAIKnownModels are the gemini models exposed through the Google AI
+// Studio (Generative Language API) backend. The list is curated rather than
+// fetched so the UI works even before the user adds an API key.
+var googleAIKnownModels = []providerModel{
+	{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", Description: "Google's flagship Gemini reasoning model via AI Studio.", ContextLength: 1048576, Tags: []string{"recommended", "high-quality"}},
+	{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Description: "Fast, low-cost Gemini model via AI Studio.", ContextLength: 1048576, Tags: []string{"fast", "lightweight"}},
+	{ID: "gemini-1.5-pro", Name: "Gemini 1.5 Pro", Description: "Previous-generation Gemini Pro with 2M context.", ContextLength: 2097152, Tags: []string{"long-context"}},
+	{ID: "gemini-1.5-flash", Name: "Gemini 1.5 Flash", Description: "Previous-generation Gemini Flash.", ContextLength: 1048576, Tags: []string{"fast"}},
+}
+
+// fetchGoogleAIModels lists models from the public Generative Language API,
+// filtered to gemini-* entries that support streamGenerateContent. Returns
+// the empty slice (with error) when the call fails so callers can fall back
+// to the curated list.
+func fetchGoogleAIModels(apiKey string) ([]providerModel, error) {
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models?key=%s", apiKey)
+	client := &http.Client{Timeout: providerModelsFetchTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetch Google AI models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("Google AI Studio: invalid API key (HTTP %d)", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch Google AI models: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Models []struct {
+			Name                       string   `json:"name"`
+			DisplayName                string   `json:"displayName"`
+			Description                string   `json:"description"`
+			InputTokenLimit            int      `json:"inputTokenLimit"`
+			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("parse Google AI response: %w", err)
+	}
+	out := make([]providerModel, 0, len(raw.Models))
+	for _, m := range raw.Models {
+		// API returns "models/gemini-2.5-pro" — strip prefix.
+		id := strings.TrimPrefix(m.Name, "models/")
+		if !strings.Contains(strings.ToLower(id), "gemini") {
+			continue
+		}
+		supportsStream := false
+		for _, sm := range m.SupportedGenerationMethods {
+			if sm == "streamGenerateContent" || sm == "generateContent" {
+				supportsStream = true
+				break
+			}
+		}
+		if !supportsStream {
+			continue
+		}
+		out = append(out, providerModel{
+			ID:            id,
+			Name:          m.DisplayName,
+			Description:   m.Description,
+			ContextLength: m.InputTokenLimit,
+		})
+	}
+	return out, nil
 }

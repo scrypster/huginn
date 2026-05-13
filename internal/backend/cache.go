@@ -11,10 +11,31 @@ import (
 // BackendCache lazily instantiates and caches backends keyed by config.
 // Agents that share provider+endpoint+apiKey reuse a single backend instance.
 type BackendCache struct {
-	mu           sync.Mutex
-	backends     map[string]Backend
-	fallback     Backend           // global backend from config.json
-	providerKeys map[string]string // provider → raw API key ref (e.g. "keyring:huginn:anthropic")
+	mu                sync.Mutex
+	backends          map[string]Backend
+	fallback          Backend            // global backend from config.json
+	providerKeys      map[string]string  // provider → raw API key ref (e.g. "keyring:huginn:anthropic")
+	preResolvedByName map[string]Backend // provider → pre-built backend (used when factory can't see full config)
+}
+
+// SetProviderBackend registers a pre-built backend for a provider. When
+// For() is called with a matching provider and no per-agent overrides, this
+// backend is returned in preference to building one from the factory.
+//
+// Used for providers whose configuration is richer than the factory's
+// (provider, endpoint, apiKey, model) tuple — e.g. Vertex AI needs project +
+// location + credentials path from config.Backend, which the factory case
+// alone cannot see.
+func (c *BackendCache) SetProviderBackend(provider string, b Backend) {
+	if provider == "" || b == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.preResolvedByName == nil {
+		c.preResolvedByName = make(map[string]Backend)
+	}
+	c.preResolvedByName[provider] = b
 }
 
 // NewBackendCache creates a BackendCache with the given fallback backend.
@@ -82,6 +103,38 @@ func (c *BackendCache) For(provider, endpoint, apiKey, model string) (Backend, e
 			return nil, fmt.Errorf("backend cache: no provider specified and no fallback backend configured")
 		}
 		return c.fallback, nil
+	}
+
+	// Pre-built backend registered via SetProviderBackend wins when the
+	// agent has no per-endpoint / per-key override. Vertex relies on this so
+	// agents with provider="vertex" reuse the global VertexBackend instance
+	// (which knows project + location + credentials) instead of going through
+	// the env-only factory case.
+	if endpoint == "" && apiKey == "" {
+		c.mu.Lock()
+		pre := c.preResolvedByName[provider]
+		c.mu.Unlock()
+		if pre != nil {
+			return pre, nil
+		}
+	}
+
+	// When the per-agent provider matches the global fallback's provider and
+	// the agent has no per-agent overrides, route through the fallback so the
+	// agent inherits the fully-resolved configuration (config-file values
+	// like project / location for vertex). Otherwise each agent would force
+	// a fresh factory build that only sees env vars.
+	if endpoint == "" && apiKey == "" && c.fallback != nil {
+		switch fb := c.fallback.(type) {
+		case *VertexBackend:
+			if provider == "vertex" {
+				return fb, nil
+			}
+		case *GoogleAIBackend:
+			if provider == "google" {
+				return fb, nil
+			}
+		}
 	}
 
 	c.mu.Lock()

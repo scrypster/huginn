@@ -56,11 +56,14 @@ type CloudConfig struct {
 
 // BackendConfig holds configuration for the LLM backend.
 type BackendConfig struct {
-	Type         string `json:"type"`               // "external" (Phase 1 default) or "managed" (Phase 3)
-	Endpoint     string `json:"endpoint"`            // used when type="external"
-	Provider     string `json:"provider,omitempty"` // "anthropic", "openai", "openrouter", "ollama"
-	APIKey       string `json:"api_key,omitempty"`  // literal key or "$ENV_VAR_NAME"
-	BuiltinModel string `json:"builtin_model,omitempty"` // active model when type="managed" (builtin llama.cpp)
+	Type            string `json:"type"`                      // "external" (Phase 1 default) or "managed" (Phase 3)
+	Endpoint        string `json:"endpoint"`                   // used when type="external"
+	Provider        string `json:"provider,omitempty"`        // "anthropic", "openai", "openrouter", "ollama"
+	APIKey          string `json:"api_key,omitempty"`         // literal key or "$ENV_VAR_NAME"
+	BuiltinModel    string `json:"builtin_model,omitempty"`   // active model when type="managed" (builtin llama.cpp)
+	Project         string `json:"project,omitempty"`         // GCP project (vertex provider); fallback: GOOGLE_CLOUD_PROJECT
+	Location        string `json:"location,omitempty"`        // GCP region (vertex provider); fallback: GOOGLE_CLOUD_LOCATION, default us-central1
+	CredentialsPath string `json:"credentials_path,omitempty"` // path to service-account JSON; fallback: GOOGLE_APPLICATION_CREDENTIALS
 }
 
 // ResolvedAPIKey returns the API key, resolving environment variables if needed.
