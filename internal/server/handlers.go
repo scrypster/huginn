@@ -591,6 +591,13 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 					endpoint = "https://openrouter.ai/api/v1"
 				}
 				fetched, fetchErr = fetchOpenRouterModels(strings.TrimSuffix(endpoint, "/"), apiKey)
+			case "google":
+				live, liveErr := fetchGoogleAIModels(apiKey)
+				if liveErr != nil || len(live) == 0 {
+					fetched = googleAIKnownModels
+				} else {
+					fetched = live
+				}
 			}
 			if fetchErr != nil {
 				if cached, cacheErr := readProviderModelsCache(provider); cacheErr == nil {

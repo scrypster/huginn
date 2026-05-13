@@ -17,6 +17,7 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     { value: 'anthropic', label: 'Anthropic' },
     { value: 'openai', label: 'OpenAI' },
     { value: 'openrouter', label: 'OpenRouter' },
+    { value: 'google', label: 'Google AI Studio' },
     { value: 'vertex', label: 'Google Vertex AI' },
     { value: 'builtin', label: 'Built-in (llama.cpp)' },
   ]
@@ -113,6 +114,7 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
       case 'anthropic': return 'Anthropic'
       case 'openai': return 'OpenAI'
       case 'openrouter': return 'OpenRouter'
+      case 'google': return 'Google AI Studio'
       case 'vertex': return 'Google Vertex AI'
       default: return currentProvider.value
     }
@@ -129,6 +131,7 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
       case 'anthropic': return 'https://api.anthropic.com'
       case 'openai': return 'https://api.openai.com/v1'
       case 'openrouter': return 'https://openrouter.ai/api/v1'
+      case 'google': return 'https://generativelanguage.googleapis.com'
       case 'vertex': return 'https://{LOCATION}-aiplatform.googleapis.com'
       default: return 'https://...'
     }

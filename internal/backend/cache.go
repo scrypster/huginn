@@ -130,6 +130,10 @@ func (c *BackendCache) For(provider, endpoint, apiKey, model string) (Backend, e
 			if provider == "vertex" {
 				return fb, nil
 			}
+		case *GoogleAIBackend:
+			if provider == "google" {
+				return fb, nil
+			}
 		}
 	}
 

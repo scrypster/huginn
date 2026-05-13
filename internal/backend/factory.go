@@ -48,6 +48,11 @@ func newFromResolvedConfig(provider, endpoint string, resolver KeyResolver, mode
 	case "openrouter":
 		return NewOpenRouterBackend(resolver, model), nil
 
+	case "google":
+		// Google AI Studio (Generative Language API). Distinct from Vertex AI
+		// — uses a single API key, no project / location / OAuth.
+		return NewGoogleAIBackend(resolver, model), nil
+
 	case "vertex":
 		return NewVertexBackend(context.Background(), VertexConfig{
 			Project:         os.Getenv("GOOGLE_CLOUD_PROJECT"),
