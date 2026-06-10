@@ -602,18 +602,47 @@ func BuildRegistry(cfg *AgentsConfig, models *modelconfig.Models) *AgentRegistry
 func BuildRegistryWithUsername(cfg *AgentsConfig, models *modelconfig.Models, username string) *AgentRegistry {
 	reg := NewRegistry()
 	for _, def := range cfg.Agents {
-		a := FromDef(def)
-		// Always resolve the effective vault name so per-agent memory activation
-		// works even when VaultName was not explicitly set in agents.json.
-		a.VaultName = def.ResolvedVaultName(username)
-		// Populate plasticity from the def (FromDef already set it; ensure non-empty).
-		if def.Plasticity != "" {
-			a.Plasticity = def.Plasticity
-		} else if a.Plasticity == "" {
-			a.Plasticity = "default"
-		}
-		// MemoryEnabled is already set by FromDef (nil → true default).
-		reg.Register(a)
+		reg.Register(agentFromDefWithUsername(def, username))
 	}
 	return reg
+}
+
+// agentFromDefWithUsername builds a runtime Agent from its persisted definition,
+// resolving the effective vault name and plasticity defaults.
+func agentFromDefWithUsername(def AgentDef, username string) *Agent {
+	a := FromDef(def)
+	// Always resolve the effective vault name so per-agent memory activation
+	// works even when VaultName was not explicitly set in agents.json.
+	a.VaultName = def.ResolvedVaultName(username)
+	// Populate plasticity from the def (FromDef already set it; ensure non-empty).
+	if def.Plasticity != "" {
+		a.Plasticity = def.Plasticity
+	} else if a.Plasticity == "" {
+		a.Plasticity = "default"
+	}
+	// MemoryEnabled is already set by FromDef (nil → true default).
+	return a
+}
+
+// ReloadFromConfig atomically replaces the registry's contents with agents
+// built from cfg. The registry is mutated in place so every component holding
+// the *AgentRegistry pointer (orchestrator, thread manager, mention parsing,
+// space rosters) sees agents created, updated, or deleted at runtime without
+// a server restart.
+func (r *AgentRegistry) ReloadFromConfig(cfg *AgentsConfig, username string) {
+	fresh := make(map[string]*Agent, len(cfg.Agents))
+	freshVaults := make(map[string]string, len(cfg.Agents))
+	for _, def := range cfg.Agents {
+		a := agentFromDefWithUsername(def, username)
+		fresh[strings.ToLower(a.Name)] = a
+		if a.VaultName != "" {
+			if _, claimed := freshVaults[a.VaultName]; !claimed {
+				freshVaults[a.VaultName] = a.Name
+			}
+		}
+	}
+	r.mu.Lock()
+	r.agents = fresh
+	r.vaultNames = freshVaults
+	r.mu.Unlock()
 }

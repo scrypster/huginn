@@ -2781,6 +2781,21 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		logger.Info("startServer: wiring agents", "count", len(agentsCfg.Agents), "names", agentReg.Names())
 		orch.SetAgentRegistry(agentReg)
 
+		// Reload the live registry whenever an agent is created/updated/deleted
+		// via the API — without this, runtime-created agents are invisible to
+		// delegation, mention parsing, and space rosters until restart (#124).
+		// The registry is mutated in place because its pointer is captured by
+		// the orchestrator, thread manager, and delegation closures below.
+		srv.SetOnAgentsChanged(func() {
+			freshCfg, loadErr := agentslib.LoadAgents()
+			if loadErr != nil || freshCfg == nil {
+				logger.Warn("agents changed: reload failed; registry left unchanged", "err", loadErr)
+				return
+			}
+			agentReg.ReloadFromConfig(freshCfg, srvUsername)
+			logger.Info("agents changed: registry reloaded", "count", len(freshCfg.Agents), "names", agentReg.Names())
+		})
+
 		// Compute working dir and bash timeout; shared by toolReg below.
 		srvCWD, cwdErr := os.Getwd()
 		if cwdErr != nil {
