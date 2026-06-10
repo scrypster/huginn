@@ -200,3 +200,51 @@ func TestWaitForThreadsTool_TimeoutClamp(t *testing.T) {
 		t.Errorf("timeout not clamped: got %s want %s", gotTimeout, maxWaitTimeout)
 	}
 }
+
+// TestWaitForThreads_MarksCollected verifies that results delivered through
+// WaitForThreads are stamped as collected, so the completion notifier can skip
+// the duplicate follow-up synthesis.
+func TestWaitForThreads_MarksCollected(t *testing.T) {
+	tm := New()
+	th, _ := tm.Create(CreateParams{SessionID: "s1", AgentID: "Sam", Task: "a"})
+	tm.Complete(th.ID, FinishSummary{Summary: "done", Status: "completed"})
+
+	if tm.WasCollected(th.ID) {
+		t.Fatal("thread must not be collected before any wait")
+	}
+	report := tm.WaitForThreads(context.Background(), "s1", []string{th.ID}, time.Second)
+	if len(report.Completed) != 1 {
+		t.Fatalf("expected 1 completed, got %d", len(report.Completed))
+	}
+	if !tm.WasCollected(th.ID) {
+		t.Error("thread must be marked collected after WaitForThreads returns it")
+	}
+
+	// Pending threads at timeout are NOT marked collected.
+	pending, _ := tm.Create(CreateParams{SessionID: "s1", AgentID: "Dave", Task: "b"})
+	_ = tm.WaitForThreads(context.Background(), "s1", []string{pending.ID}, 300*time.Millisecond)
+	if tm.WasCollected(pending.ID) {
+		t.Error("pending thread must not be marked collected")
+	}
+}
+
+// TestCompletionNotify_StampsThreadID verifies Notify stamps ThreadID onto the
+// summary so FollowUpFn implementations can identify the thread.
+func TestCompletionNotify_StampsThreadID(t *testing.T) {
+	got := make(chan FinishSummary, 1)
+	n := &CompletionNotifier{
+		Broadcast: func(string, string, map[string]any) {},
+		FollowUpFn: func(_ context.Context, _, _ string, s *FinishSummary) {
+			got <- *s
+		},
+	}
+	n.Notify(context.Background(), "s1", "th-42", "Sam", &FinishSummary{Summary: "x", Status: "completed"})
+	select {
+	case s := <-got:
+		if s.ThreadID != "th-42" {
+			t.Errorf("ThreadID = %q, want th-42", s.ThreadID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FollowUpFn never ran")
+	}
+}

@@ -938,17 +938,46 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 	for {
 		completed, pending := collect()
 		if len(pending) == 0 {
+			tm.markCollected(completed)
 			return WaitReport{Completed: completed}
 		}
 		if time.Now().After(deadline) {
+			tm.markCollected(completed)
 			return WaitReport{Completed: completed, Pending: pending, TimedOut: true}
 		}
 		select {
 		case <-ctx.Done():
+			tm.markCollected(completed)
 			return WaitReport{Completed: completed, Pending: pending, TimedOut: true}
 		case <-ticker.C:
 		}
 	}
+}
+
+// markCollected stamps CollectedAt on the live thread records whose results
+// are being returned to a waiting caller, so the completion notifier knows
+// the lead agent already has them and skips its automatic follow-up.
+func (tm *ThreadManager) markCollected(threads []*Thread) {
+	if len(threads) == 0 {
+		return
+	}
+	now := time.Now()
+	tm.mu.Lock()
+	for _, t := range threads {
+		if live, ok := tm.threads[t.ID]; ok && live.CollectedAt.IsZero() {
+			live.CollectedAt = now
+		}
+	}
+	tm.mu.Unlock()
+}
+
+// WasCollected reports whether the thread's result has been delivered to a
+// waiting lead agent via WaitForThreads.
+func (tm *ThreadManager) WasCollected(threadID string) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	t, ok := tm.threads[threadID]
+	return ok && !t.CollectedAt.IsZero()
 }
 
 // ActiveThreadIDs returns the IDs of all non-terminal threads in the session,

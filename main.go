@@ -3150,6 +3150,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return
 			}
 
+			// If the lead agent already collected this result via wait_for_threads
+			// (it was blocking on the thread and synthesized inline), a follow-up
+			// would duplicate the reply in the channel. Checked AFTER the idle wait
+			// so the wait_for_threads collection stamp has had time to land.
+			if summary.ThreadID != "" && tm.WasCollected(summary.ThreadID) {
+				logger.Info("follow-up: skipped — result already collected via wait_for_threads",
+					"session_id", sessionID, "thread_id", summary.ThreadID, "agent", ag.Name)
+				return
+			}
+
 			// Immediately signal that the lead agent is preparing a response so the
 			// frontend can show a "thinking" indicator before the first token arrives.
 			// This closes the UX gap where Sam finishes but Tom is silent for 30-60s.
