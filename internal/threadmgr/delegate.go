@@ -3,6 +3,7 @@ package threadmgr
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/tools"
@@ -13,6 +14,7 @@ type DelegateResult struct {
 	ThreadID  string
 	Spawned   bool     // true if the thread was spawned immediately
 	Conflicts []string // non-empty if file lease conflicts prevented creation
+	Warnings  []string // non-fatal degradations (e.g. session history unavailable) surfaced to the lead agent
 	Err       error
 }
 
@@ -142,14 +144,19 @@ func (d *DelegateToAgentTool) Execute(ctx context.Context, args map[string]any) 
 		}
 	}
 
+	warnSuffix := ""
+	if len(res.Warnings) > 0 {
+		warnSuffix = "\nWarning: " + strings.Join(res.Warnings, "\nWarning: ")
+	}
+
 	if res.Spawned {
 		return tools.ToolResult{
-			Output:   fmt.Sprintf("delegated task to agent %q (thread %s) — spawned immediately", agentName, res.ThreadID),
+			Output:   fmt.Sprintf("delegated task to agent %q (thread %s) — spawned immediately. Use wait_for_threads to block until it finishes and collect the result.%s", agentName, res.ThreadID, warnSuffix),
 			Metadata: map[string]any{"thread_id": res.ThreadID, "status": "spawned"},
 		}
 	}
 	return tools.ToolResult{
-		Output:   fmt.Sprintf("delegated task to agent %q (thread %s) — queued, waiting for dependencies", agentName, res.ThreadID),
+		Output:   fmt.Sprintf("delegated task to agent %q (thread %s) — queued, waiting for dependencies. Use wait_for_threads to block until it finishes and collect the result.%s", agentName, res.ThreadID, warnSuffix),
 		Metadata: map[string]any{"thread_id": res.ThreadID, "status": "queued"},
 	}
 }

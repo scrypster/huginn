@@ -28,6 +28,11 @@
           >{{ statusLabel }}</span>
         </div>
         <p class="text-[11px] text-huginn-muted truncate mt-0.5 leading-snug">{{ thread.Task || 'Running task…' }}</p>
+        <!-- Live activity heartbeat (only while running) -->
+        <p v-if="isRunning && activityLabel"
+          class="text-[10px] truncate mt-0.5 leading-snug"
+          :class="isStalled ? 'text-huginn-yellow' : 'text-huginn-muted/70'"
+        >{{ activityLabel }}</p>
       </div>
 
       <!-- Right side: elapsed + expand chevron -->
@@ -288,6 +293,27 @@ const elapsedLabel = computed(() => {
   const s = Math.floor(ms / 1000)
   if (s < 60) return `${s}s`
   return `${Math.floor(s / 60)}m ${s % 60}s`
+})
+
+// Heartbeat: flag a running thread as stalled when no token/tool/status event
+// has arrived for 2 minutes. Depends on elapsedMs so the per-second ticker
+// keeps the computation fresh.
+const STALL_THRESHOLD_MS = 2 * 60 * 1000
+const isStalled = computed(() => {
+  void props.thread.elapsedMs // reactivity tick
+  if (!isRunning.value || !props.thread.lastActivityAt) return false
+  return Date.now() - props.thread.lastActivityAt > STALL_THRESHOLD_MS
+})
+
+const activityLabel = computed(() => {
+  void props.thread.elapsedMs // reactivity tick
+  const base = props.thread.activity ?? ''
+  if (!isStalled.value) return base
+  const quietFor = props.thread.lastActivityAt
+    ? Math.floor((Date.now() - props.thread.lastActivityAt) / 60000)
+    : 0
+  const stallNote = `⚠ no activity for ${quietFor}m — may be stalled`
+  return base ? `${base} · ${stallNote}` : stallNote
 })
 
 const collaborationTimeline = computed<CoordinationEvent[]>(() => {

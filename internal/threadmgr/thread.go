@@ -41,6 +41,12 @@ type Thread struct {
 	Timeout         time.Duration  // 0 = no timeout; when > 0, the goroutine is killed after this duration
 	cancel          func()         // non-nil after Start()
 	InputCh         chan string     // receives human input when status == blocked
+
+	// Heartbeat fields — let the lead agent and UI distinguish "still working"
+	// from "stalled" without waiting for a terminal status.
+	LastActivityAt  time.Time // updated on every turn, tool call, and (throttled) token
+	CurrentActivity string    // human-readable, e.g. `thinking (turn 3/50)`, `running tool "bash"`
+	Turn            int       // current loop turn (1-based; 0 = not yet running)
 }
 
 // AuditEntry is a single immutable record in the ThreadManager audit log.

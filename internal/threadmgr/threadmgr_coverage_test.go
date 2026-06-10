@@ -238,10 +238,19 @@ func TestBuildArtifactMessages_BudgetOverflow(t *testing.T) {
 
 	_ = store
 
-	// Budget so small the artifact won't fit.
+	// Budget so small the artifact won't fit. The artifact itself is dropped,
+	// but an explicit omission note must be injected so the consumer knows an
+	// upstream result exists that it cannot see.
 	msgs := buildArtifactMessages(downstream, tm, 5)
-	if len(msgs) != 0 {
-		t.Errorf("expected 0 artifact messages when budget exceeded, got %d", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 omission-note message when budget exceeded, got %d", len(msgs))
+	}
+	note := msgs[0].Content
+	if !strings.Contains(note, "omitted") || !strings.Contains(note, "Worker") || !strings.Contains(note, upstream.ID) {
+		t.Errorf("omission note should name the dropped agent and thread ID, got %q", note)
+	}
+	if strings.Contains(note, bigSummary[:100]) {
+		t.Errorf("omission note must not include the dropped artifact content")
 	}
 }
 

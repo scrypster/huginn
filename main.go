@@ -2828,10 +2828,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				logger.Info("delegate_to_agent: agent validated", "agent", p.AgentName)
 
 				// Load the session for SpawnThread (may be a stub if not yet persisted).
+				var warnings []string
 				sess, loadErr := sessStore.Load(sessionID)
 				if loadErr != nil {
 					logger.Warn("delegate_to_agent: session load failed, using stub", "err", loadErr)
 					sess = &session.Session{ID: sessionID}
+					warnings = append(warnings,
+						"session history could not be loaded — the delegated agent will start WITHOUT prior chat context; include all necessary context in the task description")
 				}
 				logger.Info("delegate_to_agent: session loaded", "space_id", sess.SpaceID())
 
@@ -2930,10 +2933,10 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					}
 					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
 					logger.Info("delegate_to_agent: SpawnThread returned", "thread_id", tid)
-					return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true}
+					return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true, Warnings: warnings}
 				}
 				logger.Info("delegate_to_agent: thread not ready, queued", "thread_id", t.ID)
-				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false}
+				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false, Warnings: warnings}
 			},
 		}
 		toolReg.Register(delegateTool)
@@ -2966,6 +2969,23 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 		toolReg.Register(recallTool)
 
+		// wait_for_threads — barrier primitive: the lead agent blocks until its
+		// delegates finish and gets every full FinishSummary in one result,
+		// instead of polling recall_thread_result per thread.
+		waitTool := &threadmgr.WaitForThreadsTool{
+			Fn: func(ctx context.Context, threadIDs []string, timeout time.Duration) (threadmgr.WaitReport, error) {
+				sessionID := agent.GetSessionID(ctx)
+				if sessionID == "" {
+					return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
+				}
+				if len(threadIDs) == 0 {
+					threadIDs = tm.ActiveThreadIDs(sessionID)
+				}
+				return tm.WaitForThreads(ctx, sessionID, threadIDs, timeout), nil
+			},
+		}
+		toolReg.Register(waitTool)
+
 		// Tag delegation tools as "builtin" so agents with LocalTools: ["*"]
 		// (i.e. "Allow all" in the UI) see them in their tool list. Without
 		// this tag, AllBuiltinSchemas() silently excludes them and the lead
@@ -2974,6 +2994,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			"delegate_to_agent",
 			"list_team_status",
 			"recall_thread_result",
+			"wait_for_threads",
 		}, "builtin")
 
 		// ── Workflow runtime parity (Phase 1) ─────────────────────────────
@@ -3140,15 +3161,39 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// Truncate the summary to avoid Tom regurgitating Sam's entire report —
 			// the full report lives in the thread panel. Tom writes a brief synthesis.
 			summaryText := strings.TrimSpace(summary.Summary)
-			const maxSummaryLen = 800
+			const maxSummaryLen = 1200
 			truncNote := ""
 			if len(summaryText) > maxSummaryLen {
 				summaryText = summaryText[:maxSummaryLen]
 				truncNote = "\n\n(Full report is available in the thread panel.)"
 			}
-			followUpMsg := completedAgentID + " has completed their task. Key findings:\n\n" +
-				summaryText + truncNote +
-				"\n\nPlease give the user a brief synthesis (3-5 sentences max) in your own words. Do NOT repeat the full report — just the key takeaways and recommended next steps."
+			// Lead with an honest outcome line — an errored or timed-out delegate
+			// must not be presented to the user as a completed task.
+			var outcome string
+			switch summary.Status {
+			case "error":
+				outcome = completedAgentID + "'s task FAILED with an error. What they reported before failing:"
+			case "completed-with-timeout":
+				outcome = completedAgentID + " stopped early (timeout or turn limit) and may have left work unfinished. What they got done:"
+			case "blocked", "needs_review":
+				outcome = completedAgentID + " stopped with status " + summary.Status + ". Their report:"
+			default:
+				outcome = completedAgentID + " has completed their task. Key findings:"
+			}
+			// Surface the structured result fields, not just the narrative — these
+			// are exactly what the lead needs to decide next steps.
+			var details strings.Builder
+			if len(summary.FilesModified) > 0 {
+				details.WriteString("\nFiles modified: " + strings.Join(summary.FilesModified, ", "))
+			}
+			if len(summary.KeyDecisions) > 0 {
+				details.WriteString("\nKey decisions: " + strings.Join(summary.KeyDecisions, "; "))
+			}
+			if len(summary.Artifacts) > 0 {
+				details.WriteString("\nArtifacts: " + strings.Join(summary.Artifacts, ", "))
+			}
+			followUpMsg := outcome + "\n\n" + summaryText + details.String() + truncNote +
+				"\n\nPlease give the user a brief synthesis (3-5 sentences max) in your own words. Be honest about failures or unfinished work. Do NOT repeat the full report — just the key takeaways and recommended next steps."
 
 			// Stream Tom's reply tokens to the session's WS clients.
 			var replyBuf strings.Builder

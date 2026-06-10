@@ -40,6 +40,9 @@ export interface LiveThread extends Thread {
   toolCalls: LiveToolCall[]     // tool call history (most recent last)
   elapsedMs: number             // live elapsed milliseconds (updated by ticker)
   parentMessageId?: string      // chat message that triggered this thread
+  activity?: string             // heartbeat: what the agent is doing right now (e.g. 'thinking (turn 3/50)')
+  turn?: number                 // heartbeat: current loop turn
+  lastActivityAt?: number       // heartbeat: epoch ms of the last token/tool/status event
   _tickerHandle?: number        // setInterval handle for elapsed counter
 }
 
@@ -369,9 +372,12 @@ export function useThreads() {
     const onThreadStatus = (msg: WSMessage) => {
       const sid = msg.session_id ?? sessionId()
       if (!sid) return
-      const p = msg.payload as Record<string, string>
-      const t = ensureThread(sid, p.thread_id!)
+      const p = msg.payload as Record<string, unknown>
+      const t = ensureThread(sid, p.thread_id as string)
       t.Status = p.status as ThreadStatus
+      if (typeof p.activity === 'string') t.activity = p.activity
+      if (typeof p.turn === 'number') t.turn = p.turn
+      t.lastActivityAt = Date.now()
       debouncedPersist(sid)
     }
 
@@ -382,6 +388,7 @@ export function useThreads() {
       const t = ensureThread(sid, p.thread_id!)
       // Keep last 600 chars to avoid unbounded growth
       t.streamingContent = (t.streamingContent + p.token).slice(-600)
+      t.lastActivityAt = Date.now()
       // Streaming content is ephemeral — debounce persist for status only
       debouncedPersist(sid)
     }
@@ -396,6 +403,8 @@ export function useThreads() {
         args: p.args as Record<string, unknown> | undefined,
         done: false,
       })
+      t.activity = `running tool "${p.tool as string}"`
+      t.lastActivityAt = Date.now()
       debouncedPersist(sid)
     }
 
