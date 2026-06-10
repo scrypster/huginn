@@ -19,6 +19,9 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
     { value: 'openrouter', label: 'OpenRouter' },
     { value: 'google', label: 'Google AI Studio' },
     { value: 'vertex', label: 'Google Vertex AI' },
+    { value: 'deepseek', label: 'DeepSeek' },
+    { value: 'zai', label: 'Z.ai (GLM)' },
+    { value: 'custom', label: 'Custom (OpenAI-compatible)' },
     { value: 'builtin', label: 'Built-in (llama.cpp)' },
   ]
 
@@ -116,6 +119,9 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
       case 'openrouter': return 'OpenRouter'
       case 'google': return 'Google AI Studio'
       case 'vertex': return 'Google Vertex AI'
+      case 'deepseek': return 'DeepSeek'
+      case 'zai': return 'Z.ai (GLM)'
+      case 'custom': return 'Custom (OpenAI-compatible)'
       default: return currentProvider.value
     }
   })
@@ -133,6 +139,9 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
       case 'openrouter': return 'https://openrouter.ai/api/v1'
       case 'google': return 'https://generativelanguage.googleapis.com'
       case 'vertex': return 'https://{LOCATION}-aiplatform.googleapis.com'
+      case 'deepseek': return 'https://api.deepseek.com'
+      case 'zai': return 'https://api.z.ai/api/paas/v4'
+      case 'custom': return 'https://your-provider.example.com/v1'
       default: return 'https://...'
     }
   })

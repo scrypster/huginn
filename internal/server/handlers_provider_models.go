@@ -174,6 +174,74 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, live)
 		return
 
+	case "deepseek":
+		if s.cfg.Backend.Provider != "deepseek" {
+			jsonOK(w, deepseekKnownModels)
+			return
+		}
+		apiKey := func() string { k, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey); return k }()
+		if apiKey == "" {
+			jsonOK(w, deepseekKnownModels)
+			return
+		}
+		endpoint := "https://api.deepseek.com"
+		if s.cfg.Backend.Endpoint != "" {
+			endpoint = strings.TrimSuffix(s.cfg.Backend.Endpoint, "/")
+		}
+		models, fetchErr = fetchOpenAICompatibleModels(endpoint, apiKey)
+		if fetchErr != nil || len(models) == 0 {
+			jsonOK(w, deepseekKnownModels)
+			return
+		}
+		writeProviderModelsCache(provider, models)
+		jsonOK(w, models)
+		return
+
+	case "zai":
+		if s.cfg.Backend.Provider != "zai" {
+			jsonOK(w, zaiKnownModels)
+			return
+		}
+		apiKey := func() string { k, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey); return k }()
+		if apiKey == "" {
+			jsonOK(w, zaiKnownModels)
+			return
+		}
+		endpoint := "https://api.z.ai/api/paas/v4"
+		if s.cfg.Backend.Endpoint != "" {
+			endpoint = strings.TrimSuffix(s.cfg.Backend.Endpoint, "/")
+		}
+		models, fetchErr = fetchOpenAICompatibleModels(endpoint, apiKey)
+		if fetchErr != nil || len(models) == 0 {
+			jsonOK(w, zaiKnownModels)
+			return
+		}
+		writeProviderModelsCache(provider, models)
+		jsonOK(w, models)
+		return
+
+	case "custom":
+		if s.cfg.Backend.Provider != "custom" {
+			jsonOK(w, []providerModel{})
+			return
+		}
+		apiKey := func() string { k, _ := backend.ResolveAPIKey(s.cfg.Backend.APIKey); return k }()
+		endpoint := strings.TrimSuffix(s.cfg.Backend.Endpoint, "/")
+		if endpoint == "" {
+			jsonOK(w, []providerModel{})
+			return
+		}
+		models, fetchErr = fetchOpenAICompatibleModels(endpoint, apiKey)
+		if fetchErr != nil || len(models) == 0 {
+			// Custom has no known fallback list — return empty so the UI
+			// shows the "no models" state instead of an error.
+			jsonOK(w, []providerModel{})
+			return
+		}
+		writeProviderModelsCache(provider, models)
+		jsonOK(w, models)
+		return
+
 	default:
 		jsonError(w, http.StatusBadRequest, "unknown provider: "+provider)
 		return
@@ -631,4 +699,102 @@ func fetchGoogleAIModels(apiKey string) ([]providerModel, error) {
 		})
 	}
 	return out, nil
+}
+
+// ── DeepSeek ─────────────────────────────────────────────────────────────────
+
+// deepseekKnownModels are the current DeepSeek models shown when a live fetch
+// is unavailable or not yet configured.
+var deepseekKnownModels = []providerModel{
+	{ID: "deepseek-chat", Name: "DeepSeek Chat", Description: "DeepSeek's general-purpose chat model, OpenAI-compatible.", Tags: []string{"recommended"}},
+	{ID: "deepseek-reasoner", Name: "DeepSeek Reasoner", Description: "DeepSeek's advanced reasoning model for complex tasks.", Tags: []string{"reasoning"}},
+}
+
+// ── Z.ai (GLM) ───────────────────────────────────────────────────────────────
+
+// zaiKnownModels are the current Z.ai GLM models shown when a live fetch
+// is unavailable or not yet configured.
+var zaiKnownModels = []providerModel{
+	{ID: "glm-5", Name: "GLM-5", Description: "Z.ai's flagship GLM model.", Tags: []string{"recommended"}},
+	{ID: "glm-5-turbo", Name: "GLM-5 Turbo", Description: "Z.ai GLM-5 Turbo — fast and efficient.", Tags: []string{"fast"}},
+	{ID: "glm-4.7", Name: "GLM-4.7", Description: "Z.ai GLM 4.7 generation model.", Tags: []string{}},
+	{ID: "glm-4.5-air", Name: "GLM-4.5 Air", Description: "Z.ai GLM-4.5 Air — lightweight and fast.", Tags: []string{"lightweight", "fast"}},
+}
+
+// ── Generic OpenAI-compatible model list fetcher ─────────────────────────────
+
+// fetchOpenAICompatibleModels fetches the /models (or /v1/models) list from any
+// OpenAI-compatible endpoint and returns a flat slice of providerModels.
+// The URL is built using the same version-aware rule as the chat endpoint.
+func fetchOpenAICompatibleModels(endpoint, apiKey string) ([]providerModel, error) {
+	// Use openAICompatiblePath from the backend package via its exported helper.
+	// Since this is the server package we replicate the same simple rule here.
+	url := openAICompatibleModelsURL(endpoint)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := (&http.Client{Timeout: providerModelsFetchTimeout}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("invalid API key")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch models: HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("parse models response: %w", err)
+	}
+
+	models := make([]providerModel, 0, len(raw.Data))
+	for _, m := range raw.Data {
+		if m.ID == "" {
+			continue
+		}
+		models = append(models, providerModel{ID: m.ID, Name: m.ID})
+	}
+	return models, nil
+}
+
+// openAICompatibleModelsURL builds the models list URL for any OpenAI-compatible
+// endpoint, applying the same version-aware rule as the backend's chat URL helper:
+// if the endpoint's last path segment already matches ^v\d+$, append /models;
+// otherwise append /v1/models.
+func openAICompatibleModelsURL(endpoint string) string {
+	ep := strings.TrimRight(endpoint, "/")
+	lastSeg := ""
+	if idx := strings.LastIndex(ep, "/"); idx >= 0 {
+		lastSeg = ep[idx+1:]
+	}
+	if len(lastSeg) >= 2 && lastSeg[0] == 'v' {
+		allDigits := true
+		for _, c := range lastSeg[1:] {
+			if c < '0' || c > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			return ep + "/models"
+		}
+	}
+	return ep + "/v1/models"
 }

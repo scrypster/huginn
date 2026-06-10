@@ -10,12 +10,51 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/scrypster/huginn/internal/modelconfig"
 )
+
+// reVersionSegment matches a path segment that is a version identifier, e.g. v1, v4, v2.
+var reVersionSegment = regexp.MustCompile(`^v\d+$`)
+
+// openAICompatiblePath builds the full URL for an OpenAI-compatible endpoint
+// and the given sub-path (e.g. "chat/completions" or "models").
+//
+// Rule: if the endpoint's final path segment already matches ^v\d+$ (e.g. the
+// endpoint is https://api.z.ai/api/paas/v4), the sub-path is appended directly
+// so that we get /api/paas/v4/chat/completions.  Otherwise /v1/ is inserted so
+// that https://api.openai.com becomes https://api.openai.com/v1/chat/completions.
+//
+// This keeps existing behaviour identical for all previously-supported endpoints:
+//   - http://localhost:11434        → …/v1/chat/completions  (Ollama)
+//   - https://api.openai.com        → …/v1/chat/completions
+//   - https://api.deepseek.com      → …/v1/chat/completions
+//   - https://openrouter.ai/api/v1  → …/api/v1/chat/completions (already has version)
+//   - https://api.z.ai/api/paas/v4  → …/api/paas/v4/chat/completions
+func openAICompatiblePath(endpoint, subPath string) string {
+	// Strip trailing slash to normalise.
+	ep := strings.TrimRight(endpoint, "/")
+	// Extract just the path portion of the URL for the segment check.
+	urlPath := ep
+	if idx := strings.Index(ep, "://"); idx >= 0 {
+		rest := ep[idx+3:]
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			urlPath = rest[slash:]
+		} else {
+			urlPath = ""
+		}
+	}
+	lastSeg := path.Base(urlPath)
+	if reVersionSegment.MatchString(lastSeg) {
+		return ep + "/" + subPath
+	}
+	return ep + "/v1/" + subPath
+}
 
 // externalStreamStallTimeout is the maximum time the SSE scanner may be idle
 // (no non-empty line received) before the stream is aborted. Declared as a var
@@ -98,7 +137,7 @@ func (b *ExternalBackend) ChatCompletion(ctx context.Context, req ChatRequest) (
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		b.endpoint+"/v1/chat/completions", bytes.NewReader(body))
+		openAICompatiblePath(b.endpoint, "chat/completions"), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +189,7 @@ func (b *ExternalBackend) ChatCompletion(ctx context.Context, req ChatRequest) (
 // Health checks that the endpoint is reachable.
 func (b *ExternalBackend) Health(ctx context.Context) error {
 	hc := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.endpoint+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, openAICompatiblePath(b.endpoint, "models"), nil)
 	if err != nil {
 		return err
 	}

@@ -288,6 +288,9 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     if (source === 'anthropic') return { provider: 'Anthropic', icon: 'A', color: '#cc785c', family: '' }
     if (source === 'openai') return { provider: 'OpenAI', icon: 'O', color: '#10a37f', family: '' }
     if (source === 'openrouter') return { provider: 'OpenRouter', icon: 'R', color: '#5b8def', family: '' }
+    if (source === 'deepseek') return { provider: 'DeepSeek', icon: 'D', color: '#4D6BFE', family: '' }
+    if (source === 'zai') return { provider: 'Z.ai', icon: 'Z', color: '#3859ff', family: '' }
+    if (source === 'custom') return { provider: 'Custom', icon: '⚙', color: '#6b7280', family: '' }
     const n = name.toLowerCase()
     if (n.startsWith('claude')) return { provider: 'Anthropic', icon: 'A', color: '#cc785c', family: '' }
     if (n.startsWith('gpt') || n.startsWith('o1') || n.startsWith('o3') || n.startsWith('o4')) return { provider: 'OpenAI', icon: 'O', color: '#10a37f', family: '' }

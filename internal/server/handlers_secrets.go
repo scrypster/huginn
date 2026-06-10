@@ -60,7 +60,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// For LLM provider slots, update the live BackendCache immediately so
 	// in-flight and future agent requests use the new key without a restart.
-	if slot == "anthropic" || slot == "openai" || slot == "openrouter" {
+	if slot == "anthropic" || slot == "openai" || slot == "openrouter" || slot == "deepseek" || slot == "zai" {
 		if s.orch != nil {
 			s.orch.UpdateFallbackAPIKey(ref)
 		}
@@ -115,7 +115,7 @@ func isKnownSlot(slot string) bool {
 // Called under s.mu to keep in-memory state consistent with what gets saved.
 func applySecretRef(cfg *config.Config, slot, ref string) {
 	switch slot {
-	case "anthropic", "openai", "openrouter":
+	case "anthropic", "openai", "openrouter", "deepseek", "zai":
 		cfg.Backend.APIKey = ref
 	case "brave":
 		cfg.BraveAPIKey = ref

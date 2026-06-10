@@ -32,7 +32,7 @@ type SecretStatus struct {
 // Server-side handlers enforce this list to prevent the secrets file from
 // becoming a general-purpose key-value store.
 var KnownSlots = []string{
-	"anthropic", "openai", "openrouter", "brave",
+	"anthropic", "openai", "openrouter", "deepseek", "zai", "brave",
 	"google", "github", "slack", "jira", "bitbucket",
 }
 
