@@ -389,6 +389,101 @@ describe('useHuginnWS', () => {
     ws.destroy()
   })
 
+  describe('resume after reconnect', () => {
+    function sentResumes(sock: MockWebSocket) {
+      return sock.sentMessages
+        .map(m => JSON.parse(m))
+        .filter(m => m.type === 'resume')
+    }
+
+    it('does not send resume on the initial connection', async () => {
+      const ws = await createWS()
+      MockWebSocket.latest().simulateOpen()
+      expect(sentResumes(MockWebSocket.latest())).toHaveLength(0)
+      ws.destroy()
+    })
+
+    it('sends resume with the last delivered seq and epoch after a drop', async () => {
+      const ws = await createWS()
+      const first = MockWebSocket.latest()
+      first.simulateOpen()
+
+      // Deliver seq-stamped traffic so the session is tracked.
+      first.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 1 })
+      first.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 2 })
+      first.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 3 })
+
+      // Unclean drop → reconnect.
+      first.simulateClose(1006)
+      await vi.advanceTimersByTimeAsync(2_000)
+      const second = MockWebSocket.latest()
+      expect(second).not.toBe(first)
+      second.simulateOpen()
+
+      const resumes = sentResumes(second)
+      expect(resumes).toHaveLength(1)
+      expect(resumes[0].session_id).toBe('s1')
+      expect(resumes[0].payload).toEqual({ last_seq: 3, epoch: 7 })
+      ws.destroy()
+    })
+
+    it('resumes the active session first', async () => {
+      const ws = await createWS()
+      const first = MockWebSocket.latest()
+      first.simulateOpen()
+      ws.setActiveSession('sess-active')
+      first.simulateMessage({ type: 'token', session_id: 'sess-other', epoch: 7, seq: 1 })
+
+      first.simulateClose(1006)
+      await vi.advanceTimersByTimeAsync(2_000)
+      const second = MockWebSocket.latest()
+      second.simulateOpen()
+
+      const resumes = sentResumes(second)
+      expect(resumes.map(r => r.session_id)).toEqual(['sess-active', 'sess-other'])
+      // No seq state tracked yet for the active session → last_seq 0.
+      expect(resumes[0].payload.last_seq).toBe(0)
+      expect(resumes[1].payload.last_seq).toBe(1)
+      ws.destroy()
+    })
+
+    it('drops replayed messages already delivered (seq <= lastSeq)', async () => {
+      const ws = await createWS()
+      const handler = vi.fn()
+      ws.on('token', handler)
+      const sock = MockWebSocket.latest()
+      sock.simulateOpen()
+
+      sock.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 1 })
+      sock.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 2 })
+      // Server replays seq 1-3 after a resume; only seq 3 is new.
+      sock.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 1 })
+      sock.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 2 })
+      sock.simulateMessage({ type: 'token', session_id: 's1', epoch: 7, seq: 3 })
+
+      expect(handler).toHaveBeenCalledTimes(3)
+      expect(handler.mock.calls.map(c => c[0].seq)).toEqual([1, 2, 3])
+      ws.destroy()
+    })
+
+    it('passes resume_ok through to handlers unordered', async () => {
+      const ws = await createWS()
+      const handler = vi.fn()
+      ws.on('resume_ok', handler)
+      const sock = MockWebSocket.latest()
+      sock.simulateOpen()
+
+      sock.simulateMessage({
+        type: 'resume_ok',
+        session_id: 's1',
+        payload: { seq: 9, gap: true, replayed: 0 },
+      })
+      expect(handler).toHaveBeenCalledTimes(1)
+      expect(handler.mock.calls[0][0].payload.gap).toBe(true)
+      ws.destroy()
+    })
+  })
+
   describe('streamChat', () => {
     function makeSSEStream(lines: string[]): ReadableStream<Uint8Array> {
       const encoder = new TextEncoder()

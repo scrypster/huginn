@@ -297,6 +297,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "delete session: "+err.Error())
 		return
 	}
+	// Stop any in-flight chat run and evict the seq counter + replay buffer
+	// so a recycled session ID starts fresh.
+	s.cancelChatRun(id)
 	s.wsHub.DeleteSessionSeq(id)
 	jsonOK(w, map[string]any{"deleted": true})
 }

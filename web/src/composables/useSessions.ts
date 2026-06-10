@@ -314,6 +314,18 @@ export function useSessions() {
     setHydrationOverflow(sessionId, false)
   }
 
+  // refetchMessages forces a fresh history load for a session that may have
+  // missed WS events — e.g. when a reconnect "resume" came back with gap=true
+  // because the server's replay buffer could not cover the disconnect window.
+  // Reuses the hydrate-then-subscribe machinery of fetchMessages: WS events
+  // arriving during the refetch are buffered and flushed afterwards.
+  async function refetchMessages(sessionId: string): Promise<void> {
+    if (!sessionId) return
+    if (preHydrationQueue.has(sessionId)) return // fetch already in flight
+    hydrated.delete(sessionId)
+    await fetchMessages(sessionId)
+  }
+
   function formatSessionLabel(session: Session): string {
     if (session.title) return session.title
     const d = new Date(session.created_at)
@@ -363,6 +375,7 @@ export function useSessions() {
     renameSession,
     getMessages,
     fetchMessages,
+    refetchMessages,
     queueIfHydrating,
     formatSessionLabel,
     getAgentThinking,

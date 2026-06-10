@@ -60,6 +60,12 @@ const PERMANENT_CLOSE_CODES = new Set([1000, 1001, 4001])
 // When full, the oldest entry is dropped (backpressure: prefer fresh messages).
 const OUTBOX_MAX = 100
 
+// Maximum number of sessions to send a "resume" for after a reconnect.
+// The active session always goes first; other sessions this tab has seen
+// seq-stamped traffic for follow, capped to stay well under the server's
+// inbound rate limit (30 msgs / 10 s).
+const RESUME_MAX_SESSIONS = 8
+
 function jitteredDelay(base: number): number {
   const jitter = 1 + (Math.random() * 2 - 1) * BACKOFF_JITTER
   return Math.min(base * jitter, BACKOFF_MAX_MS)
@@ -95,6 +101,10 @@ export function useHuginnWS(token: string) {
 
   // Outgoing message queue: drained on reconnect, bounded by OUTBOX_MAX.
   const outbox: WSMessage[] = []
+
+  // Set when the socket drops unexpectedly so the next successful open sends
+  // "resume" messages to recover session events missed while disconnected.
+  let resumePending = false
 
   // ── Heartbeat ───────────────────────────────────────────────────────────────
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null
@@ -307,12 +317,23 @@ export function useHuginnWS(token: string) {
       if (activeSessionId) {
         sendHello(activeSessionId)
       }
+      // After a drop, ask the server to replay session events we missed while
+      // disconnected. Replayed messages carry their original seq and flow
+      // through the ordering buffer, which drops duplicates (seq <= lastSeq).
+      // A resume_ok with gap=true means the server's replay buffer could not
+      // cover everything — the app should re-fetch history via REST (handled
+      // by whoever registered an on('resume_ok') handler).
+      if (resumePending) {
+        resumePending = false
+        sendResume()
+      }
     }
 
     ws.onclose = (event) => {
       connected.value = false
       stopHeartbeat()
       clearAllGapRecoveryTimers()
+      resumePending = true
       if (!intentionallyClosed) {
         if (PERMANENT_CLOSE_CODES.has(event.code)) {
           connectionState.value = 'disconnected'
@@ -413,6 +434,32 @@ export function useHuginnWS(token: string) {
 
   function sendHello(sessionId: string) {
     send({ type: 'hello', session_id: sessionId })
+  }
+
+  /**
+   * sendResume asks the server to replay session events missed while the
+   * socket was down. The active session is resumed first, then any other
+   * sessions this tab has seen seq-stamped traffic for (capped at
+   * RESUME_MAX_SESSIONS). last_seq is the highest contiguous seq delivered to
+   * handlers; epoch lets the server detect a restart and signal a gap.
+   */
+  function sendResume() {
+    const targets: string[] = []
+    if (activeSessionId) targets.push(activeSessionId)
+    for (const id of seqStates.keys()) {
+      if (!targets.includes(id)) targets.push(id)
+    }
+    for (const id of targets.slice(0, RESUME_MAX_SESSIONS)) {
+      const state = seqStates.get(id)
+      send({
+        type: 'resume',
+        session_id: id,
+        payload: {
+          last_seq: state?.lastSeq ?? 0,
+          epoch: state?.epoch ?? 0,
+        },
+      })
+    }
   }
 
   function send(msg: WSMessage) {
@@ -521,6 +568,7 @@ export function useHuginnWS(token: string) {
     reconnectNow,
     setActiveSession,
     sendHello,
+    sendResume,
   }
 }
 

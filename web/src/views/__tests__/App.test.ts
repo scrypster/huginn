@@ -22,6 +22,7 @@ vi.mock('../../composables/useSessions', () => ({
     renameSession: mockRenameSession,
     formatSessionLabel: mockFormatSessionLabel,
     getMessages: mockGetMessages,
+    refetchMessages: vi.fn().mockResolvedValue(undefined),
     queueIfHydrating: () => false,
   }),
 }))
@@ -135,6 +136,9 @@ vi.mock('../../composables/useHuginnWS', () => {
     send: vi.fn(),
     destroy: vi.fn(),
     streamChat: vi.fn(),
+    setActiveSession: vi.fn(),
+    sendHello: vi.fn(),
+    sendResume: vi.fn(),
     lastError: ref(null),
   }
   return {
