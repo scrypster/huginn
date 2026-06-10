@@ -7,10 +7,30 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
 )
+
+// ChatIdleTimeout is the maximum time a chat or run-agent session can go
+// without emitting a token before the session context is cancelled.
+// Configurable so tests can shrink it without touching production defaults.
+var ChatIdleTimeout = 5 * time.Minute
+
+// tokenPumpSize is the capacity of the per-session non-blocking token channel.
+const tokenPumpSize = 1024
+
+// isTerminalMessageType returns true for messages whose loss would prevent the
+// remote side from knowing a session has ended.
+func isTerminalMessageType(mt MessageType) bool {
+	switch mt {
+	case MsgDone, MsgAgentResult:
+		return true
+	default:
+		return false
+	}
+}
 
 // ModelInfo describes a single model available from a provider.
 type ModelInfo struct {
@@ -37,6 +57,10 @@ type DispatcherConfig struct {
 	Hub         Hub
 	Store       *SessionStore
 	Outbox      *Outbox // optional; when set, failed hub.Send calls are queued here for retry
+
+	// DroppedMessages is incremented atomically whenever both hub.Send and
+	// outbox.Enqueue fail (message is unrecoverably lost). Optional; nil = not tracked.
+	DroppedMessages *atomic.Uint64
 
 	// Phase 3 — nil disables handler
 	ChatSession func(ctx context.Context, sessionID, userMsg string,
@@ -167,18 +191,41 @@ func (a *ActiveSessions) CancelAll() {
 //   MsgSessionStart, MsgSessionListRequest, MsgModelListRequest, MsgRunAgent
 // - MsgAgentResult: satellite → cloud only (sent by this dispatcher; never received)
 func NewDispatcher(cfg DispatcherConfig) func(context.Context, Message) {
-	// sendOrEnqueue attempts hub.Send; on failure it logs and queues the message
-	// in the outbox (if wired) so the periodic flush can retry it.
+	// sendOrEnqueue attempts hub.Send; on failure it queues the message in the
+	// outbox (if wired) so the periodic flush can retry it.
+	// For terminal messages (MsgDone, MsgAgentResult) the outbox enqueue is
+	// retried once after a short back-off before giving up.
+	// When both paths fail the dropped counter (if wired) is incremented and
+	// the failure is logged at Error level.
 	sendOrEnqueue := func(hub Hub, msg Message) {
-		if err := hub.Send("", msg); err != nil {
-			slog.Warn("relay: send failed, queuing in outbox",
-				"type", msg.Type, "err", err)
-			if cfg.Outbox != nil {
-				if enqErr := cfg.Outbox.Enqueue(msg); enqErr != nil {
-					slog.Warn("relay: outbox enqueue failed — message lost",
-						"type", msg.Type, "err", enqErr)
-				}
+		if err := hub.Send("", msg); err == nil {
+			return
+		}
+		slog.Warn("relay: send failed, queuing in outbox",
+			"type", msg.Type)
+		if cfg.Outbox == nil {
+			slog.Error("relay: outbox not wired — message lost",
+				"type", msg.Type)
+			if cfg.DroppedMessages != nil {
+				cfg.DroppedMessages.Add(1)
 			}
+			return
+		}
+		enqErr := cfg.Outbox.Enqueue(msg)
+		if enqErr == nil {
+			return
+		}
+		// Retry once for terminal messages — they must not be silently lost.
+		if isTerminalMessageType(msg.Type) {
+			time.Sleep(50 * time.Millisecond)
+			if retryErr := cfg.Outbox.Enqueue(msg); retryErr == nil {
+				return
+			}
+		}
+		slog.Error("relay: outbox enqueue failed — message lost",
+			"type", msg.Type, "err", enqErr)
+		if cfg.DroppedMessages != nil {
+			cfg.DroppedMessages.Add(1)
 		}
 	}
 
@@ -269,53 +316,127 @@ func NewDispatcher(cfg DispatcherConfig) func(context.Context, Message) {
 
 			go func() {
 				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("relay: MsgChatMessage goroutine panicked", "session_id", sessionID, "recover", r)
-						sendOrEnqueue(hub, Message{Type: MsgDone, Payload: map[string]any{"session_id": sessionID, "error": "internal server error"}})
-					}
 					cancel()
 					if cfg.Active != nil {
 						cfg.Active.Remove(sessionID, gen)
 					}
 				}()
 
-				chatErr := cfg.ChatSession(sessCtx, sessionID, content,
-					func(token string) {
-						sendOrEnqueue(hub, Message{
-							Type:    MsgToken,
-							Payload: map[string]any{"session_id": sessionID, "text": token},
-						})
-					},
-					func(eventType string, payload map[string]any) {
-						mt := MessageType(eventType)
-						if mt == MsgToolCall || mt == MsgToolResult {
-							payload["session_id"] = sessionID
-							sendOrEnqueue(hub, Message{
-								Type:    mt,
-								Payload: payload,
-							})
+				// --- idle-timeout watchdog ---
+				// The timer is reset on every token/event; if it fires we cancel the
+				// session and report a failure back to the cloud.
+				var idleExpired atomic.Bool
+				idleTimer := time.AfterFunc(ChatIdleTimeout, func() {
+					idleExpired.Store(true)
+					slog.Warn("relay: chat_message: idle timeout — cancelling session",
+						"session_id", sessionID, "idle", ChatIdleTimeout)
+					cancel()
+				})
+				defer idleTimer.Stop()
+
+				// --- non-blocking token pump ---
+				// A buffered channel absorbs bursts from the LLM stream goroutine so that
+				// the onToken callback never blocks the underlying SSE parser.
+				// A dedicated sender goroutine drains the channel into sendOrEnqueue.
+				type tokenMsg struct {
+					msg     Message
+					dropped int // >0: some earlier tokens were dropped to make room
+				}
+				tokenCh := make(chan tokenMsg, tokenPumpSize)
+				var pumpDropped atomic.Int64 // tokens dropped due to full channel
+
+				// Sender goroutine — drains tokenCh until it is closed.
+				pumpDone := make(chan struct{})
+				go func() {
+					defer close(pumpDone)
+					for tm := range tokenCh {
+						if tm.dropped > 0 {
+							slog.Warn("relay: chat token pump overflow — dropped oldest tokens",
+								"session_id", sessionID, "dropped", tm.dropped)
 						}
-					},
-					func(ev backend.StreamEvent) {
-						switch ev.Type {
-						case backend.StreamWarning:
-							sendOrEnqueue(hub, Message{
-								Type:    MsgWarning,
-								Payload: map[string]any{"session_id": sessionID, "text": ev.Content},
-							})
-						case backend.StreamStatus:
-							sendOrEnqueue(hub, Message{
-								Type:    MsgStatus,
-								Payload: map[string]any{"session_id": sessionID, "content": ev.Content},
-							})
+						sendOrEnqueue(hub, tm.msg)
+					}
+				}()
+
+				// enqueueToken does a non-blocking send into the token channel.
+				// On overflow it drops the OLDEST pending token to make room.
+				enqueueToken := func(m Message) {
+					tm := tokenMsg{msg: m}
+					select {
+					case tokenCh <- tm:
+					default:
+						// Channel full — drop the oldest entry and push ours.
+						dropped := int(pumpDropped.Add(1))
+						select {
+						case <-tokenCh: // discard oldest
+						default:
 						}
-					},
-				)
+						tm.dropped = dropped
+						select {
+						case tokenCh <- tm:
+						default:
+							// Still can't send (very unlikely); just count the drop.
+							pumpDropped.Add(1)
+						}
+					}
+				}
+
+				// Run the chat session, catching any panics so we can still send MsgDone.
+				var chatErr error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("relay: MsgChatMessage goroutine panicked", "session_id", sessionID, "recover", r)
+							chatErr = fmt.Errorf("internal server error")
+						}
+					}()
+					chatErr = cfg.ChatSession(sessCtx, sessionID, content,
+						func(token string) {
+							idleTimer.Reset(ChatIdleTimeout)
+							enqueueToken(Message{
+								Type:    MsgToken,
+								Payload: map[string]any{"session_id": sessionID, "text": token},
+							})
+						},
+						func(eventType string, payload map[string]any) {
+							idleTimer.Reset(ChatIdleTimeout)
+							mt := MessageType(eventType)
+							if mt == MsgToolCall || mt == MsgToolResult {
+								payload["session_id"] = sessionID
+								sendOrEnqueue(hub, Message{
+									Type:    mt,
+									Payload: payload,
+								})
+							}
+						},
+						func(ev backend.StreamEvent) {
+							idleTimer.Reset(ChatIdleTimeout)
+							switch ev.Type {
+							case backend.StreamWarning:
+								sendOrEnqueue(hub, Message{
+									Type:    MsgWarning,
+									Payload: map[string]any{"session_id": sessionID, "text": ev.Content},
+								})
+							case backend.StreamStatus:
+								sendOrEnqueue(hub, Message{
+									Type:    MsgStatus,
+									Payload: map[string]any{"session_id": sessionID, "content": ev.Content},
+								})
+							}
+						},
+					)
+				}()
+
+				// Determine whether the session ended due to idle timeout (context was
+				// cancelled by our watchdog) vs. external cancel or normal completion.
+				isIdleTimeout := idleExpired.Load() && errors.Is(chatErr, context.Canceled)
 
 				// Persist final status
 				if cfg.Store != nil {
 					status := "completed"
 					if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
+						status = "failed"
+					} else if isIdleTimeout {
 						status = "failed"
 					}
 					if err := cfg.Store.Save(SessionMeta{ID: sessionID, Status: status}); err != nil {
@@ -323,9 +444,21 @@ func NewDispatcher(cfg DispatcherConfig) func(context.Context, Message) {
 					}
 				}
 
+				// Drain the token channel fully before sending MsgDone so that
+				// completion never races ahead of in-flight content.
+				close(tokenCh)
+				<-pumpDone
+
+				totalDropped := pumpDropped.Load()
 				donePayload := map[string]any{"session_id": sessionID}
-				if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
+				if isIdleTimeout {
+					donePayload["status"] = "failed"
+					donePayload["error"] = "idle timeout"
+				} else if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
 					donePayload["error"] = chatErr.Error()
+				}
+				if totalDropped > 0 {
+					donePayload["dropped_tokens"] = totalDropped
 				}
 				sendOrEnqueue(hub, Message{Type: MsgDone, Payload: donePayload})
 			}()
@@ -670,28 +803,107 @@ func NewDispatcher(cfg DispatcherConfig) func(context.Context, Message) {
 
 			go func() {
 				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("relay: MsgRunAgent goroutine panicked", "run_id", runID, "agent", agentName, "recover", r)
-						sendAgentResult("", true, "internal server error")
-					}
 					runCancel()
 					if cfg.Active != nil {
 						cfg.Active.Remove(runID, gen)
 					}
 				}()
 
-				runErr := cfg.RunAgent(runCtx, agentName, prompt, sessionID,
-					func(token string) {
-						sendAgentResult(token, false, "")
-					},
-				)
+				// --- idle-timeout watchdog ---
+				var idleExpiredRun atomic.Bool
+				idleTimer := time.AfterFunc(ChatIdleTimeout, func() {
+					idleExpiredRun.Store(true)
+					slog.Warn("relay: run_agent: idle timeout — cancelling run",
+						"run_id", runID, "idle", ChatIdleTimeout)
+					runCancel()
+				})
+				defer idleTimer.Stop()
 
+				// --- non-blocking token pump ---
+				type agentTokenMsg struct {
+					token   string
+					dropped int
+				}
+				tokenCh := make(chan agentTokenMsg, tokenPumpSize)
+				var pumpDropped atomic.Int64
+
+				pumpDone := make(chan struct{})
+				go func() {
+					defer close(pumpDone)
+					for tm := range tokenCh {
+						if tm.dropped > 0 {
+							slog.Warn("relay: run_agent token pump overflow — dropped oldest tokens",
+								"run_id", runID, "dropped", tm.dropped)
+						}
+						sendAgentResult(tm.token, false, "")
+					}
+				}()
+
+				enqueueAgentToken := func(token string) {
+					tm := agentTokenMsg{token: token}
+					select {
+					case tokenCh <- tm:
+					default:
+						dropped := int(pumpDropped.Add(1))
+						select {
+						case <-tokenCh:
+						default:
+						}
+						tm.dropped = dropped
+						select {
+						case tokenCh <- tm:
+						default:
+							pumpDropped.Add(1)
+						}
+					}
+				}
+
+				// Run the agent, catching any panics so we can still send the done frame.
+				var runErr error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("relay: MsgRunAgent goroutine panicked", "run_id", runID, "agent", agentName, "recover", r)
+							runErr = fmt.Errorf("internal server error")
+						}
+					}()
+					runErr = cfg.RunAgent(runCtx, agentName, prompt, sessionID,
+						func(token string) {
+							idleTimer.Reset(ChatIdleTimeout)
+							enqueueAgentToken(token)
+						},
+					)
+				}()
+
+				isIdleTimeout := idleExpiredRun.Load() && errors.Is(runErr, context.Canceled)
+
+				// Drain the token pump before sending the done frame.
+				close(tokenCh)
+				<-pumpDone
+
+				totalDropped := pumpDropped.Load()
 				errMsg := ""
-				if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				if isIdleTimeout {
+					errMsg = "idle timeout"
+				} else if runErr != nil && !errors.Is(runErr, context.Canceled) {
 					errMsg = runErr.Error()
 					slog.Warn("relay: run_agent: run failed", "run_id", runID, "agent", agentName, "err", runErr)
 				}
-				sendAgentResult("", true, errMsg)
+				// Send the final done frame with dropped token count if any.
+				doneMsg := Message{
+					Type:     MsgAgentResult,
+					Priority: PriorityHigh,
+					Payload: map[string]any{
+						"run_id": runID,
+						"token":  "",
+						"done":   true,
+						"error":  errMsg,
+					},
+				}
+				if totalDropped > 0 {
+					doneMsg.Payload["dropped_tokens"] = totalDropped
+				}
+				sendOrEnqueue(hub, doneMsg)
 			}()
 
 		case MsgAgentResult:

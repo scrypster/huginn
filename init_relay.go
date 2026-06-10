@@ -83,6 +83,13 @@ func initRelayDispatcher(ctx context.Context, dcfg relayDispatcherConfig) func()
 			for {
 				select {
 				case <-outboxCtx.Done():
+					// Final flush: perform one last attempt with an independent
+					// short-lived context so we don't skip messages on graceful shutdown.
+					flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if err := tuiOutbox.Flush(flushCtx); err != nil && !errors.Is(err, context.Canceled) {
+						slog.Warn("relay: outbox final flush on shutdown", "err", err)
+					}
+					flushCancel()
 					return
 				case <-ticker.C:
 					if err := tuiOutbox.Flush(outboxCtx); err != nil && !errors.Is(err, context.Canceled) {

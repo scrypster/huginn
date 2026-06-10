@@ -112,6 +112,12 @@ func (s *SessionStore) Delete(id string) error {
 
 // NextSeq atomically increments LastSeq for the given session and returns
 // the new sequence number. Returns error if session not found.
+//
+// The in-memory increment is only committed (returned to the caller) after a
+// successful Save. If Save fails, the function returns 0 and an error without
+// advancing the sequence counter — the next successful call will read the
+// un-incremented persisted value and allocate the same sequence number,
+// preventing gaps and duplicate allocations.
 func (s *SessionStore) NextSeq(id string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -120,9 +126,17 @@ func (s *SessionStore) NextSeq(id string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	sess.LastSeq++
+
+	// Compute the candidate next seq without mutating sess until Save succeeds.
+	next := sess.LastSeq + 1
+	sess.LastSeq = next
+
 	if err := s.Save(sess); err != nil {
+		// Save failed: the persisted value is still the old (pre-increment) value.
+		// Return 0 so the caller knows no sequence number was allocated.
+		// The next successful NextSeq call will re-read the persisted value and
+		// allocate 'next' again — no gaps, no duplicates.
 		return 0, err
 	}
-	return sess.LastSeq, nil
+	return next, nil
 }
