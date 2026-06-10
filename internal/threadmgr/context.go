@@ -137,8 +137,9 @@ func buildArtifactMessages(t *Thread, tm *ThreadManager, budgetTokens int) []bac
 
 	var msgs []backend.Message
 	used := 0
+	var omitted []string // "agent (thread id)" entries dropped to stay within budget
 
-	for _, depID := range t.DependsOn {
+	for i, depID := range t.DependsOn {
 		dep, ok := tm.Get(depID)
 		if !ok || dep.Summary == nil {
 			continue
@@ -146,13 +147,30 @@ func buildArtifactMessages(t *Thread, tm *ThreadManager, budgetTokens int) []bac
 		content := formatFinishSummary(dep.AgentID, dep.Summary)
 		tokens := estimateTokens(content)
 		if used+tokens > budgetTokens {
-			break // drop remaining artifacts to stay within budget
+			// Budget exhausted — record every remaining dependency so the
+			// agent knows results exist that it cannot see, instead of
+			// silently losing upstream work.
+			for _, restID := range t.DependsOn[i:] {
+				if rest, ok := tm.Get(restID); ok && rest.Summary != nil {
+					omitted = append(omitted, fmt.Sprintf("%s (thread %s)", rest.AgentID, restID))
+				}
+			}
+			break
 		}
 		msgs = append(msgs, backend.Message{
 			Role:    "user",
 			Content: content,
 		})
 		used += tokens
+	}
+
+	if len(omitted) > 0 {
+		msgs = append(msgs, backend.Message{
+			Role: "user",
+			Content: fmt.Sprintf(
+				"Note: %d upstream result(s) were omitted from this context to stay within the token budget: %s. Use recall_thread_result with the thread ID to fetch any of them if relevant to your task.",
+				len(omitted), strings.Join(omitted, ", ")),
+		})
 	}
 
 	return msgs

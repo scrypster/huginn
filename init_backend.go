@@ -66,7 +66,7 @@ func initBackend(
 	// type field — when a provider + api_key is configured, use it directly.
 	cloudProvider := cfg.Backend.Provider
 	switch cloudProvider {
-	case "anthropic", "openai", "openrouter", "google":
+	case "anthropic", "openai", "openrouter", "google", "deepseek", "zai", "custom":
 		b, err := backend.NewFromConfig(cloudProvider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
 		if err != nil {
 			return res, fmt.Errorf("backend (%s): %w", cloudProvider, err)
@@ -358,7 +358,7 @@ func selectBackend(ctx context.Context, cfg *config.Config, endpointOverride, mo
 	var b backend.Backend
 
 	switch cfg.Backend.Provider {
-	case "anthropic", "openai", "openrouter", "google":
+	case "anthropic", "openai", "openrouter", "google", "deepseek", "zai", "custom":
 		var err error
 		b, err = backend.NewFromConfig(cfg.Backend.Provider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
 		if err != nil {

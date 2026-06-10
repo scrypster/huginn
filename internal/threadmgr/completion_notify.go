@@ -72,7 +72,10 @@ func (n *CompletionNotifier) Notify(_ context.Context, sessionID, threadID, agen
 	})
 
 	// Stamp ParentMessageID onto the summary so the FollowUpFn can thread
-	// the lead agent's synthesis reply under the original user message.
+	// the lead agent's synthesis reply under the original user message, and
+	// ThreadID so it can check whether the result was already collected by a
+	// waiting lead (via wait_for_threads) and skip the duplicate follow-up.
+	summary.ThreadID = threadID
 	if n.ThreadLookup != nil {
 		if t, ok := n.ThreadLookup(threadID); ok && t.ParentMessageID != "" {
 			summary.ParentMessageID = t.ParentMessageID

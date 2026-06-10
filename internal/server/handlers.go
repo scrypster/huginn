@@ -297,6 +297,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "delete session: "+err.Error())
 		return
 	}
+	// Stop any in-flight chat run and evict the seq counter + replay buffer
+	// so a recycled session ID starts fresh.
+	s.cancelChatRun(id)
 	s.wsHub.DeleteSessionSeq(id)
 	jsonOK(w, map[string]any{"deleted": true})
 }
@@ -453,6 +456,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_ = agents.SyncHeartbeatYAMLDefault(incoming) // best effort
 	}
+	// Refresh the live agent registry so the new/updated agent is immediately
+	// visible to delegation, mention parsing, and space rosters (issue #124).
+	s.notifyAgentsChanged()
 	// Broadcast so all connected frontends refresh their agent list.
 	action := "updated"
 	if existingAgent == nil {
@@ -818,6 +824,9 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = agents.DeleteHeartbeatYAMLDefault(name) // best effort; ignore error
+	// Refresh the live agent registry so the deleted agent immediately stops
+	// resolving for delegation and mention parsing (issue #124).
+	s.notifyAgentsChanged()
 	// Broadcast so all connected frontends remove the deleted agent.
 	s.BroadcastWS(WSMessage{
 		Type: "agent_changed",
@@ -921,6 +930,9 @@ func (s *Server) handleCloneAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "save clone: "+err.Error())
 		return
 	}
+	// Refresh the live agent registry so the clone is immediately usable
+	// for delegation and space rosters (issue #124).
+	s.notifyAgentsChanged()
 	s.BroadcastWS(WSMessage{
 		Type: "agent_changed",
 		Payload: map[string]any{

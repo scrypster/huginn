@@ -58,6 +58,12 @@ type Server struct {
 	// Override in tests to inject a known configuration without touching the filesystem.
 	agentLoader func() (*agents.AgentsConfig, error)
 
+	// onAgentsChanged, if set, is invoked after any agent create/update/rename/
+	// delete/clone is persisted, so the live in-memory agent registry can be
+	// reloaded from disk. Without this, agents created via the API are invisible
+	// to delegation, mention parsing, and space rosters until restart (issue #124).
+	onAgentsChanged func()
+
 	// backendCache is the live BackendCache wired to the orchestrator.
 	// Set via WithBackendCache() at startup. Used by handleUpdateConfig to push
 	// provider key changes into the running cache without requiring a restart.
@@ -173,6 +179,13 @@ type Server struct {
 	// ctx is the server lifecycle context stored at Start(). Used by long-running
 	// goroutines (e.g. SpawnThread) that must outlive individual HTTP requests.
 	ctx context.Context
+
+	// chatRunsMu guards chatRunCancels — the per-session cancel handles for
+	// in-flight WS chat runs. Runs derive from the server lifecycle context so
+	// they survive client disconnects; "chat_cancel" stops them explicitly.
+	// See beginChatRun / cancelChatRun in ws.go.
+	chatRunsMu     sync.Mutex
+	chatRunCancels map[string]*chatRunHandle
 
 	// spawnWg tracks in-flight SpawnThread goroutines so Stop() can drain them.
 	spawnWg sync.WaitGroup
@@ -504,6 +517,28 @@ func (s *Server) SetMentionDelegate(fn func(ctx context.Context, sessionID, assi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mentionDelegate = fn
+}
+
+// SetOnAgentsChanged registers a callback invoked after any agent mutation
+// (create/update/rename/delete/clone) is persisted. main.go wires this to
+// reload the in-memory agent registry so runtime-created agents are
+// immediately visible to delegation, mention parsing, and space rosters.
+// Pass nil to clear. Thread-safe.
+func (s *Server) SetOnAgentsChanged(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onAgentsChanged = fn
+}
+
+// notifyAgentsChanged invokes the onAgentsChanged hook if one is registered.
+// Called by agent mutation handlers after a successful persist.
+func (s *Server) notifyAgentsChanged() {
+	s.mu.Lock()
+	fn := s.onAgentsChanged
+	s.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // BroadcastToSession sends a typed event to all WS clients subscribed to sessionID.

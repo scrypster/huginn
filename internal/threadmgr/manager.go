@@ -873,6 +873,128 @@ func (tm *ThreadManager) CleanupSession(sessionID string) {
 	}
 }
 
+// RecordActivity updates a thread's heartbeat: LastActivityAt is set to now and,
+// when activity is non-empty, CurrentActivity is replaced. Safe to call from the
+// thread's own goroutine and from token callbacks. No-op for unknown threads.
+func (tm *ThreadManager) RecordActivity(threadID, activity string) {
+	tm.mu.Lock()
+	if t, ok := tm.threads[threadID]; ok {
+		t.LastActivityAt = time.Now()
+		if activity != "" {
+			t.CurrentActivity = activity
+		}
+	}
+	tm.mu.Unlock()
+}
+
+// recordTurn stamps the thread's current loop turn alongside the heartbeat.
+func (tm *ThreadManager) recordTurn(threadID string, turn int, activity string) {
+	tm.mu.Lock()
+	if t, ok := tm.threads[threadID]; ok {
+		t.Turn = turn
+		t.LastActivityAt = time.Now()
+		if activity != "" {
+			t.CurrentActivity = activity
+		}
+	}
+	tm.mu.Unlock()
+}
+
+// WaitReport is the result of WaitForThreads: which threads reached a terminal
+// status before the deadline and which are still running (with live heartbeat
+// state captured at return time).
+type WaitReport struct {
+	Completed []*Thread
+	Pending   []*Thread
+	TimedOut  bool // true when the deadline expired with threads still pending
+}
+
+// WaitForThreads blocks until every thread in threadIDs reaches a terminal
+// status (done, cancelled, error), the timeout expires, or ctx is cancelled.
+// Threads not found or belonging to a different session are ignored.
+// It polls thread state — completion latency is bounded by the poll interval.
+func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, threadIDs []string, timeout time.Duration) WaitReport {
+	const pollInterval = 500 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+
+	collect := func() (completed, pending []*Thread) {
+		for _, id := range threadIDs {
+			t, ok := tm.Get(id)
+			if !ok || (sessionID != "" && t.SessionID != sessionID) {
+				continue
+			}
+			switch t.Status {
+			case StatusDone, StatusCancelled, StatusError:
+				completed = append(completed, t)
+			default:
+				pending = append(pending, t)
+			}
+		}
+		return completed, pending
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		completed, pending := collect()
+		if len(pending) == 0 {
+			tm.markCollected(completed)
+			return WaitReport{Completed: completed}
+		}
+		if time.Now().After(deadline) {
+			tm.markCollected(completed)
+			return WaitReport{Completed: completed, Pending: pending, TimedOut: true}
+		}
+		select {
+		case <-ctx.Done():
+			tm.markCollected(completed)
+			return WaitReport{Completed: completed, Pending: pending, TimedOut: true}
+		case <-ticker.C:
+		}
+	}
+}
+
+// markCollected stamps CollectedAt on the live thread records whose results
+// are being returned to a waiting caller, so the completion notifier knows
+// the lead agent already has them and skips its automatic follow-up.
+func (tm *ThreadManager) markCollected(threads []*Thread) {
+	if len(threads) == 0 {
+		return
+	}
+	now := time.Now()
+	tm.mu.Lock()
+	for _, t := range threads {
+		if live, ok := tm.threads[t.ID]; ok && live.CollectedAt.IsZero() {
+			live.CollectedAt = now
+		}
+	}
+	tm.mu.Unlock()
+}
+
+// WasCollected reports whether the thread's result has been delivered to a
+// waiting lead agent via WaitForThreads.
+func (tm *ThreadManager) WasCollected(threadID string) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	t, ok := tm.threads[threadID]
+	return ok && !t.CollectedAt.IsZero()
+}
+
+// ActiveThreadIDs returns the IDs of all non-terminal threads in the session,
+// ordered by creation time. Used by wait_for_threads when no IDs are given.
+func (tm *ThreadManager) ActiveThreadIDs(sessionID string) []string {
+	threads := tm.ListBySession(sessionID)
+	var ids []string
+	for _, t := range threads {
+		switch t.Status {
+		case StatusDone, StatusCancelled, StatusError:
+		default:
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids
+}
+
 // PublishSiblingContext writes a short context update for a live thread. The
 // update becomes visible to sibling threads in the same session.
 func (tm *ThreadManager) PublishSiblingContext(threadID, content string) {

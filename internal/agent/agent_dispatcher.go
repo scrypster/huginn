@@ -91,7 +91,7 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 	// reg.Get returns (nil, false) when a tool is not registered, making this
 	// a safe no-op in environments that don't register delegation tools.
 	{
-		delegationNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
+		delegationNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result", "wait_for_threads"}
 		seenDelegation := make(map[string]bool, len(schemas))
 		for _, s := range schemas {
 			seenDelegation[s.Function.Name] = true
@@ -143,7 +143,7 @@ func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg tool
 	if workforce.GetSpaceContext(ctx) == "" {
 		return schemas
 	}
-	delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result"}
+	delegationToolNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result", "wait_for_threads"}
 	seen := make(map[string]bool, len(schemas))
 	for _, s := range schemas {
 		seen[s.Function.Name] = true

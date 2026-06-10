@@ -42,6 +42,30 @@ func newFromResolvedConfig(provider, endpoint string, resolver KeyResolver, mode
 		b.SetModel(model)
 		return b, nil
 
+	case "deepseek":
+		if endpoint == "" {
+			endpoint = "https://api.deepseek.com"
+		}
+		b := NewExternalBackendWithAPIKey(endpoint, resolver)
+		b.SetModel(model)
+		return b, nil
+
+	case "zai":
+		if endpoint == "" {
+			endpoint = "https://api.z.ai/api/paas/v4"
+		}
+		b := NewExternalBackendWithAPIKey(endpoint, resolver)
+		b.SetModel(model)
+		return b, nil
+
+	case "custom":
+		if endpoint == "" {
+			return nil, fmt.Errorf("backend: provider %q requires an endpoint to be configured", "custom")
+		}
+		b := NewExternalBackendWithAPIKey(endpoint, resolver)
+		b.SetModel(model)
+		return b, nil
+
 	case "anthropic":
 		return NewAnthropicBackend(resolver, model), nil
 

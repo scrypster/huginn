@@ -91,6 +91,11 @@ const (
 // ("slow_client_eviction") and unregistered. Drops reset to zero on any success.
 const wsMaxDrops int32 = 5
 
+// wsReplayBufferSize is the number of recently broadcast session-scoped
+// messages retained per session so that clients reconnecting after a drop can
+// recover missed events via the "resume" message instead of losing them.
+const wsReplayBufferSize = 512
+
 // WSMessage is a message sent over the WebSocket connection.
 type WSMessage struct {
 	Type    string         `json:"type"`
@@ -160,6 +165,56 @@ func (c *wsClient) wsRateAllow() bool {
 	return n <= wsRateLimitMsgs
 }
 
+// replayRing is a fixed-capacity ring buffer of recently broadcast
+// session-scoped WSMessages. Messages are appended in sequence order, so
+// iteration from the oldest slot yields ascending Seq values.
+// All access must be guarded by WSHub.seqMu.
+type replayRing struct {
+	buf  []WSMessage
+	next int  // index of the next write
+	full bool // true once the ring has wrapped at least once
+}
+
+func newReplayRing(capacity int) *replayRing {
+	return &replayRing{buf: make([]WSMessage, capacity)}
+}
+
+func (r *replayRing) add(msg WSMessage) {
+	r.buf[r.next] = msg
+	r.next = (r.next + 1) % len(r.buf)
+	if r.next == 0 {
+		r.full = true
+	}
+}
+
+// since returns all buffered messages with Seq > seq, oldest first.
+func (r *replayRing) since(seq uint64) []WSMessage {
+	start, n := 0, r.next
+	if r.full {
+		start, n = r.next, len(r.buf)
+	}
+	var out []WSMessage
+	for i := 0; i < n; i++ {
+		m := r.buf[(start+i)%len(r.buf)]
+		if m.Seq > seq {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// oldestSeq returns the sequence number of the oldest buffered message,
+// or 0 when the ring is empty.
+func (r *replayRing) oldestSeq() uint64 {
+	if r.full {
+		return r.buf[r.next].Seq
+	}
+	if r.next == 0 {
+		return 0
+	}
+	return r.buf[0].Seq
+}
+
 // WSHub manages all active WebSocket client connections.
 type WSHub struct {
 	clients    map[*wsClient]struct{}
@@ -168,21 +223,75 @@ type WSHub struct {
 	stopC      chan struct{}
 	stopOnce   sync.Once // ensures stop() is idempotent
 	stopped    int32     // atomic: 1 once stop() has been called
-	// seqMu guards sessionSeq. We use a separate mutex so broadcastToSession
-	// can hold the RLock on mu (for clients) while atomically incrementing the
-	// per-session sequence counter.
-	seqMu             sync.Mutex
-	sessionSeq        map[string]uint64
+	// seqMu guards sessionSeq and sessionReplay. We use a separate mutex so
+	// broadcastToSession can hold the RLock on mu (for clients) while atomically
+	// incrementing the per-session sequence counter.
+	seqMu      sync.Mutex
+	sessionSeq map[string]uint64
+	// sessionReplay holds the per-session replay ring of recently broadcast
+	// messages, recorded at the same place Seq numbers are stamped. Used by the
+	// "resume" WS message to recover events missed during a disconnect.
+	sessionReplay     map[string]*replayRing
 	wsDroppedMessages atomic.Int64
 }
 
 func newWSHub() *WSHub {
 	return &WSHub{
-		clients:    make(map[*wsClient]struct{}),
-		broadcastC: make(chan WSMessage, 256),
-		stopC:      make(chan struct{}),
-		sessionSeq: make(map[string]uint64),
+		clients:       make(map[*wsClient]struct{}),
+		broadcastC:    make(chan WSMessage, 256),
+		stopC:         make(chan struct{}),
+		sessionSeq:    make(map[string]uint64),
+		sessionReplay: make(map[string]*replayRing),
 	}
+}
+
+// recordForReplayLocked appends msg to the session's replay ring, creating the
+// ring on first use. Caller must hold seqMu.
+func (h *WSHub) recordForReplayLocked(sessionID string, msg WSMessage) {
+	ring := h.sessionReplay[sessionID]
+	if ring == nil {
+		ring = newReplayRing(wsReplayBufferSize)
+		h.sessionReplay[sessionID] = ring
+	}
+	ring.add(msg)
+}
+
+// stampAndRecord assigns the next sequence number (and the process epoch) to a
+// session-scoped message and records it in the session's replay ring.
+func (h *WSHub) stampAndRecord(sessionID string, msg WSMessage) WSMessage {
+	msg.SessionID = sessionID
+	msg.Epoch = serverEpoch
+	h.seqMu.Lock()
+	h.sessionSeq[sessionID]++
+	msg.Seq = h.sessionSeq[sessionID]
+	h.recordForReplayLocked(sessionID, msg)
+	h.seqMu.Unlock()
+	return msg
+}
+
+// replaySince returns the buffered messages for sessionID with Seq > lastSeq
+// (oldest first), the session's current sequence number, and gap=true when the
+// replay buffer cannot cover everything the client missed — in which case the
+// client should re-fetch history via REST.
+func (h *WSHub) replaySince(sessionID string, lastSeq uint64) (msgs []WSMessage, currentSeq uint64, gap bool) {
+	h.seqMu.Lock()
+	defer h.seqMu.Unlock()
+	currentSeq = h.sessionSeq[sessionID]
+	if lastSeq >= currentSeq {
+		// Client is up to date — or ahead of the server, which means the server
+		// restarted and seq counters reset; flag that as a gap so the client
+		// re-fetches history rather than trusting stale local state.
+		return nil, currentSeq, lastSeq > currentSeq
+	}
+	ring := h.sessionReplay[sessionID]
+	if ring == nil {
+		return nil, currentSeq, true
+	}
+	msgs = ring.since(lastSeq)
+	if oldest := ring.oldestSeq(); oldest == 0 || oldest > lastSeq+1 {
+		gap = true
+	}
+	return msgs, currentSeq, gap
 }
 
 func (h *WSHub) run() {
@@ -193,31 +302,7 @@ func (h *WSHub) run() {
 		case msg := <-h.broadcastC:
 			h.mu.RLock()
 			for c := range h.clients {
-				select {
-				case c.send <- msg:
-					atomic.StoreInt32(&c.consecutiveDrops, 0)
-				default:
-					// Slow client — buffer full, message dropped.
-					h.wsDroppedMessages.Add(1)
-					drops := atomic.AddInt32(&c.consecutiveDrops, 1)
-					if drops == wsMaxDrops {
-						slog.Error("ws: slow client evicted after repeated drops",
-							"session_id", c.sessionID,
-							"drops", drops,
-							"total_dropped", h.wsDroppedMessages.Load())
-						go func(evict *wsClient) {
-							_ = evict.conn.WriteControl(websocket.CloseMessage,
-								websocket.FormatCloseMessage(4002, "slow_client_eviction"),
-								time.Now().Add(wsWriteWait))
-							h.unregisterClient(evict)
-						}(c)
-					} else if drops < wsMaxDrops {
-						slog.Warn("ws: slow client, message dropped",
-							"session_id", c.sessionID,
-							"consecutive_drops", drops,
-							"total_dropped", h.wsDroppedMessages.Load())
-					}
-				}
+				h.trySendOrEvict(c, msg, c.sessionID)
 			}
 			h.mu.RUnlock()
 		}
@@ -260,11 +345,52 @@ func (h *WSHub) stop() {
 	})
 }
 
+// trySendOrEvict attempts a non-blocking send to c, tracking consecutive drops
+// and evicting the client (close code 4002) after wsMaxDrops in a row.
+// Callers hold h.mu.RLock; eviction happens in a goroutine to avoid deadlock.
+func (h *WSHub) trySendOrEvict(c *wsClient, msg WSMessage, sessionID string) {
+	select {
+	case c.send <- msg:
+		atomic.StoreInt32(&c.consecutiveDrops, 0)
+	default:
+		// Slow client — buffer full, message dropped.
+		h.wsDroppedMessages.Add(1)
+		drops := atomic.AddInt32(&c.consecutiveDrops, 1)
+		if drops == wsMaxDrops {
+			slog.Error("ws: slow client evicted after repeated drops",
+				"session_id", sessionID,
+				"msg_type", msg.Type,
+				"drops", drops,
+				"total_dropped", h.wsDroppedMessages.Load())
+			go func(evict *wsClient) {
+				if evict.conn != nil {
+					_ = evict.conn.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(4002, "slow_client_eviction"),
+						time.Now().Add(wsWriteWait))
+				}
+				h.unregisterClient(evict)
+			}(c)
+		} else if drops < wsMaxDrops {
+			slog.Warn("ws: slow client, message dropped",
+				"session_id", sessionID,
+				"msg_type", msg.Type,
+				"consecutive_drops", drops,
+				"total_dropped", h.wsDroppedMessages.Load())
+		}
+	}
+}
+
 func (h *WSHub) broadcast(msg WSMessage) {
 	slog.Debug("ws: broadcasting message", "type", msg.Type)
 	select {
 	case h.broadcastC <- msg:
 	default:
+		// Session-scoped messages are still stamped and recorded in the replay
+		// buffer so a later "resume" can recover them even though the live
+		// broadcast was dropped.
+		if msg.SessionID != "" {
+			h.stampAndRecord(msg.SessionID, msg)
+		}
 		slog.Warn("ws: broadcast channel full, dropping message", "type", msg.Type)
 	}
 }
@@ -293,48 +419,36 @@ func (h *WSHub) registerWithSession(c *wsClient, sessionID string) {
 
 // broadcastToSession sends a message only to clients registered for sessionID,
 // plus any wildcard clients (empty sessionID). Sets msg.SessionID, Epoch, and
-// a monotonically increasing Seq automatically.
+// a monotonically increasing Seq automatically, and records the message in the
+// session's replay ring for resume recovery.
 func (h *WSHub) broadcastToSession(sessionID string, msg WSMessage) {
-	msg.SessionID = sessionID
-	// Stamp the process-level epoch and a per-session monotonic sequence number.
-	msg.Epoch = serverEpoch
-	h.seqMu.Lock()
-	h.sessionSeq[sessionID]++
-	msg.Seq = h.sessionSeq[sessionID]
-	h.seqMu.Unlock()
+	h.broadcastToSessionFrom(sessionID, msg, nil)
+}
+
+// broadcastToSessionFrom is broadcastToSession with an optional origin client.
+// The origin (the client whose inbound message triggered this broadcast) is
+// guaranteed delivery exactly once: registered origins receive the message
+// through the normal subscriber loop; origins not registered with the hub
+// (e.g. already unregistered, or test clients) get a direct fallback send.
+// This keeps streamed chat events flowing to every client subscribed to the
+// session — including ones that reconnect mid-run — without ever double-sending
+// to the originator.
+func (h *WSHub) broadcastToSessionFrom(sessionID string, msg WSMessage, origin *wsClient) {
+	msg = h.stampAndRecord(sessionID, msg)
+	originSeen := false
 	h.mu.RLock()
 	for c := range h.clients {
 		if c.sessionID == "" || c.sessionID == sessionID {
-			select {
-			case c.send <- msg:
-				atomic.StoreInt32(&c.consecutiveDrops, 0)
-			default:
-				// Slow client — buffer full, message dropped.
-				h.wsDroppedMessages.Add(1)
-				drops := atomic.AddInt32(&c.consecutiveDrops, 1)
-				if drops == wsMaxDrops {
-					slog.Error("ws: slow client evicted after repeated session drops",
-						"session_id", sessionID,
-						"msg_type", msg.Type,
-						"drops", drops,
-						"total_dropped", h.wsDroppedMessages.Load())
-					go func(evict *wsClient) {
-						_ = evict.conn.WriteControl(websocket.CloseMessage,
-							websocket.FormatCloseMessage(4002, "slow_client_eviction"),
-							time.Now().Add(wsWriteWait))
-						h.unregisterClient(evict)
-					}(c)
-				} else if drops < wsMaxDrops {
-					slog.Warn("ws: slow client, session message dropped",
-						"session_id", sessionID,
-						"msg_type", msg.Type,
-						"consecutive_drops", drops,
-						"total_dropped", h.wsDroppedMessages.Load())
-				}
+			if c == origin {
+				originSeen = true
 			}
+			h.trySendOrEvict(c, msg, sessionID)
 		}
 	}
 	h.mu.RUnlock()
+	if origin != nil && !originSeen {
+		origin.safeSend(msg)
+	}
 }
 
 // WSDroppedMessages returns the total count of messages dropped due to slow
@@ -356,12 +470,13 @@ func (h *WSHub) unregisterClient(c *wsClient) {
 	}
 }
 
-// DeleteSessionSeq removes the sequence counter for sessionID.
-// Call this when a session is permanently deleted so the entry does not
-// accumulate and so a recycled session ID starts fresh.
+// DeleteSessionSeq removes the sequence counter and replay buffer for
+// sessionID. Call this when a session is permanently deleted so the entries
+// do not accumulate and so a recycled session ID starts fresh.
 func (h *WSHub) DeleteSessionSeq(sessionID string) {
 	h.seqMu.Lock()
 	delete(h.sessionSeq, sessionID)
+	delete(h.sessionReplay, sessionID)
 	h.seqMu.Unlock()
 }
 
@@ -968,6 +1083,60 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	return ctx
 }
 
+// chatRunHandle tracks the cancel func of an in-flight WS chat run so that an
+// explicit "chat_cancel" message (or server shutdown) can stop it. Handles are
+// compared by pointer identity so a finished run never deregisters a newer run
+// that replaced it for the same session.
+type chatRunHandle struct {
+	cancel context.CancelFunc
+}
+
+// beginChatRun derives a connection-independent context for a chat run from
+// the server lifecycle context (NOT the originating client's connection
+// context), so a client disconnect or tab close no longer cancels an in-flight
+// LLM run mid-stream. The returned handle is registered as the session's
+// active run; cancel it via cancelChatRun and release it via endChatRun.
+func (s *Server) beginChatRun(sessionID string) (context.Context, *chatRunHandle) {
+	base := s.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancel(base)
+	run := &chatRunHandle{cancel: cancel}
+	s.chatRunsMu.Lock()
+	if s.chatRunCancels == nil {
+		s.chatRunCancels = make(map[string]*chatRunHandle)
+	}
+	s.chatRunCancels[sessionID] = run
+	s.chatRunsMu.Unlock()
+	return ctx, run
+}
+
+// endChatRun releases run's context resources and deregisters it if it is
+// still the session's active run (a newer run may have replaced it).
+func (s *Server) endChatRun(sessionID string, run *chatRunHandle) {
+	s.chatRunsMu.Lock()
+	if s.chatRunCancels[sessionID] == run {
+		delete(s.chatRunCancels, sessionID)
+	}
+	s.chatRunsMu.Unlock()
+	run.cancel()
+}
+
+// cancelChatRun cancels the active chat run for sessionID, if any.
+// Returns true when a run was found and cancelled.
+func (s *Server) cancelChatRun(sessionID string) bool {
+	s.chatRunsMu.Lock()
+	run := s.chatRunCancels[sessionID]
+	delete(s.chatRunCancels, sessionID)
+	s.chatRunsMu.Unlock()
+	if run == nil {
+		return false
+	}
+	run.cancel()
+	return true
+}
+
 func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 	switch msg.Type {
 	case "chat":
@@ -997,186 +1166,71 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if rawTarget, ok := msg.Payload["target_agent"].(string); ok {
 			targetAgent = strings.TrimSpace(rawTarget)
 		}
-		go func(runID, intent, updateRoute, targetAgent string) {
-			// assistantBuf accumulates response tokens for persistence after completion.
-			var assistantBuf strings.Builder
-			// collectedToolCalls accumulates tool results for persistence with the assistant message.
-			var collectedToolCalls []session.PersistedToolCall
-			// Pre-generate assistant message ID so done payload + persistence agree.
-			assistantMsgID := session.NewID()
-			onToken := func(token string) {
-				assistantBuf.WriteString(token)
-				// Use safeSend to avoid panic if client disconnects mid-stream.
-				c.safeSend(WSMessage{Type: "token", Content: token, SessionID: sessionID})
+		go s.runWSChat(c, sessionID, userMsg, runID, intent, updateRoute, targetAgent)
+
+	case "chat_cancel":
+		// Explicit user-initiated cancellation of the session's in-flight chat
+		// run. Since chat runs derive from the server lifecycle context (not the
+		// connection), this is the only client-driven way to stop a run.
+		sessionID := msg.SessionID
+		if sessionID == "" {
+			sessionID = payloadString(msg.Payload, "session_id")
+		}
+		if sessionID == "" {
+			return
+		}
+		cancelled := s.cancelChatRun(sessionID)
+		c.safeSend(WSMessage{
+			Type:      "chat_cancel_result",
+			SessionID: sessionID,
+			Payload:   map[string]any{"cancelled": cancelled},
+		})
+
+	case "resume":
+		// Client → server after a reconnect: replay session-scoped events the
+		// client missed while disconnected (payload: {session_id, last_seq,
+		// epoch}). Buffered messages with Seq > last_seq are re-sent in order,
+		// followed by a "resume_ok" carrying the current seq and gap=true when
+		// the replay buffer could not cover everything (client should re-fetch
+		// history via REST).
+		sessionID := msg.SessionID
+		if sessionID == "" {
+			sessionID = payloadString(msg.Payload, "session_id")
+		}
+		if sessionID == "" {
+			return
+		}
+		var lastSeq uint64
+		if v, ok := msg.Payload["last_seq"].(float64); ok && v > 0 {
+			lastSeq = uint64(v)
+		}
+		var clientEpoch uint64
+		if v, ok := msg.Payload["epoch"].(float64); ok && v > 0 {
+			clientEpoch = uint64(v)
+		}
+		replayed, currentSeq, gap := s.wsHub.replaySince(sessionID, lastSeq)
+		if clientEpoch != 0 && clientEpoch != serverEpoch {
+			// Server restarted since the client last saw this session: seq
+			// numbers are not comparable across epochs, so skip the replay and
+			// tell the client to re-fetch history instead.
+			replayed, gap = nil, true
+		}
+		for _, m := range replayed {
+			if !c.safeSend(m) {
+				return // client gone mid-replay
 			}
-			onEvent := func(ev backend.StreamEvent) {
-				c.safeSend(streamEventToWS(ev, sessionID))
-				// Capture tool results so they're persisted with the assistant message.
-				if ev.Type == backend.StreamToolResult && ev.Payload != nil {
-					tc := session.PersistedToolCall{
-						ID:     payloadString(ev.Payload, "id"),
-						Name:   payloadString(ev.Payload, "tool"),
-						Result: payloadString(ev.Payload, "result"),
-					}
-					if args, ok := ev.Payload["args"].(map[string]any); ok {
-						tc.Args = args
-					}
-					collectedToolCalls = append(collectedToolCalls, tc)
-					logToolPermissionAudit(s.auditLog, ev.Payload)
-				}
-			}
+		}
+		c.safeSend(WSMessage{
+			Type:      "resume_ok",
+			SessionID: sessionID,
+			Epoch:     serverEpoch,
+			Payload: map[string]any{
+				"seq":      currentSeq,
+				"gap":      gap,
+				"replayed": len(replayed),
+			},
+		})
 
-			ag := s.resolveAgentForMessage(sessionID, userMsg)
-
-			// Pre-generate the user message ID so the delegate_to_agent tool can
-			// thread replies under it. The same ID is reused in persistAccumulated.
-			userMsgID := session.NewID()
-
-			// Build space context (channel team roster + descriptions) and inject
-			// it into the context so BuildPersonaPromptWithMemory can pick it up.
-			// This is the critical wiring that makes the lead agent aware of its
-			// team members and their capabilities for intelligent delegation.
-			chatCtx := c.ctx
-			chatCtx = s.InjectSpaceContext(chatCtx, sessionID, ag)
-			chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)
-			// Set calling agent so DelegateFn can record the delegation's FromAgent.
-			if ag != nil {
-				chatCtx = threadmgr.SetCallingAgent(chatCtx, ag.Name)
-			}
-
-			runChat := func() error {
-				if ag != nil {
-					return s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, nil, onEvent)
-				}
-				// No agents configured — fall back to generic Chat.
-				return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
-			}
-
-			err := runChat()
-			if err != nil && strings.Contains(err.Error(), "already running") {
-				warnContent := "Another response is still finishing — queued your message and retrying."
-				if intent == "update_active_work" && s.tm != nil {
-					switch updateRoute {
-					case "lead_only":
-						warnContent = "Queued a lead follow-up to your update."
-					case "specific_delegate":
-						if targetAgent != "" {
-							activeDelegates := s.tm.PublishSessionGuidanceTarget(sessionID, "operator", targetAgent, "main-channel update: "+userMsg)
-							if activeDelegates > 0 {
-								warnContent = fmt.Sprintf("Shared your update with @%s and queued a lead follow-up.", targetAgent)
-							} else {
-								warnContent = fmt.Sprintf("No active delegate matched @%s — queued a lead follow-up.", targetAgent)
-							}
-							break
-						}
-						fallthrough
-					case "", "all_active":
-						activeDelegates := s.tm.PublishSessionGuidance(sessionID, "operator", "main-channel update: "+userMsg)
-						if activeDelegates > 0 {
-							if activeDelegates == 1 {
-								warnContent = "Shared your update with 1 active delegate and queued a lead follow-up."
-							} else {
-								warnContent = fmt.Sprintf("Shared your update with %d active delegates and queued a lead follow-up.", activeDelegates)
-							}
-						}
-					default:
-						warnContent = "Queued a lead follow-up to your update."
-					}
-				}
-				// Slack-like behavior: treat quick follow-up user messages as queued
-				// guidance when another run is still winding down.
-				c.safeSend(WSMessage{
-					Type:      "warning",
-					Content:   warnContent,
-					SessionID: sessionID,
-					RunID:     runID,
-				})
-				waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer waitCancel()
-				if s.orch.WaitForSessionIdle(sessionID, waitCtx) {
-					err = runChat()
-				}
-			}
-			// persistAccumulated saves the user message and whatever assistant
-			// content/tool-calls have been accumulated so far. Called on
-			// success (done), disconnect (context cancelled mid-stream),
-			// and real errors.
-			persistAccumulated := func(errContent string) {
-				if s.store == nil || sessionID == "" {
-					return
-				}
-				sess, loadErr := s.store.Load(sessionID)
-				if loadErr != nil {
-					return
-				}
-				agentName := ""
-				if ag != nil {
-					agentName = ag.Name
-				}
-				now := time.Now().UTC()
-				if appendErr := s.store.Append(sess, session.SessionMessage{
-					ID: userMsgID, Role: "user", Content: userMsg, Ts: now,
-				}); appendErr != nil {
-					logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
-				}
-				// When we have accumulated response content or tool calls, persist them.
-				if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
-					assistantMsg := session.SessionMessage{
-						ID:        assistantMsgID,
-						Role:      "assistant",
-						Content:   assistantBuf.String(),
-						Agent:     agentName,
-						Ts:        time.Now().UTC(),
-						ToolCalls: collectedToolCalls,
-					}
-					if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
-						logger.Error("ws chat: failed to persist assistant message", "session_id", sessionID, "err", appendErr)
-					}
-				} else if errContent != "" {
-					// No accumulated content but there was an error — persist
-					// an error placeholder so the conversation log is complete.
-					_ = s.store.Append(sess, session.SessionMessage{
-						ID: session.NewID(), Role: "assistant",
-						Content: errContent,
-						Agent:   agentName,
-						Ts:      time.Now().UTC(),
-					})
-				}
-				s.emitSpaceActivity(sess.SpaceID())
-			}
-
-			if err != nil {
-				// Distinguish client disconnect from real backend errors.
-				// A disconnect is when the client's WS context was cancelled
-				// (c.ctx.Err() != nil). Backend timeouts or API errors should
-				// still be reported as errors even if they wrap context.DeadlineExceeded.
-				isDisconnect := c.ctx.Err() != nil
-
-				if isDisconnect {
-					logger.Info("ws chat: client disconnected mid-stream, persisting accumulated content",
-						"session_id", sessionID, "buf_len", assistantBuf.Len(), "tool_calls", len(collectedToolCalls))
-					persistAccumulated("")
-				} else {
-					logger.Error("chat completion", "session_id", sessionID, "err", err)
-					c.safeSend(WSMessage{Type: "error", Content: err.Error(), SessionID: sessionID, RunID: runID})
-					persistAccumulated("⚠️ " + err.Error())
-				}
-			} else {
-				c.safeSend(WSMessage{Type: "done", SessionID: sessionID, RunID: runID, Payload: map[string]any{
-					"message_id": assistantMsgID,
-				}})
-
-				// Persist user + assistant messages to the session store so history
-				// survives page reload. Also emits space_activity for unseen badges.
-				persistAccumulated("")
-			}
-
-			logger.Info("ws chat done",
-				"session_id", sessionID,
-				"assistant_response_len", assistantBuf.Len(),
-				"had_error", err != nil,
-			)
-		}(runID, intent, updateRoute, targetAgent)
 	case "ping":
 		c.safeSend(WSMessage{Type: "pong"})
 
@@ -1317,4 +1371,205 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 			},
 		})
 	}
+}
+
+// runWSChat executes one chat turn for sessionID. It runs under a context
+// derived from the server lifecycle (see beginChatRun), NOT the originating
+// client's connection context, so the run survives client disconnects and tab
+// closes. Streamed tokens/events are broadcast to every client subscribed to
+// the session — including clients that reconnect mid-run — with a direct-send
+// fallback to the originating client when it is not registered with the hub.
+// Persistence of accumulated content runs on every exit path.
+func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updateRoute, targetAgent string) {
+	// assistantBuf accumulates response tokens for persistence after completion.
+	var assistantBuf strings.Builder
+	// collectedToolCalls accumulates tool results for persistence with the assistant message.
+	var collectedToolCalls []session.PersistedToolCall
+	// Pre-generate assistant message ID so done payload + persistence agree.
+	assistantMsgID := session.NewID()
+
+	// emit streams a run event to all clients subscribed to this session.
+	emit := func(msg WSMessage) {
+		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
+	}
+	onToken := func(token string) {
+		assistantBuf.WriteString(token)
+		emit(WSMessage{Type: "token", Content: token})
+	}
+	onEvent := func(ev backend.StreamEvent) {
+		emit(streamEventToWS(ev, sessionID))
+		// Capture tool results so they're persisted with the assistant message.
+		if ev.Type == backend.StreamToolResult && ev.Payload != nil {
+			tc := session.PersistedToolCall{
+				ID:     payloadString(ev.Payload, "id"),
+				Name:   payloadString(ev.Payload, "tool"),
+				Result: payloadString(ev.Payload, "result"),
+			}
+			if args, ok := ev.Payload["args"].(map[string]any); ok {
+				tc.Args = args
+			}
+			collectedToolCalls = append(collectedToolCalls, tc)
+			logToolPermissionAudit(s.auditLog, ev.Payload)
+		}
+	}
+
+	ag := s.resolveAgentForMessage(sessionID, userMsg)
+
+	// Pre-generate the user message ID so the delegate_to_agent tool can
+	// thread replies under it. The same ID is reused in persistAccumulated.
+	userMsgID := session.NewID()
+
+	// Derive the run context from the server lifetime and register it as the
+	// session's active run so a "chat_cancel" message can stop it explicitly.
+	chatCtx, run := s.beginChatRun(sessionID)
+	defer s.endChatRun(sessionID, run)
+
+	// Build space context (channel team roster + descriptions) and inject
+	// it into the context so BuildPersonaPromptWithMemory can pick it up.
+	// This is the critical wiring that makes the lead agent aware of its
+	// team members and their capabilities for intelligent delegation.
+	chatCtx = s.InjectSpaceContext(chatCtx, sessionID, ag)
+	chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)
+	// Set calling agent so DelegateFn can record the delegation's FromAgent.
+	if ag != nil {
+		chatCtx = threadmgr.SetCallingAgent(chatCtx, ag.Name)
+	}
+
+	runChat := func() error {
+		if ag != nil {
+			return s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, nil, onEvent)
+		}
+		// No agents configured — fall back to generic Chat.
+		return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
+	}
+
+	err := runChat()
+	if err != nil && strings.Contains(err.Error(), "already running") {
+		warnContent := "Another response is still finishing — queued your message and retrying."
+		if intent == "update_active_work" && s.tm != nil {
+			switch updateRoute {
+			case "lead_only":
+				warnContent = "Queued a lead follow-up to your update."
+			case "specific_delegate":
+				if targetAgent != "" {
+					activeDelegates := s.tm.PublishSessionGuidanceTarget(sessionID, "operator", targetAgent, "main-channel update: "+userMsg)
+					if activeDelegates > 0 {
+						warnContent = fmt.Sprintf("Shared your update with @%s and queued a lead follow-up.", targetAgent)
+					} else {
+						warnContent = fmt.Sprintf("No active delegate matched @%s — queued a lead follow-up.", targetAgent)
+					}
+					break
+				}
+				fallthrough
+			case "", "all_active":
+				activeDelegates := s.tm.PublishSessionGuidance(sessionID, "operator", "main-channel update: "+userMsg)
+				if activeDelegates > 0 {
+					if activeDelegates == 1 {
+						warnContent = "Shared your update with 1 active delegate and queued a lead follow-up."
+					} else {
+						warnContent = fmt.Sprintf("Shared your update with %d active delegates and queued a lead follow-up.", activeDelegates)
+					}
+				}
+			default:
+				warnContent = "Queued a lead follow-up to your update."
+			}
+		}
+		// Slack-like behavior: treat quick follow-up user messages as queued
+		// guidance when another run is still winding down.
+		emit(WSMessage{
+			Type:    "warning",
+			Content: warnContent,
+			RunID:   runID,
+		})
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer waitCancel()
+		if s.orch.WaitForSessionIdle(sessionID, waitCtx) {
+			err = runChat()
+		}
+	}
+	// persistAccumulated saves the user message and whatever assistant
+	// content/tool-calls have been accumulated so far. Called on
+	// success (done), cancellation (chat_cancel / server shutdown),
+	// and real errors — it must run regardless of client disconnects.
+	persistAccumulated := func(errContent string) {
+		if s.store == nil || sessionID == "" {
+			return
+		}
+		sess, loadErr := s.store.Load(sessionID)
+		if loadErr != nil {
+			return
+		}
+		agentName := ""
+		if ag != nil {
+			agentName = ag.Name
+		}
+		now := time.Now().UTC()
+		if appendErr := s.store.Append(sess, session.SessionMessage{
+			ID: userMsgID, Role: "user", Content: userMsg, Ts: now,
+		}); appendErr != nil {
+			logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
+		}
+		// When we have accumulated response content or tool calls, persist them.
+		if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
+			assistantMsg := session.SessionMessage{
+				ID:        assistantMsgID,
+				Role:      "assistant",
+				Content:   assistantBuf.String(),
+				Agent:     agentName,
+				Ts:        time.Now().UTC(),
+				ToolCalls: collectedToolCalls,
+			}
+			if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
+				logger.Error("ws chat: failed to persist assistant message", "session_id", sessionID, "err", appendErr)
+			}
+		} else if errContent != "" {
+			// No accumulated content but there was an error — persist
+			// an error placeholder so the conversation log is complete.
+			_ = s.store.Append(sess, session.SessionMessage{
+				ID: session.NewID(), Role: "assistant",
+				Content: errContent,
+				Agent:   agentName,
+				Ts:      time.Now().UTC(),
+			})
+		}
+		s.emitSpaceActivity(sess.SpaceID())
+	}
+
+	if err != nil {
+		// Distinguish explicit run cancellation (chat_cancel message or server
+		// shutdown) from real backend errors. Client disconnects no longer
+		// cancel the run — chatCtx derives from the server lifecycle, not the
+		// connection. Backend timeouts or API errors are still reported as
+		// errors even if they wrap context.DeadlineExceeded.
+		isCancelled := chatCtx.Err() != nil
+
+		if isCancelled {
+			logger.Info("ws chat: run cancelled mid-stream, persisting accumulated content",
+				"session_id", sessionID, "buf_len", assistantBuf.Len(), "tool_calls", len(collectedToolCalls))
+			// Signal completion so any connected client stops its spinner.
+			emit(WSMessage{Type: "done", RunID: runID, Payload: map[string]any{
+				"message_id": assistantMsgID,
+				"cancelled":  true,
+			}})
+			persistAccumulated("")
+		} else {
+			logger.Error("chat completion", "session_id", sessionID, "err", err)
+			emit(WSMessage{Type: "error", Content: err.Error(), RunID: runID})
+			persistAccumulated("⚠️ " + err.Error())
+		}
+	} else {
+		emit(WSMessage{Type: "done", RunID: runID, Payload: map[string]any{
+			"message_id": assistantMsgID,
+		}})
+
+		// Persist user + assistant messages to the session store so history
+		// survives page reload. Also emits space_activity for unseen badges.
+		persistAccumulated("")
+	}
+
+	logger.Info("ws chat done",
+		"session_id", sessionID,
+		"assistant_response_len", assistantBuf.Len(),
+		"had_error", err != nil,
+	)
 }

@@ -435,9 +435,12 @@ func TestBroadcastToSession_PersistsDelegationPreviewTimeoutEvent(t *testing.T) 
 }
 func (d *disconnectBackend) ContextWindow() int { return 4096 }
 
-// TestWSChat_PersistsOnDisconnect verifies that when a WS client disconnects
-// mid-stream (before the done event fires), whatever content was accumulated
-// is still persisted to the session store.
+// TestWSChat_PersistsOnDisconnect verifies the connection-independent run
+// contract: a WS client disconnect mid-stream does NOT cancel the in-flight
+// chat run (the run context derives from the server lifecycle, not the
+// connection), and when the run is later stopped via the explicit cancel
+// pathway (chat_cancel), whatever content was accumulated is still persisted
+// to the session store.
 //
 // Regression: previously the server only persisted on "done". If the client
 // refreshed during streaming, all accumulated content was lost.
@@ -486,8 +489,23 @@ func TestWSChat_PersistsOnDisconnect(t *testing.T) {
 		t.Fatal("timeout waiting for tokens to be emitted")
 	}
 
-	// Cancel the context (simulates WS disconnect).
+	// Cancel the client's connection context (simulates WS disconnect).
+	// The chat run must survive this: its context derives from the server
+	// lifecycle, not the connection.
 	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	// The backend is still blocked on its context, so nothing has been
+	// persisted yet — proving the run was not cancelled by the disconnect.
+	if early, _ := store.TailMessages(sess.ID, 10); len(early) != 0 {
+		t.Fatalf("run should still be in flight after client disconnect, but %d messages were persisted", len(early))
+	}
+
+	// Now stop the run via the explicit cancel pathway (what a chat_cancel
+	// WS message triggers).
+	if !srv.cancelChatRun(sess.ID) {
+		t.Fatal("expected an active chat run to cancel — run did not survive the client disconnect")
+	}
 
 	// Allow the goroutine to finish and persist.
 	time.Sleep(200 * time.Millisecond)

@@ -2216,7 +2216,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		endpoint = "http://localhost:11434"
 	}
 	switch cfg.Backend.Provider {
-	case "anthropic", "openai", "openrouter", "google":
+	case "anthropic", "openai", "openrouter", "google", "deepseek", "zai", "custom":
 		cb, bErr := backend.NewFromConfig(cfg.Backend.Provider, cfg.Backend.Endpoint, cfg.Backend.ResolvedAPIKey(), cfg.DefaultModel)
 		if bErr != nil {
 			return nil, "", nil, fmt.Errorf("backend (%s): %w", cfg.Backend.Provider, bErr)
@@ -2781,6 +2781,21 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		logger.Info("startServer: wiring agents", "count", len(agentsCfg.Agents), "names", agentReg.Names())
 		orch.SetAgentRegistry(agentReg)
 
+		// Reload the live registry whenever an agent is created/updated/deleted
+		// via the API — without this, runtime-created agents are invisible to
+		// delegation, mention parsing, and space rosters until restart (#124).
+		// The registry is mutated in place because its pointer is captured by
+		// the orchestrator, thread manager, and delegation closures below.
+		srv.SetOnAgentsChanged(func() {
+			freshCfg, loadErr := agentslib.LoadAgents()
+			if loadErr != nil || freshCfg == nil {
+				logger.Warn("agents changed: reload failed; registry left unchanged", "err", loadErr)
+				return
+			}
+			agentReg.ReloadFromConfig(freshCfg, srvUsername)
+			logger.Info("agents changed: registry reloaded", "count", len(freshCfg.Agents), "names", agentReg.Names())
+		})
+
 		// Compute working dir and bash timeout; shared by toolReg below.
 		srvCWD, cwdErr := os.Getwd()
 		if cwdErr != nil {
@@ -2828,10 +2843,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				logger.Info("delegate_to_agent: agent validated", "agent", p.AgentName)
 
 				// Load the session for SpawnThread (may be a stub if not yet persisted).
+				var warnings []string
 				sess, loadErr := sessStore.Load(sessionID)
 				if loadErr != nil {
 					logger.Warn("delegate_to_agent: session load failed, using stub", "err", loadErr)
 					sess = &session.Session{ID: sessionID}
+					warnings = append(warnings,
+						"session history could not be loaded — the delegated agent will start WITHOUT prior chat context; include all necessary context in the task description")
 				}
 				logger.Info("delegate_to_agent: session loaded", "space_id", sess.SpaceID())
 
@@ -2930,10 +2948,10 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					}
 					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
 					logger.Info("delegate_to_agent: SpawnThread returned", "thread_id", tid)
-					return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true}
+					return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true, Warnings: warnings}
 				}
 				logger.Info("delegate_to_agent: thread not ready, queued", "thread_id", t.ID)
-				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false}
+				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false, Warnings: warnings}
 			},
 		}
 		toolReg.Register(delegateTool)
@@ -2966,6 +2984,23 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 		toolReg.Register(recallTool)
 
+		// wait_for_threads — barrier primitive: the lead agent blocks until its
+		// delegates finish and gets every full FinishSummary in one result,
+		// instead of polling recall_thread_result per thread.
+		waitTool := &threadmgr.WaitForThreadsTool{
+			Fn: func(ctx context.Context, threadIDs []string, timeout time.Duration) (threadmgr.WaitReport, error) {
+				sessionID := agent.GetSessionID(ctx)
+				if sessionID == "" {
+					return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
+				}
+				if len(threadIDs) == 0 {
+					threadIDs = tm.ActiveThreadIDs(sessionID)
+				}
+				return tm.WaitForThreads(ctx, sessionID, threadIDs, timeout), nil
+			},
+		}
+		toolReg.Register(waitTool)
+
 		// Tag delegation tools as "builtin" so agents with LocalTools: ["*"]
 		// (i.e. "Allow all" in the UI) see them in their tool list. Without
 		// this tag, AllBuiltinSchemas() silently excludes them and the lead
@@ -2974,6 +3009,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			"delegate_to_agent",
 			"list_team_status",
 			"recall_thread_result",
+			"wait_for_threads",
 		}, "builtin")
 
 		// ── Workflow runtime parity (Phase 1) ─────────────────────────────
@@ -3129,6 +3165,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return
 			}
 
+			// If the lead agent already collected this result via wait_for_threads
+			// (it was blocking on the thread and synthesized inline), a follow-up
+			// would duplicate the reply in the channel. Checked AFTER the idle wait
+			// so the wait_for_threads collection stamp has had time to land.
+			if summary.ThreadID != "" && tm.WasCollected(summary.ThreadID) {
+				logger.Info("follow-up: skipped — result already collected via wait_for_threads",
+					"session_id", sessionID, "thread_id", summary.ThreadID, "agent", ag.Name)
+				return
+			}
+
 			// Immediately signal that the lead agent is preparing a response so the
 			// frontend can show a "thinking" indicator before the first token arrives.
 			// This closes the UX gap where Sam finishes but Tom is silent for 30-60s.
@@ -3136,19 +3182,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				"agent": ag.Name,
 			})
 
-			// Build a concise synthesis prompt for the lead agent.
-			// Truncate the summary to avoid Tom regurgitating Sam's entire report —
-			// the full report lives in the thread panel. Tom writes a brief synthesis.
-			summaryText := strings.TrimSpace(summary.Summary)
-			const maxSummaryLen = 800
-			truncNote := ""
-			if len(summaryText) > maxSummaryLen {
-				summaryText = summaryText[:maxSummaryLen]
-				truncNote = "\n\n(Full report is available in the thread panel.)"
-			}
-			followUpMsg := completedAgentID + " has completed their task. Key findings:\n\n" +
-				summaryText + truncNote +
-				"\n\nPlease give the user a brief synthesis (3-5 sentences max) in your own words. Do NOT repeat the full report — just the key takeaways and recommended next steps."
+			// Build a concise, status-honest synthesis prompt for the lead agent.
+			followUpMsg := threadmgr.BuildFollowUpPrompt(completedAgentID, summary)
 
 			// Stream Tom's reply tokens to the session's WS clients.
 			var replyBuf strings.Builder
@@ -4296,6 +4331,12 @@ func providerDisplayName(id string) string {
 		return "Google AI Studio"
 	case "vertex":
 		return "Google Vertex AI"
+	case "deepseek":
+		return "DeepSeek"
+	case "zai":
+		return "Z.ai (GLM)"
+	case "custom":
+		return "Custom (OpenAI-compatible)"
 	default:
 		return id
 	}

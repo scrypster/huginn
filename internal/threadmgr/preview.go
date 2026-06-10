@@ -2,6 +2,7 @@ package threadmgr
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -173,6 +174,8 @@ func (g *DelegationPreviewGate) Approve(
 			}
 			broadcastFn(sessionID, "delegation_preview_timeout", payload)
 		}
+		slog.Warn("delegation preview timed out without user ack — auto-approving",
+			"session_id", sessionID, "thread_id", threadID, "agent", agentName, "timeout", g.timeout)
 		return true // timeout → default approve
 	}
 }

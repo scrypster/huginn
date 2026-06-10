@@ -919,7 +919,7 @@ import { useDeliveryQueue } from './composables/useDeliveryQueue'
 
 const route = useRoute()
 const router = useRouter()
-const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages } = useSessions()
+const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages, refetchMessages } = useSessions()
 const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } = useNotifications()
 const { wireWS: wireWorkflowsWS } = useWorkflows()
 const { isAgentActive } = useThreads()
@@ -1133,6 +1133,10 @@ const wsLastError = computed(() => wsRef.value?.lastError?.value ?? null)
 function wsReconnectNow() { wsRef.value?.reconnectNow?.() }
 function reloadPage() { window.location.reload() }
 
+// Keep the WS layer informed of the active session so it can re-subscribe and
+// resume missed events (replay) after a reconnect.
+watch(activeSessionId, (id) => { wsRef.value?.setActiveSession(id || null) })
+
 // Show a banner after 4 s of non-connected state to avoid flicker on brief blips.
 const showDegradedBanner = ref(false)
 let degradedTimer: ReturnType<typeof setTimeout> | null = null
@@ -1198,6 +1202,15 @@ async function initApp() {
     ws.on('delivery_badge_update', (msg) => {
       handleBadgeUpdate((msg as unknown as { count: number }).count ?? 0)
     })
+    // Resume recovery: after a reconnect the WS layer sends "resume" for the
+    // sessions it was tracking. gap=true means the server's replay buffer
+    // could not cover the disconnect window — re-fetch history via REST.
+    ws.on('resume_ok', (msg) => {
+      if (msg.session_id && msg.payload?.gap === true) {
+        refetchMessages(msg.session_id)
+      }
+    })
+    ws.setActiveSession(activeSessionId.value || null)
   } catch (e: unknown) {
     appError.value = e instanceof Error ? e.message : 'Failed to initialize'
     appLoading.value = false

@@ -41,6 +41,19 @@ type Thread struct {
 	Timeout         time.Duration  // 0 = no timeout; when > 0, the goroutine is killed after this duration
 	cancel          func()         // non-nil after Start()
 	InputCh         chan string     // receives human input when status == blocked
+
+	// Heartbeat fields — let the lead agent and UI distinguish "still working"
+	// from "stalled" without waiting for a terminal status.
+	LastActivityAt  time.Time // updated on every turn, tool call, and (throttled) token
+	CurrentActivity string    // human-readable, e.g. `thinking (turn 3/50)`, `running tool "bash"`
+	Turn            int       // current loop turn (1-based; 0 = not yet running)
+
+	// CollectedAt is stamped when WaitForThreads delivers this thread's result
+	// to a waiting lead agent. The completion notifier skips its automatic
+	// follow-up synthesis for collected threads — the lead already has the
+	// result in its tool output and will synthesize inline; firing the
+	// follow-up too would produce a duplicate reply in the channel.
+	CollectedAt time.Time
 }
 
 // AuditEntry is a single immutable record in the ThreadManager audit log.
@@ -62,6 +75,7 @@ type FinishSummary struct {
 	Artifacts       []string // references to outputs
 	Status          string   // "completed" | "blocked" | "needs_review" | "completed-with-timeout" | "error"
 	ParentMessageID string   // ID of the chat message that triggered this thread (for reply threading)
+	ThreadID        string   // stamped by CompletionNotifier.Notify so FollowUpFn can identify the thread
 }
 
 // CreateParams holds arguments for ThreadManager.Create.

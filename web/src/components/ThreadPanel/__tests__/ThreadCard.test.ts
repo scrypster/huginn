@@ -499,3 +499,42 @@ describe('ThreadCard — inject input validation', () => {
     expect(wrapper.emitted('inject')![0]).toEqual(['thread-1', 'via enter key'])
   })
 })
+
+// ── Heartbeat: live activity line + stall warning ─────────────────────────────
+
+describe('ThreadCard — activity heartbeat', () => {
+  it('shows the live activity line while running', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'thinking',
+      activity: 'thinking (turn 3/50)',
+      lastActivityAt: Date.now(),
+    }))
+    expect(wrapper.text()).toContain('thinking (turn 3/50)')
+    expect(wrapper.text()).not.toContain('may be stalled')
+  })
+
+  it('flags a stalled thread when the heartbeat is older than 2 minutes', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'thinking',
+      activity: 'running tool "bash"',
+      lastActivityAt: Date.now() - 5 * 60 * 1000,
+    }))
+    expect(wrapper.text()).toContain('running tool "bash"')
+    expect(wrapper.text()).toContain('may be stalled')
+  })
+
+  it('does not show activity or stall warning on terminal threads', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      activity: 'thinking (turn 3/50)',
+      lastActivityAt: Date.now() - 10 * 60 * 1000,
+    }))
+    expect(wrapper.text()).not.toContain('thinking (turn 3/50)')
+    expect(wrapper.text()).not.toContain('may be stalled')
+  })
+
+  it('renders no activity line when no heartbeat has arrived', () => {
+    const wrapper = mountCard(makeThread({ Status: 'thinking' }))
+    expect(wrapper.text()).not.toContain('may be stalled')
+  })
+})

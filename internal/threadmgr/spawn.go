@@ -424,10 +424,17 @@ func (tm *ThreadManager) runOnce(
 			history = append([]backend.Message{{Role: "system", Content: runtime.ExtraSystem}}, history...)
 		}
 	}
-	if sibling := tm.SiblingContext(threadID, 8); len(sibling) > 0 {
+	// Fetch one more than the injection cap so we can tell the agent when
+	// older team updates exist beyond what is shown.
+	const siblingContextLimit = 8
+	if sibling := tm.SiblingContext(threadID, siblingContextLimit+1); len(sibling) > 0 {
+		truncated := len(sibling) > siblingContextLimit
+		if truncated {
+			sibling = sibling[len(sibling)-siblingContextLimit:] // keep the most recent
+		}
 		history = append(history, backend.Message{
 			Role:    "user",
-			Content: formatSiblingContextBlock(sibling),
+			Content: formatSiblingContextBlock(sibling, truncated),
 		})
 	}
 	logger.Info("runOnce: context built", "thread_id", threadID, "history_len", len(history))
@@ -482,10 +489,15 @@ func (tm *ThreadManager) runOnce(
 			return loopResult{kind: loopDone}
 		}
 
-		// Broadcast thinking status at the start of each turn.
+		// Record heartbeat + broadcast thinking status at the start of each turn.
+		activity := fmt.Sprintf("thinking (turn %d/%d)", turn+1, maxTurns)
+		tm.recordTurn(threadID, turn+1, activity)
 		broadcast(sess.ID, "thread_status", map[string]any{
 			"thread_id": threadID,
 			"status":    "thinking",
+			"activity":  activity,
+			"turn":      turn + 1,
+			"max_turns": maxTurns,
 		})
 
 		// Build the chat request, streaming tokens via broadcast.
@@ -503,7 +515,13 @@ func (tm *ThreadManager) runOnce(
 				})
 				// Emit token event sampled 1-in-5 to avoid flooding the emitter.
 				if tokenCounter != nil {
-					if n := atomic.AddInt64(tokenCounter, 1); n%5 == 0 {
+					n := atomic.AddInt64(tokenCounter, 1)
+					// Throttled heartbeat: a streaming model is alive even when
+					// no turn/tool boundary has been crossed for a while.
+					if n%25 == 0 {
+						tm.RecordActivity(threadID, "")
+					}
+					if n%5 == 0 {
 						emitter.Emit(ThreadEvent{
 							Event:     "token",
 							ThreadID:  threadID,
@@ -717,7 +735,8 @@ func (tm *ThreadManager) runOnce(
 				})
 			}
 
-			// Broadcast tool call event before dispatching.
+			// Record heartbeat + broadcast tool call event before dispatching.
+			tm.RecordActivity(threadID, fmt.Sprintf("running tool %q", tc.Function.Name))
 			broadcast(sess.ID, "thread_tool_call", map[string]any{
 				"thread_id": threadID,
 				"tool":      tc.Function.Name,
@@ -785,6 +804,8 @@ func (tm *ThreadManager) runOnce(
 		tm.mu.Lock()
 		if t, ok := tm.threads[threadID]; ok && t.Status == StatusTooling {
 			t.Status = StatusThinking
+			t.LastActivityAt = time.Now()
+			t.CurrentActivity = fmt.Sprintf("thinking (turn %d/%d)", turn+1, maxTurns)
 		}
 		tm.mu.Unlock()
 	}
@@ -845,7 +866,8 @@ func (tm *ThreadManager) setBlocked(threadID, helpMessage string) {
 		return
 	}
 	t.Status = StatusBlocked
-	_ = helpMessage // message is broadcast by caller
+	t.LastActivityAt = time.Now()
+	t.CurrentActivity = "waiting for help: " + clipResult(helpMessage, 120)
 	tm.mu.Unlock()
 	tm.fireStatusChange(threadID, StatusBlocked)
 }
@@ -909,9 +931,12 @@ func clipResult(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-func formatSiblingContextBlock(msgs []ThreadContextMessage) string {
+func formatSiblingContextBlock(msgs []ThreadContextMessage, truncated bool) string {
 	var sb strings.Builder
 	sb.WriteString("## Team Context Updates\n")
+	if truncated {
+		sb.WriteString(fmt.Sprintf("(showing the %d most recent team updates — older updates were omitted; use list_team_status for current state)\n", len(msgs)))
+	}
 	for _, m := range msgs {
 		content := clipResult(m.Content, 140)
 		if content == "" {

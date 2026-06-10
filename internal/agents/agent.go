@@ -227,7 +227,7 @@ func BuildPersonaPromptWithRoster(ag *Agent, ctxText, roster string) string {
 		return base
 	}
 	return base + "\n\n## Your Team\n" + roster +
-		"\n\nUse `delegate_to_agent` to assign sub-tasks to team members. " +
+		"\n\nUse `delegate_to_agent` to assign sub-tasks to team members, then `wait_for_threads` to collect their full results when you need them before replying. " +
 		"Only delegate when the request clearly requires another agent's specialized expertise. " +
 		"For simple conversational messages (greetings, questions, general chat), respond directly — do not delegate."
 }
