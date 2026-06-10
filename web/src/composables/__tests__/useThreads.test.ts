@@ -982,3 +982,84 @@ describe('useThreads — concurrent and edge cases', () => {
     expect(getActiveThreadCount('sess-cnt')).toBe(1)
   })
 })
+
+// ── Heartbeat: activity / lastActivityAt tracking ─────────────────────────────
+
+describe('useThreads — heartbeat tracking', () => {
+  it('thread_status stores activity, turn, and lastActivityAt', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionThreads } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-hb1')
+
+    handlers['thread_started']!({ session_id: 'sess-hb1', payload: { thread_id: 'th-hb1', agent_id: 'a', task: 't' } })
+    handlers['thread_status']!({
+      session_id: 'sess-hb1',
+      payload: { thread_id: 'th-hb1', status: 'thinking', activity: 'thinking (turn 3/50)', turn: 3 },
+    })
+
+    const t = getSessionThreads('sess-hb1')[0]!
+    expect(t.activity).toBe('thinking (turn 3/50)')
+    expect(t.turn).toBe(3)
+    expect(t.lastActivityAt).toBeTypeOf('number')
+    expect(Date.now() - t.lastActivityAt!).toBeLessThan(5000)
+  })
+
+  it('thread_status without activity/turn fields still stamps lastActivityAt and keeps prior activity', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionThreads } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-hb2')
+
+    handlers['thread_started']!({ session_id: 'sess-hb2', payload: { thread_id: 'th-hb2', agent_id: 'a', task: 't' } })
+    handlers['thread_status']!({
+      session_id: 'sess-hb2',
+      payload: { thread_id: 'th-hb2', status: 'thinking', activity: 'thinking (turn 1/50)', turn: 1 },
+    })
+    // Legacy-shaped event (no heartbeat fields, e.g. older server)
+    handlers['thread_status']!({
+      session_id: 'sess-hb2',
+      payload: { thread_id: 'th-hb2', status: 'tooling' },
+    })
+
+    const t = getSessionThreads('sess-hb2')[0]!
+    expect(t.Status).toBe('tooling')
+    expect(t.activity).toBe('thinking (turn 1/50)') // preserved, not cleared
+    expect(t.lastActivityAt).toBeTypeOf('number')
+  })
+
+  it('thread_token refreshes lastActivityAt', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionThreads } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-hb3')
+
+    handlers['thread_started']!({ session_id: 'sess-hb3', payload: { thread_id: 'th-hb3', agent_id: 'a', task: 't' } })
+    const before = getSessionThreads('sess-hb3')[0]!.lastActivityAt
+    handlers['thread_token']!({ session_id: 'sess-hb3', payload: { thread_id: 'th-hb3', token: 'hi' } })
+
+    const t = getSessionThreads('sess-hb3')[0]!
+    expect(t.lastActivityAt).toBeTypeOf('number')
+    expect(t.lastActivityAt!).toBeGreaterThanOrEqual(before ?? 0)
+    expect(t.streamingContent).toBe('hi')
+  })
+
+  it('thread_tool_call sets a running-tool activity', async () => {
+    const { useThreads } = await freshUseThreads()
+    const { wireWS, getSessionThreads } = useThreads()
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    const ws = { on: (e: string, fn: (msg: unknown) => void) => { handlers[e] = fn } }
+    wireWS(ws as any, () => 'sess-hb4')
+
+    handlers['thread_started']!({ session_id: 'sess-hb4', payload: { thread_id: 'th-hb4', agent_id: 'a', task: 't' } })
+    handlers['thread_tool_call']!({ session_id: 'sess-hb4', payload: { thread_id: 'th-hb4', tool: 'bash' } })
+
+    const t = getSessionThreads('sess-hb4')[0]!
+    expect(t.activity).toBe('running tool "bash"')
+    expect(t.lastActivityAt).toBeTypeOf('number')
+    expect(t.toolCalls).toHaveLength(1)
+  })
+})

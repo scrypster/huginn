@@ -3157,43 +3157,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				"agent": ag.Name,
 			})
 
-			// Build a concise synthesis prompt for the lead agent.
-			// Truncate the summary to avoid Tom regurgitating Sam's entire report —
-			// the full report lives in the thread panel. Tom writes a brief synthesis.
-			summaryText := strings.TrimSpace(summary.Summary)
-			const maxSummaryLen = 1200
-			truncNote := ""
-			if len(summaryText) > maxSummaryLen {
-				summaryText = summaryText[:maxSummaryLen]
-				truncNote = "\n\n(Full report is available in the thread panel.)"
-			}
-			// Lead with an honest outcome line — an errored or timed-out delegate
-			// must not be presented to the user as a completed task.
-			var outcome string
-			switch summary.Status {
-			case "error":
-				outcome = completedAgentID + "'s task FAILED with an error. What they reported before failing:"
-			case "completed-with-timeout":
-				outcome = completedAgentID + " stopped early (timeout or turn limit) and may have left work unfinished. What they got done:"
-			case "blocked", "needs_review":
-				outcome = completedAgentID + " stopped with status " + summary.Status + ". Their report:"
-			default:
-				outcome = completedAgentID + " has completed their task. Key findings:"
-			}
-			// Surface the structured result fields, not just the narrative — these
-			// are exactly what the lead needs to decide next steps.
-			var details strings.Builder
-			if len(summary.FilesModified) > 0 {
-				details.WriteString("\nFiles modified: " + strings.Join(summary.FilesModified, ", "))
-			}
-			if len(summary.KeyDecisions) > 0 {
-				details.WriteString("\nKey decisions: " + strings.Join(summary.KeyDecisions, "; "))
-			}
-			if len(summary.Artifacts) > 0 {
-				details.WriteString("\nArtifacts: " + strings.Join(summary.Artifacts, ", "))
-			}
-			followUpMsg := outcome + "\n\n" + summaryText + details.String() + truncNote +
-				"\n\nPlease give the user a brief synthesis (3-5 sentences max) in your own words. Be honest about failures or unfinished work. Do NOT repeat the full report — just the key takeaways and recommended next steps."
+			// Build a concise, status-honest synthesis prompt for the lead agent.
+			followUpMsg := threadmgr.BuildFollowUpPrompt(completedAgentID, summary)
 
 			// Stream Tom's reply tokens to the session's WS clients.
 			var replyBuf strings.Builder
