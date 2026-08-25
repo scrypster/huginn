@@ -147,7 +147,7 @@ This applies to all write operations: `write_file`, `edit_file`, and any other t
 
 The permission tier system controls the risk level of individual tool calls and whether they require approval. The agent toolbelt is a separate, additional layer that controls which external providers each agent is allowed to use at all.
 
-**`toolbelt`** — a list of connections the agent may access. At session start, only the tool schemas for providers in the toolbelt are sent to the model. The model never learns that other providers exist, so it cannot even attempt to use them. An empty toolbelt (the default) allows access to all configured connections.
+**`toolbelt`** — a list of connections the agent may access. At session start, only the tool schemas for providers in the toolbelt are sent to the model. The model never learns that other providers exist, so it cannot even attempt to use them. An empty toolbelt (the default) grants no external providers — fail closed. Use `{ "provider": "*" }` (or `connection_id: "*"`) for explicit allow-all.
 
 **`local_tools`** — a list of builtin tool names the agent is allowed to use. Tools not in this list are excluded from the agent's schema set. An empty `local_tools` list means no builtins are available to the agent.
 
