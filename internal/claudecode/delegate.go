@@ -1,0 +1,215 @@
+package claudecode
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strconv"
+	"time"
+)
+
+// DelegateRequest is one delegated Claude Code task.
+type DelegateRequest struct {
+	Prompt         string
+	CWD            string
+	Model          string
+	PermissionMode string
+	MaxTurns       int
+	AllowedTools   []string
+}
+
+// DelegateResult is the outcome of a delegated run.
+type DelegateResult struct {
+	SessionID  string
+	Text       string
+	CostUSD    float64
+	DurationMS int
+	NumTurns   int
+	IsError    bool
+	ErrorText  string
+}
+
+// StreamEvent is a live update emitted while the delegated run proceeds.
+// Type is "text" or "tool_use".
+type StreamEvent struct {
+	Type     string
+	Text     string
+	ToolName string
+}
+
+// BuildArgs assembles the claude CLI arguments for a delegated run.
+//
+// The session id is assigned by Huginn rather than read back afterwards, so
+// the transcript watcher can correlate the run to a session without racing
+// the CLI.
+func BuildArgs(cfg DelegateConfig, req DelegateRequest, sessionID string) []string {
+	mode := req.PermissionMode
+	if mode == "" {
+		mode = cfg.PermissionMode
+	}
+	model := req.Model
+	if model == "" {
+		model = cfg.DefaultModel
+	}
+	turns := req.MaxTurns
+	if turns <= 0 {
+		turns = cfg.MaxTurns
+	}
+
+	args := []string{
+		"-p", req.Prompt,
+		"--session-id", sessionID,
+		"--output-format", "stream-json",
+		"--verbose",
+	}
+	if mode != "" {
+		args = append(args, "--permission-mode", mode)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	// --max-turns is absent from `claude --help` but IS accepted by the CLI.
+	// Verified empirically: this build rejects genuinely unknown flags with
+	// "error: unknown option", and `--max-turns 3` was accepted and ran
+	// normally. It is undocumented, not nonexistent — do not remove it, and do
+	// not assume other undocumented flags behave the same way without testing.
+	if turns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(turns))
+	}
+	if len(req.AllowedTools) > 0 {
+		args = append(args, "--allowedTools")
+		args = append(args, req.AllowedTools...)
+	}
+	// Only ever set from explicit configuration, never inferred.
+	if cfg.SkipPermissions {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	return args
+}
+
+// Delegate runs a one-shot Claude Code task and returns its result.
+//
+// onEvent, if non-nil, is called for each assistant text and tool_use event as
+// it streams, so callers can mirror progress into a thread panel. It is called
+// from the reading goroutine and must not block for long.
+//
+// On timeout the process group is killed and the partial result is returned
+// alongside a non-nil error.
+func Delegate(
+	ctx context.Context,
+	cfg DelegateConfig,
+	binary string,
+	req DelegateRequest,
+	sessionID string,
+	onEvent func(StreamEvent),
+) (DelegateResult, error) {
+	timeout := time.Duration(cfg.TimeoutSecs) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, binary, BuildArgs(cfg, req, sessionID)...)
+	if req.CWD != "" {
+		cmd.Dir = req.CWD
+	}
+	// Put the child in its own process group so a timeout kills any tools it
+	// spawned, not just the CLI itself. Platform-specific; see delegate_unix.go.
+	setProcessGroup(cmd)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return DelegateResult{IsError: true, ErrorText: err.Error()},
+			fmt.Errorf("claudecode: stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return DelegateResult{IsError: true, ErrorText: err.Error()},
+			fmt.Errorf("claudecode: start %s: %w", binary, err)
+	}
+
+	res := DelegateResult{SessionID: sessionID}
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		applyStreamLine(sc.Bytes(), &res, onEvent)
+	}
+
+	waitErr := cmd.Wait()
+	if runCtx.Err() != nil {
+		res.IsError = true
+		res.ErrorText = "claude run timed out after " + timeout.String()
+		return res, fmt.Errorf("claudecode: delegate timed out: %w", runCtx.Err())
+	}
+	if waitErr != nil {
+		res.IsError = true
+		if res.ErrorText == "" {
+			res.ErrorText = waitErr.Error()
+		}
+		return res, fmt.Errorf("claudecode: delegate failed: %w", waitErr)
+	}
+	return res, nil
+}
+
+// streamLine is one line of claude's stream-json output.
+//
+// VERIFIED against the real CLI, not just the test fixture: a live
+// `claude -p ... --output-format json` run emits exactly these keys —
+// result, total_cost_usd, duration_ms, num_turns, subtype ("success"),
+// session_id, type ("result"). Field names here match that output.
+type streamLine struct {
+	Type     string  `json:"type"`
+	Subtype  string  `json:"subtype"`
+	Result   string  `json:"result"`
+	IsError  bool    `json:"is_error"`
+	Cost     float64 `json:"total_cost_usd"`
+	Duration int     `json:"duration_ms"`
+	NumTurns int     `json:"num_turns"`
+	Message  struct {
+		Content contentBlocks `json:"content"`
+	} `json:"message"`
+}
+
+func applyStreamLine(raw []byte, res *DelegateResult, onEvent func(StreamEvent)) {
+	var sl streamLine
+	if err := json.Unmarshal(raw, &sl); err != nil {
+		return
+	}
+	// VERIFIED against a live `claude -p --output-format stream-json` run: the
+	// stream also carries `system` (hook events) and `rate_limit_event` lines.
+	// Both are deliberately ignored here — the default switch arm drops any
+	// line type this bridge does not consume, so new line types in future CLI
+	// versions cannot break a delegation.
+	switch sl.Type {
+	case "assistant":
+		if onEvent == nil {
+			return
+		}
+		for _, b := range sl.Message.Content {
+			switch b.Type {
+			case "text":
+				onEvent(StreamEvent{Type: "text", Text: b.Text})
+			case "tool_use":
+				onEvent(StreamEvent{Type: "tool_use", ToolName: b.Name})
+			}
+		}
+	case "result":
+		res.Text = sl.Result
+		res.CostUSD = sl.Cost
+		res.DurationMS = sl.Duration
+		res.NumTurns = sl.NumTurns
+		// `is_error` is the CLI's canonical failure signal; `subtype` carries
+		// the reason. Both are checked: a run can report is_error with a
+		// subtype we do not recognise, and older builds may set only subtype.
+		if sl.IsError || (sl.Subtype != "" && sl.Subtype != "success") {
+			res.IsError = true
+			res.ErrorText = sl.Subtype
+			if res.ErrorText == "" {
+				res.ErrorText = "claude reported is_error"
+			}
+		}
+	}
+}
