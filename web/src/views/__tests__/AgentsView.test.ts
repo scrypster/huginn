@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
+import { MODEL_TOOL_WARNING } from '../agents/modelToolCapabilities'
+
+const { mockModelsAvailable } = vi.hoisted(() => ({
+  mockModelsAvailable: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
+}))
 
 // We need to stub useAgents so we can control the agents list.
 vi.mock('../../composables/useAgents', () => {
@@ -54,7 +59,7 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
       },
       models: {
         ...orig.api.models,
-        available: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
+        available: (...args: unknown[]) => mockModelsAvailable(...args),
       },
     },
   }
@@ -79,6 +84,7 @@ describe('AgentsView', () => {
       if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
       return {}
     })
+    mockModelsAvailable.mockReset().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] })
   })
 
   it('shows empty state when agents list is empty and not loading', async () => {
@@ -136,5 +142,74 @@ describe('AgentsView', () => {
     await wrapper.find('[data-testid="agent-card"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/agents/Alpha')
+  })
+
+  it('shows the tools warning when picking qwen2.5-coder:7b but not 14b', async () => {
+    mockModelsAvailable.mockResolvedValue({
+      models: [
+        { name: 'qwen2.5-coder:7b', supportsTools: true, supportsDelegation: false, tier: 'low', details: { parameter_size: '7.6B' } },
+        { name: 'qwen2.5-coder:14b', supportsTools: true, supportsDelegation: true, tier: 'medium', details: { parameter_size: '14.8B' } },
+      ],
+      builtin_models: [],
+      provider_models: [],
+    })
+    document.body.innerHTML = ''
+    const wrapper = mount(AgentsView, {
+      attachTo: document.body,
+      global: { plugins: [router] },
+      props: { agentName: 'new' },
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="pick-model-qwen2.5-coder:7b"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+    expect(wrapper.find('[data-testid="local-access-model-tools-warning"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="local-access-allow-all-btn"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="local-access-model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="pick-model-qwen2.5-coder:14b"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="model-tools-warning"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="local-access-model-tools-warning"]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('shows the picker warning copy when supportsTools is false', async () => {
+    mockModelsAvailable.mockResolvedValue({
+      models: [
+        { name: 'custom-coder', supportsTools: false, supportsDelegation: false, tier: 'low' },
+      ],
+      builtin_models: [],
+      provider_models: [],
+    })
+    document.body.innerHTML = ''
+    const wrapper = mount(AgentsView, {
+      attachTo: document.body,
+      global: { plugins: [router] },
+      props: { agentName: 'new' },
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="model-picker-tools-warning"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="pick-model-custom-coder"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-picker-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+
+    wrapper.unmount()
   })
 })

@@ -37,6 +37,14 @@ func TestOrchestrator_Backend(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_ModelRegistry(t *testing.T) {
+	reg := modelconfig.NewRegistry(modelconfig.DefaultModels())
+	o := mustNewOrchestrator(t, newMockBackend(""), modelconfig.DefaultModels(), nil, reg, nil, nil)
+	if o.ModelRegistry() != reg {
+		t.Error("ModelRegistry() should return the injected registry")
+	}
+}
+
 func TestOrchestrator_ToolRegistry_Nil(t *testing.T) {
 	o := mustNewOrchestrator(t, newMockBackend(""), modelconfig.DefaultModels(), nil, nil, nil, nil)
 	if o.ToolRegistry() != nil {

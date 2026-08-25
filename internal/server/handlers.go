@@ -18,6 +18,7 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/logger"
+	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/threadmgr"
@@ -497,29 +498,36 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	} else {
 		defer resp.Body.Close()
 		var result struct {
-			Models []any `json:"models"`
+			Models []map[string]any `json:"models"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			ollamaErr = "decode error: " + err.Error()
 		} else {
-			ollamaModels = result.Models
+			ollamaModels = enrichOllamaModels(r.Context(), s, baseURL, result.Models)
 		}
 	}
 
 	// Built-in llama.cpp managed models.
 	type builtinModel struct {
-		Name      string `json:"name"`
-		Source    string `json:"source"`
-		SizeBytes int64  `json:"size_bytes,omitempty"`
+		Name               string `json:"name"`
+		Source             string `json:"source"`
+		SizeBytes          int64  `json:"size_bytes,omitempty"`
+		SupportsTools      bool   `json:"supportsTools"`
+		SupportsDelegation bool   `json:"supportsDelegation"`
+		Tier               string `json:"tier,omitempty"`
 	}
 	var builtinModels []builtinModel
 	if s.modelStore != nil {
 		if installed, err := s.modelStore.Installed(); err == nil {
 			for name, entry := range installed {
+				caps := inferListedModelCaps(name, true)
 				builtinModels = append(builtinModels, builtinModel{
-					Name:      name,
-					Source:    "built-in",
-					SizeBytes: entry.SizeBytes,
+					Name:               name,
+					Source:             "built-in",
+					SizeBytes:          entry.SizeBytes,
+					SupportsTools:      caps.SupportsTools,
+					SupportsDelegation: caps.SupportsDelegation,
+					Tier:               string(caps.Tier),
 				})
 			}
 		}
@@ -533,7 +541,14 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	var cloudModels []any
 	addProvider := func(name string, models []providerModel) {
 		for _, m := range models {
-			cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": name})
+			caps := inferListedModelCaps(m.ID, true)
+			cloudModels = append(cloudModels, map[string]any{
+				"name":               m.ID,
+				"source":             name,
+				"supportsTools":      caps.SupportsTools,
+				"supportsDelegation": caps.SupportsDelegation,
+				"tier":               caps.Tier,
+			})
 		}
 	}
 

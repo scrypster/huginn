@@ -113,7 +113,7 @@
                 placeholder="Agent name"
                 class="w-full bg-transparent text-base font-semibold text-huginn-text text-center outline-none border-b border-transparent focus:border-huginn-blue/40 transition-colors placeholder:text-huginn-muted/40 pb-0.5" />
               <!-- Model selector — opens modal -->
-              <button @click="showModelPicker = true"
+              <button data-testid="open-model-picker" @click="showModelPicker = true"
                 class="inline-flex items-center gap-1 group focus:outline-none">
                 <!-- No model: amber attention pill -->
                 <div v-if="!form.model"
@@ -128,6 +128,11 @@
                   <svg class="w-2.5 h-2.5 text-huginn-muted/50 group-hover:text-huginn-muted transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
               </button>
+              <p v-if="selectedModelUnreliableTools"
+                data-testid="model-tools-warning"
+                class="text-[10px] text-huginn-amber/90 leading-snug px-3">
+                {{ MODEL_TOOL_WARNING }}
+              </p>
             </div>
           </div>
 
@@ -322,6 +327,11 @@
                 <span class="text-[11px] text-huginn-muted">{{ localAccessSummary }}</span>
               </div>
               <p class="text-[11px] text-huginn-muted leading-relaxed">Grant this agent access to the local file system, git, and shell.</p>
+              <div v-if="showLocalAccessToolWarning"
+                data-testid="local-access-model-tools-warning"
+                class="px-3 py-2 rounded-lg border border-huginn-amber/40 bg-huginn-amber/8">
+                <p class="text-[11px] text-huginn-amber leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+              </div>
               <!-- Allow-all quick toggle -->
               <div class="flex items-center gap-2">
                 <button
@@ -969,6 +979,12 @@
             </div>
           </div>
 
+          <div v-if="selectedModelUnreliableTools"
+            data-testid="model-picker-tools-warning"
+            class="mx-4 mt-2 px-3 py-2 rounded-lg border border-huginn-amber/40 bg-huginn-amber/8">
+            <p class="text-[11px] text-huginn-amber leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+          </div>
+
           <!-- List -->
           <div class="overflow-y-auto flex-1 py-2">
 
@@ -1001,6 +1017,7 @@
 
               <!-- Models in group — indented -->
               <button v-for="m in group.models" :key="m.name"
+                :data-testid="'pick-model-' + m.name"
                 @click="selectModel(m.name, m.source)"
                 class="w-full flex items-center gap-3 pl-10 pr-4 py-2 text-left transition-colors hover:bg-huginn-surface/60"
                 :class="form.model === m.name ? 'bg-huginn-blue/8' : ''">
@@ -1211,6 +1228,12 @@
           </div>
           <button @click="showLocalAccessModal = false" class="ml-auto" style="color:rgba(255,255,255,0.35)">✕</button>
         </div>
+        <p v-if="selectedModelUnreliableTools"
+          data-testid="local-access-modal-model-tools-warning"
+          class="text-[11px] text-huginn-amber leading-snug px-5 py-2 border-b"
+          style="border-color:#30363d">
+          {{ MODEL_TOOL_WARNING }}
+        </p>
         <!-- Body: two columns -->
         <div class="flex flex-1 overflow-hidden" style="min-height:0">
           <!-- Available -->
@@ -1357,6 +1380,9 @@ const {
   modalSkills,
   colorPalette,
   filteredModelGroups,
+  selectedModelUnreliableTools,
+  showLocalAccessToolWarning,
+  MODEL_TOOL_WARNING,
   memoryModes,
   availableSkills,
   connectionLabel,

@@ -5,6 +5,7 @@ import (
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/notepad"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/relay"
@@ -244,6 +245,16 @@ func (o *Orchestrator) ModelSupportsTools(modelName string) bool {
 		return true
 	}
 	return reg.ModelSupportsTools(modelName)
+}
+
+// ModelRegistry returns the live model capability registry, or nil.
+func (o *Orchestrator) ModelRegistry() *modelconfig.ModelRegistry {
+	if o == nil {
+		return nil
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.registry
 }
 
 // SetSkillsFragment injects workspace rule content into the ContextBuilder.

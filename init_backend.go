@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/scrypster/huginn/internal/agent"
@@ -26,7 +29,6 @@ import (
 	"github.com/scrypster/huginn/internal/skills"
 	"github.com/scrypster/huginn/internal/stats"
 )
-
 
 // backendResult holds the initialised backend, orchestrator, and related objects.
 type backendResult struct {
@@ -124,6 +126,7 @@ func initBackend(
 		models.Reasoner = defaultModel
 	}
 	res.Registry = modelconfig.NewRegistry(models)
+	startModelCapabilityProbe(cfg.OllamaBaseURL, res.Registry)
 
 	// --- Compactor ---
 	compactBudget := cfg.ContextLimitKB * 1024 / 4
@@ -405,6 +408,50 @@ func selectBackend(ctx context.Context, cfg *config.Config, endpointOverride, mo
 	}
 
 	return b, models, nil
+}
+
+// startModelCapabilityProbe fills ModelRegistry.Available from Ollama /api/tags
+// + /api/show so ModelSupportsTools is not blindly true for installed models.
+func startModelCapabilityProbe(baseURL string, reg *modelconfig.ModelRegistry) {
+	if reg == nil {
+		return
+	}
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+	go func(ep string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(ep, "/")+"/api/tags", nil)
+		if err != nil {
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		var result struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return
+		}
+		names := make([]string, 0, len(result.Models))
+		for _, m := range result.Models {
+			if m.Name != "" {
+				names = append(names, m.Name)
+			}
+		}
+		infos := backend.ProbeOllamaModels(ctx, ep, names)
+		if len(infos) == 0 {
+			return
+		}
+		reg.ReplaceAvailable(infos)
+		slog.Info("backend: probed model capabilities", "count", len(infos))
+	}(baseURL)
 }
 
 // joinStrings joins a slice of strings with a separator.
