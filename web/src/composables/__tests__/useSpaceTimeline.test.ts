@@ -201,6 +201,23 @@ describe('wireSpaceTimelineWS', () => {
     expect(assistantMsgs[0].content).toBe('one two three')
   })
 
+  it('strips leading tool-call JSON from streamed assistant content', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: '{"name": "bash", "arguments": {"command": "echo PONG"}}' })
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'PONG' })
+    await nextTick()
+
+    const assistantMsgs = state.messages.filter(m => m.role === 'assistant')
+    expect(assistantMsgs).toHaveLength(1)
+    expect(assistantMsgs[0].content).toBe('PONG')
+    expect(assistantMsgs[0].content).not.toContain('{"name"')
+  })
+
   it('ignores token events with no session_id', async () => {
     const { state } = setupSpace()
     state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)

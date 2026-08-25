@@ -42,6 +42,7 @@ All notable changes to Huginn are documented here.
 - Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them. One or more whitespace-separated `{"name","arguments"}` objects in a single content blob are all promoted (Winston oneshot sent two).
 - Empty agent toolbelt no longer grants every connection provider. `AllowedProviders` fails closed; `provider: "*"` / `connection_id: "*"` remains explicit allow-all. Server auto-approve (`NewGate(true, nil)` skipAll) no longer bypasses an empty toolbelt.
 - In-flight responding status names the addressed `@mention` agent instead of always showing the channel lead; per-space run chrome from owner-scoped events is unchanged
+- Mixed JSON-in-content tool calls (and streamed JSON tokens) are stripped from the user-visible assistant bubble so harness invocations never render as chat text.
 
 ## [0.4.0] - 2026-06-10
 

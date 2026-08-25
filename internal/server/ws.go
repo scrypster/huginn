@@ -1698,7 +1698,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			assistantMsg := session.SessionMessage{
 				ID:        assistantMsgID,
 				Role:      "assistant",
-				Content:   assistantBuf.String(),
+				Content:   backend.VisibleAssistantContent(assistantBuf.String()),
 				Agent:     agentName,
 				Ts:        time.Now().UTC(),
 				ToolCalls: collectedToolCalls,

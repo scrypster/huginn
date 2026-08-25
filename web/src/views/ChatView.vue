@@ -539,7 +539,7 @@
                 />
                 <!-- Message text — system-fail prefixes are not teammate speech -->
                 <div
-                  v-if="isBareFailSpeech(msg.content)"
+                  v-if="isBareFailSpeech(visibleAssistantText(msg) || msg.content)"
                   data-testid="system-fail-line"
                   class="inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
                          border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
@@ -548,12 +548,12 @@
                     <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
                   </svg>
                   <span>
-                    <span class="font-semibold">{{ parseSystemFailSpeech(msg.content)!.kind }}</span>
-                    <span v-if="parseSystemFailSpeech(msg.content)!.message"> · {{ parseSystemFailSpeech(msg.content)!.message }}</span>
+                    <span class="font-semibold">{{ parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.kind }}</span>
+                    <span v-if="parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.message"> · {{ parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.message }}</span>
                   </span>
                 </div>
-                <div v-else-if="msg.content && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
-                  v-html="renderWithMentions(msg.content)" />
+                <div v-else-if="visibleAssistantText(msg) && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                  v-html="renderWithMentions(visibleAssistantText(msg))" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
                 <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2">
@@ -1128,6 +1128,7 @@ import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
+import { visibleAssistantContent } from '../utils/visibleAssistantContent'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 import { isBareFailSpeech, messageToolChipFailed, parseSystemFailSpeech, visibleToolCalls } from '../utils/honesty'
 
@@ -1896,6 +1897,12 @@ function isForActiveSession(msg: WSMessage): boolean {
   return sid === props.sessionId
 }
 
+function visibleAssistantText(msg: { role?: string; content?: string }): string {
+  const content = msg.content ?? ''
+  if (msg.role !== 'assistant') return content
+  return visibleAssistantContent(content)
+}
+
 function isMemoryToolName(name: string): boolean {
   return name.startsWith('muninn_')
 }
@@ -2326,6 +2333,7 @@ watch(wsRef, (ws) => {
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
       if (streamMsg?.streaming) {
         streamMsg.content += msg.content ?? ''
+        streamMsg.content = visibleAssistantContent(streamMsg.content)
         scrollToBottom()
         return
       }
@@ -2334,7 +2342,7 @@ watch(wsRef, (ws) => {
       msgs.push({
         id: `h-${Date.now()}`,
         role: 'assistant',
-        content: msg.content ?? '',
+        content: visibleAssistantContent(msg.content ?? ''),
         streaming: true,
         agent: selectedAgentName.value || undefined,
         createdAt: new Date().toISOString(),
@@ -2452,7 +2460,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
       const last = msgs.at(-1)
       const agentName = last?.agent ?? 'Agent'
-      const preview = last?.content?.slice(0, 80) ?? ''
+      const preview = visibleAssistantContent(last?.content ?? '').slice(0, 80)
       const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName,

@@ -2,6 +2,7 @@ import { reactive, toRefs } from 'vue'
 import { api, type SpaceMessage } from './useApi'
 import { plaintextPreview } from '../utils/honesty'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
+import { visibleAssistantContent } from '../utils/visibleAssistantContent'
 
 export type { SpaceMessage }
 
@@ -124,10 +125,10 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             // Replace the status placeholder content with the first real token.
             // cancelStatus() fires in Go before this message arrives, so the
             // status goroutine cannot fire after this point.
-            existing.content = msg.content ?? ''
+            existing.content = visibleAssistantContent(msg.content ?? '')
             loadingSessionIds.delete(sessionId)
           } else {
-            existing.content += msg.content
+            existing.content = visibleAssistantContent(existing.content + msg.content)
           }
         } else {
           // Start a new streaming message placeholder, flushing any tool
@@ -140,7 +141,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             seq: -1,
             ts: new Date().toISOString(),
             role: 'assistant',
-            content: msg.content ?? '',
+            content: visibleAssistantContent(msg.content ?? ''),
             agent: ((msg as unknown as Record<string, unknown>).agent as string) ?? '',
             toolCalls: pending.length > 0 ? pending.map(p => ({ ...p, done: true })) : undefined,
           })

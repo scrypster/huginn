@@ -816,7 +816,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			}
 			if buf.Len() > 0 {
 				assistantMsg := session.SessionMessage{
-					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
+					ID: session.NewID(), Role: "assistant", Content: backend.VisibleAssistantContent(buf.String()), Agent: agentName, Ts: time.Now().UTC(),
 				}
 				s.applyKnownUsage(&assistantMsg, id, persistModelName(sess, ag))
 				if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {

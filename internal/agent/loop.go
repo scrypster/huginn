@@ -411,11 +411,16 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
 
+		tokenGate := backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
+		onToken := cfg.OnToken
+		if tokenGate != nil {
+			onToken = tokenGate.OnToken
+		}
 		chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
 			Model:    cfg.ModelName,
 			Messages: messages,
 			Tools:    cfg.ToolSchemas,
-			OnToken:  cfg.OnToken,
+			OnToken:  onToken,
 			OnEvent:  cfg.OnEvent,
 		})
 		if err != nil {
@@ -438,6 +443,8 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// object in content instead of structured tool_calls. Promote it so
 		// the loop executes the grant instead of treating it as a final answer.
 		backend.PromoteContentToolCalls(chatResult)
+		backend.RevealContentToolCalls(chatResult)
+		tokenGate.Finish(chatResult.Content)
 
 		// Append assistant response to history
 		assistantMsg := backend.Message{
