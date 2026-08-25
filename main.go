@@ -3410,6 +3410,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// Wire audit logger: non-blocking permission gate event recording to SQLite.
 	srv.StartAuditLog(sqlDB)
 
+	// Wire the Claude Code bridge: ingests Claude Code transcripts into Huginn
+	// sessions. Disabled by default; a failure to start is logged and never
+	// aborts server startup.
+	if err := srv.StartClaudeBridge(ctx, cfg.ClaudeCode, sqlDB); err != nil {
+		logger.Warn("claudecode: bridge did not start", "err", err)
+	}
+
 	// Wire connection token refresh events → WS broadcast.
 	// Lets the frontend react to proactive refresh failures (e.g. revoked tokens).
 	if connMgr != nil {

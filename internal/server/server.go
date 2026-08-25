@@ -16,6 +16,7 @@ import (
 	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/claudecode"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
 	catalogpkg "github.com/scrypster/huginn/internal/connections/catalog"
@@ -223,6 +224,21 @@ type Server struct {
 	// Entries are evicted after swarmSnapshotTTL (1h) by a background goroutine.
 	// Value type: swarmSnapshotEntry
 	swarmSnapshots sync.Map
+
+	// claudeMu guards the claude* fields below. A dedicated lock (not s.mu):
+	// StartClaudeBridge runs during server startup, concurrently with the HTTP
+	// server already accepting requests, and reusing s.mu here would risk a
+	// lock-ordering interaction with the rest of the startup path.
+	claudeMu sync.RWMutex
+	// claudeCfg is the Claude Code bridge configuration, set by StartClaudeBridge.
+	claudeCfg claudecode.Config
+	// claudeIngester converts Claude Code transcripts into Huginn sessions.
+	// nil until StartClaudeBridge succeeds.
+	claudeIngester *claudecode.Ingester
+	// claudeRoot is the Claude Code projects directory being watched.
+	claudeRoot string
+	// claudeWatching reports whether the transcript watcher is running.
+	claudeWatching bool
 }
 
 // SetDB wires the SQLite database for thread/message handlers.
@@ -1201,6 +1217,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/muninn/vaults", api(s.handleMuninnVaultCreate))
 	mux.HandleFunc("GET /api/v1/memory/replication-status", api(s.handleMemoryReplicationStatus))
 	mux.HandleFunc("POST /api/v1/muninn/tool", api(s.handleMuninnTool))
+
+	// Claude Code bridge API (authenticated)
+	mux.HandleFunc("GET /api/v1/claude/status", api(s.handleClaudeStatus))
+	mux.HandleFunc("POST /api/v1/claude/backfill", api(s.handleClaudeBackfill))
 
 	// Spaces API (authenticated)
 	// NOTE: route ordering matters in Go 1.22+ ServeMux.

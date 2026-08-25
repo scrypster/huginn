@@ -11,6 +11,14 @@ import (
 // package so that tests which call SaveAgentDefault / DeleteAgentDefault
 // never write to the developer's real ~/.huginn/agents/.
 //
+// It also sets HOME (and USERPROFILE, for Windows) to the same temp directory.
+// internal/config's Config.Save() does not consult HUGINN_HOME at all; it
+// resolves the config path via os.UserHomeDir(), which reads HOME (or
+// USERPROFILE on Windows). Handlers such as handleUpdateConfig and
+// handleRestoreActiveState call cfg.Save() directly, so without this redirect
+// `go test ./...` writes straight through to the developer's real
+// ~/.huginn/config.json. This has happened.
+//
 // It also pre-populates the agents directory with a few baseline agents so
 // that the "cannot delete last agent" guard in handleDeleteAgent does not
 // interfere with tests that add and remove individual agents.
@@ -19,8 +27,9 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(tmp)
 	os.Setenv("HUGINN_HOME", tmp) //nolint:errcheck
+	os.Setenv("HOME", tmp)        //nolint:errcheck
+	os.Setenv("USERPROFILE", tmp) //nolint:errcheck
 
 	// Pre-populate with a few stable baseline agents so LoadAgents() always
 	// returns >1 agent; this prevents the "last agent" guard from firing
@@ -43,5 +52,9 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	os.Exit(m.Run())
+	// Note: os.Exit below skips deferred functions, so the temp dir cleanup
+	// must happen before the Exit call rather than via defer.
+	code := m.Run()
+	os.RemoveAll(tmp) //nolint:errcheck
+	os.Exit(code)
 }
