@@ -50,6 +50,12 @@ func TestBuildSpaceContextBlock_LeadAgentBlock_ContainsDelegationProtocol(t *tes
 	if !strings.Contains(result, "Prefer delegate-first routing") {
 		t.Error("lead agent block missing delegate-first specialist routing rule")
 	}
+	if strings.Contains(result, "this does nothing") {
+		t.Error("lead agent block still claims a bare @mention does nothing")
+	}
+	if !strings.Contains(result, "user @mention addresses that agent") {
+		t.Error("lead agent block should tell the model that a user @mention is a real address")
+	}
 }
 
 func TestBuildSpaceContextBlock_LeadAgentBlock_UsesRosterExamples(t *testing.T) {

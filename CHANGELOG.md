@@ -7,6 +7,8 @@ All notable changes to Huginn are documented here.
 ### Added
 - Space-routed DMs/channels now load REST threads after timeline hydrate (active session and every `session_id` on the timeline) so ThreadPanel, previews, and A2A strips use the same helpers as session mode
 - CLI `--print` / `--agent` oneshot now wires A2A delegation (`delegate_to_agent`, `wait_for_threads`, `list_team_status`, `recall_thread_result`) with an ephemeral session, ThreadManager, and SpawnThread. Preview is always auto-approved (`HUGINN_DELEGATION_PREVIEW=off`). Named agents resolve from `~/.huginn/agents/*.{yaml,json}`.
+- Model picker warns when the selected model cannot reliably use tools (7b / `supportsTools: false`)
+- User `@Name` in a channel or DM addresses that agent for the turn when they are on the space roster (stamped lead no longer swallows the mention). A leftover `@Name` of someone not in the roster still does not address them or extra-spawn a thread
 
 ### Fixed
 - Settings → Tools no longer presents `tools_enabled` as a master off switch for `huginn serve`; the copy matches serve (builtins still register; allow/deny still apply; deny wins on conflict)
