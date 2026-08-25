@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scrypster/huginn/internal/oneshot"
 	"github.com/scrypster/huginn/internal/radar"
 	"github.com/scrypster/huginn/internal/repo"
 	"github.com/scrypster/huginn/internal/storage"
@@ -20,7 +21,7 @@ import (
 // main.go injects this when --print is also set, keeping internal/headless
 // free of agent/backend imports.
 // Returns (output, toolNames, tokenCount, err).
-type AgentRunFunc func(ctx context.Context, agentName, prompt, sessionID string) (output string, toolsCalled []string, tokensUsed int, err error)
+type AgentRunFunc func(ctx context.Context, agentName, prompt, sessionID string) (output string, toolsCalled []oneshot.ToolCall, tokensUsed int, err error)
 
 // HeadlessConfig holds configuration for a headless run.
 type HeadlessConfig struct {
@@ -31,18 +32,18 @@ type HeadlessConfig struct {
 	// the runner executes the prompt via the provided agent and populates
 	// RunResult.AgentOutput, ToolsCalled, and TokensUsed.
 	Prompt    string
-	Agent     string        // agent name; uses default if empty
-	SessionID string        // optional session ID for multi-turn
-	AgentRun  AgentRunFunc  // injected by main.go; nil means no agent execution
+	Agent     string       // agent name; uses default if empty
+	SessionID string       // optional session ID for multi-turn
+	AgentRun  AgentRunFunc // injected by main.go; nil means no agent execution
 }
 
 // FindingSummary is a trimmed representation of a radar Finding for JSON output.
 type FindingSummary struct {
-	ID       string  `json:"id"`
-	Type     string  `json:"type"`
-	Title    string  `json:"title"`
-	Severity string  `json:"severity"`
-	Score    float64 `json:"score"`
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Title    string   `json:"title"`
+	Severity string   `json:"severity"`
+	Score    float64  `json:"score"`
 	Files    []string `json:"files"`
 }
 
@@ -60,9 +61,9 @@ type RunResult struct {
 	BannersEmitted  int              `json:"bannersEmitted"`
 	Errors          []string         `json:"errors,omitempty"`
 	// Agent output fields (populated when HeadlessConfig.Prompt != "").
-	AgentOutput string   `json:"agentOutput,omitempty"`
-	ToolsCalled []string `json:"toolsCalled,omitempty"`
-	TokensUsed  int      `json:"tokensUsed,omitempty"`
+	AgentOutput string             `json:"agentOutput,omitempty"`
+	ToolsCalled []oneshot.ToolCall `json:"toolsCalled,omitempty"`
+	TokensUsed  int                `json:"tokensUsed,omitempty"`
 }
 
 // Run executes the headless pipeline: detect → index → radar → (optional) agent prompt.

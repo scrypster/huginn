@@ -131,6 +131,37 @@ func TestOrchestrator_ChatWithAgent_NoModel(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_ChatWithAgent_SetMaxTurns(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "ok"}}
+	reg := newRegistryWith(tool)
+	reg.TagTools([]string{"bash"}, "builtin")
+
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("bash", "c1"),
+			toolCallResponse("bash", "c2"),
+			toolCallResponse("bash", "c3"),
+			stopResponse("done"),
+		},
+	}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	gate := permissions.NewGate(true, nil)
+	defer gate.Close()
+	o.SetTools(reg, gate)
+	o.SetMaxTurns(2)
+
+	ag := &agents.Agent{Name: "Steve", ModelID: "m", LocalTools: []string{"*"}}
+	if err := o.ChatWithAgent(context.Background(), ag, "loop", "", nil, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	n := mb.callCount
+	mb.mu.Unlock()
+	if n != 2 {
+		t.Errorf("backend calls = %d, want 2 (SetMaxTurns)", n)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ReasonWithAgent
 // ---------------------------------------------------------------------------

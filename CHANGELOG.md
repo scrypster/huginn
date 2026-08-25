@@ -34,6 +34,8 @@ All notable changes to Huginn are documented here.
 - Switching DMs no longer dumps another space's follow-up cards, thread completion cards, permission prompts, warnings, or thread-help toasts onto the room you opened — those events write to the owner space's timeline and only surface permission/toasts when that space is in view
 - Assistant or user `@Name` of someone not in the space no longer extra-spawns a thread via CreateFromMentions (Tess DM `@Steve` stays Tess-only; channel roster members still spawn; standalone session-mode is unchanged)
 - `delegate_to_agent` targeting someone not in the space roster now fails visibly (DELEGATE_FAIL) instead of spawning (Tess-only DM cannot spawn Steve; channel roster members still delegate; standalone session-mode is unchanged)
+- Creating an agent now refreshes the chat sidebar and persists a derived description from the system prompt instead of leaving DMs stale and cards showing "No description"
+- CLI `--print` / `--agent NAME MSG` now run the agentic tool loop (`ChatWithAgent` / `RunLoop`) instead of a bare ChatCompletion. `--print` honors `--agent`, `--model` (via SwapModel), `--no-tools`, `--max-turns`, and `--dangerously-skip-permissions` without requiring `--headless`. `--json` emits `agentOutput` plus `toolsCalled` `{name, args, result}` for each tool.
 
 ## [0.4.0] - 2026-06-10
 

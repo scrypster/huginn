@@ -93,6 +93,9 @@ type Orchestrator struct {
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string
 
+	// defaultMaxTurns caps ChatWithAgent's RunLoop. 0 means the loop default (50).
+	defaultMaxTurns int
+
 	// sessionStore is the persistent session store for history hydration.
 	sessionStore huginsession.StoreInterface
 

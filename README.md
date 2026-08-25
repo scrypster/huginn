@@ -100,8 +100,9 @@ ollama pull deepseek-r1:14b    # reasoner — Mark
 # 1. Launch TUI in any project directory
 huginn
 
-# 2. Single-turn non-interactive query
+# 2. Single-turn non-interactive query (agentic tool loop; no TUI)
 huginn --print "what does the auth middleware do?"
+huginn --agent Steve --print "Use bash to run hostname" --dangerously-skip-permissions --json
 
 # 3. Launch the web UI (opens at http://localhost:8421)
 huginn tray
