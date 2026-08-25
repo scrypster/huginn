@@ -36,18 +36,20 @@ const (
 type Agent struct {
 	mu sync.Mutex
 
-	Name          string
-	SystemPrompt  string
-	Color         string // lipgloss hex, e.g. "#58A6FF"
-	Icon          string // single char, e.g. "C"
-	IsDefault     bool
-	ModelID       string
-	Provider      string
-	Endpoint      string
-	APIKey        string
-	History       []backend.Message
-	VaultName     string
-	Plasticity    string
+	Name                string
+	SystemPrompt        string
+	Color               string // lipgloss hex, e.g. "#58A6FF"
+	Icon                string // single char, e.g. "C"
+	IsDefault           bool
+	ModelID             string
+	Provider            string
+	Endpoint            string
+	APIKey              string
+	ClaudeSessionID     string
+	ClaudeCWD           string
+	History             []backend.Message
+	VaultName           string
+	Plasticity          string
 	MemoryEnabled       bool
 	ContextNotesEnabled bool
 	MemoryMode          string
@@ -131,6 +133,8 @@ func (a *Agent) cloneUnlocked() Agent {
 		Provider:            a.Provider,
 		Endpoint:            a.Endpoint,
 		APIKey:              a.APIKey,
+		ClaudeSessionID:     a.ClaudeSessionID,
+		ClaudeCWD:           a.ClaudeCWD,
 		VaultName:           a.VaultName,
 		Plasticity:          a.Plasticity,
 		MemoryEnabled:       a.MemoryEnabled,
