@@ -316,7 +316,8 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 			"List the top 3 best practices for Go unit tests. Keep it brief.",
 			fmt.Sprintf("%s is the Go expert", exampleAgentB),
 		)
-		sb.WriteString("  BAD:  Mentioning a team member by name in your message without calling delegate_to_agent — this does nothing.\n")
+		sb.WriteString("A user @mention addresses that agent for the turn — they receive the message, not you. When YOU need a teammate, call delegate_to_agent; writing @Name in your own reply does not assign work.\n")
+		sb.WriteString("  BAD:  Writing @Name in your reply and expecting it to assign work — use delegate_to_agent instead.\n")
 		sb.WriteString("  BAD:  A vague task like \"help with this\" — the agent needs a specific, complete description to act.\n\n")
 		sb.WriteString("**Collecting results — use `wait_for_threads`:**\n")
 		sb.WriteString("After delegating, call `wait_for_threads` (with the thread IDs, or no arguments for all) to block until your delegates finish and receive their full results in one response.\n")

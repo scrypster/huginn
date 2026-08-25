@@ -767,17 +767,18 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 // server restart.
 //
 // Resolution order:
-//  1. Session's primary agent (set via "set_primary_agent" WS message or
-//     stamped at session-creation time from the space's lead agent)
-//     1b. Channel @mention override — when the message starts with @Name and the
-//     named agent is a member of the channel space, route this message to
-//     that agent (stateless per-message, does not change session state).
-//     Only applies to KindChannel spaces; DMs are always 1:1.
-//     1c. Space lead agent — defence-in-depth for DM/channel sessions created
-//     before fix #33 or where space lookup failed at session creation.
-//     Heals existing sessions at runtime without any DB migration.
-//  2. First agent marked IsDefault in the config
-//  3. First agent in the config (last resort)
+//  1. User @mention addressee — the first @Name in the message that matches a
+//     real agent. Channel members are preferred; otherwise any known agent.
+//     This is stateless per-message and does NOT require PrimaryAgent to be
+//     empty. A Chris-led channel with Manifest.Agent=Chris still routes
+//     "@Steve do X" to Steve. Applies to channels, DMs, and any session
+//     with a lead: a user @mention is a real address, not decoration.
+//  2. Session's primary agent (set via "set_primary_agent" or stamped at
+//     session-creation time from the space's lead agent)
+//  3. Space lead agent — defence-in-depth for sessions created before
+//     fix #33 or where space lookup failed at session creation.
+//  4. First agent marked IsDefault in the config
+//  5. First agent in the config (last resort)
 //
 // Returns nil only if no agents are configured or the config cannot be loaded,
 // in which case callers should fall back to Orchestrator.Chat().
@@ -792,96 +793,243 @@ func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent
 	}
 
 	var loadedSess *session.Session
-
-	// 1. Session primary agent
 	if s.store != nil && sessionID != "" {
 		if sess, loadErr := s.store.Load(sessionID); loadErr == nil {
 			loadedSess = sess
-			if agentName := sess.PrimaryAgentID(); agentName != "" {
-				for _, def := range cfg.Agents {
-					if strings.EqualFold(def.Name, agentName) {
-						return agentFromDefWithVault(def)
-					}
-				}
-				// Primary agent name saved but not found in config — log and fall through.
-				logger.Warn("resolveAgentForMessage: primary agent not found in config", "agent", agentName, "session_id", sessionID)
-			}
 		}
 	}
 
+	var memberNames []string
+	var spaceLead string
 	if s.spaceStore != nil && loadedSess != nil && loadedSess.Manifest.SpaceID != "" {
-		sp, spErr := s.spaceStore.GetSpace(loadedSess.Manifest.SpaceID)
-		if spErr == nil && sp.LeadAgent != "" {
-			// 1b. Channel @mention override — stateless per-message routing.
-			// A leading @Name in the message routes to that agent if they are
-			// a member of this channel. DMs skip this step (always 1:1).
-			if sp.Kind == spaces.KindChannel && content != "" {
-				if mentioned := extractLeadMention(content); mentioned != "" {
-					isMember := false
-					for _, m := range sp.Members {
-						if strings.EqualFold(m, mentioned) {
-							isMember = true
-							break
-						}
-					}
-					if isMember {
-						for _, def := range cfg.Agents {
-							if strings.EqualFold(def.Name, mentioned) {
-								return agentFromDefWithVault(def)
-							}
-						}
-						// Mentioned agent is a space member but missing from config — log and fall through.
-						logger.Warn("resolveAgentForMessage: mentioned agent not in config",
-							"agent", mentioned, "space_id", loadedSess.Manifest.SpaceID)
-					}
-				}
-			}
-			// 1c. Space lead agent (DMs always reach here; channels reach here when
-			// there is no valid @mention or the mentioned agent is not a member).
-			for _, def := range cfg.Agents {
-				if strings.EqualFold(def.Name, sp.LeadAgent) {
-					return agentFromDefWithVault(def)
-				}
-			}
-			logger.Warn("resolveAgentForMessage: space lead agent not found in config",
-				"agent", sp.LeadAgent, "space_id", loadedSess.Manifest.SpaceID)
+		if sp, spErr := s.spaceStore.GetSpace(loadedSess.Manifest.SpaceID); spErr == nil && sp != nil {
+			spaceLead = sp.LeadAgent
+			memberNames = spaceMemberNames(sp)
 		}
 	}
 
-	// 2. Default agent
+	// 1. User @mention addressee — wins over the stamped lead / primary agent.
+	if content != "" {
+		if ag := resolveMentionAddressee(content, cfg, memberNames); ag != nil {
+			return ag
+		}
+	}
+
+	// 2. Session primary agent
+	if loadedSess != nil {
+		if agentName := loadedSess.PrimaryAgentID(); agentName != "" {
+			if ag := agentFromConfig(cfg, agentName); ag != nil {
+				return ag
+			}
+			logger.Warn("resolveAgentForMessage: primary agent not found in config", "agent", agentName, "session_id", sessionID)
+		}
+	}
+
+	// 3. Space lead agent
+	if spaceLead != "" {
+		if ag := agentFromConfig(cfg, spaceLead); ag != nil {
+			return ag
+		}
+		if loadedSess != nil {
+			logger.Warn("resolveAgentForMessage: space lead agent not found in config",
+				"agent", spaceLead, "space_id", loadedSess.Manifest.SpaceID)
+		}
+	}
+
+	// 4. Default agent
 	for _, def := range cfg.Agents {
 		if def.IsDefault {
 			return agentFromDefWithVault(def)
 		}
 	}
 
-	// 3. First agent
+	// 5. First agent
 	return agentFromDefWithVault(cfg.Agents[0])
 }
 
-// extractLeadMention returns the agent name from a leading @mention at the
-// start of content. Returns "" if content doesn't start with a valid @mention.
-//
+// spaceMemberNames returns the lead plus roster members of a space.
+func spaceMemberNames(sp *spaces.Space) []string {
+	if sp == nil {
+		return nil
+	}
+	out := make([]string, 0, len(sp.Members)+1)
+	if sp.LeadAgent != "" {
+		out = append(out, sp.LeadAgent)
+	}
+	for _, m := range sp.Members {
+		if !strings.EqualFold(m, sp.LeadAgent) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func agentFromConfig(cfg *agents.AgentsConfig, name string) *agents.Agent {
+	if cfg == nil || name == "" {
+		return nil
+	}
+	for _, def := range cfg.Agents {
+		if strings.EqualFold(def.Name, name) {
+			return agentFromDefWithVault(def)
+		}
+	}
+	return nil
+}
+
+// resolveMentionAddressee returns the agent addressed by the first @mention
+// in content that matches a real agent. Channel/space members are tried
+// first for each mention; if that name is not a member, any known agent
+// with that name still wins. Mentions are walked in order so the first
+// matching @ is the addressee.
+func resolveMentionAddressee(content string, cfg *agents.AgentsConfig, memberNames []string) *agents.Agent {
+	mentions := extractMentionNames(content)
+	if len(mentions) == 0 || cfg == nil {
+		return nil
+	}
+	members := make(map[string]bool, len(memberNames))
+	for _, m := range memberNames {
+		members[strings.ToLower(m)] = true
+	}
+	for _, name := range mentions {
+		if len(members) > 0 && members[strings.ToLower(name)] {
+			if ag := agentFromConfig(cfg, name); ag != nil {
+				return ag
+			}
+		}
+		if ag := agentFromConfig(cfg, name); ag != nil {
+			return ag
+		}
+	}
+	return nil
+}
+
+// additionalMentionNames returns @mentions after the addressee that match
+// known agents. The first matching mention is the addressee and is omitted
+// so CreateFromMentions can spawn threads for the rest.
+func additionalMentionNames(content, addressee string, cfg *agents.AgentsConfig, memberNames []string) []string {
+	mentions := extractMentionNames(content)
+	if len(mentions) == 0 {
+		return nil
+	}
+	addr := resolveMentionAddressee(content, cfg, memberNames)
+	addrName := addressee
+	if addr != nil {
+		addrName = addr.Name
+	}
+	var extra []string
+	seen := map[string]bool{}
+	if addrName != "" {
+		seen[strings.ToLower(addrName)] = true
+	}
+	for _, name := range mentions {
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		if ag := agentFromConfig(cfg, name); ag != nil {
+			seen[key] = true
+			extra = append(extra, ag.Name)
+		}
+	}
+	return extra
+}
+
+// spawnAdditionalUserMentions fans additional user @mentions out through the
+// existing CreateFromMentions path. The first matching @ is already the
+// addressee for this turn; DedupMentions would strip those user-typed names
+// from an assistant reply, so we pass only the leftover @names here.
+func (s *Server) spawnAdditionalUserMentions(ctx context.Context, sessionID, userMsg, parentMsgID string, addressee *agents.Agent) {
+	if s.mentionDelegate == nil || userMsg == "" {
+		return
+	}
+	loader := s.agentLoader
+	if loader == nil {
+		loader = agents.LoadAgents
+	}
+	cfg, err := loader()
+	if err != nil || cfg == nil {
+		return
+	}
+	var memberNames []string
+	if s.store != nil && sessionID != "" && s.spaceStore != nil {
+		if sess, loadErr := s.store.Load(sessionID); loadErr == nil && sess.Manifest.SpaceID != "" {
+			if sp, spErr := s.spaceStore.GetSpace(sess.Manifest.SpaceID); spErr == nil {
+				memberNames = spaceMemberNames(sp)
+			}
+		}
+	}
+	addresseeName := ""
+	if addressee != nil {
+		addresseeName = addressee.Name
+	}
+	extras := additionalMentionNames(userMsg, addresseeName, cfg, memberNames)
+	if len(extras) == 0 {
+		return
+	}
+	var b strings.Builder
+	for i, name := range extras {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteByte('@')
+		b.WriteString(name)
+	}
+	b.WriteString(" ")
+	b.WriteString(userMsg)
+	// originalUserMsg is empty so DedupMentions will not strip the leftover
+	// user-typed names we are deliberately spawning.
+	s.mentionDelegate(ctx, sessionID, b.String(), "", parentMsgID)
+}
+
+// extractMentionNames returns every @Name token in content, in order.
 // Valid agent names start with a letter and contain only letters, digits,
-// hyphens, and underscores (max 64 chars). This prevents garbage input from
-// hitting the agent-config scan loop.
-func extractLeadMention(content string) string {
+// hyphens, and underscores (max 64 chars).
+func extractMentionNames(content string) []string {
 	content = strings.TrimSpace(content)
-	if !strings.HasPrefix(content, "@") {
+	if content == "" {
+		return nil
+	}
+	var names []string
+	seen := map[string]bool{}
+	for i := 0; i < len(content); i++ {
+		if content[i] != '@' {
+			continue
+		}
+		if i > 0 && isAgentNameChar(content[i-1]) {
+			// Email-style "alice@Bob" — not a mention.
+			continue
+		}
+		rest := content[i+1:]
+		if len(rest) == 0 || !isAgentNameStart(rest[0]) {
+			continue
+		}
+		end := 1
+		for end < len(rest) && isAgentNameChar(rest[end]) {
+			end++
+		}
+		if end > 64 {
+			continue
+		}
+		name := rest[:end]
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		names = append(names, name)
+		i += end
+	}
+	return names
+}
+
+// extractLeadMention returns the first @mention in content. Kept as a thin
+// wrapper so existing unit tests and call sites keep a single entry point.
+func extractLeadMention(content string) string {
+	names := extractMentionNames(content)
+	if len(names) == 0 {
 		return ""
 	}
-	rest := content[1:]
-	if len(rest) == 0 || !isAgentNameStart(rest[0]) {
-		return ""
-	}
-	end := 1
-	for end < len(rest) && isAgentNameChar(rest[end]) {
-		end++
-	}
-	if end > 64 {
-		return ""
-	}
-	return rest[:end]
+	return names[0]
 }
 
 func isAgentNameStart(c byte) bool {
@@ -1418,6 +1566,16 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	// Pre-generate the user message ID so the delegate_to_agent tool can
 	// thread replies under it. The same ID is reused in persistAccumulated.
 	userMsgID := session.NewID()
+
+	// First @ is the addressee (ag). Additional user @names spawn threads
+	// via the existing mention/CreateFromMentions path.
+	if s.mentionDelegate != nil {
+		spawnCtx := s.Context()
+		if spawnCtx == nil {
+			spawnCtx = context.Background()
+		}
+		s.spawnAdditionalUserMentions(spawnCtx, sessionID, userMsg, userMsgID, ag)
+	}
 
 	// Derive the run context from the server lifetime and register it as the
 	// session's active run so a "chat_cancel" message can stop it explicitly.
