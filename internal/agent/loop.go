@@ -434,13 +434,30 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			return result, fmt.Errorf("turn %d: backend returned nil response without error", turn+1)
 		}
 
-		// Append assistant response to history
+		// Append assistant response to history. A backend that ran its own
+		// tools reports them in ExecutedTools; they belong in history exactly
+		// like dispatched calls, but must never reach dispatchTools below.
+		persistedCalls := chatResult.ToolCalls
+		if len(persistedCalls) == 0 && len(chatResult.ExecutedTools) > 0 {
+			persistedCalls = make([]backend.ToolCall, 0, len(chatResult.ExecutedTools))
+			for _, et := range chatResult.ExecutedTools {
+				persistedCalls = append(persistedCalls, et.Call)
+			}
+		}
 		assistantMsg := backend.Message{
 			Role:      "assistant",
 			Content:   chatResult.Content,
-			ToolCalls: chatResult.ToolCalls,
+			ToolCalls: persistedCalls,
 		}
 		messages = append(messages, assistantMsg)
+		for _, et := range chatResult.ExecutedTools {
+			messages = append(messages, backend.Message{
+				Role:       "tool",
+				ToolName:   et.Call.Function.Name,
+				ToolCallID: et.Call.ID,
+				Content:    et.Result,
+			})
+		}
 		result.FinalContent = chatResult.Content
 
 		// Surface parse errors to the model so it can retry with valid JSON.

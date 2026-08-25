@@ -95,6 +95,14 @@ type ToolCall struct {
 	Function ToolCallFunction
 }
 
+// ExecutedTool is a tool call the BACKEND already ran. Claude Code executes its
+// own tools, so these must be persisted into history but never dispatched — the
+// agent loop keys dispatching off ChatResponse.ToolCalls, which stays empty.
+type ExecutedTool struct {
+	Call   ToolCall
+	Result string
+}
+
 // StreamEventType identifies the kind of streaming event.
 type StreamEventType string
 
@@ -153,6 +161,9 @@ type ChatResponse struct {
 	// ParseErrors contains non-fatal SSE parse errors (e.g. malformed tool call JSON).
 	// Non-empty means some tool calls may have been silently dropped.
 	ParseErrors []string
+	// ExecutedTools carries tool calls the backend already executed. The loop
+	// persists them into history and does NOT dispatch them.
+	ExecutedTools []ExecutedTool
 }
 
 // StatusReporter is an optional interface implemented by backends that support
