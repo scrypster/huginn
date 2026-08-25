@@ -787,3 +787,48 @@ func TestBackendConfig_VertexFields(t *testing.T) {
 		t.Errorf("CredentialsPath = %q, want %q", bc.CredentialsPath, "/etc/huginn/sa.json")
 	}
 }
+
+func TestClaudeCodeMigrationRegisteredAtRightIndex(t *testing.T) {
+	if currentConfigVersion != 14 {
+		t.Fatalf("currentConfigVersion = %d, want 14", currentConfigVersion)
+	}
+	if len(configMigrations) != 14 {
+		t.Fatalf("len(configMigrations) = %d, want 14 — a v13 config indexes configMigrations[13]", len(configMigrations))
+	}
+}
+
+func TestV13ConfigMigratesAndKeepsCustomPort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	// A config shaped like a real pre-bridge install: version 13, a CUSTOMISED
+	// web_ui port, and no claude_code key at all.
+	const v13 = `{"version":13,"web_ui":{"enabled":true,"port":9200,"auto_open":true,"bind":"127.0.0.1"}}`
+	if err := os.WriteFile(path, []byte(v13), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+
+	if cfg.Version != 14 {
+		t.Errorf("Version = %d, want 14", cfg.Version)
+	}
+	if cfg.WebUI.Port != 9200 {
+		t.Errorf("WebUI.Port = %d, want 9200 — migration must not reset a customised port", cfg.WebUI.Port)
+	}
+	if cfg.ClaudeCode.Enabled {
+		t.Error("ClaudeCode.Enabled = true after upgrade; the bridge must stay opt-in for existing installs")
+	}
+	if cfg.ClaudeCode.Binary != "claude" {
+		t.Errorf("ClaudeCode.Binary = %q, want \"claude\" — defaults must fill in for an absent block", cfg.ClaudeCode.Binary)
+	}
+	if cfg.ClaudeCode.Watch.MaxFileMB != 50 {
+		t.Errorf("Watch.MaxFileMB = %d, want 50", cfg.ClaudeCode.Watch.MaxFileMB)
+	}
+	if cfg.ClaudeCode.Delegate.TimeoutSecs != 900 {
+		t.Errorf("Delegate.TimeoutSecs = %d, want 900", cfg.ClaudeCode.Delegate.TimeoutSecs)
+	}
+}

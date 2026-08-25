@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/scrypster/huginn/internal/claudecode"
 	"github.com/scrypster/huginn/internal/mcp"
 )
 
@@ -56,13 +57,13 @@ type CloudConfig struct {
 
 // BackendConfig holds configuration for the LLM backend.
 type BackendConfig struct {
-	Type            string `json:"type"`                      // "external" (Phase 1 default) or "managed" (Phase 3)
+	Type            string `json:"type"`                       // "external" (Phase 1 default) or "managed" (Phase 3)
 	Endpoint        string `json:"endpoint"`                   // used when type="external"
-	Provider        string `json:"provider,omitempty"`        // "anthropic", "openai", "openrouter", "ollama"
-	APIKey          string `json:"api_key,omitempty"`         // literal key or "$ENV_VAR_NAME"
-	BuiltinModel    string `json:"builtin_model,omitempty"`   // active model when type="managed" (builtin llama.cpp)
-	Project         string `json:"project,omitempty"`         // GCP project (vertex provider); fallback: GOOGLE_CLOUD_PROJECT
-	Location        string `json:"location,omitempty"`        // GCP region (vertex provider); fallback: GOOGLE_CLOUD_LOCATION, default us-central1
+	Provider        string `json:"provider,omitempty"`         // "anthropic", "openai", "openrouter", "ollama"
+	APIKey          string `json:"api_key,omitempty"`          // literal key or "$ENV_VAR_NAME"
+	BuiltinModel    string `json:"builtin_model,omitempty"`    // active model when type="managed" (builtin llama.cpp)
+	Project         string `json:"project,omitempty"`          // GCP project (vertex provider); fallback: GOOGLE_CLOUD_PROJECT
+	Location        string `json:"location,omitempty"`         // GCP region (vertex provider); fallback: GOOGLE_CLOUD_LOCATION, default us-central1
 	CredentialsPath string `json:"credentials_path,omitempty"` // path to service-account JSON; fallback: GOOGLE_APPLICATION_CREDENTIALS
 }
 
@@ -88,44 +89,45 @@ func (bc *BackendConfig) ResolvedAPIKey() string {
 
 // Config holds all Huginn configuration.
 type Config struct {
-	DefaultModel      string        `json:"default_model,omitempty"`       // default model for the primary agent
-	ReasonerModel     string        `json:"reasoner_model"`
-	OllamaBaseURL     string        `json:"ollama_base_url"`
-	Backend           BackendConfig `json:"backend"`
-	Theme             string        `json:"theme"`
-	ContextLimitKB    int           `json:"context_limit_kb"`
-	GitStageOnWrite   bool          `json:"git_stage_on_write"`
-	WorkspacePath     string        `json:"workspace_path,omitempty"`
-	MaxTurns          int           `json:"max_turns,omitempty"`         // default 50; max agentic loop iterations
-	ToolsEnabled      bool          `json:"tools_enabled"`               // default true
-	AllowedTools      []string      `json:"allowed_tools,omitempty"`     // whitelist; empty = all allowed
-	DisallowedTools   []string      `json:"disallowed_tools,omitempty"`  // blacklist
-	BashTimeoutSecs   int           `json:"bash_timeout_secs,omitempty"` // default 120
-	MachineID         string        `json:"machine_id,omitempty"`
-	DiffReviewMode    string        `json:"diff_review_mode,omitempty"` // "always", "never", "auto"
-	MCPServers        []mcp.MCPServerConfig `json:"mcp_servers,omitempty"`     // MCP server configurations
-	NotepadsEnabled   bool          `json:"notepads_enabled"`
-	NotepadsMaxTokens int           `json:"notepads_max_tokens,omitempty"`
-	CompactMode       string        `json:"compact_mode,omitempty"`    // "auto", "never", "always"
-	CompactTrigger    float64       `json:"compact_trigger,omitempty"` // 0.0-1.0
-	VisionEnabled     bool          `json:"vision_enabled"`
-	MaxImageSizeKB    int           `json:"max_image_size_kb,omitempty"`
-	EmbeddingModel    string        `json:"embedding_model,omitempty"`     // default "nomic-embed-text"
-	SemanticSearch    bool          `json:"semantic_search,omitempty"`     // default false
-	BraveAPIKey       string        `json:"brave_api_key,omitempty"`       // web_search disabled if empty
-	WebUI        WebUIConfig        `json:"web_ui"`
-	Integrations IntegrationsConfig `json:"integrations"`
-	Cloud        CloudConfig        `json:"cloud"`
-	ActiveSessionID   string        `json:"active_session_id,omitempty"`
-	SchedulerEnabled  bool          `json:"scheduler_enabled"` // default true; set false to pause all routines
-	Version           int           `json:"version,omitempty"`
+	DefaultModel      string                `json:"default_model,omitempty"` // default model for the primary agent
+	ReasonerModel     string                `json:"reasoner_model"`
+	OllamaBaseURL     string                `json:"ollama_base_url"`
+	Backend           BackendConfig         `json:"backend"`
+	Theme             string                `json:"theme"`
+	ContextLimitKB    int                   `json:"context_limit_kb"`
+	GitStageOnWrite   bool                  `json:"git_stage_on_write"`
+	WorkspacePath     string                `json:"workspace_path,omitempty"`
+	MaxTurns          int                   `json:"max_turns,omitempty"`         // default 50; max agentic loop iterations
+	ToolsEnabled      bool                  `json:"tools_enabled"`               // default true
+	AllowedTools      []string              `json:"allowed_tools,omitempty"`     // whitelist; empty = all allowed
+	DisallowedTools   []string              `json:"disallowed_tools,omitempty"`  // blacklist
+	BashTimeoutSecs   int                   `json:"bash_timeout_secs,omitempty"` // default 120
+	MachineID         string                `json:"machine_id,omitempty"`
+	DiffReviewMode    string                `json:"diff_review_mode,omitempty"` // "always", "never", "auto"
+	MCPServers        []mcp.MCPServerConfig `json:"mcp_servers,omitempty"`      // MCP server configurations
+	NotepadsEnabled   bool                  `json:"notepads_enabled"`
+	NotepadsMaxTokens int                   `json:"notepads_max_tokens,omitempty"`
+	CompactMode       string                `json:"compact_mode,omitempty"`    // "auto", "never", "always"
+	CompactTrigger    float64               `json:"compact_trigger,omitempty"` // 0.0-1.0
+	VisionEnabled     bool                  `json:"vision_enabled"`
+	MaxImageSizeKB    int                   `json:"max_image_size_kb,omitempty"`
+	EmbeddingModel    string                `json:"embedding_model,omitempty"` // default "nomic-embed-text"
+	SemanticSearch    bool                  `json:"semantic_search,omitempty"` // default false
+	BraveAPIKey       string                `json:"brave_api_key,omitempty"`   // web_search disabled if empty
+	WebUI             WebUIConfig           `json:"web_ui"`
+	Integrations      IntegrationsConfig    `json:"integrations"`
+	Cloud             CloudConfig           `json:"cloud"`
+	ClaudeCode        claudecode.Config     `json:"claude_code"`
+	ActiveSessionID   string                `json:"active_session_id,omitempty"`
+	SchedulerEnabled  bool                  `json:"scheduler_enabled"` // default true; set false to pause all routines
+	Version           int                   `json:"version,omitempty"`
 }
 
 // Default returns a Config with all production defaults.
 func Default() *Config {
 	return &Config{
-		ReasonerModel:   "deepseek-r1:14b",
-		OllamaBaseURL:   "http://localhost:11434",
+		ReasonerModel: "deepseek-r1:14b",
+		OllamaBaseURL: "http://localhost:11434",
 		Backend: BackendConfig{
 			Type:     "external",
 			Endpoint: "http://localhost:11434",
@@ -155,6 +157,7 @@ func Default() *Config {
 		Cloud: CloudConfig{
 			URL: "https://huginncloud.com",
 		},
+		ClaudeCode:       claudecode.DefaultConfig(),
 		SchedulerEnabled: true,
 	}
 }
@@ -181,7 +184,7 @@ func generateMachineID() string {
 
 // currentConfigVersion is incremented whenever a breaking schema change is made.
 // Version 0 is treated as legacy (no version field present).
-const currentConfigVersion = 13
+const currentConfigVersion = 14
 
 // configMigrations is a forward-only chain. Index i migrates version i → i+1.
 var configMigrations = []func(*Config){
@@ -198,6 +201,7 @@ var configMigrations = []func(*Config){
 	migrateV10toV11,
 	migrateV11toV12,
 	migrateV12toV13,
+	migrateV13toV14,
 }
 
 // migrateV0toV1 is the baseline migration.
@@ -301,6 +305,12 @@ func migrateV12toV13(_ *Config) {
 	// No struct mutation needed: fields removed from Config struct.
 	// Active stripping is handled by the SaveTo() in LoadFrom() post-migration.
 }
+
+// migrateV13toV14 adds the ClaudeCode bridge block. No field renames or removals: LoadFrom
+// unmarshals the persisted file over Default(), so a config predating this block simply keeps
+// claudecode.DefaultConfig() — which is opt-out (Enabled: false). The migration exists to
+// record the version bump, matching migrateV11toV12's treatment of ActiveSessionID.
+func migrateV13toV14(_ *Config) {}
 
 // migrateV7toV8 adds WebUI, Integrations, and Cloud config fields.
 func migrateV7toV8(cfg *Config) {
