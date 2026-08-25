@@ -74,3 +74,79 @@ func TestExecutedToolsArePersistedButNotDispatched(t *testing.T) {
 		t.Error("no role=tool message carrying the result — Huginn's history is missing the tool output")
 	}
 }
+
+// mixedFieldsBackend returns a response carrying BOTH a real ToolCalls entry
+// and an ExecutedTools entry on its first call, then a terminal stop response
+// on the second call (after the real tool call has been dispatched and the
+// loop continues for another turn).
+type mixedFieldsBackend struct{ calls int }
+
+func (b *mixedFieldsBackend) ChatCompletion(_ context.Context, _ backend.ChatRequest) (*backend.ChatResponse, error) {
+	b.calls++
+	if b.calls == 1 {
+		return &backend.ChatResponse{
+			Content:    "",
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID:       "real-1",
+				Function: backend.ToolCallFunction{Name: "mytool", Arguments: map[string]any{}},
+			}},
+			ExecutedTools: []backend.ExecutedTool{{
+				Call: backend.ToolCall{
+					ID:       "tu1",
+					Function: backend.ToolCallFunction{Name: "Read", Arguments: map[string]any{"file_path": "/tmp/x"}},
+				},
+				Result: "package main",
+			}},
+		}, nil
+	}
+	return &backend.ChatResponse{Content: "done", DoneReason: "stop"}, nil
+}
+func (b *mixedFieldsBackend) Health(_ context.Context) error   { return nil }
+func (b *mixedFieldsBackend) Shutdown(_ context.Context) error { return nil }
+func (b *mixedFieldsBackend) ContextWindow() int               { return 200000 }
+
+// TestToolCallsWinWhenBothFieldsAreSet verifies that when a response carries
+// BOTH a real tool call and an already-executed one, the real call still
+// dispatches (the loop's behavior is unaffected), while the ExecutedTools
+// entry is ignored entirely rather than appended as a tool result answering
+// a call no assistant message declared.
+func TestToolCallsWinWhenBothFieldsAreSet(t *testing.T) {
+	realTool := &mockTool{
+		name:   "mytool",
+		result: tools.ToolResult{Output: "real tool ran"},
+	}
+	reg := newRegistryWith(realTool)
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  &mixedFieldsBackend{},
+		Tools:    reg,
+		Messages: []backend.Message{{Role: "user", Content: "do stuff"}},
+	})
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+
+	if realTool.callCount != 1 {
+		t.Fatalf("realTool.callCount = %d, want 1 — the real ToolCalls entry must still dispatch", realTool.callCount)
+	}
+
+	for _, m := range result.Messages {
+		if m.Role == "tool" && m.ToolCallID == "tu1" {
+			t.Fatalf("found orphaned role=tool message for ToolCallID %q — the ExecutedTools entry must be ignored when ToolCalls is also present", m.ToolCallID)
+		}
+	}
+
+	var sawAssistantWithRealCall bool
+	for _, m := range result.Messages {
+		if m.Role == "assistant" && len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "real-1" {
+			sawAssistantWithRealCall = true
+		} else if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			t.Errorf("assistant message ToolCalls = %+v, want only the real call [real-1]", m.ToolCalls)
+		}
+	}
+	if !sawAssistantWithRealCall {
+		t.Error("no assistant message carrying only the real tool call")
+	}
+}

@@ -437,8 +437,15 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// Append assistant response to history. A backend that ran its own
 		// tools reports them in ExecutedTools; they belong in history exactly
 		// like dispatched calls, but must never reach dispatchTools below.
+		//
+		// ToolCalls wins when both are present: a real tool-calling backend
+		// takes precedence, and the ExecutedTools are ignored entirely rather
+		// than appended as tool results answering calls no assistant message
+		// declared.
+		usedExecuted := len(chatResult.ToolCalls) == 0 && len(chatResult.ExecutedTools) > 0
+
 		persistedCalls := chatResult.ToolCalls
-		if len(persistedCalls) == 0 && len(chatResult.ExecutedTools) > 0 {
+		if usedExecuted {
 			persistedCalls = make([]backend.ToolCall, 0, len(chatResult.ExecutedTools))
 			for _, et := range chatResult.ExecutedTools {
 				persistedCalls = append(persistedCalls, et.Call)
@@ -450,13 +457,15 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			ToolCalls: persistedCalls,
 		}
 		messages = append(messages, assistantMsg)
-		for _, et := range chatResult.ExecutedTools {
-			messages = append(messages, backend.Message{
-				Role:       "tool",
-				ToolName:   et.Call.Function.Name,
-				ToolCallID: et.Call.ID,
-				Content:    et.Result,
-			})
+		if usedExecuted {
+			for _, et := range chatResult.ExecutedTools {
+				messages = append(messages, backend.Message{
+					Role:       "tool",
+					ToolName:   et.Call.Function.Name,
+					ToolCallID: et.Call.ID,
+					Content:    et.Result,
+				})
+			}
 		}
 		result.FinalContent = chatResult.Content
 
