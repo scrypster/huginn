@@ -567,6 +567,9 @@ func (tm *ThreadManager) runOnce(
 		}
 
 		if err == nil {
+			// Same fallback as RunLoop: local Qwen/Ollama may emit a lone
+			// function-call JSON object in content instead of tool_calls.
+			backend.PromoteContentToolCalls(resp)
 			logger.Info("runOnce: ChatCompletion succeeded",
 				"thread_id", threadID, "turn", turn, "content_len", len(resp.Content),
 				"tool_calls", len(resp.ToolCalls), "done_reason", resp.DoneReason)

@@ -434,6 +434,11 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			return result, fmt.Errorf("turn %d: backend returned nil response without error", turn+1)
 		}
 
+		// Local Qwen/Ollama models sometimes put a lone function-call JSON
+		// object in content instead of structured tool_calls. Promote it so
+		// the loop executes the grant instead of treating it as a final answer.
+		backend.PromoteContentToolCalls(chatResult)
+
 		// Append assistant response to history
 		assistantMsg := backend.Message{
 			Role:      "assistant",
