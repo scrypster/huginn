@@ -186,6 +186,108 @@ func TestRunLoop_ToolCallExecuted(t *testing.T) {
 	}
 }
 
+func TestRunLoop_ContentJSONExecutesTool(t *testing.T) {
+	tool := &mockTool{
+		name:   "bash",
+		result: tools.ToolResult{Output: "testhost"},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				Content:    `{"name": "bash", "arguments": {"command": "hostname"}}`,
+				DoneReason: "stop",
+			},
+			stopResponse("the hostname is testhost"),
+		},
+	}
+	reg := newRegistryWith(tool)
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    reg,
+		Messages: []backend.Message{{Role: "user", Content: "what host?"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Fatalf("bash was not executed: callCount=%d (content JSON should become a tool call)", tool.callCount)
+	}
+	if result.TurnCount != 2 {
+		t.Errorf("TurnCount = %d, want 2", result.TurnCount)
+	}
+	if result.FinalContent != "the hostname is testhost" {
+		t.Errorf("FinalContent = %q", result.FinalContent)
+	}
+}
+
+func TestRunLoop_ContentProseDoesNotExecuteTool(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			stopResponse("hello"),
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("prose should not execute bash, callCount=%d", tool.callCount)
+	}
+	if result.StopReason != "stop" || result.TurnCount != 1 {
+		t.Errorf("StopReason=%q TurnCount=%d", result.StopReason, result.TurnCount)
+	}
+}
+
+func TestRunLoop_NativeToolCallsNotDoubleParsed(t *testing.T) {
+	tool := &mockTool{name: "read_file", result: tools.ToolResult{Output: "ok"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				Content:    `{"name": "bash", "arguments": {"command": "hostname"}}`,
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_native",
+					Function: backend.ToolCallFunction{
+						Name:      "read_file",
+						Arguments: map[string]any{"file_path": "main.go"},
+					},
+				}},
+			},
+			stopResponse("done"),
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool, &mockTool{name: "bash"}),
+		Messages: []backend.Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Errorf("read_file callCount=%d, want 1", tool.callCount)
+	}
+	// Content JSON must not be promoted into a second bash call.
+	var toolNames []string
+	for _, msg := range result.Messages {
+		if msg.Role == "tool" {
+			toolNames = append(toolNames, msg.ToolName)
+		}
+	}
+	if len(toolNames) != 1 || toolNames[0] != "read_file" {
+		t.Errorf("executed tools = %v, want [read_file] only", toolNames)
+	}
+}
+
 // TestRunLoop_MaxTurnsReached verifies that a backend that never stops tool calls
 // is cut off at MaxTurns with StopReason="max_turns".
 func TestRunLoop_MaxTurnsReached(t *testing.T) {
@@ -1073,10 +1175,10 @@ func TestRunLoop_PanicPath_OnToolDoneStillFires(t *testing.T) {
 	var doneIsError bool
 
 	_, err := RunLoop(context.Background(), RunLoopConfig{
-		MaxTurns: 5,
-		Backend:  mb,
-		Tools:    reg,
-		Messages: []backend.Message{{Role: "user", Content: "trigger panic"}},
+		MaxTurns:   5,
+		Backend:    mb,
+		Tools:      reg,
+		Messages:   []backend.Message{{Role: "user", Content: "trigger panic"}},
 		OnToolCall: func(callID string, name string, args map[string]any) {},
 		OnToolDone: func(callID string, name string, result tools.ToolResult) {
 			doneCalled = true
