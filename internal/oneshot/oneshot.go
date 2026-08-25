@@ -1,5 +1,7 @@
 // Package oneshot runs a single agentic turn from the CLI without the TUI
-// or web UI. --print and --agent NAME MSG both go through Run.
+// or web UI. --print and --agent NAME MSG both go through Run. Named-agent
+// runs get an ephemeral session and the same A2A tools as the server
+// (delegate_to_agent, wait_for_threads, list_team_status, recall_thread_result).
 package oneshot
 
 import (
@@ -7,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"github.com/scrypster/huginn/internal/memory"
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/permissions"
+	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/tools"
 )
 
@@ -49,6 +53,14 @@ type Config struct {
 	Models   *modelconfig.Models
 	Registry *agents.AgentRegistry
 	Tools    *tools.Registry
+
+	// SessionID is the ephemeral session used for A2A delegation. Empty
+	// means generate a new ULID for this run.
+	SessionID string
+
+	// SessionStore persists specialist thread JSONL. Tests inject a store;
+	// the CLI uses a temp-dir store when nil.
+	SessionStore session.StoreInterface
 
 	// LoadRegistry is used when Registry is nil. Tests inject a stub; the
 	// CLI uses LoadDefaultRegistry when both are nil.
@@ -124,6 +136,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	var gate *permissions.Gate
+	sessionID := ephemeralSessionID(cfg)
 	if !cfg.NoTools {
 		toolReg := cfg.Tools
 		if toolReg == nil {
@@ -135,6 +148,27 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			return permissions.Deny
 		})
 		defer gate.Close()
+
+		// A2A: ephemeral session + ThreadManager + SpawnThread, same stack
+		// as server boot. spawnCtx outlives tool-call contexts so specialists
+		// are not cancelled when delegate_to_agent returns.
+		spawnCtx, cancelSpawn := context.WithCancel(ctx)
+		defer cancelSpawn()
+		sessStore := cfg.SessionStore
+		var tmpDir string
+		if sessStore == nil {
+			dir, dirErr := os.MkdirTemp("", "huginn-oneshot-")
+			if dirErr != nil {
+				return nil, fmt.Errorf("oneshot: session store: %w", dirErr)
+			}
+			tmpDir = dir
+			sessStore = session.NewStore(dir)
+		}
+		if tmpDir != "" {
+			defer os.RemoveAll(tmpDir)
+		}
+		attachDelegation(spawnCtx, toolReg, reg, cfg.Backend, sessStore, sessionID)
+
 		orch.SetTools(toolReg, gate)
 	}
 
@@ -165,7 +199,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 	}
 
-	if err := orch.ChatWithAgent(ctx, ag, cfg.Prompt, "", onToken, onToolEvent, nil); err != nil {
+	if err := orch.ChatWithAgent(ctx, ag, cfg.Prompt, sessionID, onToken, onToolEvent, nil); err != nil {
 		return nil, err
 	}
 

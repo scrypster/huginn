@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Added
+- CLI `--print` / `--agent` oneshot now wires A2A delegation (`delegate_to_agent`, `wait_for_threads`, `list_team_status`, `recall_thread_result`) with an ephemeral session, ThreadManager, and SpawnThread. Preview is always auto-approved (`HUGINN_DELEGATION_PREVIEW=off`). Named agents resolve from `~/.huginn/agents/*.{yaml,json}`.
+
 ### Fixed
 - CLI `--print` / `--agent NAME MSG` now run the agentic tool loop (`ChatWithAgent` / `RunLoop`) instead of a bare ChatCompletion. `--print` honors `--agent`, `--model` (via SwapModel), `--no-tools`, `--max-turns`, and `--dangerously-skip-permissions` without requiring `--headless`. `--json` emits `agentOutput` plus `toolsCalled` `{name, args, result}` for each tool.
 
