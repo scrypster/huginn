@@ -5,13 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/modelconfig"
+	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/tools"
 )
 
@@ -286,5 +291,232 @@ func TestFormatToolSummary_AndWriteText(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "bash") {
 		t.Errorf("stderr tool summary = %q", errOut.String())
+	}
+}
+
+func hasToolSchema(tools []backend.Tool, name string) bool {
+	for _, t := range tools {
+		if t.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+var threadIDRe = regexp.MustCompile(`thread ([0-9A-Za-z]+)`)
+
+func threadIDFromHistory(msgs []backend.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if m := threadIDRe.FindStringSubmatch(msgs[i].Content); len(m) == 2 {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// chiefOfStaffBackend scripts Winston → delegate_to_agent → wait_for_threads
+// and Reggie → PONG. Routing is by tool schema (specialists get finish()).
+type chiefOfStaffBackend struct {
+	mu          sync.Mutex
+	winstonCall int
+	requests    []backend.ChatRequest
+}
+
+func (f *chiefOfStaffBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, req)
+	f.mu.Unlock()
+
+	if hasToolSchema(req.Tools, "finish") && !hasToolSchema(req.Tools, "delegate_to_agent") {
+		if req.OnToken != nil {
+			req.OnToken("PONG")
+		}
+		return &backend.ChatResponse{Content: "PONG", DoneReason: "stop"}, nil
+	}
+
+	f.mu.Lock()
+	n := f.winstonCall
+	f.winstonCall++
+	f.mu.Unlock()
+
+	switch n {
+	case 0:
+		return &backend.ChatResponse{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID: "call_delegate_1",
+				Function: backend.ToolCallFunction{
+					Name: "delegate_to_agent",
+					Arguments: map[string]any{
+						"agent": "Reggie",
+						"task":  "Reply with exactly PONG.",
+					},
+				},
+			}},
+		}, nil
+	case 1:
+		args := map[string]any{"timeout_seconds": float64(10)}
+		if id := threadIDFromHistory(req.Messages); id != "" {
+			args["thread_ids"] = []any{id}
+		}
+		return &backend.ChatResponse{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID: "call_wait_1",
+				Function: backend.ToolCallFunction{
+					Name:      "wait_for_threads",
+					Arguments: args,
+				},
+			}},
+		}, nil
+	default:
+		if req.OnToken != nil {
+			req.OnToken("PONG")
+		}
+		return &backend.ChatResponse{Content: "PONG", DoneReason: "stop"}, nil
+	}
+}
+
+func (f *chiefOfStaffBackend) Health(_ context.Context) error   { return nil }
+func (f *chiefOfStaffBackend) Shutdown(_ context.Context) error { return nil }
+func (f *chiefOfStaffBackend) ContextWindow() int               { return 8192 }
+
+func writeAgentYAML(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s.yaml: %v", name, err)
+	}
+}
+
+func TestLoadAgents_WinstonAndReggieYAML(t *testing.T) {
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	cfg, err := agents.LoadAgentsFromBase(base)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromBase: %v", err)
+	}
+	reg := agents.BuildRegistry(cfg, modelconfig.DefaultModels())
+	if _, ok := reg.ByName("Winston"); !ok {
+		t.Fatal("Winston not loaded from yaml")
+	}
+	if _, ok := reg.ByName("Reggie"); !ok {
+		t.Fatal("Reggie not loaded from yaml")
+	}
+}
+
+func TestRun_ChiefOfStaff_WinstonDelegatesToReggie(t *testing.T) {
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff. Delegate and wait.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	b := &chiefOfStaffBackend{}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := Run(ctx, Config{
+		Prompt:          "Ask Reggie to reply with exactly PONG. Wait for him and report only his word.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		MaxTurns:        8,
+		Backend:         b,
+		SessionStore:    session.NewStore(t.TempDir()),
+		LoadRegistry: func() (*agents.AgentRegistry, error) {
+			cfg, err := agents.LoadAgentsFromBase(base)
+			if err != nil {
+				return nil, err
+			}
+			return agents.BuildRegistry(cfg, modelconfig.DefaultModels()), nil
+		},
+		Tools:  tools.NewRegistry(),
+		Models: modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(res.AgentOutput, "PONG") {
+		t.Fatalf("agentOutput = %q, want PONG", res.AgentOutput)
+	}
+
+	var names []string
+	for _, tc := range res.ToolsCalled {
+		names = append(names, tc.Name)
+	}
+	if len(res.ToolsCalled) == 0 {
+		t.Fatal("toolsCalled is empty")
+	}
+	got := strings.Join(names, ",")
+	if !strings.Contains(got, "delegate_to_agent") {
+		t.Errorf("toolsCalled = %v, want delegate_to_agent", names)
+	}
+	if !strings.Contains(got, "wait_for_threads") {
+		t.Errorf("toolsCalled = %v, want wait_for_threads", names)
+	}
+	for _, tc := range res.ToolsCalled {
+		if tc.Name == "wait_for_threads" && !strings.Contains(tc.Result, "PONG") {
+			t.Errorf("wait_for_threads result = %q, want PONG from Reggie", tc.Result)
+		}
+		if tc.Name == "delegate_to_agent" && tc.Result == "" {
+			t.Error("delegate_to_agent result is empty")
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := WriteResult(&buf, io.Discard, res, true, false); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+	var parsed Result
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json: %v\nraw: %s", err, buf.String())
+	}
+	if len(parsed.ToolsCalled) == 0 {
+		t.Error("JSON toolsCalled is empty")
+	}
+	if !strings.Contains(parsed.AgentOutput, "PONG") {
+		t.Errorf("JSON agentOutput = %q, want PONG", parsed.AgentOutput)
+	}
+}
+
+func TestRun_DelegationToolsInSchema(t *testing.T) {
+	b := bashThenAnswerBackend()
+	_, err := Run(context.Background(), Config{
+		Prompt:          "Use bash to run hostname",
+		AgentName:       "Steve",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, name := range delegationToolNames {
+		if !hasToolSchema(b.lastTools(), name) {
+			t.Errorf("lead schemas missing %s", name)
+		}
 	}
 }
