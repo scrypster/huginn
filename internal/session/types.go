@@ -27,6 +27,12 @@ type Manifest struct {
 
 	// Space fields (empty string means no space assigned)
 	SpaceID string `json:"space_id,omitempty"` // ID of the Space this session belongs to
+
+	// External bridge fields. Empty strings mean a native Huginn session.
+	// ExternalKind identifies the foreign system ("claude-code"); ExternalID
+	// is that system's own session identifier.
+	ExternalKind string `json:"external_kind,omitempty"`
+	ExternalID   string `json:"external_id,omitempty"`
 }
 
 // PersistedToolCall is a single tool invocation stored with an assistant message.

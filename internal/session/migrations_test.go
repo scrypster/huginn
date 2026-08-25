@@ -2,17 +2,19 @@ package session_test
 
 import (
 	"database/sql"
+	"path/filepath"
 	"testing"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/sqlitedb"
 )
 
 func TestMigrationsRegistered(t *testing.T) {
 	migs := session.Migrations()
-	if len(migs) != 9 {
-		t.Fatalf("expected 9 migrations, got %d", len(migs))
+	if len(migs) != 11 {
+		t.Fatalf("expected 11 migrations, got %d", len(migs))
 	}
 }
 
@@ -271,5 +273,191 @@ func TestConnectionsRefreshErrorMigration_AddsColumns(t *testing.T) {
 	}
 	if lastErr != "token expired" {
 		t.Fatalf("last_refresh_error = %q, want %q", lastErr, "token expired")
+	}
+}
+
+// TestApplySchemaThenMigrateOnLegacyDatabase reproduces the real startup
+// sequence (ApplySchema, then Migrate) against a pre-bridge sessions table —
+// i.e. what every existing Huginn install has on disk. This catches a bug
+// that fresh-database tests structurally cannot: ApplySchema's
+// `CREATE TABLE IF NOT EXISTS sessions` is a no-op against an existing
+// table, so if the base schema also tried to create the
+// uq_sessions_external index there, ApplySchema would fail with
+// "no such column: external_kind" before migrateSessionsExternalColumnsV1
+// ever got a chance to ALTER TABLE the columns in. The index must only be
+// created by the migration, after the ALTER TABLE ADD COLUMN statements.
+func TestApplySchemaThenMigrateOnLegacyDatabase(t *testing.T) {
+	db, err := sqlitedb.Open(filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// A pre-bridge sessions table: no external_kind, no external_id.
+	// This is what every existing install has on disk.
+	if _, err := db.Write().Exec(`
+		CREATE TABLE sessions (
+			id              TEXT NOT NULL PRIMARY KEY,
+			tenant_id       TEXT NOT NULL DEFAULT '',
+			title           TEXT NOT NULL DEFAULT '',
+			model           TEXT NOT NULL DEFAULT '',
+			agent           TEXT NOT NULL DEFAULT '',
+			created_at      TEXT NOT NULL DEFAULT '',
+			updated_at      TEXT NOT NULL DEFAULT '',
+			message_count   INTEGER NOT NULL DEFAULT 0,
+			last_message_id TEXT NOT NULL DEFAULT '',
+			workspace_root  TEXT NOT NULL DEFAULT '',
+			workspace_name  TEXT NOT NULL DEFAULT '',
+			status          TEXT NOT NULL DEFAULT 'active',
+			version         INTEGER NOT NULL DEFAULT 1,
+			summary         TEXT,
+			summary_through TEXT,
+			source          TEXT NOT NULL DEFAULT '',
+			routine_id      TEXT NOT NULL DEFAULT '',
+			run_id          TEXT NOT NULL DEFAULT '',
+			space_id        TEXT DEFAULT NULL
+		)`); err != nil {
+		t.Fatalf("create legacy sessions table: %v", err)
+	}
+
+	// This is the exact startup sequence: ApplySchema, then Migrate.
+	if err := db.ApplySchema(); err != nil {
+		t.Fatalf("ApplySchema on a legacy database failed — this breaks every existing install: %v", err)
+	}
+	if err := db.Migrate(session.Migrations()); err != nil {
+		t.Fatalf("Migrate on a legacy database: %v", err)
+	}
+
+	// The migration must have added the columns...
+	var n int
+	if err := db.Read().QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name IN ('external_kind','external_id')`,
+	).Scan(&n); err != nil {
+		t.Fatalf("pragma_table_info: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("legacy sessions table has %d of the 2 new columns after migration", n)
+	}
+
+	// ...and created the index.
+	if err := db.Read().QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='uq_sessions_external'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("sqlite_master: %v", err)
+	}
+	if n != 1 {
+		t.Error("uq_sessions_external index missing after migration on a legacy database")
+	}
+
+	// Re-running startup must stay clean (idempotency).
+	if err := db.ApplySchema(); err != nil {
+		t.Fatalf("second ApplySchema: %v", err)
+	}
+	if err := db.Migrate(session.Migrations()); err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+}
+
+// TestMigration_RollbackOnFailure verifies that migrations are rolled back if they fail.
+func TestMigration_RollbackOnFailure(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+
+	// Apply the initial schema (this creates _migrations table)
+	if err := db.ApplySchema(); err != nil {
+		t.Fatalf("ApplySchema: %v", err)
+	}
+
+	// Define a failing migration that tries to create a table twice
+	failingMigration := session.Migrations()
+	failingMigration = append(failingMigration, sqlitedb.Migration{
+		Name: "test_migration_failure",
+		Up: func(tx *sql.Tx) error {
+			// Create a table
+			if _, err := tx.Exec(`CREATE TABLE test_table (id INTEGER PRIMARY KEY)`); err != nil {
+				return err
+			}
+			// Try to create the same table again — this will fail
+			if _, err := tx.Exec(`CREATE TABLE test_table (id INTEGER PRIMARY KEY)`); err != nil {
+				return err
+			}
+			return nil
+		},
+	})
+
+	// First, apply the non-failing migrations
+	if err := db.Migrate(session.Migrations()); err != nil {
+		t.Fatalf("initial Migrate: %v", err)
+	}
+
+	// Record the migration count before the failing migration
+	var countBefore int
+	err := db.Read().QueryRow(`SELECT COUNT(*) FROM _migrations`).Scan(&countBefore)
+	if err != nil {
+		t.Fatalf("query migrations before: %v", err)
+	}
+
+	// Try to apply the failing migration
+	failingMigs := failingMigration[len(session.Migrations()):]
+	err = db.Migrate(failingMigs)
+	if err == nil {
+		t.Fatal("expected migration to fail, but it succeeded")
+	}
+	t.Logf("migration failed as expected: %v", err)
+
+	// Verify that the migration was NOT recorded (rolled back)
+	var countAfter int
+	errAfter := db.Read().QueryRow(`SELECT COUNT(*) FROM _migrations`).Scan(&countAfter)
+	if errAfter != nil {
+		t.Fatalf("query migrations after: %v", errAfter)
+	}
+
+	if countAfter != countBefore {
+		t.Errorf("migration count changed despite rollback: before %d, after %d", countBefore, countAfter)
+	}
+
+	// Verify that test_table was NOT created (rolled back)
+	var tableExists int
+	err = db.Read().QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='test_table'`,
+	).Scan(&tableExists)
+	if err != nil {
+		t.Fatalf("query table existence: %v", err)
+	}
+	if tableExists > 0 {
+		t.Error("test_table should not exist after failed migration (rollback)")
+	}
+}
+
+// TestMigrations_Idempotent verifies that calling Migrations() and Migrate()
+// twice produces no errors, and that each registered migration is recorded
+// exactly once (re-running is a no-op, not a duplicate insert).
+//
+// Note: prior to the Claude Code bridge, Migrations() returned nil because
+// all schema was squashed into ApplySchema's base DDL. It now also registers
+// rolling migrations (sessions_external_columns_v1, claude_ingest_v1) so that
+// databases created before the bridge gain the new columns/table — ApplySchema
+// alone can't do this since CREATE TABLE IF NOT EXISTS won't add columns to
+// an existing table. openSessTestDB already runs Migrations() once; this test
+// re-runs them twice more to prove idempotency.
+func TestMigrations_Idempotent(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+
+	if err := db.Migrate(session.Migrations()); err != nil {
+		t.Fatalf("first Migrate: %v", err)
+	}
+	if err := db.Migrate(session.Migrations()); err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+
+	// The _migrations table should have exactly one row per registered
+	// migration — re-running Migrate() must not insert duplicates.
+	var count int
+	if err := db.Read().QueryRow(`SELECT COUNT(*) FROM _migrations`).Scan(&count); err != nil {
+		t.Fatalf("query migrations count: %v", err)
+	}
+	if want := len(session.Migrations()); count != want {
+		t.Errorf("expected %d migration rows (one per registered migration, no duplicates), got %d", want, count)
 	}
 }

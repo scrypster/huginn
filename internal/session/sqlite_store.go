@@ -4,6 +4,7 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -86,8 +87,8 @@ func (s *SQLiteSessionStore) SaveManifest(sess *Session) error {
 		INSERT INTO sessions
 			(id, title, model, agent, created_at, updated_at, message_count,
 			 last_message_id, workspace_root, workspace_name, status, version,
-			 source, routine_id, run_id, space_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 source, routine_id, run_id, space_id, external_kind, external_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, model=excluded.model, agent=excluded.agent,
 			updated_at=excluded.updated_at, message_count=excluded.message_count,
@@ -95,7 +96,8 @@ func (s *SQLiteSessionStore) SaveManifest(sess *Session) error {
 			workspace_root=excluded.workspace_root, workspace_name=excluded.workspace_name,
 			status=excluded.status, version=excluded.version,
 			source=excluded.source, routine_id=excluded.routine_id, run_id=excluded.run_id,
-			space_id=excluded.space_id`,
+			space_id=excluded.space_id,
+			external_kind=excluded.external_kind, external_id=excluded.external_id`,
 		m.ID, m.Title, m.Model, m.Agent,
 		m.CreatedAt.UTC().Format(time.RFC3339),
 		m.UpdatedAt.UTC().Format(time.RFC3339),
@@ -103,6 +105,7 @@ func (s *SQLiteSessionStore) SaveManifest(sess *Session) error {
 		m.WorkspaceRoot, m.WorkspaceName,
 		statusOrDefault(m.Status), versionOrDefault(m.Version),
 		m.Source, m.RoutineID, m.RunID, spaceID,
+		m.ExternalKind, m.ExternalID,
 	); err != nil {
 		return fmt.Errorf("session sqlite: save manifest %s: %w", m.ID, err)
 	}
@@ -163,6 +166,27 @@ func (s *SQLiteSessionStore) LoadOrReconstruct(id string) (*Session, error) {
 	return s.Load(id)
 }
 
+// LoadByExternalID returns the session bridged from an external system, or
+// (nil, nil) if no such session exists. kind is a value like "claude-code".
+func (s *SQLiteSessionStore) LoadByExternalID(kind, externalID string) (*Session, error) {
+	rdb := s.db.Read()
+	if rdb == nil {
+		return nil, fmt.Errorf("session sqlite: no read connection")
+	}
+	var id string
+	err := rdb.QueryRow(
+		`SELECT id FROM sessions WHERE external_kind = ? AND external_id = ?`,
+		kind, externalID,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("session sqlite: load by external id: %w", err)
+	}
+	return s.Load(id)
+}
+
 // Delete removes the session and its related messages and threads from SQLite.
 // Also removes the session's FTS row from sessions_fts.
 func (s *SQLiteSessionStore) Delete(id string) error {
@@ -207,12 +231,12 @@ func (s *SQLiteSessionStore) ListFiltered(filter SessionFilter) ([]Manifest, err
 	if filter.IncludeArchived {
 		q = `SELECT id, title, model, agent, created_at, updated_at, message_count,
 		       last_message_id, workspace_root, workspace_name, status, version,
-		       source, routine_id, run_id, space_id
+		       source, routine_id, run_id, space_id, external_kind, external_id
 		FROM sessions ORDER BY updated_at DESC`
 	} else {
 		q = `SELECT id, title, model, agent, created_at, updated_at, message_count,
 		       last_message_id, workspace_root, workspace_name, status, version,
-		       source, routine_id, run_id, space_id
+		       source, routine_id, run_id, space_id, external_kind, external_id
 		FROM sessions WHERE status != 'archived' ORDER BY updated_at DESC`
 	}
 	rows, err := s.db.Read().Query(q)
@@ -244,7 +268,7 @@ func (s *SQLiteSessionStore) List() ([]Manifest, error) {
 	rows, err := s.db.Read().Query(`
 		SELECT id, title, model, agent, created_at, updated_at, message_count,
 		       last_message_id, workspace_root, workspace_name, status, version,
-		       source, routine_id, run_id, space_id
+		       source, routine_id, run_id, space_id, external_kind, external_id
 		FROM sessions
 		ORDER BY updated_at DESC`)
 	if err != nil {
@@ -515,7 +539,7 @@ func (s *SQLiteSessionStore) loadManifestRow(id string) (*Manifest, error) {
 	row := s.db.Read().QueryRow(`
 		SELECT id, title, model, agent, created_at, updated_at, message_count,
 		       last_message_id, workspace_root, workspace_name, status, version,
-		       source, routine_id, run_id, space_id
+		       source, routine_id, run_id, space_id, external_kind, external_id
 		FROM sessions WHERE id = ?`, id)
 	m, err := scanManifestRow(row)
 	if err == sql.ErrNoRows {
@@ -542,6 +566,7 @@ func scanManifestRow(row rowScanner) (*Manifest, error) {
 		&m.LastMessageID, &m.WorkspaceRoot, &m.WorkspaceName,
 		&m.Status, &m.Version,
 		&m.Source, &m.RoutineID, &m.RunID, &spaceID,
+		&m.ExternalKind, &m.ExternalID,
 	)
 	if err != nil {
 		return nil, err
@@ -935,7 +960,8 @@ func (s *SQLiteSessionStore) SearchSessions(query string) ([]Manifest, error) {
 	rows, err := s.db.Read().Query(`
 		SELECT s.id, s.title, s.model, s.agent, s.created_at, s.updated_at,
 		       s.message_count, s.last_message_id, s.workspace_root, s.workspace_name,
-		       s.status, s.version, s.source, s.routine_id, s.run_id, s.space_id
+		       s.status, s.version, s.source, s.routine_id, s.run_id, s.space_id,
+		       s.external_kind, s.external_id
 		FROM sessions_fts
 		JOIN sessions s ON s.id = sessions_fts.session_id
 		WHERE sessions_fts MATCH ?
