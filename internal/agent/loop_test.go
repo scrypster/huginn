@@ -255,6 +255,74 @@ func TestRunLoop_ContentJSONThenProseHidesJSONAndDoesNotExecute(t *testing.T) {
 	}
 }
 
+// tokenStreamBackend fires OnToken per rune then StreamDone, matching Ollama
+// parseSSE + the WS onEvent that used to close the bubble before RunLoop Finish.
+type tokenStreamBackend struct {
+	content string
+}
+
+func (b *tokenStreamBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	for _, r := range b.content {
+		if req.OnToken != nil {
+			req.OnToken(string(r))
+		}
+	}
+	if req.OnEvent != nil {
+		req.OnEvent(backend.StreamEvent{Type: backend.StreamDone})
+	}
+	return &backend.ChatResponse{Content: b.content, DoneReason: "stop"}, nil
+}
+func (b *tokenStreamBackend) Health(_ context.Context) error   { return nil }
+func (b *tokenStreamBackend) Shutdown(_ context.Context) error { return nil }
+func (b *tokenStreamBackend) ContextWindow() int               { return 128_000 }
+
+func TestRunLoop_StreamedJSONThenPONG_NoONGFork(t *testing.T) {
+	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
+	var tokens []string
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 1,
+		Backend:  &tokenStreamBackend{content: mixed},
+		Tools:    newRegistryWith(&mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}),
+		Messages: []backend.Message{{Role: "user", Content: "@Steve say PONG and nothing else"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("streamed %q tokens %q, want PONG (dropped or forked first char?)", got, tokens)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+	for _, tok := range tokens {
+		if tok == "ONG" {
+			t.Fatalf("forked ONG after StreamDone: %q", tokens)
+		}
+	}
+}
+
+func TestRunLoop_StreamedPlainPONG_DoesNotDropFirstChar(t *testing.T) {
+	var tokens []string
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 1,
+		Backend:  &tokenStreamBackend{content: "PONG"},
+		Messages: []backend.Message{{Role: "user", Content: "ping"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("plain PONG streamed %q tokens %q", got, tokens)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+}
+
 func TestRunLoop_ContentProseDoesNotExecuteTool(t *testing.T) {
 	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
 	mb := &mockBackend{

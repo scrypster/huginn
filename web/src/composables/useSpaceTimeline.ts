@@ -144,6 +144,10 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   const onDone = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
+    // Ignore backend StreamDone forwarded as "done" without run_id. ChatView
+    // already drops those; stamping stream- → done- here forks leftover
+    // tokens (PONG then nameless ONG) into a second timeline row.
+    if (!msg.run_id) return
     for (const [, st] of stateMap.entries()) {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       // Update activeSessionId for the space that owns this session.

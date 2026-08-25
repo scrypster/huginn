@@ -187,20 +187,72 @@ func withContentCallIDs(calls []ToolCall) []ToolCall {
 }
 
 func readJSONObject(s string) (obj, after string, ok bool) {
-	dec := json.NewDecoder(strings.NewReader(s))
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
+	end, found := jsonObjectEnd(s)
+	if !found {
 		return "", "", false
 	}
-	trim := bytes.TrimSpace(raw)
+	raw := s[:end]
+	if !json.Valid([]byte(raw)) {
+		return "", "", false
+	}
+	trim := bytes.TrimSpace([]byte(raw))
 	if len(trim) == 0 || trim[0] != '{' {
 		return "", "", false
 	}
-	off := dec.InputOffset()
-	if off < 0 || int(off) > len(s) {
-		return "", "", false
+	return string(trim), s[end:], true
+}
+
+// jsonObjectEnd returns the index just past a leading JSON object in s,
+// using a string-aware brace scan so leftover prose after `}` is never
+// swallowed by encoding/json Decoder read-ahead (InputOffset can sit past
+// the first leftover character on some prefixes). The index is into s.
+func jsonObjectEnd(s string) (int, bool) {
+	start := -1
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '{' {
+			start = i
+			break
+		}
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			return 0, false
+		}
 	}
-	return string(trim), s[off:], true
+	if start < 0 {
+		return 0, false
+	}
+	depth := 0
+	inStr := false
+	escape := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
@@ -615,16 +667,15 @@ func (g *ContentToolCallTokenGate) Push(delta string) {
 // visible Content after PromoteContentToolCalls + RevealContentToolCalls
 // so a promoted lone fence/JSON never leaks at end-of-stream.
 func (g *ContentToolCallTokenGate) Finish(visible string) {
-	if g == nil {
+	if g == nil || visible == "" {
 		return
 	}
+	// Only emit a true suffix. A conflicting replacement (visible != emitted
+	// and not a prefix) forks a second stream event — live #mention-proof
+	// painted Steve `PONG` then an orphan `ONG` after StreamDone closed the
+	// first row.
 	if strings.HasPrefix(visible, g.emitted) {
 		g.emit(visible[len(g.emitted):])
-		g.emitted = visible
-		return
-	}
-	if visible != "" && visible != g.emitted {
-		g.emit(visible)
 		g.emitted = visible
 	}
 }

@@ -21,6 +21,7 @@ import {
   useSpaceTimeline,
   clearSpaceTimeline,
   getSessionSpaceId,
+  getSpaceLastMessage,
 } from '../useSpaceTimeline'
 
 // ── Mock WS factory ───────────────────────────────────────────────────
@@ -49,6 +50,11 @@ function createMockWs() {
 // ── Helpers ───────────────────────────────────────────────────────────
 const SPACE_ID = 'space-test-1'
 const SESSION_ID = 'session-test-1'
+const RUN_ID = 'run-1'
+
+function emitDone(ws: ReturnType<typeof createMockWs>, extra: Record<string, unknown> = {}) {
+  ws.emit('done', { type: 'done', session_id: SESSION_ID, run_id: RUN_ID, ...extra })
+}
 
 function setupSpace() {
   const tl = useSpaceTimeline(SPACE_ID)
@@ -211,6 +217,63 @@ describe('wireSpaceTimelineWS', () => {
     expect(assistantMsgs[0].content).not.toContain('{"name"')
   })
 
+  it('streamed leftover P then ONG stays one PONG bubble (first char not dropped or forked)', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'P' })
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'ONG' })
+    await nextTick()
+
+    const assistantMsgs = state.messages.filter(m => m.role === 'assistant')
+    expect(assistantMsgs).toHaveLength(1)
+    expect(assistantMsgs[0].content).toBe('PONG')
+  })
+
+  it('plain streamed PONG stays PONG', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    for (const ch of 'PONG') {
+      ws.emit('token', { type: 'token', session_id: SESSION_ID, content: ch })
+    }
+    await nextTick()
+
+    const assistantMsgs = state.messages.filter(m => m.role === 'assistant')
+    expect(assistantMsgs).toHaveLength(1)
+    expect(assistantMsgs[0].content).toBe('PONG')
+  })
+
+  it('done without run_id does not close the stream (no orphan ONG after PONG)', async () => {
+    // Live PR 134 regression: parseSSE StreamDone is forwarded as "done"
+    // without run_id. Stamping stream- → done- made the leftover suffix
+    // "ONG" a second nameless bubble; sidebar preview became ONG.
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'P' })
+    await nextTick()
+    ws.emit('done', { type: 'done', session_id: SESSION_ID }) // no run_id
+    await nextTick()
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'ONG' })
+    await nextTick()
+
+    const assistantMsgs = state.messages.filter(m => m.role === 'assistant')
+    expect(assistantMsgs).toHaveLength(1)
+    expect(assistantMsgs[0].content).toBe('PONG')
+    expect(assistantMsgs[0].id).toMatch(/^stream-/)
+    expect(getSpaceLastMessage(SPACE_ID)?.text).toBe('PONG')
+  })
+
   it('ignores token events with no session_id', async () => {
     const { state } = setupSpace()
     state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
@@ -244,7 +307,7 @@ describe('wireSpaceTimelineWS', () => {
     const ws = createMockWs()
     wireSpaceTimelineWS(ws as any)
 
-    ws.emit('done', { type: 'done', session_id: SESSION_ID })
+    emitDone(ws)
     await nextTick()
     await new Promise(r => setTimeout(r, 0)) // flush microtasks for the getMessages promise
 
@@ -260,7 +323,7 @@ describe('wireSpaceTimelineWS', () => {
     const ws = createMockWs()
     wireSpaceTimelineWS(ws as any)
 
-    ws.emit('done', { type: 'done', session_id: SESSION_ID })
+    emitDone(ws)
     await nextTick()
 
     expect(state.activeSessionId).toBeNull()
@@ -283,7 +346,7 @@ describe('wireSpaceTimelineWS', () => {
     // Turn 1: emit tokens then done
     ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'first' })
     await nextTick()
-    ws.emit('done', { type: 'done', session_id: SESSION_ID })
+    emitDone(ws)
     await nextTick()
 
     // Turn 2: tokens arrive while fetch is still pending
@@ -326,7 +389,7 @@ describe('wireSpaceTimelineWS', () => {
     const ws = createMockWs()
     wireSpaceTimelineWS(ws as any)
 
-    ws.emit('done', { type: 'done', session_id: SESSION_ID })
+    emitDone(ws)
     await nextTick()
     await new Promise(r => setTimeout(r, 0))
 
@@ -432,7 +495,7 @@ describe('wireSpaceTimelineWS', () => {
 
     ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Using tool...' })
     await nextTick()
-    ws.emit('done', { type: 'done', session_id: SESSION_ID }) // renames stream- → done-
+    emitDone(ws) // renames stream- → done-
     await nextTick()
 
     // tool_result arrives after done renamed the placeholder
@@ -542,11 +605,7 @@ describe('wireSpaceTimelineWS', () => {
     ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'response' })
     await nextTick()
 
-    ws.emit('done', {
-      type: 'done',
-      session_id: SESSION_ID,
-      payload: { message_id: 'server-msg-001' },
-    })
+    emitDone(ws, { payload: { message_id: 'server-msg-001' } })
     await nextTick()
 
     // Placeholder must now have the server ID (not stream- or done- prefix)
@@ -565,7 +624,7 @@ describe('wireSpaceTimelineWS', () => {
 
     ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'hello' })
     await nextTick()
-    ws.emit('done', { type: 'done', session_id: SESSION_ID }) // no payload
+    emitDone(ws) // run_id present, no message_id payload
     await nextTick()
 
     expect(state.messages[0].id).toMatch(/^done-/)
@@ -597,11 +656,7 @@ describe('wireSpaceTimelineWS', () => {
       },
     ])
 
-    ws.emit('done', {
-      type: 'done',
-      session_id: SESSION_ID,
-      payload: { message_id: 'server-msg-002' },
-    })
+    emitDone(ws, { payload: { message_id: 'server-msg-002' } })
     await nextTick()
 
     // Simulate thread_started attaching delegatedThreads BEFORE fetch resolves
@@ -632,11 +687,7 @@ describe('wireSpaceTimelineWS', () => {
     // Turn 1
     ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'first' })
     await nextTick()
-    ws.emit('done', {
-      type: 'done',
-      session_id: SESSION_ID,
-      payload: { message_id: 'server-msg-003' },
-    })
+    emitDone(ws, { payload: { message_id: 'server-msg-003' } })
     await nextTick()
 
     // Turn 2 tokens must NOT append to the server-ID message
@@ -666,6 +717,29 @@ describe('wireSpaceTimelineWS', () => {
     const freshState = useSpaceTimeline(SPACE_ID).getState()
     expect(freshState.messages).toHaveLength(0)
     expect(freshState.sessionToSpaceMap.size).toBe(0)
+  })
+})
+
+describe('getSpaceLastMessage', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+
+  it('sidebar preview is PONG with agent prefix, not orphan ONG', () => {
+    const { state } = setupSpace()
+    state.messages.push({
+      id: 'a1',
+      session_id: SESSION_ID,
+      seq: 1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'PONG',
+      agent: 'Steve',
+    })
+    expect(getSpaceLastMessage(SPACE_ID)).toMatchObject({ text: 'Steve: PONG' })
   })
 })
 

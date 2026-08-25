@@ -26,4 +26,15 @@ describe('visibleAssistantContent', () => {
     const sample = 'Sure, run ' + pureJSON
     expect(visibleAssistantContent(sample)).toBe(sample)
   })
+
+  it('does not drop the first leftover character on JSON-then-PONG', () => {
+    expect(visibleAssistantContent(liveMixed)).toBe('PONG')
+    expect(visibleAssistantContent(liveMixed)).not.toBe('ONG')
+  })
+
+  it('leaves plain PONG unchanged', () => {
+    expect(visibleAssistantContent('PONG')).toBe('PONG')
+    expect(visibleAssistantContent('P')).toBe('P')
+    expect(visibleAssistantContent('PONG')).not.toBe('ONG')
+  })
 })

@@ -411,6 +411,11 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
 
+		// Gate OnToken so backends/mocks that stream raw JSON-in-content never
+		// paint harness JSON. parseSSE already Finish-es leftover prose; do
+		// not Finish again after ChatCompletion — a second suffix flush
+		// after StreamDone forks leftover (`PONG` → `ONG`) into a new
+		// anonymous timeline row.
 		tokenGate := backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
 		onToken := cfg.OnToken
 		if tokenGate != nil {
@@ -444,7 +449,6 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// the loop executes the grant instead of treating it as a final answer.
 		backend.PromoteContentToolCalls(chatResult)
 		backend.RevealContentToolCalls(chatResult)
-		tokenGate.Finish(chatResult.Content)
 
 		// Append assistant response to history
 		assistantMsg := backend.Message{
