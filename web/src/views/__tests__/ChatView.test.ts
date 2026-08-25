@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
-import { ref, nextTick } from 'vue'
+import { ref, reactive, nextTick } from 'vue'
 
 // ── Composable mocks (hoisted before component import) ────────────────
 
@@ -88,7 +88,7 @@ vi.mock('../../composables/useApi', () => ({
 // ── useSpaceTimeline mock ─────────────────────────────────────────────
 // Provides a controllable timeline with a real Map for sessionToSpaceMap
 // so .set() / .has() calls work correctly in production code.
-const makeSpaceState = () => ({
+const makeSpaceState = () => reactive({
   messages: [] as any[],
   sessionToSpaceMap: new Map<string, string>(),
   activeSessionId: null as string | null,
@@ -1973,6 +1973,7 @@ describe('ChatView — space mode', () => {
     mockSpaceState = makeSpaceState()
     mockSpaceHydrate.mockResolvedValue(undefined)
     mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
+    mockActiveSpace.value = null
   })
 
   it('first send: auto-creates session and registers it in sessionToSpaceMap', async () => {
@@ -2076,5 +2077,63 @@ describe('ChatView — space mode', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+  })
+
+  it('in-flight @mention status names the addressed agent, not the lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Steve say PONG and nothing else')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Steve is responding')
+    expect(banner.text()).not.toContain('Tess is responding')
+  })
+
+  it('in-flight unmentioned status names the channel lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'what is the status?')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Tess is responding')
+    expect(banner.text()).not.toContain('Steve is responding')
   })
 })
