@@ -148,7 +148,27 @@ CREATE TABLE IF NOT EXISTS sessions (
     run_id          TEXT    NOT NULL DEFAULT '',    -- ULID for this specific routine execution
 
     -- Space membership. NULL means the session is not in any space.
-    space_id        TEXT    DEFAULT NULL            -- ULID of the Space this session belongs to
+    space_id        TEXT    DEFAULT NULL,           -- ULID of the Space this session belongs to
+
+    -- External bridge linkage. Empty strings mean a native Huginn session.
+    external_kind   TEXT    NOT NULL DEFAULT '',   -- e.g. "claude-code"
+    external_id     TEXT    NOT NULL DEFAULT ''    -- foreign system's session id
+);
+
+-- NOTE: the uq_sessions_external index is deliberately NOT defined here. It is
+-- created by migrateSessionsExternalColumnsV1 instead, because ApplySchema()
+-- runs BEFORE Migrate(): on an existing database this CREATE TABLE is a no-op,
+-- so an index here would reference external_kind/external_id before the
+-- ALTER TABLE has added them and startup would fail. Do not move it back.
+
+CREATE TABLE IF NOT EXISTS claude_ingest (
+    external_id       TEXT    NOT NULL PRIMARY KEY,  -- Claude Code session UUID
+    huginn_session_id TEXT    NOT NULL,
+    path              TEXT    NOT NULL,
+    size              INTEGER NOT NULL DEFAULT 0,
+    byte_offset       INTEGER NOT NULL DEFAULT 0,
+    last_uuid         TEXT    NOT NULL DEFAULT '',
+    updated_at        INTEGER NOT NULL DEFAULT 0
 );
 
 -- Hot path: list sessions newest first (session picker, relay sync)
