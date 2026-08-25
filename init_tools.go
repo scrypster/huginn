@@ -70,6 +70,7 @@ func initTools(
 	toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 	tools.RegisterWorktreeTools(toolReg, cwd)
 	tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+	tools.RegisterClaudeCodeTool(toolReg, cfg.ClaudeCode, cwd, nil)
 
 	// --- Connection (OAuth) tools ---
 	initConnectionTools(cfg, huginnHome, sqlDB, toolReg)
