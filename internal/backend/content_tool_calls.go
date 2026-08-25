@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -13,15 +14,16 @@ import (
 // assistant content. Providers that emit native tool_calls supply their own ids.
 const contentToolCallID = "content_call_1"
 
-// PromoteContentToolCalls lifts a tool invocation that some local models
+// PromoteContentToolCalls lifts tool invocations that some local models
 // (notably qwen2.5-coder:14b on Ollama) emit as assistant content instead of
 // structured tool_calls. Native ToolCalls always win.
 //
-// Content is treated as a tool call only when the entire trimmed message is a
-// single invocation: a JSON object with name+arguments, a <tool_call> fence,
-// or Qwen XML. Surrounding prose is rejected so code samples are not executed.
+// Content is treated as tool calls only when the entire trimmed message is
+// one or more invocations: whitespace-separated JSON objects each with
+// name+arguments, a <tool_call> fence, or Qwen XML. If any leftover prose
+// remains, nothing is promoted so code samples are not executed.
 //
-// When a call is promoted, Content is cleared (same mutual-exclusion rule
+// When calls are promoted, Content is cleared (same mutual-exclusion rule
 // buildRequest applies when sending tool_calls back to the model) and
 // DoneReason becomes "tool_calls" if it was empty or "stop".
 func PromoteContentToolCalls(resp *ChatResponse) {
@@ -37,20 +39,22 @@ func PromoteContentToolCalls(resp *ChatResponse) {
 	if resp.DoneReason == "" || resp.DoneReason == "stop" {
 		resp.DoneReason = "tool_calls"
 	}
-	slog.Debug("backend: promoted content tool call",
+	slog.Debug("backend: promoted content tool calls",
+		"count", len(calls),
 		"name", calls[0].Function.Name,
 		"id", calls[0].ID)
 }
 
-// parseContentToolCalls returns at most one ToolCall when content is a lone
-// tool invocation. It returns nil when content is normal prose or ambiguous.
+// parseContentToolCalls returns tool calls when content is a lone invocation
+// or a whitespace-separated sequence of JSON tool objects. It returns nil
+// when content is normal prose or any object fails name+arguments checks.
 func parseContentToolCalls(content string) []ToolCall {
 	payload, kind, ok := extractLoneToolCallPayload(content)
 	if !ok {
 		return nil
 	}
-	if tc, ok := parseToolCallJSON(payload); ok {
-		return []ToolCall{tc}
+	if calls := parseToolCallJSONStream(payload); len(calls) > 0 {
+		return calls
 	}
 	if kind == "fence" || kind == "qwen_xml" {
 		if tc, ok := parseQwenXMLFunction(payload); ok {
@@ -120,15 +124,36 @@ func looksLikeQwenFunction(s string) bool {
 	return strings.HasPrefix(strings.ToLower(s), "<function=")
 }
 
-func parseToolCallJSON(s string) (ToolCall, bool) {
+// parseToolCallJSONStream decodes one or more whitespace-separated JSON
+// objects from s. Every object must have name+arguments; any decode error
+// or leftover prose causes a full miss (nothing is promoted).
+func parseToolCallJSONStream(s string) []ToolCall {
 	dec := json.NewDecoder(strings.NewReader(s))
-	var raw map[string]json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		return ToolCall{}, false
+	var calls []ToolCall
+	for {
+		var raw map[string]json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil
+		}
+		tc, ok := toolCallFromRaw(raw)
+		if !ok {
+			return nil
+		}
+		calls = append(calls, tc)
 	}
-	if !decoderAtEOF(dec) {
-		return ToolCall{}, false
+	if len(calls) == 0 {
+		return nil
 	}
+	for i := range calls {
+		calls[i].ID = fmt.Sprintf("content_call_%d", i+1)
+	}
+	return calls
+}
+
+func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
 	nameRaw, hasName := raw["name"]
 	argsRaw, hasArgs := raw["arguments"]
 	if !hasName || !hasArgs {

@@ -137,6 +137,70 @@ func TestPromoteContentToolCalls_RejectsEmbeddedSample(t *testing.T) {
 	}
 }
 
+// winstonTwoObjectContent is the live 2026-08-25 17:47 ET Winston oneshot
+// sample from qwen2.5-coder:14b: two whitespace-separated JSON objects in
+// one content blob, no structured tool_calls.
+const winstonTwoObjectContent = `{
+  "name": "delegate_to_agent",
+  "arguments": {
+    "agent": "Reggie",
+    "task": "Reply with exactly PONG",
+    "depends_on": [],
+    "file_intents": [],
+    "rationale": "Need a simple confirmation from Reggie."
+  }
+}
+
+{
+  "name": "wait_for_threads",
+  "arguments": {}
+}`
+
+func TestPromoteContentToolCalls_WinstonTwoJSONObjects(t *testing.T) {
+	resp := &ChatResponse{
+		Content:    winstonTwoObjectContent,
+		DoneReason: "stop",
+	}
+	PromoteContentToolCalls(resp)
+
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2; content=%q", len(resp.ToolCalls), resp.Content)
+	}
+	if resp.ToolCalls[0].Function.Name != "delegate_to_agent" {
+		t.Errorf("ToolCalls[0].Name = %q, want delegate_to_agent", resp.ToolCalls[0].Function.Name)
+	}
+	if resp.ToolCalls[0].Function.Arguments["agent"] != "Reggie" {
+		t.Errorf("delegate agent = %v, want Reggie", resp.ToolCalls[0].Function.Arguments["agent"])
+	}
+	if resp.ToolCalls[0].Function.Arguments["task"] != "Reply with exactly PONG" {
+		t.Errorf("delegate task = %v", resp.ToolCalls[0].Function.Arguments["task"])
+	}
+	if resp.ToolCalls[1].Function.Name != "wait_for_threads" {
+		t.Errorf("ToolCalls[1].Name = %q, want wait_for_threads", resp.ToolCalls[1].Function.Name)
+	}
+	if resp.ToolCalls[0].ID == resp.ToolCalls[1].ID {
+		t.Errorf("expected distinct synthetic ids, both %q", resp.ToolCalls[0].ID)
+	}
+	if resp.Content != "" {
+		t.Errorf("Content = %q, want empty after promote", resp.Content)
+	}
+	if resp.DoneReason != "tool_calls" {
+		t.Errorf("DoneReason = %q, want tool_calls", resp.DoneReason)
+	}
+}
+
+func TestPromoteContentToolCalls_TwoObjectsPlusProseRejected(t *testing.T) {
+	content := winstonTwoObjectContent + "\n\nthanks"
+	resp := &ChatResponse{Content: content, DoneReason: "stop"}
+	PromoteContentToolCalls(resp)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("leftover prose produced ToolCalls %+v, want none", resp.ToolCalls)
+	}
+	if resp.Content != content {
+		t.Errorf("content was rewritten: got %q", resp.Content)
+	}
+}
+
 func TestPromoteContentToolCalls_ArgumentsJSONString(t *testing.T) {
 	resp := &ChatResponse{
 		Content:    `{"name":"bash","arguments":"{\"command\":\"hostname\"}"}`,
