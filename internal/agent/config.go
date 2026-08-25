@@ -68,6 +68,14 @@ func (o *Orchestrator) SetTools(reg *tools.Registry, gate *permissions.Gate) {
 	o.permGate = gate
 }
 
+// SetMaxTurns sets the default agentic-loop turn cap used by ChatWithAgent.
+// Values ≤ 0 leave the RunLoop default (50) in place.
+func (o *Orchestrator) SetMaxTurns(n int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.defaultMaxTurns = n
+}
+
 // SetAgentRegistry injects the named agent registry.
 func (o *Orchestrator) SetAgentRegistry(reg *agents.AgentRegistry) {
 	o.mu.Lock()

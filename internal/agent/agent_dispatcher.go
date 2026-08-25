@@ -731,8 +731,12 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	}
 	reg := o.toolRegistry
 	gate := o.permGate
+	maxTurns := o.defaultMaxTurns
 	memReplicator := o.optionalMemoryReplicatorLocked()
 	o.mu.RUnlock()
+	if maxTurns <= 0 {
+		maxTurns = 50
+	}
 
 	// Slow path: named session not found — create it under write lock (double-check pattern).
 	if sess == nil && sessionID != "" {
@@ -902,7 +906,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			sess:             sess,
 			reg:              reg,
 			gate:             gate,
-			maxTurns:         50,
+			maxTurns:         maxTurns,
 			errorPrefix:      "chat",
 			latencySlot:      "agent-chat",
 			sessionID:        sessionID,

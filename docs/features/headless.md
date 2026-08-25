@@ -8,7 +8,7 @@ Run Huginn without a terminal UI on servers, in Docker containers, or CI/CD pipe
 |------|---------|---------|
 | Server mode | `huginn tray --server` | Skip onboarding; serve the web UI on a remote server |
 | Headless mode | `huginn --headless` | No TUI; output to stdout; ideal for scripts |
-| Single-turn | `huginn --print "..."` | Run one message and exit; CI/scripting |
+| Single-turn | `huginn --print "..."` | Run one message through the agentic tool loop and exit; CI/scripting |
 
 ---
 
@@ -37,13 +37,23 @@ huginn --headless --json --print "list all API endpoints"
 
 ### Single-turn mode
 
-Run a message and exit immediately:
+Run a message through the same `RunLoop` / `ChatWithAgent` path as the web UI
+and exit. `--print` and `--agent` work together; `--headless` is not required.
+`--no-tools`, `--max-turns`, and `--dangerously-skip-permissions` apply here
+(not only on the TUI path).
 
 ```bash
 huginn --print "summarize internal/payment/gateway.go"
 # Short form
 huginn -p "summarize internal/payment/gateway.go"
+
+# Named agent + tools, JSON for scripts
+huginn --agent Steve --model qwen3.6:35b --print "Use bash to run hostname" \
+  --dangerously-skip-permissions --json
 ```
+
+`--json` prints `{ "agentOutput": "...", "toolsCalled": [{ "name", "args", "result" }] }`.
+Without `--json`, tokens stream to stdout and a short tool summary goes to stderr.
 
 ### Docker
 
