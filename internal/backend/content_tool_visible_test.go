@@ -169,6 +169,35 @@ func TestParseSSE_PureJSON_DoesNotStreamJSON(t *testing.T) {
 	}
 }
 
+func TestParseSSE_PlainPONG_DoesNotDropFirstChar(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ch := range "PONG" {
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", string(ch))
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	var streamed strings.Builder
+	b := NewExternalBackend(srv.URL)
+	resp, err := b.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "qwen2.5-coder:14b",
+		Messages: []Message{{Role: "user", Content: "ping"}},
+		OnToken:  func(s string) { streamed.WriteString(s) },
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if streamed.String() != "PONG" {
+		t.Errorf("plain PONG streamed %q, want PONG", streamed.String())
+	}
+	if resp.Content != "PONG" {
+		t.Errorf("Content = %q, want PONG", resp.Content)
+	}
+}
+
 func TestParseSSE_FencedSampleStillStreams(t *testing.T) {
 	content := "Here is an example:\n```json\n" + qwen14bContentJSON + "\n```"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -197,5 +226,101 @@ func TestParseSSE_FencedSampleStillStreams(t *testing.T) {
 	}
 	if len(resp.ToolCalls) != 0 {
 		t.Errorf("fenced sample must not execute: %+v", resp.ToolCalls)
+	}
+}
+
+func TestVisibleAssistantContent_EveryPrefixLeftover(t *testing.T) {
+	s := liveMixedJSONProse
+	for i := 1; i <= len(s); i++ {
+		vis := VisibleAssistantContent(s[:i])
+		if strings.Contains(vis, `{"name"`) || strings.HasPrefix(strings.TrimSpace(vis), "{") {
+			continue
+		}
+		if vis != "" && !strings.HasPrefix("PONG", vis) {
+			t.Errorf("prefix %q → visible %q (want empty or PONG prefix)", s[:i], vis)
+		}
+		if vis == "ONG" {
+			t.Fatalf("off-by-one leftover ONG at prefix %q", s[:i])
+		}
+	}
+}
+
+func TestContentToolCallTokenGate_JSONThenPONG_NoDroppedOrForkedChar(t *testing.T) {
+	var tokens []string
+	gate := NewContentToolCallTokenGate(func(s string) { tokens = append(tokens, s) }, nil)
+	for _, r := range liveMixedJSONProse {
+		gate.Push(string(r))
+	}
+	gate.Finish(VisibleAssistantContent(liveMixedJSONProse))
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Fatalf("streamed %q tokens %q, want PONG", got, tokens)
+	}
+	for _, tok := range tokens {
+		if tok == "ONG" {
+			t.Fatalf("forked ONG token %q", tokens)
+		}
+	}
+}
+
+func TestContentToolCallTokenGate_NestedFinishDoesNotForkONG(t *testing.T) {
+	var tokens []string
+	runLoopGate := NewContentToolCallTokenGate(func(s string) { tokens = append(tokens, s) }, nil)
+	parseSSEGate := NewContentToolCallTokenGate(runLoopGate.OnToken, nil)
+	for _, r := range liveMixedJSONProse {
+		parseSSEGate.Push(string(r))
+	}
+	visible := VisibleAssistantContent(liveMixedJSONProse)
+	parseSSEGate.Finish(visible)
+	// StreamDone would close the client bubble here. A second Finish must
+	// not emit leftover again (PONG then orphan ONG).
+	runLoopGate.Finish(visible)
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("nested gates streamed %q tokens %q, want PONG", got, tokens)
+	}
+}
+
+func TestContentToolCallTokenGate_PlainPONG(t *testing.T) {
+	var tokens []string
+	gate := NewContentToolCallTokenGate(func(s string) { tokens = append(tokens, s) }, nil)
+	for _, r := range "PONG" {
+		gate.Push(string(r))
+	}
+	gate.Finish("PONG")
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("plain PONG streamed %q tokens %q", got, tokens)
+	}
+	if len(tokens) > 0 && tokens[0] == "ONG" {
+		t.Fatal("plain PONG dropped the first character")
+	}
+}
+
+func TestContentToolCallTokenGate_FinishAfterCompleteDoesNotRefork(t *testing.T) {
+	var tokens []string
+	gate := NewContentToolCallTokenGate(func(s string) { tokens = append(tokens, s) }, nil)
+	gate.Push(liveMixedJSONProse)
+	gate.Finish("PONG")
+	gate.Finish("PONG")
+	if strings.Join(tokens, "") != "PONG" {
+		t.Errorf("double Finish streamed %q, want single PONG", tokens)
+	}
+}
+
+func TestReadJSONObject_LeftoverAfterClose(t *testing.T) {
+	obj, after, ok := readJSONObject(liveMixedJSONProse)
+	if !ok {
+		t.Fatal("expected to read JSON object")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(obj), "{") {
+		t.Errorf("obj=%q", obj)
+	}
+	if after != "PONG" {
+		t.Errorf("after=%q, want PONG (object-end off-by-one?)", after)
+	}
+	_, afterP, okP := readJSONObject(liveMixedJSONProse[:len(liveMixedJSONProse)-3]) // JSON + "P"
+	if !okP || afterP != "P" {
+		t.Errorf("JSON+P leftover=%q ok=%v, want P", afterP, okP)
 	}
 }

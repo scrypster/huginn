@@ -2009,6 +2009,45 @@ describe('ChatView — message display edge cases', () => {
     expect(streamingMsg?.content).toBe('PONG')
   })
 
+  it('streamed leftover P then ONG stays one PONG bubble', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: '@Steve say PONG and nothing else' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({ type: 'token', content: 'P' })
+    mockWs.simulateMessage({ type: 'token', content: 'ONG' })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streaming = msgs.filter((m: any) => m.role === 'assistant')
+    expect(streaming).toHaveLength(1)
+    expect(streaming[0].content).toBe('PONG')
+  })
+
+  it('plain streamed PONG does not drop the first character', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: 'ping' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    for (const ch of 'PONG') {
+      mockWs.simulateMessage({ type: 'token', content: ch })
+    }
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streamingMsg = msgs.find((m: any) => m.streaming)
+    expect(streamingMsg?.content).toBe('PONG')
+  })
 
   it('completed tool-use message renders the tool call chip', async () => {
     mockMessages['test-session-id'] = [

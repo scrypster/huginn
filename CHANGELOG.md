@@ -43,6 +43,7 @@ All notable changes to Huginn are documented here.
 - Empty agent toolbelt no longer grants every connection provider. `AllowedProviders` fails closed; `provider: "*"` / `connection_id: "*"` remains explicit allow-all. Server auto-approve (`NewGate(true, nil)` skipAll) no longer bypasses an empty toolbelt.
 - In-flight responding status names the addressed `@mention` agent instead of always showing the channel lead; per-space run chrome from owner-scoped events is unchanged
 - Mixed JSON-in-content tool calls (and streamed JSON tokens) are stripped from the user-visible assistant bubble so harness invocations never render as chat text.
+- Streamed leftover after JSON-in-content (`}PONG`) stays one bubble — the first character is not dropped or forked into a nameless `ONG` row, and the sidebar preview keeps `PONG`.
 
 ## [0.4.0] - 2026-06-10
 
