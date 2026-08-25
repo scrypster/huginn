@@ -92,10 +92,10 @@ func externalStreamingTransport() *http.Transport {
 // ExternalBackend calls any OpenAI-compatible /v1/chat/completions endpoint.
 // It is safe for concurrent use.
 type ExternalBackend struct {
-	endpoint    string       // base URL, e.g. "http://localhost:11434"
+	endpoint    string // base URL, e.g. "http://localhost:11434"
 	client      *http.Client
-	model       string       // configured model name
-	keyResolver KeyResolver  // optional; resolves API key sent as Bearer token
+	model       string      // configured model name
+	keyResolver KeyResolver // optional; resolves API key sent as Bearer token
 }
 
 // NewExternalBackend creates an ExternalBackend pointing at endpoint.
@@ -478,6 +478,10 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 		}
 		result.ToolCalls = append(result.ToolCalls, *tc)
 	}
+
+	// qwen2.5-coder:14b (Ollama) often returns finish_reason=stop with a
+	// function-call JSON object in content and no structured tool_calls.
+	PromoteContentToolCalls(result)
 
 	return result, nil
 }
