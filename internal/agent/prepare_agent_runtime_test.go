@@ -8,7 +8,9 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/modelconfig"
+	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/stats"
+	"github.com/scrypster/huginn/internal/tools"
 )
 
 // TestPrepareAgentRuntime_NoRegistries_ReturnsNil asserts that when the
@@ -153,4 +155,42 @@ func TestPrepareAgentRuntime_MemoryDisabled_SkipsVaultDial(t *testing.T) {
 	}
 
 	var _ backend.Backend = mb // keep mb referenced
+}
+
+// TestPrepareAgentRuntime_EmptyToolbelt_CannotExecuteAWS verifies the
+// per-thread executor applies the forked gate: skipAll auto-approve on the
+// parent must not let a hallucinated aws_* tool run when the toolbelt is empty.
+func TestPrepareAgentRuntime_EmptyToolbelt_CannotExecuteAWS(t *testing.T) {
+	mb := newMockBackend("")
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, stats.NoopCollector{}, nil)
+
+	awsTool := &writeMockTool{
+		name:   "aws_ec2_terminate_instance",
+		result: tools.ToolResult{Output: "terminated"},
+	}
+	reg := tools.NewRegistry()
+	reg.Register(awsTool)
+	reg.TagTools([]string{"aws_ec2_terminate_instance"}, "aws")
+
+	o.SetTools(reg, permissions.NewGate(true, nil))
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Locked", MemoryEnabled: false})
+	o.SetAgentRegistry(agentReg)
+
+	rt, err := o.PrepareAgentRuntime(context.Background(), "Locked")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("expected a runtime")
+	}
+	defer rt.Cleanup()
+
+	_, execErr := rt.ExecuteTool(context.Background(), "aws_ec2_terminate_instance", nil)
+	if execErr == nil || !strings.Contains(execErr.Error(), "permission denied") {
+		t.Fatalf("expected permission denied for aws_* on empty toolbelt, got %v", execErr)
+	}
+	if n := callCount(awsTool); n != 0 {
+		t.Fatalf("empty toolbelt executor ran aws_* %d time(s)", n)
+	}
 }

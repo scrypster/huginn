@@ -2250,8 +2250,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		models.Reasoner = cfg.ReasonerModel
 	}
 
-	// Permissions gate for server mode: auto-approve all tool calls (headless).
-	// Also used by the relay dispatcher to deliver remote permission responses.
+	// Permissions gate for server mode: auto-approve prompts (headless).
+	// skipAll is not allow-all-providers — each agent run forks this gate
+	// with AllowedProviders from the agent's toolbelt. An empty toolbelt
+	// fails closed. Also used by the relay dispatcher to deliver remote
+	// permission responses.
 	serverGate := permissions.NewGate(true, nil)
 
 	// Orchestrator (minimal setup for serve mode)
@@ -3270,10 +3273,21 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// notes, web, GitHub CLI) filtered by each agent's local_tools config —
 		// intentional parity with TUI mode.
 		tm.SetToolRegistry(toolReg)
-		// Gate-wrapped executor: server mode uses auto-approve (NewGate(true,nil)).
-		// Captured here so threadmgr stays free of the permissions package.
-		// Future interactive modes can swap in a gate that prompts the user.
+		// Legacy fallback executor (used only when the runtime preparer is
+		// unset). Production threads go through PrepareAgentRuntime, which
+		// forks serverGate with the agent's AllowedProviders. skipAll here
+		// means auto-approve, not "every provider in the global registry".
 		tm.SetToolExecutor(func(ctx context.Context, name string, args map[string]any) (string, error) {
+			if t, ok := toolReg.Get(name); ok {
+				if !serverGate.Check(permissions.PermissionRequest{
+					ToolName: name,
+					Level:    t.Permission(),
+					Args:     args,
+					Provider: toolReg.ProviderFor(name),
+				}) {
+					return "", fmt.Errorf("permission denied")
+				}
+			}
 			return toolReg.Execute(ctx, name, args)
 		})
 

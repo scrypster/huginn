@@ -432,11 +432,31 @@ func TestDecisionConstants_Distinct(t *testing.T) {
 
 func TestGate_AllowedProviders_NilAllowsAll(t *testing.T) {
 	g := NewGate(false, func(r PermissionRequest) Decision { return Allow })
-	// nil allowedProviders — any provider allowed
+	// nil allowedProviders — any provider allowed (legacy / unscoped gate)
 	g.SetAllowedProviders(nil)
 	req := PermissionRequest{ToolName: "slack_post", Level: tools.PermRead, Provider: "slack"}
 	if !g.Check(req) {
 		t.Error("expected allowed when allowedProviders is nil")
+	}
+}
+
+func TestGate_AllowedProviders_EmptyMapDeniesExternal(t *testing.T) {
+	// Empty map is fail-closed. skipAll auto-approves prompts; it must not
+	// grant every provider just because the toolbelt was empty.
+	g := NewGate(true, nil)
+	g.SetAllowedProviders(map[string]bool{})
+	req := PermissionRequest{ToolName: "aws_ec2_terminate_instance", Level: tools.PermWrite, Provider: "aws"}
+	if g.Check(req) {
+		t.Error("expected empty AllowedProviders to deny aws even when skipAll=true")
+	}
+}
+
+func TestGate_AllowedProviders_WildcardAllowsAll(t *testing.T) {
+	g := NewGate(true, nil)
+	g.SetAllowedProviders(map[string]bool{"*": true})
+	req := PermissionRequest{ToolName: "aws_ec2_terminate_instance", Level: tools.PermWrite, Provider: "aws"}
+	if !g.Check(req) {
+		t.Error("expected provider \"*\" to allow aws")
 	}
 }
 
