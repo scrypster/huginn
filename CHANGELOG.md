@@ -5,7 +5,7 @@ All notable changes to Huginn are documented here.
 ## [Unreleased]
 
 ### Fixed
-- Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them. One or more whitespace-separated `{"name","arguments"}` objects in a single content blob are all promoted (Winston oneshot sent two).
+- Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them. One or more whitespace-separated `{"name","arguments"}` objects in a single content blob are all promoted (Winston oneshot sent two). Mixed JSON-then-prose (and streamed JSON tokens) is stripped from the user-visible assistant bubble so harness invocations never render as chat text.
 
 ## [0.4.0] - 2026-06-10
 

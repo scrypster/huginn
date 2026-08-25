@@ -277,7 +277,7 @@ func TestParseSSE_NativeToolCallsNotDoubleParsed(t *testing.T) {
 	if resp.ToolCalls[0].ID != "call_native" || resp.ToolCalls[0].Function.Name != "read_file" {
 		t.Errorf("expected native read_file, got %+v", resp.ToolCalls[0])
 	}
-	if resp.Content != qwen14bContentJSON {
-		t.Errorf("native path should keep content, got %q", resp.Content)
+	if resp.Content != "" {
+		t.Errorf("native path should strip echoed tool JSON from Content, got %q", resp.Content)
 	}
 }

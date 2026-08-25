@@ -1721,6 +1721,33 @@ describe('ChatView — message display edge cases', () => {
     expect(streamingMsg?.content).toBe('hello world')
   })
 
+  it('does not show leading tool-call JSON in the assistant bubble', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: '@Steve say PONG and nothing else' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '{"name": "bash", "arguments": {"command": "echo PONG"}}PONG',
+        agent: 'Steve',
+        streaming: true,
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    const html = wrapper.html()
+    expect(html).toContain('PONG')
+    expect(html).not.toContain('{"name"')
+    expect(html).not.toContain('"arguments"')
+
+    mockWs.simulateMessage({ type: 'token', content: '' })
+    const msgs = mockGetMessages('test-session-id')
+    const streamingMsg = msgs.find((m: any) => m.streaming)
+    expect(streamingMsg?.content).toBe('PONG')
+  })
+
   it('completed tool-use message renders the tool call chip', async () => {
     mockMessages['test-session-id'] = [
       {

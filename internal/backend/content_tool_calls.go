@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -128,29 +129,78 @@ func looksLikeQwenFunction(s string) bool {
 // objects from s. Every object must have name+arguments; any decode error
 // or leftover prose causes a full miss (nothing is promoted).
 func parseToolCallJSONStream(s string) []ToolCall {
-	dec := json.NewDecoder(strings.NewReader(s))
-	var calls []ToolCall
-	for {
-		var raw map[string]json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil
-		}
-		tc, ok := toolCallFromRaw(raw)
-		if !ok {
-			return nil
-		}
-		calls = append(calls, tc)
-	}
-	if len(calls) == 0 {
+	calls, leftover, ok := parseLeadingToolCallJSONStream(s)
+	if !ok || strings.TrimSpace(leftover) != "" {
 		return nil
 	}
+	return calls
+}
+
+// parseLeadingToolCallJSONStream is the display-safe sibling of
+// parseToolCallJSONStream: it accepts leftover prose after one or more
+// valid tool objects instead of treating leftover as a full miss.
+func parseLeadingToolCallJSONStream(s string) (calls []ToolCall, leftover string, ok bool) {
+	rest := s
+	for {
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		if rest == "" {
+			break
+		}
+		if rest[0] != '{' {
+			if len(calls) == 0 {
+				return nil, "", false
+			}
+			return withContentCallIDs(calls), rest, true
+		}
+		obj, after, parsed := readJSONObject(rest)
+		if !parsed {
+			if len(calls) == 0 {
+				return nil, "", false
+			}
+			return withContentCallIDs(calls), rest, true
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(obj), &raw); err != nil {
+			return nil, "", false
+		}
+		tc, valid := toolCallFromRaw(raw)
+		if !valid {
+			if len(calls) == 0 {
+				return nil, "", false
+			}
+			return withContentCallIDs(calls), rest, true
+		}
+		calls = append(calls, tc)
+		rest = after
+	}
+	if len(calls) == 0 {
+		return nil, "", false
+	}
+	return withContentCallIDs(calls), "", true
+}
+
+func withContentCallIDs(calls []ToolCall) []ToolCall {
 	for i := range calls {
 		calls[i].ID = fmt.Sprintf("content_call_%d", i+1)
 	}
 	return calls
+}
+
+func readJSONObject(s string) (obj, after string, ok bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return "", "", false
+	}
+	trim := bytes.TrimSpace(raw)
+	if len(trim) == 0 || trim[0] != '{' {
+		return "", "", false
+	}
+	off := dec.InputOffset()
+	if off < 0 || int(off) > len(s) {
+		return "", "", false
+	}
+	return string(trim), s[off:], true
 }
 
 func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
@@ -329,5 +379,278 @@ func newContentToolCall(name string, args map[string]any) ToolCall {
 			Name:      name,
 			Arguments: args,
 		},
+	}
+}
+
+// VisibleAssistantContent returns the user-visible remainder of assistant
+// content after removing a leading tool-call JSON/XML prefix. Code samples
+// with leading prose, fenced JSON that is not a lone invocation, and other
+// ordinary text are returned unchanged.
+//
+// This does not promote or execute anything. PromoteContentToolCalls still
+// requires the entire trimmed message to be tool objects.
+func VisibleAssistantContent(content string) string {
+	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
+		return leftover
+	}
+	return content
+}
+
+// RevealContentToolCalls replaces Content with its user-visible remainder so
+// harness JSON never lands in the transcript. Safe to call after
+// PromoteContentToolCalls (pure tool JSON is already empty).
+func RevealContentToolCalls(resp *ChatResponse) {
+	if resp == nil {
+		return
+	}
+	resp.Content = VisibleAssistantContent(resp.Content)
+}
+
+func stripLeadingContentToolCalls(content string) (leftover string, stripped bool) {
+	s := strings.TrimSpace(content)
+	if s == "" {
+		return content, false
+	}
+	if strings.HasPrefix(s, "{") {
+		calls, rest, ok := parseLeadingToolCallJSONStream(s)
+		if ok && len(calls) > 0 {
+			return strings.TrimSpace(rest), true
+		}
+		return content, false
+	}
+	if inner, after, ok := splitLeadingTagged(s, "<tool_call>", "</tool_call>"); ok {
+		if isToolPayload(inner) {
+			return strings.TrimSpace(after), true
+		}
+		return content, false
+	}
+	if looksLikeQwenFunction(s) {
+		if inner, after, ok := splitLeadingQwenFunction(s); ok {
+			if _, parsed := parseQwenXMLFunction(inner); parsed {
+				return strings.TrimSpace(after), true
+			}
+		}
+	}
+	return content, false
+}
+
+func isToolPayload(s string) bool {
+	if len(parseToolCallJSONStream(s)) > 0 {
+		return true
+	}
+	if _, ok := parseQwenXMLFunction(s); ok {
+		return true
+	}
+	if _, ok := parseNameParenArgs(s); ok {
+		return true
+	}
+	return false
+}
+
+func splitLeadingTagged(s, open, close string) (inner, after string, ok bool) {
+	lower := strings.ToLower(s)
+	if !strings.HasPrefix(lower, open) {
+		return "", "", false
+	}
+	idx := strings.Index(lower, close)
+	if idx < 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(s[len(open):idx]), s[idx+len(close):], true
+}
+
+func splitLeadingQwenFunction(s string) (inner, after string, ok bool) {
+	lower := strings.ToLower(s)
+	const close = "</function>"
+	idx := strings.Index(lower, close)
+	if idx < 0 {
+		return "", "", false
+	}
+	end := idx + len(close)
+	return s[:end], s[end:], true
+}
+
+func couldBeContentToolCallPrefix(content string) bool {
+	s := strings.TrimLeftFunc(content, unicode.IsSpace)
+	if s == "" {
+		return true
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(s, "{") {
+		return couldBeJSONToolPrefix(s)
+	}
+	if strings.HasPrefix(lower, "<tool_call>") || strings.HasPrefix(lower, "<function=") {
+		if leftover, stripped := stripLeadingContentToolCalls(s); stripped {
+			return leftover == ""
+		}
+		if strings.HasPrefix(lower, "<tool_call>") && !strings.Contains(lower, "</tool_call>") {
+			return true
+		}
+		if strings.HasPrefix(lower, "<function=") && !strings.Contains(lower, "</function>") {
+			return true
+		}
+		return false
+	}
+	if strings.HasPrefix(s, "```") {
+		return couldBeFenceToolPrefix(s)
+	}
+	return false
+}
+
+func couldBeJSONToolPrefix(s string) bool {
+	s = strings.TrimLeftFunc(s, unicode.IsSpace)
+	if s == "" || s[0] != '{' {
+		return s == ""
+	}
+	obj, _, parsed := readJSONObject(s)
+	if !parsed {
+		return isIncompleteJSONPrefix(s)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(obj), &raw); err != nil {
+		return false
+	}
+	_, ok := toolCallFromRaw(raw)
+	return ok
+}
+
+func isIncompleteJSONPrefix(s string) bool {
+	dec := json.NewDecoder(strings.NewReader(s))
+	var raw json.RawMessage
+	return isIncompleteJSON(dec.Decode(&raw))
+}
+
+func isIncompleteJSON(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return strings.Contains(err.Error(), "unexpected end of JSON")
+}
+
+func couldBeFenceToolPrefix(s string) bool {
+	if !strings.HasPrefix(s, "```") {
+		return false
+	}
+	if body, ok := unwrapWholeMarkdownFence(s); ok {
+		return isToolPayload(body)
+	}
+	rest := s[3:]
+	nl := strings.IndexByte(rest, '\n')
+	if nl < 0 {
+		lang := strings.ToLower(strings.TrimSpace(rest))
+		if lang == "" {
+			return true
+		}
+		for _, cand := range []string{"json", "tool_call", "xml"} {
+			if strings.HasPrefix(cand, lang) || strings.HasPrefix(lang, cand) {
+				return true
+			}
+		}
+		return false
+	}
+	lang := strings.ToLower(strings.TrimSpace(rest[:nl]))
+	switch lang {
+	case "", "json", "tool_call", "xml":
+	default:
+		return false
+	}
+	body := rest[nl+1:]
+	closeIdx := strings.Index(body, "```")
+	if closeIdx < 0 {
+		return true
+	}
+	if strings.TrimSpace(body[closeIdx+3:]) != "" {
+		return false
+	}
+	return isToolPayload(strings.TrimSpace(body[:closeIdx]))
+}
+
+func visibleOrHeldAssistantContent(content string) (visible string, holding bool) {
+	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
+		return leftover, leftover == ""
+	}
+	if couldBeContentToolCallPrefix(content) {
+		return "", true
+	}
+	return content, false
+}
+
+// ContentToolCallTokenGate holds back streamed tokens that still look like a
+// leading tool-call JSON/XML prefix so the chat bubble never paints harness
+// JSON. Leftover prose is emitted as soon as it is recognized.
+type ContentToolCallTokenGate struct {
+	downstreamToken func(string)
+	downstreamEvent func(StreamEvent)
+	raw             string
+	emitted         string
+}
+
+// NewContentToolCallTokenGate wraps OnToken / OnEvent StreamText emitters.
+// A nil gate is returned when both callbacks are nil.
+func NewContentToolCallTokenGate(onToken func(string), onEvent func(StreamEvent)) *ContentToolCallTokenGate {
+	if onToken == nil && onEvent == nil {
+		return nil
+	}
+	return &ContentToolCallTokenGate{downstreamToken: onToken, downstreamEvent: onEvent}
+}
+
+// OnToken implements the ChatRequest.OnToken callback.
+func (g *ContentToolCallTokenGate) OnToken(tok string) {
+	if g == nil || tok == "" {
+		return
+	}
+	g.raw += tok
+	g.flush(false)
+}
+
+// Push is an alias for OnToken used by the SSE parser.
+func (g *ContentToolCallTokenGate) Push(delta string) {
+	g.OnToken(delta)
+}
+
+// Finish emits any remaining user-visible text. Pass the authoritative
+// visible Content after PromoteContentToolCalls + RevealContentToolCalls
+// so a promoted lone fence/JSON never leaks at end-of-stream.
+func (g *ContentToolCallTokenGate) Finish(visible string) {
+	if g == nil {
+		return
+	}
+	if strings.HasPrefix(visible, g.emitted) {
+		g.emit(visible[len(g.emitted):])
+		g.emitted = visible
+		return
+	}
+	if visible != "" && visible != g.emitted {
+		g.emit(visible)
+		g.emitted = visible
+	}
+}
+
+func (g *ContentToolCallTokenGate) flush(final bool) {
+	vis, holding := visibleOrHeldAssistantContent(g.raw)
+	if holding && !final {
+		return
+	}
+	if final {
+		vis = VisibleAssistantContent(g.raw)
+	}
+	if strings.HasPrefix(vis, g.emitted) {
+		g.emit(vis[len(g.emitted):])
+		g.emitted = vis
+	}
+}
+
+func (g *ContentToolCallTokenGate) emit(s string) {
+	if s == "" {
+		return
+	}
+	if g.downstreamEvent != nil {
+		g.downstreamEvent(StreamEvent{Type: StreamText, Content: s})
+	}
+	if g.downstreamToken != nil {
+		g.downstreamToken(s)
 	}
 }

@@ -528,8 +528,8 @@
                   :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
                 <!-- Message text -->
-                <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
-                  v-html="renderWithMentions(msg.content)" />
+                <div v-if="visibleAssistantText(msg)" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                  v-html="renderWithMentions(visibleAssistantText(msg))" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
                 <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
@@ -1101,6 +1101,7 @@ import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
+import { visibleAssistantContent } from '../utils/visibleAssistantContent'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 
 interface Agent {
@@ -1720,6 +1721,12 @@ function isForActiveSession(msg: WSMessage): boolean {
   return sid === props.sessionId
 }
 
+function visibleAssistantText(msg: { role?: string; content?: string }): string {
+  const content = msg.content ?? ''
+  if (msg.role !== 'assistant') return content
+  return visibleAssistantContent(content)
+}
+
 function isMemoryToolName(name: string): boolean {
   return name.startsWith('muninn_')
 }
@@ -2071,6 +2078,7 @@ watch(wsRef, (ws) => {
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
       if (streamMsg?.streaming) {
         streamMsg.content += msg.content ?? ''
+        streamMsg.content = visibleAssistantContent(streamMsg.content)
         scrollToBottom()
         return
       }
@@ -2079,7 +2087,7 @@ watch(wsRef, (ws) => {
       msgs.push({
         id: `h-${Date.now()}`,
         role: 'assistant',
-        content: msg.content ?? '',
+        content: visibleAssistantContent(msg.content ?? ''),
         streaming: true,
         agent: selectedAgentName.value || undefined,
         createdAt: new Date().toISOString(),
@@ -2185,7 +2193,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       const msgs = getMessages(props.sessionId)
       const last = msgs.at(-1)
       const agentName = last?.agent ?? 'Agent'
-      const preview = last?.content?.slice(0, 80) ?? ''
+      const preview = visibleAssistantContent(last?.content ?? '').slice(0, 80)
       notify(
         agentName,
         preview || 'Finished responding',

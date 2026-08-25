@@ -222,6 +222,39 @@ func TestRunLoop_ContentJSONExecutesTool(t *testing.T) {
 	}
 }
 
+func TestRunLoop_ContentJSONThenProseHidesJSONAndDoesNotExecute(t *testing.T) {
+	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
+	var streamed strings.Builder
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{Content: mixed, DoneReason: "stop"},
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "@Steve say PONG and nothing else"}},
+		OnToken:  func(s string) { streamed.WriteString(s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("mixed JSON+prose must not execute bash, callCount=%d", tool.callCount)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+	if strings.Contains(streamed.String(), `{"name"`) {
+		t.Errorf("tool JSON leaked into OnToken: %q", streamed.String())
+	}
+	if streamed.String() != "PONG" {
+		t.Errorf("streamed %q, want PONG", streamed.String())
+	}
+}
+
 func TestRunLoop_ContentProseDoesNotExecuteTool(t *testing.T) {
 	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
 	mb := &mockBackend{
