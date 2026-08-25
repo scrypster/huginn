@@ -49,11 +49,11 @@ func providerDisplayName(slug string) string {
 	return strings.ToUpper(slug[:1]) + slug[1:]
 }
 
-// extractRoleBlurb returns the role text for the card's Role line.
+// ExtractRoleBlurb returns a one-line role summary for UI lists and capability cards.
 // If descriptionOverride is non-empty, it is used directly.
 // Otherwise, the first sentence of systemPrompt is extracted (max 200 chars).
 // "You are <Name>, " prefix is stripped.
-func extractRoleBlurb(systemPrompt, descriptionOverride string) string {
+func ExtractRoleBlurb(systemPrompt, descriptionOverride string) string {
 	if descriptionOverride != "" {
 		return descriptionOverride
 	}
@@ -112,7 +112,7 @@ func BuildCapabilityCard(in CapabilityCardInput, infoFn ModelInfoFn) string {
 	sb.WriteString("\n")
 
 	// Role
-	if role := extractRoleBlurb(in.SystemPrompt, in.Description); role != "" {
+	if role := ExtractRoleBlurb(in.SystemPrompt, in.Description); role != "" {
 		sb.WriteString("  Role: ")
 		sb.WriteString(role)
 		sb.WriteString("\n")

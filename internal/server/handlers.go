@@ -316,6 +316,12 @@ func redactAgentDef(a agents.AgentDef) agents.AgentDef {
 	if a.LocalTools == nil {
 		a.LocalTools = []string{}
 	}
+	// Legacy YAML often has no description key. Fill a display fallback from
+	// the system prompt so list/GET never surface an empty description when a
+	// role blurb can be derived. Disk is unchanged until the next save.
+	if a.Description == "" {
+		a.Description = agents.ExtractRoleBlurb(a.SystemPrompt, "")
+	}
 	return a
 }
 
@@ -425,6 +431,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if err := incoming.ApplyMemoryType(); err != nil {
 		jsonError(w, 400, "invalid memory_type: "+err.Error())
 		return
+	}
+	// Persist a one-line description when the client omitted one so list rows
+	// never have to render a "No description" placeholder.
+	if incoming.Description == "" {
+		incoming.Description = agents.ExtractRoleBlurb(incoming.SystemPrompt, "")
 	}
 	if err := incoming.Validate(); err != nil {
 		jsonError(w, 422, "invalid agent: "+err.Error())

@@ -123,6 +123,29 @@ func TestBuildCapabilityCard_LowTierNoTools(t *testing.T) {
 	}
 }
 
+func TestExtractRoleBlurb(t *testing.T) {
+	tests := []struct {
+		name     string
+		prompt   string
+		override string
+		want     string
+	}{
+		{"override wins", "You are Steve, a coder.", "Codes and reviews PRs", "Codes and reviews PRs"},
+		{"strips name prefix", "You are Steve, a coder. Use tools.", "", "a coder"},
+		{"first sentence only", "Reviews pull requests for regressions. Then files issues.", "", "Reviews pull requests for regressions"},
+		{"empty prompt", "", "", ""},
+		{"whitespace prompt", "   ", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := agents.ExtractRoleBlurb(tt.prompt, tt.override)
+			if got != tt.want {
+				t.Fatalf("ExtractRoleBlurb(%q, %q) = %q, want %q", tt.prompt, tt.override, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildCapabilityCard_SystemPromptTruncation(t *testing.T) {
 	long := "You are Verbose, " + strings.Repeat("a", 300)
 	in := agents.CapabilityCardInput{

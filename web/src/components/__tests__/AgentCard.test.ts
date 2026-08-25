@@ -26,9 +26,18 @@ describe('AgentCard', () => {
     expect(wrapper.text()).toContain('My helpful agent')
   })
 
-  it('shows "No description" when description is absent', () => {
+  it('never renders the raw "No description" placeholder', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ system_prompt: 'You are Steve, a coder. Use tools.' }) },
+    })
+    expect(wrapper.text()).toContain('a coder')
+    expect(wrapper.text()).not.toContain('No description')
+  })
+
+  it('falls back to a default line when no description or prompt is available', () => {
     const wrapper = mount(AgentCard, { props: { agent: makeAgent() } })
-    expect(wrapper.text()).toContain('No description')
+    expect(wrapper.text()).toContain('Ready to chat')
+    expect(wrapper.text()).not.toContain('No description')
   })
 
   it('shows heartbeat badge when heartbeat_enabled is true', () => {

@@ -23,13 +23,19 @@ vi.mock('../../composables/useAgents', () => {
   }
 })
 
-// Stub apiFetch used by openDM
+const mockOpenSpaceDM = vi.hoisted(() => vi.fn())
+
+vi.mock('../../composables/useSpaces', () => ({
+  useSpaces: () => ({
+    openDM: mockOpenSpaceDM,
+  }),
+  wireSpaceWS: vi.fn(),
+}))
+
+// Stub remaining API used by the agent editor
 vi.mock('../../composables/useApi', async (importOriginal) => {
   const orig = await importOriginal<any>()
-  const mockedApiFetch = vi.fn().mockImplementation(async (path: string) => {
-    if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
-    return {}
-  })
+  const mockedApiFetch = vi.fn().mockResolvedValue({})
   return {
     ...orig,
     apiFetch: mockedApiFetch,
@@ -84,10 +90,9 @@ describe('AgentsView', () => {
     await router.isReady()
     ;((_useAgents() as any).agents as any).value = []
     ;((_useAgents() as any).loading as any).value = false
-    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
-      return {}
-    })
+    vi.mocked(apiFetch).mockResolvedValue({})
+    mockOpenSpaceDM.mockReset()
+    mockOpenSpaceDM.mockResolvedValue({ id: 'space-123', kind: 'dm', leadAgent: 'Alpha' })
   })
 
   it('shows empty state when agents list is empty and not loading', async () => {
@@ -112,6 +117,7 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(wrapper.findAll('[data-testid="agent-card"]')).toHaveLength(2)
     expect(wrapper.text()).not.toContain('Select an agent')
+    expect(wrapper.text()).not.toContain('No description')
   })
 
   it('openDM navigates to /space/:id on success', async () => {
@@ -143,11 +149,7 @@ describe('AgentsView', () => {
   })
 
   it('openDM falls back to /agents/:name if DM fetch fails', async () => {
-    // Override the mock so DM fetch fails while other calls (e.g. skills load) succeed.
-    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/v1/spaces/dm/')) throw new Error('fail')
-      return {}
-    })
+    mockOpenSpaceDM.mockResolvedValueOnce(null)
     ;((_useAgents() as any).agents as any).value = [
       { name: 'Alpha', color: '#ff0', icon: 'A', model: 'gpt-4' },
     ]

@@ -7,6 +7,8 @@ const {
   mockApiFetch,
   mockAgents,
   mockLoading,
+  mockUpdateAgent,
+  mockOpenSpaceDM,
   mockRouterPush,
   mockRouterReplace,
   mockConnectionsList,
@@ -17,6 +19,8 @@ const {
   mockApiFetch: vi.fn(),
   mockAgents: { value: [] as any[] },
   mockLoading: { value: false },
+  mockUpdateAgent: vi.fn(),
+  mockOpenSpaceDM: vi.fn(),
   mockRouterPush: vi.fn(),
   mockRouterReplace: vi.fn(),
   mockConnectionsList: vi.fn().mockResolvedValue([]),
@@ -48,11 +52,17 @@ vi.mock('../../../composables/useApi', () => ({
 
 vi.mock('../../../composables/useAgents', () => ({
   useAgents: () => ({
-    agents: ref(mockAgents.value),
+    agents: mockAgents,
     loading: ref(mockLoading.value),
-    updateAgent: vi.fn(),
+    updateAgent: mockUpdateAgent,
     removeAgent: vi.fn(),
     fetchAgents: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
+
+vi.mock('../../../composables/useSpaces', () => ({
+  useSpaces: () => ({
+    openDM: mockOpenSpaceDM,
   }),
 }))
 
@@ -81,16 +91,25 @@ function mountHarness(agentName?: string) {
 
 beforeEach(() => {
   mockApiFetch.mockReset()
+  mockUpdateAgent.mockReset()
+  mockOpenSpaceDM.mockReset()
   mockRouterPush.mockReset()
   mockRouterReplace.mockReset()
   mockConnectionsList.mockReset()
   mockAgentsGet.mockReset()
   mockAgentsUpdate.mockReset()
   mockValidateCapabilityMatrix.mockReset()
+  mockAgents.value = []
   mockConnectionsList.mockResolvedValue([])
   mockAgentsGet.mockResolvedValue({})
   mockAgentsUpdate.mockResolvedValue({})
   mockValidateCapabilityMatrix.mockResolvedValue({ valid: true, decisions: [] })
+  mockOpenSpaceDM.mockResolvedValue({ id: 'space-steve', kind: 'dm', leadAgent: 'Steve' })
+  mockUpdateAgent.mockImplementation((name: string, patch: Record<string, unknown>) => {
+    const idx = mockAgents.value.findIndex((a: { name: string }) => a.name === name)
+    if (idx >= 0) mockAgents.value[idx] = { ...mockAgents.value[idx], ...patch }
+    else mockAgents.value.push({ name, ...patch })
+  })
 })
 
 describe('useAgentsViewState', () => {
@@ -114,16 +133,16 @@ describe('useAgentsViewState', () => {
   })
 
   it('openDM routes to DM space when lookup succeeds', async () => {
-    mockApiFetch.mockResolvedValueOnce({ id: 'space-123' })
+    mockOpenSpaceDM.mockResolvedValueOnce({ id: 'space-123' })
     const { state } = mountHarness()
     await state.openDM({ name: 'Alpha' })
 
-    expect(mockApiFetch).toHaveBeenCalledWith('/api/v1/spaces/dm/Alpha')
+    expect(mockOpenSpaceDM).toHaveBeenCalledWith('Alpha')
     expect(mockRouterPush).toHaveBeenCalledWith('/space/space-123')
   })
 
   it('openDM falls back to agent route when lookup fails', async () => {
-    mockApiFetch.mockRejectedValueOnce(new Error('failed'))
+    mockOpenSpaceDM.mockResolvedValueOnce(null)
     const { state } = mountHarness()
     await state.openDM({ name: 'Alpha' })
 
@@ -171,6 +190,42 @@ describe('useAgentsViewState', () => {
     expect(state.form.value.local_tools).toEqual([])
     expect(state.showLocalAllowAllConfirm.value).toBe(false)
     expect(state.dirty.value).toBe(true)
+  })
+
+  it('save of a new agent updates the agent list and opens that DM without a reload', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+
+    state.form.value.name = 'Steve'
+    state.form.value.model = 'qwen2.5-coder:7b'
+    state.form.value.system_prompt = 'You are Steve, a coder. Use tools.'
+    state.form.value.description = ''
+
+    await state.save()
+    await flushPromises()
+
+    expect(mockAgentsUpdate).toHaveBeenCalled()
+    expect(mockAgents.value.map((a: { name: string }) => a.name)).toContain('Steve')
+    expect(mockOpenSpaceDM).toHaveBeenCalledWith('Steve')
+    expect(mockRouterPush).toHaveBeenCalledWith('/space/space-steve')
+  })
+
+  it('save derives a description from the system prompt instead of persisting empty', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+
+    state.form.value.name = 'Steve'
+    state.form.value.model = 'qwen2.5-coder:7b'
+    state.form.value.system_prompt = 'You are Steve, a coder. Use tools.'
+    state.form.value.description = ''
+
+    await state.save()
+    await flushPromises()
+
+    const payload = mockAgentsUpdate.mock.calls[0]?.[1] as { description?: string }
+    expect(payload.description).toBe('a coder')
+    expect(payload.description).not.toBe('No description')
+    expect(mockAgents.value[0]?.description).toBe('a coder')
   })
 
   it('toggleConnectionsAllowAll toggles explicit assignable connections', async () => {

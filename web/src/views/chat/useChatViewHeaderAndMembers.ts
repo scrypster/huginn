@@ -1,4 +1,5 @@
 import { ref, computed, nextTick, watch, type Ref } from 'vue'
+import { agentDisplayDescription } from '../../utils/agentDescription'
 
 type SessionLike = { id: string; title?: string }
 type SpaceLike = { leadAgent: string; memberAgents: string[] } | null
@@ -7,6 +8,7 @@ type AgentLike = {
   icon?: string
   model?: string
   description?: string
+  system_prompt?: string
   vault_name?: string
   color?: string
 }
@@ -79,7 +81,7 @@ export function useChatViewHeaderAndMembers(params: Params) {
       const agent = params.agentsList.value.find(a => a.name === n)
       return {
         name: n,
-        description: agent?.description ?? '',
+        description: agentDisplayDescription(agent ? { ...agent, name: n } : { name: n }),
         vaultName: agent?.vault_name ?? '',
         isLead: n === leadName,
         color: agent?.color ?? '#58a6ff',

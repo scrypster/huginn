@@ -47,6 +47,19 @@ describe('ChannelMemberPanel', () => {
     expect(wrapper.text()).toContain('alice-vault')
   })
 
+  it('never renders the raw "No description" placeholder', () => {
+    const wrapper = mount(ChannelMemberPanel, {
+      props: {
+        members: [
+          { name: 'Steve', description: '', vaultName: '', isLead: true, color: '#58a6ff' },
+        ],
+        open: true,
+      },
+    })
+    expect(wrapper.text()).not.toContain('No description')
+    expect(wrapper.text()).toContain('Ready to chat')
+  })
+
   it('emits toggle when chevron button is clicked', async () => {
     const wrapper = mount(ChannelMemberPanel, {
       props: { members: makeMembers(), open: true },

@@ -1,5 +1,6 @@
-import { ref, onUnmounted } from 'vue'
+import { ref, getCurrentInstance, onUnmounted } from 'vue'
 import { api } from './useApi'
+import type { HuginnWS, WSMessage } from './useHuginnWS'
 
 export interface AgentSummary {
   name: string
@@ -45,23 +46,21 @@ export function useAgents() {
     return agents.value.find(a => a.name.toLowerCase() === name.toLowerCase())
   }
 
-  function wireWS(ws: WebSocket): void {
-    const handler = (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse(event.data as string)
-        if (msg.type === 'agent_changed') {
-          const { name: agentName, action } = msg.payload ?? {}
-          if (action === 'deleted') {
-            removeAgent(agentName as string)
-          } else if (action === 'created' || action === 'updated') {
-            // Re-fetch the full list to get the latest data including all fields.
-            fetchAgents()
-          }
-        }
-      } catch { /* ignore malformed messages */ }
+  function wireWS(ws: HuginnWS): void {
+    if (!ws) return
+    const onChanged = (msg: WSMessage) => {
+      const { name: agentName, action } = msg.payload ?? {}
+      if (action === 'deleted') {
+        removeAgent(agentName as string)
+      } else if (action === 'created' || action === 'updated') {
+        // Re-fetch the full list to get the latest data including all fields.
+        fetchAgents()
+      }
     }
-    ws.addEventListener('message', handler)
-    onUnmounted(() => ws.removeEventListener('message', handler))
+    ws.on('agent_changed', onChanged)
+    if (getCurrentInstance() != null) {
+      onUnmounted(() => ws.off('agent_changed', onChanged))
+    }
   }
 
   return { agents, loading, fetchAgents, updateAgent, removeAgent, getAgentByName, wireWS }
