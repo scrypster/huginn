@@ -31,6 +31,7 @@ export interface Session {
   created_at: string
   updated_at: string
   title?: string
+  external_kind?: string
 }
 
 export interface ToolCallRecord {

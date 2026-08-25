@@ -183,4 +183,37 @@ describe('SessionsView', () => {
     expect(button.exists()).toBe(true)
     expect(button.text()).toContain('refresh')
   })
+
+  it('shows the "claude code" badge for a session bridged from Claude Code', async () => {
+    mockApiSessionsList.mockResolvedValueOnce([
+      { ...sampleSessions[0], external_kind: 'claude-code' },
+    ])
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('claude code')
+  })
+
+  it('shows the claude code badge on a bridged session that has no model yet', async () => {
+    // A session that has just started: ingested from a transcript whose first
+    // assistant turn has not arrived, so Manifest.Model is still empty.
+    // The badge must not be conditional on model.
+    mockApiSessionsList.mockResolvedValueOnce([
+      {
+        id: 'sess-freshlybridged',
+        created_at: '2026-01-16T10:00:00Z',
+        updated_at: '2026-01-16T10:00:00Z',
+        external_kind: 'claude-code',
+      },
+    ])
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('claude code')
+    expect(w.text()).not.toContain('model:')
+  })
+
+  it('does not show the "claude code" badge for a native session', async () => {
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).not.toContain('claude code')
+  })
 })

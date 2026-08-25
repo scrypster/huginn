@@ -19,7 +19,17 @@
             <span class="text-huginn-text text-sm font-mono">{{ sess.id?.slice(0, 12) }}...</span>
             <span class="text-huginn-muted text-xs">{{ formatDate(sess.created_at || sess.updated_at) }}</span>
           </div>
-          <div v-if="sess.model" class="text-huginn-muted text-xs mt-1">model: {{ sess.model }}</div>
+          <div
+            v-if="sess.model || sess.external_kind === 'claude-code'"
+            class="text-huginn-muted text-xs mt-1"
+          >
+            <span v-if="sess.model">model: {{ sess.model }}</span>
+            <span
+              v-if="sess.external_kind === 'claude-code'"
+              class="text-huginn-blue text-xs border border-huginn-border rounded px-1"
+              :class="{ 'ml-2': sess.model }"
+            >claude code</span>
+          </div>
           <div v-if="expanded === sess.id" class="mt-3 pt-3 border-t border-huginn-border">
             <pre class="text-huginn-muted text-xs overflow-x-auto whitespace-pre-wrap">{{ JSON.stringify(sess, null, 2) }}</pre>
           </div>
