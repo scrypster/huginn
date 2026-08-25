@@ -1,6 +1,10 @@
 package modelconfig
 
-import "strings"
+import (
+	"strings"
+	"sync"
+	"unicode"
+)
 
 // CapabilityTier classifies a model's orchestration capability.
 type CapabilityTier string
@@ -65,9 +69,22 @@ func (m *ModelInfo) InferCapabilities() {
 }
 
 // ModelRegistry holds capability info for available models.
-// Populated by probing the backend at startup.
+// Populated by probing the backend at startup and when listing models.
 type ModelRegistry struct {
+	mu        sync.RWMutex
 	Available []ModelInfo `json:"available"`
+}
+
+// ReplaceAvailable swaps the probed model list. Safe for concurrent readers.
+func (r *ModelRegistry) ReplaceAvailable(models []ModelInfo) {
+	if r == nil {
+		return
+	}
+	copied := make([]ModelInfo, len(models))
+	copy(copied, models)
+	r.mu.Lock()
+	r.Available = copied
+	r.mu.Unlock()
 }
 
 // NewRegistry builds an empty registry.
@@ -77,6 +94,11 @@ func NewRegistry(models *Models) *ModelRegistry {
 
 // ModelContextWindow returns the context window for the named model (0 = unknown).
 func (r *ModelRegistry) ModelContextWindow(modelName string) int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, m := range r.Available {
 		if m.Name == modelName {
 			return m.ContextWindow
@@ -88,6 +110,11 @@ func (r *ModelRegistry) ModelContextWindow(modelName string) int {
 // ModelSupportsTools returns true if the named model supports tool calling.
 // Defaults to true when unknown.
 func (r *ModelRegistry) ModelSupportsTools(modelName string) bool {
+	if r == nil {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, m := range r.Available {
 		if m.Name == modelName {
 			return m.SupportsTools
@@ -100,6 +127,11 @@ func (r *ModelRegistry) ModelSupportsTools(modelName string) bool {
 // When Available is empty (e.g. backend not yet probed) it returns true so that
 // callers don't incorrectly treat unprobed models as stale.
 func (r *ModelRegistry) HasModel(modelName string) bool {
+	if r == nil {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if len(r.Available) == 0 {
 		return true // cannot validate yet — optimistic default
 	}
@@ -109,4 +141,46 @@ func (r *ModelRegistry) HasModel(modelName string) bool {
 		}
 	}
 	return false
+}
+
+// IsLowTierToolClass reports 7b-class names that do not reliably emit tool_calls,
+// even when Ollama advertises a `tools` capability. Matches 7b / 3b / tiny as
+// size tokens so 14b / 13b / 70b stay quiet.
+func IsLowTierToolClass(name string) bool {
+	n := strings.ToLower(name)
+	if n == "" {
+		return false
+	}
+	if hasSizeToken(n, "7b") || hasSizeToken(n, "3b") {
+		return true
+	}
+	return strings.HasPrefix(n, "tiny") || hasSizeToken(n, "tiny")
+}
+
+// UnreliableForTools is the picker warning rule: 7b-class names or an explicit
+// SupportsTools=false. 14b+ and probed-tools models without a low-tier name do
+// not warn.
+func UnreliableForTools(name string, supportsTools bool) bool {
+	if IsLowTierToolClass(name) {
+		return true
+	}
+	return !supportsTools
+}
+
+func hasSizeToken(name, token string) bool {
+	for i := 0; i+len(token) <= len(name); i++ {
+		if name[i:i+len(token)] != token {
+			continue
+		}
+		leftOK := i == 0 || !isTokenChar(rune(name[i-1]))
+		rightOK := i+len(token) == len(name) || !isTokenChar(rune(name[i+len(token)]))
+		if leftOK && rightOK {
+			return true
+		}
+	}
+	return false
+}
+
+func isTokenChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }

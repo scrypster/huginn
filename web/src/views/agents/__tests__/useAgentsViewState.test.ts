@@ -265,6 +265,39 @@ describe('useAgentsViewState', () => {
     expect(state.wildcardStripped.value).toBe(true)
   })
 
+  it('selectedModelUnreliableTools warns for 7b even when supportsTools is true', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+    state.availableModels.value = [
+      { name: 'qwen2.5-coder:7b', supportsTools: true, supportsDelegation: false, tier: 'low' },
+      { name: 'qwen2.5-coder:14b', supportsTools: true, supportsDelegation: true, tier: 'medium' },
+    ]
+
+    state.form.value.model = 'qwen2.5-coder:7b'
+    expect(state.selectedModelUnreliableTools.value).toBe(true)
+    expect(state.MODEL_TOOL_WARNING).toBe(
+      'This model is unlikely to use tools or delegate. Grants will not do what you expect.',
+    )
+    expect(state.showLocalAccessToolWarning.value).toBe(false)
+
+    state.form.value.local_tools = ['*']
+    expect(state.showLocalAccessToolWarning.value).toBe(true)
+
+    state.form.value.model = 'qwen2.5-coder:14b'
+    expect(state.selectedModelUnreliableTools.value).toBe(false)
+    expect(state.showLocalAccessToolWarning.value).toBe(false)
+  })
+
+  it('selectedModelUnreliableTools warns when supportsTools is false', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+    state.availableModels.value = [
+      { name: 'custom-coder', supportsTools: false },
+    ]
+    state.form.value.model = 'custom-coder'
+    expect(state.selectedModelUnreliableTools.value).toBe(true)
+  })
+
   it('saveLocalAccessModal bypasses toolbelt validation when saving existing agent', async () => {
     const { state } = mountHarness('Alpha')
     state.form.value.name = 'Alpha'

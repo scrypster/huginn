@@ -522,6 +522,7 @@ func main() {
 	}
 
 	registry := modelconfig.NewRegistry(models)
+	startModelCapabilityProbe(cfg.OllamaBaseURL, registry)
 
 	// 7b. Load agent registry (non-fatal: falls back to defaults)
 	agentsCfg, agentsErr := agentslib.LoadAgents()
@@ -2219,7 +2220,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	serverGate := permissions.NewGate(true, nil)
 
 	// Orchestrator (minimal setup for serve mode)
-	orch, err := agent.NewOrchestrator(b, models, nil, nil, nil, nil)
+	registry := modelconfig.NewRegistry(models)
+	startModelCapabilityProbe(cfg.OllamaBaseURL, registry)
+	orch, err := agent.NewOrchestrator(b, models, nil, registry, nil, nil)
 	if err != nil {
 		return nil, "", nil, err
 	}

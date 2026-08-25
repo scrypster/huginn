@@ -7,12 +7,19 @@ import { useAgents, type AgentSummary } from '../../composables/useAgents'
 import { useSpaces } from '../../composables/useSpaces'
 import { agentDisplayDescription, DEFAULT_AGENT_DESCRIPTION } from '../../utils/agentDescription'
 import { useAgentCapabilityMatrix } from './useAgentCapabilityMatrix'
+import {
+  MODEL_TOOL_WARNING,
+  modelUnreliableForTools,
+} from './modelToolCapabilities'
 
 interface OllamaModel {
   name: string
   source?: string
   size_bytes?: number
   details?: { parameter_size?: string; quantization_level?: string }
+  supportsTools?: boolean
+  supportsDelegation?: boolean
+  tier?: string
 }
 
 type MemoryType = 'none' | 'context' | 'muninndb'
@@ -330,6 +337,16 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       const oa = order[a.provider] ?? 3
       const ob = order[b.provider] ?? 3
       return oa !== ob ? oa - ob : a.provider.localeCompare(b.provider)
+    })
+  })
+
+  const selectedModelUnreliableTools = computed(() => {
+    const name = form.value.model
+    if (!name) return false
+    const listed = availableModels.value.find(m => m.name === name)
+    return modelUnreliableForTools({
+      name,
+      supportsTools: listed?.supportsTools,
     })
   })
 
@@ -721,6 +738,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     form.value.local_tools.length === 1 && form.value.local_tools[0] === '*',
   )
 
+  const showLocalAccessToolWarning = computed(() =>
+    selectedModelUnreliableTools.value && (isLocalAllowAll.value || form.value.local_tools.length > 0),
+  )
+
   const localAccessSummary = computed(() => {
     if (!form.value.local_tools.length) return 'none'
     if (isLocalAllowAll.value) return 'all (including shell ⚡)'
@@ -1106,6 +1127,9 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     modalSkills,
     colorPalette,
     filteredModelGroups,
+    selectedModelUnreliableTools,
+    showLocalAccessToolWarning,
+    MODEL_TOOL_WARNING,
     memoryModes,
     availableSkills,
     modalAddableConnections,
