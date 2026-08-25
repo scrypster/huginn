@@ -6,7 +6,7 @@ All notable changes to Huginn are documented here.
 
 ### Fixed
 - CLI `--print` / `--agent NAME MSG` now run the agentic tool loop (`ChatWithAgent` / `RunLoop`) instead of a bare ChatCompletion. `--print` honors `--agent`, `--model` (via SwapModel), `--no-tools`, `--max-turns`, and `--dangerously-skip-permissions` without requiring `--headless`. `--json` emits `agentOutput` plus `toolsCalled` `{name, args, result}` for each tool.
-- Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them.
+- Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them. One or more whitespace-separated `{"name","arguments"}` objects in a single content blob are all promoted (Winston oneshot sent two).
 
 ## [0.4.0] - 2026-06-10
 
