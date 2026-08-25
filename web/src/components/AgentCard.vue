@@ -24,7 +24,7 @@
     <div class="min-w-0">
       <p class="text-sm font-semibold truncate" style="color:var(--color-text, #e6edf3)">{{ agent.name }}</p>
       <p class="text-xs mt-0.5 leading-relaxed" style="color:var(--color-text-muted, #8b949e);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">
-        {{ agent.description || 'No description' }}
+        {{ displayDescription }}
       </p>
     </div>
 
@@ -56,8 +56,12 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { AgentSummary } from '../composables/useAgents'
+import { agentDisplayDescription } from '../utils/agentDescription'
 
-defineProps<{ agent: AgentSummary }>()
+const props = defineProps<{ agent: AgentSummary }>()
 defineEmits<{ (e: 'click'): void; (e: 'edit'): void }>()
+
+const displayDescription = computed(() => agentDisplayDescription(props.agent))
 </script>

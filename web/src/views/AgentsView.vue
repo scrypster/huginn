@@ -158,6 +158,17 @@
                 class="w-full bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 text-sm text-huginn-text text-center font-bold outline-none focus:border-huginn-blue/50 transition-colors tracking-widest" />
             </div>
 
+            <!-- Description -->
+            <div class="space-y-2">
+              <p class="text-[10px] font-semibold text-huginn-muted uppercase tracking-widest">Description</p>
+              <input
+                data-testid="agent-description-input"
+                v-model="form.description" @input="markDirty"
+                placeholder="One-line role — or leave blank to use the system prompt"
+                maxlength="200"
+                class="w-full bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 text-xs text-huginn-text outline-none focus:border-huginn-blue/50 transition-colors placeholder:text-huginn-muted/40" />
+            </div>
+
             <!-- Memory -->
             <div class="space-y-2">
               <p class="text-[10px] font-semibold text-huginn-muted uppercase tracking-widest">Memory</p>

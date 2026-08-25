@@ -84,6 +84,7 @@ vi.mock('../../composables/useAgents', () => ({
     agents: mockAgents,
     loading: ref(false),
     fetchAgents: mockFetchAgents,
+    wireWS: vi.fn(),
   }),
 }))
 
