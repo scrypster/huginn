@@ -201,6 +201,14 @@ describe('AgentsView', () => {
     expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('✓ Allow all')
   })
 
+  const editorMount = (props: { agentName?: string } = { agentName: 'new' }) => mount(AgentsView, {
+    global: {
+      plugins: [router],
+      stubs: { Teleport: true, Transition: false },
+    },
+    props,
+  })
+
   it('shows the tools warning when picking qwen2.5-coder:7b but not 14b', async () => {
     mockModelsAvailable.mockResolvedValue({
       models: [
@@ -210,12 +218,7 @@ describe('AgentsView', () => {
       builtin_models: [],
       provider_models: [],
     })
-    document.body.innerHTML = ''
-    const wrapper = mount(AgentsView, {
-      attachTo: document.body,
-      global: { plugins: [router] },
-      props: { agentName: 'new' },
-    })
+    const wrapper = editorMount()
     await flushPromises()
 
     await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
@@ -236,8 +239,6 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="model-tools-warning"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="local-access-model-tools-warning"]').exists()).toBe(false)
-
-    wrapper.unmount()
   })
 
   it('shows the picker warning copy when supportsTools is false', async () => {
@@ -248,12 +249,7 @@ describe('AgentsView', () => {
       builtin_models: [],
       provider_models: [],
     })
-    document.body.innerHTML = ''
-    const wrapper = mount(AgentsView, {
-      attachTo: document.body,
-      global: { plugins: [router] },
-      props: { agentName: 'new' },
-    })
+    const wrapper = editorMount()
     await flushPromises()
 
     await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
@@ -266,7 +262,5 @@ describe('AgentsView', () => {
     await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[data-testid="model-picker-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
-
-    wrapper.unmount()
   })
 })

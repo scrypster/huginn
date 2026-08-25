@@ -18,7 +18,6 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/logger"
-	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/stats"
