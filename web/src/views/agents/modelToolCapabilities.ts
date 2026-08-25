@@ -25,8 +25,8 @@ function hasSizeToken(name: string, token: string): boolean {
   while (from <= name.length - token.length) {
     const i = name.indexOf(token, from)
     if (i < 0) return false
-    const left = i === 0 || !isTokenChar(name[i - 1])
-    const right = i + token.length === name.length || !isTokenChar(name[i + token.length])
+    const left = i === 0 || !isTokenChar(name.charAt(i - 1))
+    const right = i + token.length === name.length || !isTokenChar(name.charAt(i + token.length))
     if (left && right) return true
     from = i + 1
   }
