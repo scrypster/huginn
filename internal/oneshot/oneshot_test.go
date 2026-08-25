@@ -28,6 +28,14 @@ func (f *fakeBackend) ChatCompletion(_ context.Context, req backend.ChatRequest)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
+	// --no-tools sends no schemas; answer in one shot instead of emitting a tool_call.
+	if len(req.Tools) == 0 {
+		resp := &backend.ChatResponse{Content: "The hostname is testhost.", DoneReason: "stop"}
+		if req.OnToken != nil {
+			req.OnToken(resp.Content)
+		}
+		return resp, nil
+	}
 	idx := f.call
 	f.call++
 	var resp *backend.ChatResponse
@@ -177,6 +185,9 @@ func TestRun_NoTools_ToolsCalledEmpty(t *testing.T) {
 	}
 	if len(res.ToolsCalled) != 0 {
 		t.Fatalf("toolsCalled = %#v, want empty under --no-tools", res.ToolsCalled)
+	}
+	if res.AgentOutput == "" {
+		t.Error("agentOutput should still be set under --no-tools")
 	}
 	if len(b.lastTools()) != 0 {
 		t.Errorf("--no-tools still sent tool schemas: %v", b.lastTools())
