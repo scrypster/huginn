@@ -8,7 +8,7 @@ function mountHarness() {
   const sessions = ref([{ id: 's1', title: 'Session One' }])
   const sessionId = ref('s1')
   const spaceId = ref('space-1')
-  const activeSpace = ref({ leadAgent: 'Tom', memberAgents: ['Sam'] })
+  const activeSpace = ref({ kind: 'channel', leadAgent: 'Tom', memberAgents: ['Sam'] })
   const agentsList = ref([
     { name: 'Tom', color: '#58a6ff', description: 'Lead', vault_name: 'vault-tom' },
     { name: 'Sam', color: '#3fb950', description: 'Member', vault_name: 'vault-sam' },
@@ -16,6 +16,8 @@ function mountHarness() {
   const selectedAgentName = ref('Tom')
   const selectedAgent = ref(agentsList.value[0])
   const threadPanelOpen = ref(false)
+  const streaming = ref(false)
+  const inFlightUserContent = ref('')
   const renameSession = (id: string, title: string) => {
     const s = sessions.value.find(s => s.id === id)
     if (s) s.title = title
@@ -34,13 +36,15 @@ function mountHarness() {
         selectedAgentName,
         threadPanelOpen,
         selectedAgent,
+        streaming,
+        inFlightUserContent,
       })
       return () => null
     },
   })
 
   mount(Harness)
-  return { state, sessions, threadPanelOpen }
+  return { state, sessions, threadPanelOpen, streaming, inFlightUserContent }
 }
 
 describe('useChatViewHeaderAndMembers', () => {
@@ -76,5 +80,24 @@ describe('useChatViewHeaderAndMembers', () => {
     threadPanelOpen.value = false
     await Promise.resolve()
     expect(state.memberPanelOpen.value).toBe(true)
+  })
+
+  it('displayAgent names the mentioned member during an in-flight turn', async () => {
+    const { state, streaming, inFlightUserContent } = mountHarness()
+    expect(state.displayAgent.value?.name).toBe('Tom')
+
+    streaming.value = true
+    inFlightUserContent.value = '@Sam review this PR'
+    await Promise.resolve()
+    expect(state.displayAgent.value?.name).toBe('Sam')
+  })
+
+  it('displayAgent stays on the lead during an unmentioned in-flight turn', async () => {
+    const { state, streaming, inFlightUserContent } = mountHarness()
+
+    streaming.value = true
+    inFlightUserContent.value = 'what is the status?'
+    await Promise.resolve()
+    expect(state.displayAgent.value?.name).toBe('Tom')
   })
 })

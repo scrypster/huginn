@@ -1743,6 +1743,15 @@ const selectedAgent = computed(() =>
   agentsList.value.find(a => a.name === selectedAgentName.value) ?? null
 )
 
+const inFlightUserContent = computed(() => {
+  if (!streaming.value) return ''
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m?.role === 'user') return m.content ?? ''
+  }
+  return ''
+})
+
 const {
   headerEditing,
   headerEditValue,
@@ -1763,11 +1772,13 @@ const {
   spaceId: computed(() => props.spaceId),
   formatSessionLabel: formatSessionLabel as (s: { id: string; title?: string }) => string,
   renameSession,
-  activeSpace: activeSpace as Ref<{ leadAgent: string; memberAgents: string[] } | null>,
+  activeSpace: activeSpace as Ref<{ kind?: string; leadAgent: string; memberAgents: string[] } | null>,
   agentsList: agentsList as Ref<Array<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string }>>,
   selectedAgentName,
   threadPanelOpen,
   selectedAgent: selectedAgent as Ref<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string } | null>,
+  streaming,
+  inFlightUserContent,
 })
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (headerInputEl satisfies unknown)

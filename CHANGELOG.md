@@ -41,6 +41,7 @@ All notable changes to Huginn are documented here.
 - CLI `--print` / `--agent NAME MSG` now run the agentic tool loop (`ChatWithAgent` / `RunLoop`) instead of a bare ChatCompletion. `--print` honors `--agent`, `--model` (via SwapModel), `--no-tools`, `--max-turns`, and `--dangerously-skip-permissions` without requiring `--headless`. `--json` emits `agentOutput` plus `toolsCalled` `{name, args, result}` for each tool.
 - Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them. One or more whitespace-separated `{"name","arguments"}` objects in a single content blob are all promoted (Winston oneshot sent two).
 - Empty agent toolbelt no longer grants every connection provider. `AllowedProviders` fails closed; `provider: "*"` / `connection_id: "*"` remains explicit allow-all. Server auto-approve (`NewGate(true, nil)` skipAll) no longer bypasses an empty toolbelt.
+- In-flight responding status names the addressed `@mention` agent instead of always showing the channel lead; per-space run chrome from owner-scoped events is unchanged
 
 ## [0.4.0] - 2026-06-10
 
