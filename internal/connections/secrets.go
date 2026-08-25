@@ -3,7 +3,11 @@ package connections
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
@@ -30,7 +34,7 @@ func credsKey(connID string) string { return "creds/" + connID }
 // KeychainStore uses the OS keychain (macOS Keychain, GNOME Keyring,
 // Windows Credential Manager) via go-keyring.
 //
-// Security model
+// # Security model
 //
 // Tokens are serialised as JSON and stored verbatim in the platform keychain.
 // Application-layer encryption is intentionally NOT added on top because:
@@ -184,12 +188,48 @@ func (m *MemoryStore) DeleteCredentials(connID string) error {
 // NewSecretStore returns the best available SecretStore.
 // It probes the OS keychain; if unavailable it falls back to MemoryStore.
 // The fallback is appropriate for CI, Docker, and SSH sessions.
+// keychainProbeTimeout bounds the keychain availability probe. It must be
+// short: it runs on the startup path, before the HTTP server binds.
+const keychainProbeTimeout = 3 * time.Second
+
 func NewSecretStore() SecretStore {
 	ks := &KeychainStore{}
 	testKey := "__huginn_probe__"
-	if err := keyring.Set(keychainService, testKey, "probe"); err == nil {
-		_ = keyring.Delete(keychainService, testKey)
-		return ks
+
+	// Explicit opt-out. The keychain is only used to persist Connections
+	// OAuth tokens; everything else works without it. Set this when running
+	// headless, in CI/Docker, or from a freshly built binary that would
+	// otherwise trigger a per-binary keychain ACL prompt.
+	if v := os.Getenv("HUGINN_NO_KEYCHAIN"); v == "1" || strings.EqualFold(v, "true") {
+		slog.Debug("connections: HUGINN_NO_KEYCHAIN set, using in-memory secret store")
+		return NewMemoryStore()
+	}
+
+	// The probe must not be able to hang. On macOS go-keyring shells out to
+	// the `security` binary, which blocks indefinitely waiting for a GUI
+	// unlock prompt when the keychain is locked or the calling binary has no
+	// ACL entry (keychain ACLs are per-binary, so a freshly built binary
+	// always prompts). A bare keyring.Set therefore never returns the error
+	// this fallback was written for, and startup hangs before the server
+	// binds -- exactly the CI/Docker/SSH case the fallback exists to serve.
+	done := make(chan error, 1)
+	go func() { done <- keyring.Set(keychainService, testKey, "probe") }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			_ = keyring.Delete(keychainService, testKey)
+			return ks
+		}
+		slog.Debug("connections: keychain unavailable, using in-memory secret store", "err", err)
+	case <-keychainProbeTimer():
+		// The goroutine and its `security` subprocess are left to finish on
+		// their own; this runs once per process start, so it cannot accumulate.
+		slog.Warn("connections: keychain probe timed out, using in-memory secret store",
+			"timeout", keychainProbeTimeout)
 	}
 	return NewMemoryStore()
 }
+
+// keychainProbeTimer is a variable so tests can shorten the timeout.
+var keychainProbeTimer = func() <-chan time.Time { return time.After(keychainProbeTimeout) }
