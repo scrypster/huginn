@@ -253,6 +253,12 @@
         </div>
       </div>
 
+      <div v-if="displayAgentUnreliableTools"
+        data-testid="chat-model-tools-warning"
+        class="flex-shrink-0 px-5 py-1.5 border-b border-huginn-yellow/25 bg-huginn-yellow/8">
+        <p class="text-[11px] text-huginn-yellow leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+      </div>
+
       <!-- ── In-chat search bar (Ctrl+F) ────────────────────────── -->
       <Transition
         enter-active-class="transition-all duration-150 ease-out"
@@ -528,7 +534,16 @@
                   :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
                 <!-- Message text -->
-                <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                <div v-if="parseToolFailContent(msg.content)"
+                  data-testid="tool-fail-chip"
+                  class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                         border border-huginn-red/30 bg-huginn-red/8 text-huginn-red">
+                  <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <span>{{ parseToolFailContent(msg.content) }}</span>
+                </div>
+                <div v-else-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
@@ -965,6 +980,11 @@
 
       <!-- ── Input area ──────────────────────────────────────────── -->
       <div class="px-4 pb-4 flex-shrink-0">
+        <p v-if="displayAgentUnreliableTools"
+          data-testid="composer-model-tools-warning"
+          class="text-[10px] text-huginn-yellow/90 leading-snug px-1 pb-2">
+          {{ MODEL_TOOL_WARNING }}
+        </p>
         <ChatEditor
           ref="chatEditorRef"
           :disabled="streaming"
@@ -1101,6 +1121,8 @@ import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
+import { parseToolFailContent } from './chat/toolFailMessage'
+import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 
 interface Agent {
@@ -1627,6 +1649,13 @@ const {
 })
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (headerInputEl satisfies unknown)
+
+const displayAgentUnreliableTools = computed(() =>
+  modelUnreliableForTools({
+    name: displayAgent.value?.model,
+    supportsTools: (displayAgent.value as { supportsTools?: boolean } | null)?.supportsTools,
+  }),
+)
 
 function exportSession() {
   if (!messages.value.length) return

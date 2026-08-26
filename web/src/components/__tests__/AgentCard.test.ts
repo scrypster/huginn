@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AgentCard from '../AgentCard.vue'
 import type { AgentSummary } from '../../composables/useAgents'
+import { MODEL_TOOL_WARNING } from '../../views/agents/modelToolCapabilities'
 
 function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
   return {
@@ -70,5 +71,26 @@ describe('AgentCard', () => {
     const wrapper = mount(AgentCard, { props: { agent: makeAgent() } })
     await wrapper.find('[data-testid="agent-card"]').trigger('click')
     expect(wrapper.emitted('click')).toHaveLength(1)
+  })
+
+  it('shows the tools warning for a 7b model', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ name: 'Steve', model: 'qwen2.5-coder:7b' }) },
+    })
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  it('shows the tools warning when supportsTools is false', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ name: 'Custom', model: 'custom-coder' }), supportsTools: false },
+    })
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  it('hides the tools warning for a 14b model with tools', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ name: 'Chris', model: 'qwen2.5-coder:14b' }), supportsTools: true },
+    })
+    expect(wrapper.find('[data-testid="model-tools-warning"]').exists()).toBe(false)
   })
 })

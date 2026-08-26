@@ -5,12 +5,19 @@ import type { Connection, ToolbeltEntry, SystemToolStatus } from '../../composab
 import { useInstalledSkills } from '../../composables/useSkills'
 import { useAgents, type AgentSummary } from '../../composables/useAgents'
 import { useAgentCapabilityMatrix } from './useAgentCapabilityMatrix'
+import {
+  MODEL_TOOL_WARNING,
+  modelUnreliableForTools,
+} from './modelToolCapabilities'
 
 interface OllamaModel {
   name: string
   source?: string
   size_bytes?: number
   details?: { parameter_size?: string; quantization_level?: string }
+  supportsTools?: boolean
+  supportsDelegation?: boolean
+  tier?: string
 }
 
 type MemoryType = 'none' | 'context' | 'muninndb'
@@ -326,6 +333,21 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       return oa !== ob ? oa - ob : a.provider.localeCompare(b.provider)
     })
   })
+
+  const selectedModelUnreliableTools = computed(() => {
+    const name = form.value.model
+    if (!name) return false
+    const listed = availableModels.value.find(m => m.name === name)
+    return modelUnreliableForTools({
+      name,
+      supportsTools: listed?.supportsTools,
+    })
+  })
+
+  function listedSupportsTools(name: string | undefined): boolean | undefined {
+    if (!name) return undefined
+    return availableModels.value.find(m => m.name === name)?.supportsTools
+  }
 
   function selectModel(name: string, source?: string) {
     form.value.model = name
@@ -1055,6 +1077,9 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     modalSkills,
     colorPalette,
     filteredModelGroups,
+    selectedModelUnreliableTools,
+    listedSupportsTools,
+    MODEL_TOOL_WARNING,
     memoryModes,
     availableSkills,
     modalAddableConnections,
