@@ -538,8 +538,11 @@ describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
     })
     const wrapper = mountComponent({ messages: [msg] })
     expect(wrapper.find('[data-testid="system-fail-line"]').exists()).toBe(true)
-    expect(wrapper.html()).toContain('failed')
+    expect(wrapper.text()).toContain("I couldn't do that.")
+    expect(wrapper.text()).not.toContain('TOOL_FAIL')
+    expect(wrapper.text()).not.toContain('Details')
     expect(wrapper.html()).not.toContain('· done')
+    expect(wrapper.find('[data-testid="system-fail-line"]').attributes('title')).toContain('TOOL_FAIL')
   })
 
   it('bare TOOL_FAIL token is a system chip without an empty reason span', () => {
@@ -550,8 +553,10 @@ describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
     const wrapper = mountComponent({ messages: [msg] })
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text().trim()).toBe('TOOL_FAIL')
-    expect(fail.text()).not.toContain('·')
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("I couldn't do that.")
+    expect(fail.text()).not.toContain('TOOL_FAIL')
+    expect(fail.text()).not.toContain('Details')
+    expect(fail.attributes('title')).toBe('TOOL_FAIL')
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 

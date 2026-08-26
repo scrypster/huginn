@@ -10,6 +10,9 @@ All notable changes to Huginn are documented here.
 - Model picker warns when the selected model cannot reliably use tools (7b / `supportsTools: false`)
 - User `@Name` in a channel or DM addresses that agent for the turn when they are on the space roster (stamped lead no longer swallows the mention). A leftover `@Name` of someone not in the roster still does not address them or extra-spawn a thread
 
+### Changed
+- Fail UX reads as people in a room: **I couldn't do that.** / **I asked Tesla and they haven't come back yet.** / sidebar **Couldn't do that** or **Still waiting on Tesla** — never `TOOL_FAIL` or a debug panel; hover keeps the raw token, tool, and reason
+
 ### Fixed
 - Residual playbook speech (`<wait for X to finish>`, "Once X has finished:", re-typed or invented tool JSON, echoed result objects) is stripped from CLI `agentOutput` and the web assistant bubble after tools ran; invented names are never executed and non-tool code fences stay intact
 - Fenced or bare JSON invocations of granted tools mixed with prose (the qwen2.5-coder "playbook" shape) now promote and execute in order — glue prose stays visible, fences never paint in chat, unknown names stay inert, and a lead that delegates without `wait_for_threads` gets one automatic barrier so specialist results are not abandoned

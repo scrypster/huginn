@@ -228,6 +228,7 @@ function mountChatView(
     global: {
       stubs: {
         Teleport: true,
+        SystemFailLine: false,
         RouterLink: { template: '<a><slot /></a>' },
         ChatEditor: {
           name: 'ChatEditor',
@@ -1382,6 +1383,8 @@ describe('ChatView', () => {
 
     expect(wrapper.html()).toContain('1 tool call')
     expect(wrapper.html()).not.toContain('3 tool calls')
+    expect(wrapper.text()).not.toContain('wait_for_threads')
+    expect(wrapper.text()).not.toContain('delegate_to_agent')
   })
 
   it('delegation_preview_timeout appends auto-approved timeline message', async () => {
@@ -1917,10 +1920,16 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text()).toContain('TOOL_FAIL')
-    expect(fail.text()).toContain('json')
-    expect(wrapper.html()).not.toContain('md-content')
-    expect(wrapper.html()).toContain('failed')
+    expect(fail.text()).toBe("I couldn't do that.")
+    expect(fail.text()).not.toContain('TOOL_FAIL')
+    expect(fail.text()).not.toContain('wait_for_threads')
+    expect(fail.text()).not.toContain('Details')
+    expect(fail.attributes('title')).toContain('TOOL_FAIL')
+    expect(fail.attributes('title')).toContain('json')
+    expect(fail.attributes('aria-description')).toContain('json')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain("Couldn't run")
+    expect(wrapper.text()).not.toMatch(/· failed/)
     expect(wrapper.html()).not.toMatch(/text-huginn-green">· done/)
   })
 
@@ -1938,7 +1947,10 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text()).toContain('DELEGATE_FAIL')
+    expect(fail.text()).toBe("I asked Tesla and they haven't come back yet.")
+    expect(fail.text()).not.toContain('DELEGATE_FAIL')
+    expect(fail.attributes('title')).toContain('DELEGATE_FAIL')
+    expect(fail.attributes('title')).toContain('tesla')
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 
@@ -1957,8 +1969,10 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text().trim()).toBe('TOOL_FAIL')
-    expect(fail.text()).not.toContain('·')
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("I couldn't do that.")
+    expect(fail.text()).not.toContain('TOOL_FAIL')
+    expect(fail.text()).not.toContain('Details')
+    expect(fail.attributes('title')).toBe('TOOL_FAIL')
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 
@@ -1977,8 +1991,9 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text().trim()).toBe('DELEGATE_FAIL')
-    expect(fail.text()).not.toContain('·')
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("They haven't come back yet.")
+    expect(fail.text()).not.toContain('DELEGATE_FAIL')
+    expect(fail.attributes('title')).toBe('DELEGATE_FAIL')
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 
@@ -2920,7 +2935,9 @@ describe('ChatView — model tool capability warning', () => {
     await nextTick()
 
     const chip = wrapper.get('[data-testid="system-fail-line"]')
-    expect(chip.text()).toContain('The "json" tool is not available.')
+    expect(chip.text()).toBe("I couldn't do that.")
+    expect(chip.text()).not.toContain('TOOL_FAIL')
+    expect(chip.attributes('title')).toContain('The "json" tool is not available.')
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 })

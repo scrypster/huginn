@@ -777,7 +777,7 @@ describe('getSessionSpaceId', () => {
     expect(getSessionSpaceId('unknown-session')).toBeNull()
   })
 
-  it('sidebar preview keeps TOOL_FAIL and snake_case underscores', () => {
+  it('sidebar preview humanizes fail tokens and never shows TOOL_FAIL', () => {
     const tl = useSpaceTimeline(SPACE_ID)
     tl.getState().messages.push({
       id: 'm-fail',
@@ -791,9 +791,10 @@ describe('getSessionSpaceId', () => {
 
     const preview = getSpaceLastMessage(SPACE_ID)
     expect(preview).not.toBeNull()
-    expect(preview!.text).toContain('TOOL_FAIL')
-    expect(preview!.text).toContain('json_tool')
-    expect(preview!.text).not.toContain('TOOLFAIL')
+    expect(preview!.text).toContain("Couldn't do that")
+    expect(preview!.text).toContain('Steve:')
+    expect(preview!.text).not.toContain('TOOL_FAIL')
+    expect(preview!.text).not.toContain('wait_for_threads')
   })
 
   it('returns the correct space when multiple spaces are tracked', () => {
@@ -824,8 +825,9 @@ describe('getSessionSpaceId', () => {
     expect(useSpaceTimeline(SPACE_B).getState().messages).toHaveLength(0)
     const snippet = getSpaceLastMessage(SPACE_B)
     expect(snippet).not.toBeNull()
-    expect(snippet!.text).toContain('TOOL_FAIL')
-    expect(snippet!.text).toContain('_')
+    expect(snippet!.text).toContain("Couldn't do that")
+    expect(snippet!.text).not.toContain('TOOL_FAIL')
+    expect(snippet!.text).not.toContain('wait_for_threads')
   })
 })
 

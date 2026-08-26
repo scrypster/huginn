@@ -14,6 +14,11 @@ import {
   isBareFailSpeech,
   isDelegationAnnouncement,
   visibleToolCalls,
+  FAIL_COPY,
+  failVisibleCopy,
+  failDiagnostic,
+  failChipLabel,
+  failDisplayFor,
 } from '../honesty'
 
 describe('parseSystemFailSpeech', () => {
@@ -147,17 +152,61 @@ describe('conflictingTools — deny wins', () => {
   })
 })
 
-describe('plaintextPreview keeps underscores', () => {
-  it('keeps snake_case and TOOL_FAIL underscores', () => {
-    expect(plaintextPreview('TOOL_FAIL: The json tool is not available')).toContain('TOOL_FAIL')
-    expect(plaintextPreview('read_file returned snake_case')).toContain('read_file')
-    expect(plaintextPreview('read_file returned snake_case')).toContain('snake_case')
+describe('plaintextPreview display', () => {
+  it('humanizes fail tokens instead of leaking TOOL_FAIL', () => {
+    expect(plaintextPreview('TOOL_FAIL: The json tool is not available')).toBe(FAIL_COPY.preview)
+    expect(plaintextPreview('TOOL_FAIL: The json tool is not available')).not.toContain('TOOL_FAIL')
+    expect(plaintextPreview('DELEGATE_FAIL: agent tesla is unavailable')).toBe('Still waiting on Tesla')
+    expect(plaintextPreview('Steve: TOOL_FAIL: missing')).toBe(FAIL_COPY.preview)
   })
 
-  it('does not interpret markdown italics', () => {
-    const text = plaintextPreview('Steve: TOOL_FAIL: missing')
-    expect(text).toBe('Steve: TOOL_FAIL: missing')
-    expect(text).not.toBe('Steve: TOOLFAIL: missing')
+  it('keeps snake_case in ordinary speech and does not eat underscores', () => {
+    expect(plaintextPreview('read_file returned snake_case')).toContain('read_file')
+    expect(plaintextPreview('read_file returned snake_case')).toContain('snake_case')
+    expect(plaintextPreview('check TOOL_FAIL in the log')).toBe('check TOOL_FAIL in the log')
+  })
+
+  it('does not preview leftover tool JSON or wait_for_threads', () => {
+    expect(plaintextPreview('{"name":"wait_for_threads","arguments":{}}')).toBe('')
+    expect(plaintextPreview('{"name":"wait_for_threads","arguments":{}}')).not.toContain('wait_for_threads')
+    expect(plaintextPreview('{"name":"bash","arguments":{"command":"x"}}TOOL_FAIL')).toBe(FAIL_COPY.preview)
+  })
+})
+
+describe('fail display copy', () => {
+  it('speaks in the agent voice and keeps the raw token on the diagnostic', () => {
+    expect(failVisibleCopy('TOOL_FAIL: The "json" tool is not available.')).toBe(FAIL_COPY.tool)
+    expect(failVisibleCopy('TOOL_FAIL')).toBe(FAIL_COPY.tool)
+    expect(failVisibleCopy('DELEGATE_FAIL: agent tesla is unavailable')).toBe(
+      'I asked Tesla and they haven\'t come back yet.',
+    )
+    expect(failVisibleCopy('DELEGATE_FAIL')).toBe(FAIL_COPY.delegate)
+    expect(failVisibleCopy('TOOL_FAIL: permission denied', { toolName: 'bash' })).toBe(FAIL_COPY.shell)
+    expect(failChipLabel()).toBe(FAIL_COPY.chip)
+  })
+
+  it('puts token, tool, and reason on the diagnostic only', () => {
+    const diag = failDiagnostic(
+      'TOOL_FAIL: The "json" tool is not available.',
+      { toolName: 'json' },
+    )
+    expect(diag).toContain('TOOL_FAIL')
+    expect(diag).toContain('json')
+    expect(diag).toContain('The "json" tool is not available.')
+    expect(failVisibleCopy('TOOL_FAIL: The "json" tool is not available.')).not.toContain('TOOL_FAIL')
+  })
+
+  it('bundles display for a failed user-facing tool', () => {
+    const d = failDisplayFor(
+      'TOOL_FAIL: The "json" tool is not available.',
+      [{ name: 'json', result: 'error: tool "json" is not available' }],
+    )
+    expect(d).not.toBeNull()
+    expect(d!.copy).toBe(FAIL_COPY.tool)
+    expect(d!.chip).toBe(FAIL_COPY.chip)
+    expect(d!.toolName).toBe('json')
+    expect(d!.diagnostic).toContain('TOOL_FAIL')
+    expect(d!.diagnostic).toContain('json')
   })
 })
 

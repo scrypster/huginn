@@ -24,10 +24,16 @@ func (f *fakeBackend) ChatCompletion(_ context.Context, req backend.ChatRequest)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	if req.OnToken != nil && f.response != nil {
-		req.OnToken(f.response.Content)
+	if f.response == nil {
+		return nil, f.err
 	}
-	return f.response, f.err
+	// Copy so concurrent SpawnThread goroutines (shared fake) don't race on
+	// RevealContentToolCalls mutating the same *ChatResponse.
+	cp := *f.response
+	if req.OnToken != nil {
+		req.OnToken(cp.Content)
+	}
+	return &cp, f.err
 }
 func (f *fakeBackend) Health(_ context.Context) error   { return nil }
 func (f *fakeBackend) Shutdown(_ context.Context) error { return nil }
