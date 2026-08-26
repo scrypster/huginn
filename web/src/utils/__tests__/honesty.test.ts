@@ -37,6 +37,31 @@ describe('parseSystemFailSpeech', () => {
   it('accepts leading whitespace', () => {
     expect(parseSystemFailSpeech('  TOOL_FAIL: missing')).not.toBeNull()
   })
+
+  it('parses a bare TOOL_FAIL token with an empty message', () => {
+    const fail = parseSystemFailSpeech('TOOL_FAIL')
+    expect(fail).not.toBeNull()
+    expect(fail!.kind).toBe('TOOL_FAIL')
+    expect(fail!.message).toBe('')
+  })
+
+  it('parses a bare DELEGATE_FAIL token with an empty message', () => {
+    const fail = parseSystemFailSpeech('DELEGATE_FAIL')
+    expect(fail).not.toBeNull()
+    expect(fail!.kind).toBe('DELEGATE_FAIL')
+    expect(fail!.message).toBe('')
+  })
+
+  it('still returns the reason for the colon form', () => {
+    const fail = parseSystemFailSpeech(
+      'TOOL_FAIL: The "json" tool is not available. Please use a different method to format the response.',
+    )
+    expect(fail).not.toBeNull()
+    expect(fail!.kind).toBe('TOOL_FAIL')
+    expect(fail!.message).toBe(
+      'The "json" tool is not available. Please use a different method to format the response.',
+    )
+  })
 })
 
 describe('tool chip failure', () => {
@@ -57,6 +82,7 @@ describe('tool chip failure', () => {
       'TOOL_FAIL: The "json" tool is not available.',
       [{ result: 'ok' }],
     )).toBe(true)
+    expect(messageToolChipFailed('TOOL_FAIL', [])).toBe(true)
     expect(messageToolChipFailed('PONG', [{ result: 'hi' }])).toBe(false)
   })
 })

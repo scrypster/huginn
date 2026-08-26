@@ -9,7 +9,8 @@ export const TOOLS_ENABLED_SERVE_HINT =
 export const DENY_WINS_COPY =
   'Deny wins — a tool listed in both allow and deny stays blocked.'
 
-const SYSTEM_FAIL_RE = /^(TOOL_FAIL|DELEGATE_FAIL)\s*:\s*([\s\S]*)$/i
+// Colon is optional: hydrated Steve DMs store the bare token with no reason.
+const SYSTEM_FAIL_RE = /^(TOOL_FAIL|DELEGATE_FAIL)(?:\s*:\s*([\s\S]*))?$/i
 const FAILED_RESULT_RE = /^(error:|TOOL_FAIL\b|DELEGATE_FAIL\b)|is not available|permission denied/i
 
 export type SystemFailKind = 'TOOL_FAIL' | 'DELEGATE_FAIL'
@@ -22,7 +23,7 @@ export interface SystemFailSpeech {
 /** Detect assistant text that is a system failure, not teammate speech. */
 export function parseSystemFailSpeech(content: string | undefined | null): SystemFailSpeech | null {
   if (!content) return null
-  const m = content.trimStart().match(SYSTEM_FAIL_RE)
+  const m = content.trim().match(SYSTEM_FAIL_RE)
   if (!m) return null
   const kind = m[1]!.toUpperCase() === 'DELEGATE_FAIL' ? 'DELEGATE_FAIL' : 'TOOL_FAIL'
   return { kind, message: (m[2] ?? '').trim() }

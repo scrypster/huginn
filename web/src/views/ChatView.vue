@@ -539,7 +539,7 @@
                   </svg>
                   <span>
                     <span class="font-semibold">{{ parseSystemFailSpeech(msg.content)!.kind }}</span>
-                    · {{ parseSystemFailSpeech(msg.content)!.message }}
+                    <span v-if="parseSystemFailSpeech(msg.content)!.message"> · {{ parseSystemFailSpeech(msg.content)!.message }}</span>
                   </span>
                 </div>
                 <div v-else-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"

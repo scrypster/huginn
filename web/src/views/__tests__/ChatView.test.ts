@@ -1763,6 +1763,46 @@ describe('ChatView — message display edge cases', () => {
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 
+  it('bare TOOL_FAIL token (hydrated Steve DM) is a system chip, not speech', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        agent: 'Steve',
+        content: 'TOOL_FAIL',
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text().trim()).toBe('TOOL_FAIL')
+    expect(fail.text()).not.toContain('·')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
+  it('bare DELEGATE_FAIL token (hydrated Steve DM) is a system chip, not speech', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        agent: 'Steve',
+        content: 'DELEGATE_FAIL',
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text().trim()).toBe('DELEGATE_FAIL')
+    expect(fail.text()).not.toContain('·')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
   it('completed tool-use message renders the tool call chip', async () => {
     mockMessages['test-session-id'] = [
       {

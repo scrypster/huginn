@@ -216,7 +216,7 @@
               >
                 <span>
                   <span class="font-semibold">{{ parseSystemFailSpeech(item.msg.content)!.kind }}</span>
-                  · {{ parseSystemFailSpeech(item.msg.content)!.message }}
+                  <span v-if="parseSystemFailSpeech(item.msg.content)!.message"> · {{ parseSystemFailSpeech(item.msg.content)!.message }}</span>
                 </span>
               </div>
               <div v-else-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"

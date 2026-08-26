@@ -7,7 +7,7 @@ All notable changes to Huginn are documented here.
 ### Fixed
 - Settings → Tools no longer presents `tools_enabled` as a master off switch for `huginn serve`; the copy matches serve (builtins still register; allow/deny still apply; deny wins on conflict)
 - Chat tool chips say **failed** instead of green **done** when a tool is denied, missing, or the assistant text is `TOOL_FAIL` / `DELEGATE_FAIL`
-- `TOOL_FAIL` / `DELEGATE_FAIL` assistant text renders as a system error line, not teammate speech
+- `TOOL_FAIL` / `DELEGATE_FAIL` assistant text renders as a system error line, not teammate speech (bare hydrated tokens and `TOKEN: reason` both chip)
 - Channel sidebar previews stay plaintext so `snake_case` and `TOOL_FAIL` keep their underscores
 - New-agent form no longer opens as "Unsaved changes" or offers Delete
 - Parked Memory (empty vaults / disconnected) no longer badges agent cards or the channel header
