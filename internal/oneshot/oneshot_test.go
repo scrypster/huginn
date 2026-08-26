@@ -597,6 +597,42 @@ func TestRun_DelegationToolsInSchema(t *testing.T) {
 	}
 }
 
+func TestRun_FailTokenNotAgentOutput(t *testing.T) {
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID:       "call_bash_1",
+					Function: backend.ToolCallFunction{Name: "bash", Arguments: map[string]any{"command": "hostname"}},
+				}},
+			},
+			{Content: "TOOL_FAIL", DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "hostname",
+		AgentName:       "Steve",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) == 0 || res.ToolsCalled[0].Name != "bash" {
+		t.Fatalf("toolsCalled = %+v, want bash in structured log", res.ToolsCalled)
+	}
+	if strings.Contains(res.AgentOutput, "TOOL_FAIL") || strings.Contains(res.AgentOutput, "DELEGATE_FAIL") {
+		t.Errorf("agentOutput leaked fail token: %q", res.AgentOutput)
+	}
+	if strings.Contains(res.AgentOutput, "wait_for_threads") || strings.Contains(res.AgentOutput, `"name"`) {
+		t.Errorf("agentOutput leaked harness JSON: %q", res.AgentOutput)
+	}
+}
+
 func TestRun_DeniedTool_HidesLeftoverHarnessJSON(t *testing.T) {
 	issueJSON := `{"name":"gh_issue_create","arguments":{"title":"need help","body":"bash denied"}}`
 	b := &fakeBackend{

@@ -446,15 +446,20 @@ func newContentToolCall(name string, args map[string]any) ToolCall {
 }
 
 // VisibleAssistantContent returns the user-visible remainder of assistant
-// content after removing a leading tool-call JSON/XML prefix. Code samples
-// with leading prose, fenced JSON that is not a lone invocation, and other
-// ordinary text are returned unchanged.
+// content after removing a leading tool-call JSON/XML prefix and any
+// leftover TOOL_FAIL / DELEGATE_FAIL tokens or bare harness tool-name lines.
+// Code samples with leading prose, fenced JSON that is not a lone
+// invocation, and other ordinary text are returned unchanged.
 //
 // This does not promote or execute anything. PromoteContentToolCalls still
 // requires the entire trimmed message to be tool objects.
 func VisibleAssistantContent(content string) string {
 	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
-		return leftover
+		content = leftover
+	}
+	content = stripHarnessVisibleTokens(content)
+	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
+		content = stripHarnessVisibleTokens(leftover)
 	}
 	return content
 }
@@ -470,11 +475,64 @@ func RevealContentToolCalls(resp *ChatResponse) {
 }
 
 // VisibleAssistantContentAfterDeny is the display filter used after a tool
-// permission deny. It strips a leading tool-call prefix (same as
-// VisibleAssistantContent) and any remaining unfenced harness JSON objects
-// so leftover `{"name":"gh_issue_create",...}` never appears as an answer.
+// permission deny (and for oneshot agentOutput). It strips a leading
+// tool-call prefix (same as VisibleAssistantContent), remaining unfenced
+// harness JSON, and leftover TOOL_FAIL / DELEGATE_FAIL tokens so they never
+// appear as the visible answer.
 func VisibleAssistantContentAfterDeny(content string) string {
-	return stripEmbeddedHarnessToolJSON(VisibleAssistantContent(content))
+	return stripHarnessVisibleTokens(stripEmbeddedHarnessToolJSON(VisibleAssistantContent(content)))
+}
+
+// stripHarnessVisibleTokens removes leftover fail tokens and lines that are
+// only a harness tool name. Ordinary prose that happens to mention "bash"
+// is left alone — only a line that is exactly the token or tool name goes.
+func stripHarnessVisibleTokens(content string) string {
+	if content == "" {
+		return content
+	}
+	if isFailSpeech(strings.TrimSpace(content)) || isHarnessToolNameLine(content) {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		if isFailSpeech(strings.TrimSpace(line)) || isHarnessToolNameLine(line) {
+			changed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !changed {
+		return content
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func isFailSpeech(s string) bool {
+	if s == "" {
+		return false
+	}
+	upper := strings.ToUpper(s)
+	for _, tok := range []string{"TOOL_FAIL", "DELEGATE_FAIL"} {
+		if upper == tok {
+			return true
+		}
+		if strings.HasPrefix(upper, tok) {
+			rest := strings.TrimSpace(upper[len(tok):])
+			return rest == "" || strings.HasPrefix(rest, ":")
+		}
+	}
+	return false
+}
+
+func isHarnessToolNameLine(s string) bool {
+	switch strings.TrimSpace(s) {
+	case "wait_for_threads", "delegate_to_agent", "recall_thread_result", "list_team_status", "bash":
+		return true
+	default:
+		return false
+	}
 }
 
 // stripEmbeddedHarnessToolJSON removes unfenced JSON objects that parse as

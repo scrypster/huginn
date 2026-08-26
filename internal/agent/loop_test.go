@@ -300,6 +300,31 @@ func TestRunLoop_FollowUpWaitForThreadsJSONIsPromoted(t *testing.T) {
 	}
 }
 
+func TestRunLoop_FailTokenNotFinalContent(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "testhost"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("bash", "call-1"),
+			{Content: "TOOL_FAIL", DoneReason: "stop"},
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "hostname"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Fatalf("bash callCount=%d, want 1", tool.callCount)
+	}
+	if strings.Contains(result.FinalContent, "TOOL_FAIL") || strings.Contains(result.FinalContent, "bash") {
+		t.Errorf("FinalContent leaked fail token / tool name: %q", result.FinalContent)
+	}
+}
+
 func TestRunLoop_ContentJSONThenProseHidesJSONAndDoesNotExecute(t *testing.T) {
 	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
 	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}

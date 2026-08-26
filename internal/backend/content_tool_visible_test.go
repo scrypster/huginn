@@ -77,6 +77,42 @@ func TestVisibleAssistantContent_TwoObjectsPlusThanks(t *testing.T) {
 	}
 }
 
+func TestVisibleAssistantContent_FailTokensHidden(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"TOOL_FAIL", ""},
+		{"DELEGATE_FAIL", ""},
+		{"TOOL_FAIL: The \"json\" tool is not available.", ""},
+		{"DELEGATE_FAIL: agent tesla is unavailable", ""},
+		{"wait_for_threads", ""},
+		{"delegate_to_agent", ""},
+		{"He said PONG.\nTOOL_FAIL", "He said PONG."},
+		{"I can't run bash.", "I can't run bash."},
+		{"hello", "hello"},
+		{"TOOL_FAIL\n{\"name\": \"wait_for_threads\"}", ""},
+	}
+	for _, tc := range cases {
+		if got := VisibleAssistantContent(tc.in); got != tc.want {
+			t.Errorf("VisibleAssistantContent(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestVisibleAssistantContentAfterDeny_FailTokenAndJSONHidden(t *testing.T) {
+	mixed := "I can't run bash.\nTOOL_FAIL\n" + leftoverIssueJSON
+	got := VisibleAssistantContentAfterDeny(mixed)
+	if strings.Contains(got, "TOOL_FAIL") || strings.Contains(got, "gh_issue_create") || strings.Contains(got, `"name"`) {
+		t.Errorf("AfterDeny leaked harness token/JSON: %q", got)
+	}
+	if !strings.Contains(got, "I can't run bash") {
+		t.Errorf("prose was stripped: %q", got)
+	}
+	if got := VisibleAssistantContentAfterDeny("TOOL_FAIL"); got != "" {
+		t.Errorf("pure TOOL_FAIL should be hidden, got %q", got)
+	}
+}
+
 func TestVisibleAssistantContent_NameOnlyJSONThenProse(t *testing.T) {
 	const mixed = `{"name":"wait_for_threads"} then he said PONG`
 	if got := VisibleAssistantContent(mixed); got != "then he said PONG" {
