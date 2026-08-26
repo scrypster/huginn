@@ -1,7 +1,12 @@
 /**
  * Small honesty helpers for Settings vs serve, failed tool chips,
  * system-fail speech, plaintext sidebar previews, and A2A harness rows.
+ *
+ * Detection stays here. Visible fail copy is failVisibleCopy / failChipLabel /
+ * plaintextPreview — never feed those strings back into the parsers.
  */
+
+import { visibleAssistantContent } from './visibleAssistantContent'
 
 export const TOOLS_ENABLED_SERVE_HINT =
   'TUI/CLI only. huginn serve always registers builtin tools; this switch does not turn them off. Use the deny list to block a tool in the web UI.'
@@ -112,11 +117,14 @@ export function conflictingTools(allowed: string[], disallowed: string[]): strin
 }
 
 /**
- * Plaintext sidebar snippet. Underscores (snake_case, TOOL_FAIL) must survive.
- * Does not interpret markdown italics.
+ * Plaintext sidebar snippet. Ordinary snake_case keeps its underscores.
+ * Detected fails render as human copy — never TOOL_FAIL / DELEGATE_FAIL.
+ * Leftover leading tool JSON is stripped so harness names never preview.
  */
 export function plaintextPreview(content: string, max = 48): string {
-  const raw = content.replace(/[`#*>[\]]/g, '').replace(/\s+/g, ' ').trim()
+  const stripped = visibleAssistantContent(content)
+  const raw = stripped.replace(/[`#*>[\]]/g, '').replace(/\s+/g, ' ').trim()
+  if (isFailPreviewSource(content) || isFailPreviewSource(raw)) return FAIL_COPY.preview
   return raw.length > max ? raw.slice(0, max) + '…' : raw
 }
 
@@ -328,4 +336,94 @@ export function isResultShapedObject(v: unknown): boolean {
   const keys = Object.keys(v)
   if (!keys.length || 'name' in v || 'function_name' in v) return false
   return keys.every(k => { const x = v[k]; return x === null || typeof x !== 'object' })
+}
+
+// ── Display copy (detection stays above; these never feed parsers) ────
+
+export const FAIL_COPY = {
+  tool: "I couldn't run that.",
+  delegate: "That handoff didn't finish.",
+  shell: "I wasn't allowed to use the shell.",
+  chip: "Couldn't run",
+  preview: "Couldn't finish",
+} as const
+
+const PREFIXED_FAIL_RE = /^(?:You: |[^\n:]+: )?(TOOL_FAIL|DELEGATE_FAIL)(?:\s*:[\s\S]*)?$/i
+
+function isFailKind(kind: SystemFailKind | undefined): kind is 'TOOL_FAIL' | 'DELEGATE_FAIL' {
+  return kind === 'TOOL_FAIL' || kind === 'DELEGATE_FAIL'
+}
+
+function isFailPreviewSource(text: string): boolean {
+  const parsed = parseSystemFailSpeech(text)
+  if (parsed && isFailKind(parsed.kind)) return true
+  if (parsed?.kind === 'announcement' && isBareFailSpeech(parsed.summary)) return true
+  return PREFIXED_FAIL_RE.test(text.trim())
+}
+
+function isShellDenied(message: string, toolName?: string): boolean {
+  const hay = `${toolName ?? ''} ${message}`.toLowerCase()
+  return /permission denied|not allowed|denied/.test(hay) && /\bbash\b|\bshell\b/.test(hay)
+}
+
+function firstFailedTool<T extends { name: string; result?: string }>(
+  calls?: T[] | null,
+): T | undefined {
+  return (calls ?? []).find(tc => isFailedToolResult(tc.result))
+    ?? visibleToolCalls(calls)[0]
+}
+
+/** Visible teammate line for a detected fail. Empty when content is not fail speech. */
+export function failVisibleCopy(
+  content?: string | null,
+  opts?: { toolName?: string },
+): string {
+  const parsed = parseSystemFailSpeech(content)
+  if (!parsed || !isFailKind(parsed.kind)) return ''
+  if (parsed.kind === 'DELEGATE_FAIL') return FAIL_COPY.delegate
+  if (isShellDenied(parsed.message, opts?.toolName)) return FAIL_COPY.shell
+  return FAIL_COPY.tool
+}
+
+/** Raw token, tool name, and reason — hover / aria / details only. */
+export function failDiagnostic(
+  content?: string | null,
+  opts?: { toolName?: string; result?: string },
+): string {
+  const parsed = parseSystemFailSpeech(content)
+  const parts: string[] = []
+  if (parsed && isFailKind(parsed.kind)) parts.push(parsed.kind)
+  if (opts?.toolName) parts.push(opts.toolName)
+  const reason = (parsed && isFailKind(parsed.kind) ? parsed.message : '') || opts?.result || ''
+  if (reason) parts.push(reason)
+  return parts.join(' · ')
+}
+
+export function failChipLabel(): string {
+  return FAIL_COPY.chip
+}
+
+export interface FailDisplay {
+  copy: string
+  diagnostic: string
+  chip: string
+  toolName?: string
+}
+
+/** Bundle visible copy + diagnostic for a message that failed. */
+export function failDisplayFor(
+  content?: string | null,
+  calls?: Array<{ name: string; result?: string }> | null,
+): FailDisplay | null {
+  const parsed = parseSystemFailSpeech(content)
+  const isFailSpeech = !!parsed && isFailKind(parsed.kind)
+  const failed = firstFailedTool(calls)
+  if (!isFailSpeech && !failed) return null
+  const toolName = failed?.name
+  return {
+    copy: failVisibleCopy(content, { toolName }) || FAIL_COPY.tool,
+    diagnostic: failDiagnostic(content, { toolName, result: failed?.result }),
+    chip: FAIL_COPY.chip,
+    toolName,
+  }
 }

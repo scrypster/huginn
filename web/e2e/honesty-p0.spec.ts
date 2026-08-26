@@ -71,7 +71,7 @@ test.describe('P0 honesty', () => {
     await page.screenshot({ path: `${ARTIFACTS}/honesty_settings_tools_conflict.png`, fullPage: true })
   })
 
-  test('Chat: TOOL_FAIL is a system line and chip says failed; preview keeps underscores', async ({ page }) => {
+  test('Chat: fail line and chip are human; preview is Couldn\'t finish', async ({ page }) => {
     await setupApiMocks(page)
     await page.route('**/api/v1/space-messages/space-general**', route =>
       route.fulfill({ json: failMessages }),
@@ -86,13 +86,16 @@ test.describe('P0 honesty', () => {
 
     await page.goto('/#/space/space-general')
     await expect(page.getByTestId('system-fail-line')).toBeVisible({ timeout: 8000 })
-    await expect(page.getByTestId('system-fail-line')).toContainText('TOOL_FAIL')
-    await expect(page.locator('text=· failed')).toBeVisible()
+    await expect(page.getByTestId('system-fail-copy')).toHaveText("I couldn't run that.")
+    await expect(page.getByTestId('system-fail-line')).not.toContainText('TOOL_FAIL')
+    await expect(page.getByTestId('system-fail-line')).toHaveAttribute('title', /TOOL_FAIL/)
+    await expect(page.getByText("Couldn't run")).toBeVisible()
     await expect(page.locator('text=· done')).toHaveCount(0)
 
     const preview = page.locator('[data-testid="channel-item-space-general"]')
-    await expect(preview).toContainText('TOOL_FAIL')
-    await expect(preview).not.toContainText('TOOLFAIL')
+    await expect(preview).toContainText("Couldn't finish")
+    await expect(preview).not.toContainText('TOOL_FAIL')
+    await expect(preview).not.toContainText('wait_for_threads')
 
     await page.screenshot({ path: `${ARTIFACTS}/honesty_toolfail_system_line.png`, fullPage: true })
   })

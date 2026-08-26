@@ -544,20 +544,11 @@
                   :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
                 <!-- Message text — system-fail prefixes are not teammate speech -->
-                <div
+                <SystemFailLine
                   v-if="isBareFailSpeech(visibleAssistantText(msg) || msg.content)"
-                  data-testid="system-fail-line"
-                  class="inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
-                         border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
-                >
-                  <svg class="w-3.5 h-3.5 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                  <span>
-                    <span class="font-semibold">{{ parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.kind }}</span>
-                    <span v-if="parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.message"> · {{ parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.message }}</span>
-                  </span>
-                </div>
+                  :content="visibleAssistantText(msg) || msg.content"
+                  :tool-name="failDisplayFor(msg.content, msg.toolCalls)?.toolName"
+                />
                 <div v-else-if="visibleAssistantText(msg) && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(visibleAssistantText(msg))" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
@@ -736,18 +727,30 @@
                 <div v-if="msg.toolCalls?.length && (!msg.streaming || !visibleToolCalls(activeToolCalls).length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
-                    class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100">
+                    class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100"
+                    :title="messageToolChipFailed(msg.content, msg.toolCalls) ? failDisplayFor(msg.content, msg.toolCalls)?.diagnostic : undefined"
+                    :aria-description="messageToolChipFailed(msg.content, msg.toolCalls) ? failDisplayFor(msg.content, msg.toolCalls)?.diagnostic : undefined">
                     <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                       <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                     </svg>
-                    <span class="text-xs text-huginn-text">
-                      {{ isMemoryOnlyToolCalls(msg.toolCalls)
-                        ? `🧠 Memory: ${summarizeMemoryToolCalls(msg.toolCalls)}`
-                        : `${msg.toolCalls.length} tool call${msg.toolCalls.length === 1 ? '' : 's'}` }}
+                    <span
+                      v-if="isMemoryOnlyToolCalls(msg.toolCalls)"
+                      class="text-xs text-huginn-text"
+                    >
+                      🧠 Memory: {{ summarizeMemoryToolCalls(msg.toolCalls) }}
                     </span>
-                    <span :class="messageToolChipFailed(msg.content, msg.toolCalls) ? 'text-[11px] text-huginn-red' : 'text-[11px] text-huginn-green'">
-                      · {{ messageToolChipFailed(msg.content, msg.toolCalls) ? 'failed' : 'done' }}
+                    <span
+                      v-else-if="messageToolChipFailed(msg.content, msg.toolCalls)"
+                      class="text-xs text-huginn-red"
+                    >
+                      {{ failChipLabel() }}
                     </span>
+                    <template v-else>
+                      <span class="text-xs text-huginn-text">
+                        {{ `${msg.toolCalls.length} tool call${msg.toolCalls.length === 1 ? '' : 's'}` }}
+                      </span>
+                      <span class="text-[11px] text-huginn-green">· done</span>
+                    </template>
                     <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                       :class="expandedMsgCalls.has(msg.id) ? 'rotate-180' : ''"
                       viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -760,7 +763,10 @@
                       class="rounded-xl overflow-hidden border border-huginn-border">
                       <button @click="toggleToolCall(tc)"
                         class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-huginn-surface/80 transition-colors duration-100">
-                        <span class="text-xs font-medium text-huginn-text flex-1">{{ tc.name }}</span>
+                        <span
+                          class="text-xs font-medium text-huginn-text flex-1"
+                          :title="isFailedToolResult(tc.result) ? `${tc.name}${tc.result ? ` · ${tc.result}` : ''}` : undefined"
+                        >{{ isFailedToolResult(tc.result) ? failChipLabel() : tc.name }}</span>
                         <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                           :class="expandedToolCalls.has(tc.id) ? 'rotate-180' : ''"
                           viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -1124,6 +1130,7 @@ import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
 import MessageActions from '../components/MessageActions.vue'
+import SystemFailLine from '../components/SystemFailLine.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
@@ -1142,7 +1149,7 @@ import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import { visibleAssistantContent } from '../utils/visibleAssistantContent'
 import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
-import { isBareFailSpeech, messageToolChipFailed, parseSystemFailSpeech, visibleToolCalls } from '../utils/honesty'
+import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, visibleToolCalls } from '../utils/honesty'
 
 interface Agent {
   name: string
