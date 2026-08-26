@@ -8,6 +8,12 @@ describe('parseToolFailContent', () => {
     )
   })
 
+  it('extracts the error after DELEGATE_FAIL:', () => {
+    expect(parseToolFailContent('DELEGATE_FAIL: Tess is not available.')).toBe(
+      'Tess is not available.',
+    )
+  })
+
   it('returns null for normal assistant text', () => {
     expect(parseToolFailContent('I will look that up for you.')).toBeNull()
     expect(parseToolFailContent('')).toBeNull()

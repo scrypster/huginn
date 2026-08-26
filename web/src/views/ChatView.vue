@@ -506,6 +506,20 @@
               </div>
             </div>
 
+            <!-- System fail line — TOOL_FAIL / DELEGATE_FAIL is not teammate voice -->
+            <div v-else-if="msg.role === 'assistant' && parseToolFailContent(msg.content)"
+              class="mt-2 flex justify-start">
+              <div
+                data-testid="tool-fail-chip"
+                class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
+                       border border-huginn-red/30 bg-huginn-red/8 text-huginn-red">
+                <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                  <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                <span>{{ parseToolFailContent(msg.content) }}</span>
+              </div>
+            </div>
+
             <!-- Assistant message (left-aligned) -->
             <div v-else-if="msg.role === 'assistant'" class="group flex gap-3" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
               <!-- Agent avatar — visible only on first message of a run; placeholder spacer otherwise -->
@@ -534,16 +548,7 @@
                   :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
                 <!-- Message text -->
-                <div v-if="parseToolFailContent(msg.content)"
-                  data-testid="tool-fail-chip"
-                  class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium
-                         border border-huginn-red/30 bg-huginn-red/8 text-huginn-red">
-                  <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                  <span>{{ parseToolFailContent(msg.content) }}</span>
-                </div>
-                <div v-else-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->

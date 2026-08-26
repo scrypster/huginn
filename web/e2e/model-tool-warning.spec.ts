@@ -115,3 +115,66 @@ test.describe('Chat model tool warning', () => {
     await page.screenshot({ path: '/opt/cursor/artifacts/chat_tool_warning_and_fail_chip.png', fullPage: true })
   })
 })
+
+test.describe('Persisted space fail chips', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupConnectedWS(page)
+    await setupApiMocks(page)
+    await mockWarningAgents(page)
+    await page.route('**/api/v1/space-messages/**', route =>
+      route.fulfill({
+        json: {
+          messages: [
+            {
+              id: 'sm-1',
+              session_id: 'dm-steve',
+              seq: 1,
+              ts: '2026-08-26T00:00:00Z',
+              role: 'assistant',
+              content: 'TOOL_FAIL: The "json" tool is not available.',
+              agent: 'Steve',
+            },
+            {
+              id: 'sm-2',
+              session_id: 'dm-steve',
+              seq: 2,
+              ts: '2026-08-26T00:00:01Z',
+              role: 'assistant',
+              content: 'DELEGATE_FAIL: Tess is not available.',
+              agent: 'Steve',
+            },
+          ],
+          next_cursor: '',
+        },
+      }),
+    )
+    await page.route('**/api/v1/spaces/dm-steve', route => {
+      if (route.request().method() === 'GET') {
+        return route.fulfill({
+          json: {
+            id: 'dm-steve',
+            name: 'Steve',
+            kind: 'dm',
+            lead_agent: 'Steve',
+            member_agents: ['Steve'],
+            icon: 'S',
+            color: '#d29922',
+          },
+        })
+      }
+      return route.continue()
+    })
+  })
+
+  test('hydrated DM history chips TOOL_FAIL and DELEGATE_FAIL, not prose', async ({ page }) => {
+    await page.goto('/#/space/dm-steve')
+    const chips = page.getByTestId('tool-fail-chip')
+    await expect(chips).toHaveCount(2)
+    await expect(chips.nth(0)).toContainText('The "json" tool is not available.')
+    await expect(chips.nth(1)).toContainText('Tess is not available.')
+    await expect(page.locator('.md-content')).toHaveCount(0)
+    await expect(page.getByText('TOOL_FAIL:', { exact: false })).toHaveCount(0)
+    await expect(page.getByText('DELEGATE_FAIL:', { exact: false })).toHaveCount(0)
+    await page.screenshot({ path: '/opt/cursor/artifacts/space_dm_fail_chips.png', fullPage: true })
+  })
+})

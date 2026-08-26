@@ -2077,6 +2077,46 @@ describe('ChatView — space mode', () => {
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
   })
+
+  it('renders persisted space TOOL_FAIL and DELEGATE_FAIL as chips, not prose', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    mockActiveSpace.value = { id: SPACE_ID, name: 'Steve', kind: 'dm', leadAgent: 'Steve', memberAgents: ['Steve'] }
+    mockSpaceState.messages = [
+      {
+        id: 'sm-1',
+        session_id: 'dm-steve',
+        seq: 1,
+        ts: '2026-08-26T00:00:00Z',
+        role: 'assistant',
+        content: 'TOOL_FAIL: The "json" tool is not available.',
+        agent: 'Steve',
+      },
+      {
+        id: 'sm-2',
+        session_id: 'dm-steve',
+        seq: 2,
+        ts: '2026-08-26T00:00:01Z',
+        role: 'assistant',
+        content: 'DELEGATE_FAIL: Tess is not available.',
+        agent: 'Steve',
+      },
+    ]
+
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+    await nextTick()
+
+    const chips = wrapper.findAll('[data-testid="tool-fail-chip"]')
+    expect(chips).toHaveLength(2)
+    expect(chips[0]!.text()).toContain('The "json" tool is not available.')
+    expect(chips[1]!.text()).toContain('Tess is not available.')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('TOOL_FAIL:')
+    expect(wrapper.text()).not.toContain('DELEGATE_FAIL:')
+    expect(wrapper.findComponent({ name: 'AgentMessageHeader' }).exists()).toBe(false)
+  })
 })
 
 describe('ChatView — model tool capability warning', () => {
@@ -2133,5 +2173,7 @@ describe('ChatView — model tool capability warning', () => {
     const chip = wrapper.get('[data-testid="tool-fail-chip"]')
     expect(chip.text()).toContain('The "json" tool is not available.')
     expect(wrapper.find('.md-content').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('TOOL_FAIL:')
+    expect(wrapper.findComponent({ name: 'AgentMessageHeader' }).exists()).toBe(false)
   })
 })
