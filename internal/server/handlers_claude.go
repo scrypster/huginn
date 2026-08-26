@@ -10,6 +10,23 @@ import (
 	"github.com/scrypster/huginn/internal/sqlitedb"
 )
 
+// SetClaudeAgentOwned tells the transcript ingester which Claude Code sessions
+// are driven by a Huginn agent, so the bridge does not import turns the agent's
+// own chat path has already persisted — without this every message from a
+// claude-code agent is stored twice, once by the agent and once by the bridge.
+//
+// Replaces the whole set, so callers pass the complete list on every change.
+// A no-op when the bridge is disabled: there is then nothing ingesting.
+func (s *Server) SetClaudeAgentOwned(externalIDs []string) {
+	s.claudeMu.RLock()
+	ing := s.claudeIngester
+	s.claudeMu.RUnlock()
+	if ing == nil {
+		return
+	}
+	ing.SetAgentOwned(externalIDs)
+}
+
 // StartClaudeBridge starts transcript ingestion if the bridge is enabled.
 // It returns immediately; the watcher runs until ctx is cancelled. A failure
 // to start is logged and swallowed — the bridge is never allowed to prevent

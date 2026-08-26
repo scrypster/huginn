@@ -114,10 +114,17 @@ func toolAllowed(claudeAllowedTools []string, tool string) bool {
 
 // agentForClaudeSession maps a Claude Code session id to the agent bound to it.
 func (s *Server) agentForClaudeSession(sessionID string) (agents.AgentDef, bool) {
-	if sessionID == "" || s.agentLoader == nil {
+	if sessionID == "" {
 		return agents.AgentDef{}, false
 	}
-	cfg, err := s.agentLoader()
+	// agentLoader is nil in production — only tests set it — so fall back to
+	// the real loader exactly as every other agent lookup does. Without this
+	// the handler could never find an agent and denied every approval.
+	loader := s.agentLoader
+	if loader == nil {
+		loader = agents.LoadAgents
+	}
+	cfg, err := loader()
 	if err != nil || cfg == nil {
 		return agents.AgentDef{}, false
 	}

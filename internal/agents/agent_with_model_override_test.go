@@ -74,17 +74,21 @@ func TestWithModelOverride_PreservesSkillsAndToolbelt(t *testing.T) {
 func TestWithModelOverride_DeepCopiesSliceFields(t *testing.T) {
 	t.Parallel()
 	a := &Agent{
-		Name:       "Dina",
-		ModelID:    "haiku",
-		Skills:     []string{"code-review"},
-		Toolbelt:   []ToolbeltEntry{{Provider: "github", ConnectionID: "gh-1"}},
-		LocalTools: []string{"read_file"},
+		Name:               "Dina",
+		ModelID:            "haiku",
+		Skills:             []string{"code-review"},
+		Toolbelt:           []ToolbeltEntry{{Provider: "github", ConnectionID: "gh-1"}},
+		LocalTools:         []string{"read_file"},
+		ClaudeAllowedTools: []string{"Read"},
+		ClaudeGatedTools:   []string{"Bash"},
 	}
 	cp := a.WithModelOverride("sonnet")
 
 	cp.Skills[0] = "mutated-skill"
 	cp.Toolbelt[0].Provider = "jira"
 	cp.LocalTools[0] = "write_file"
+	cp.ClaudeAllowedTools[0] = "Write"
+	cp.ClaudeGatedTools[0] = "Read"
 
 	if a.Skills[0] != "code-review" {
 		t.Fatalf("source Skills mutated through copy alias: %v", a.Skills)
@@ -95,16 +99,28 @@ func TestWithModelOverride_DeepCopiesSliceFields(t *testing.T) {
 	if a.LocalTools[0] != "read_file" {
 		t.Fatalf("source LocalTools mutated through copy alias: %v", a.LocalTools)
 	}
+	// These two gate what a Claude Code agent may execute: ClaudeAllowedTools
+	// is the pre-authorised set and ClaudeGatedTools drives the PreToolUse
+	// hooks. A copy that aliased them would let a request-scoped clone silently
+	// rewrite the registry's stored tool policy for every later turn.
+	if a.ClaudeAllowedTools[0] != "Read" {
+		t.Fatalf("source ClaudeAllowedTools mutated through copy alias: %v", a.ClaudeAllowedTools)
+	}
+	if a.ClaudeGatedTools[0] != "Bash" {
+		t.Fatalf("source ClaudeGatedTools mutated through copy alias: %v", a.ClaudeGatedTools)
+	}
 }
 
 func TestWithExtraSystem_DeepCopiesSliceFields(t *testing.T) {
 	t.Parallel()
 	a := &Agent{
-		Name:         "Eli",
-		SystemPrompt: "you are eli",
-		Skills:       []string{"research"},
-		Toolbelt:     []ToolbeltEntry{{Provider: "github", ConnectionID: "gh-2"}},
-		LocalTools:   []string{"read_file"},
+		Name:               "Eli",
+		SystemPrompt:       "you are eli",
+		Skills:             []string{"research"},
+		Toolbelt:           []ToolbeltEntry{{Provider: "github", ConnectionID: "gh-2"}},
+		LocalTools:         []string{"read_file"},
+		ClaudeAllowedTools: []string{"Read"},
+		ClaudeGatedTools:   []string{"Bash"},
 	}
 	cp := a.WithExtraSystem("\nExtra instructions")
 	if cp == a {
@@ -117,6 +133,8 @@ func TestWithExtraSystem_DeepCopiesSliceFields(t *testing.T) {
 	cp.Skills[0] = "mutated-research"
 	cp.Toolbelt[0].ConnectionID = "changed"
 	cp.LocalTools[0] = "bash"
+	cp.ClaudeAllowedTools[0] = "Write"
+	cp.ClaudeGatedTools[0] = "Read"
 
 	if a.Skills[0] != "research" {
 		t.Fatalf("source Skills mutated through copy alias: %v", a.Skills)
@@ -126,5 +144,11 @@ func TestWithExtraSystem_DeepCopiesSliceFields(t *testing.T) {
 	}
 	if a.LocalTools[0] != "read_file" {
 		t.Fatalf("source LocalTools mutated through copy alias: %v", a.LocalTools)
+	}
+	if a.ClaudeAllowedTools[0] != "Read" {
+		t.Fatalf("source ClaudeAllowedTools mutated through copy alias: %v", a.ClaudeAllowedTools)
+	}
+	if a.ClaudeGatedTools[0] != "Bash" {
+		t.Fatalf("source ClaudeGatedTools mutated through copy alias: %v", a.ClaudeGatedTools)
 	}
 }

@@ -52,18 +52,45 @@ type Ingester struct {
 	mappers map[string]*Mapper
 	pending map[string][]Mapped
 	fileMu  map[string]*sync.Mutex
+	// agentOwned holds the Claude Code session ids driven by a Huginn agent.
+	// Their transcripts are skipped entirely — see SetAgentOwned.
+	agentOwned map[string]bool
 }
 
 // NewIngester wires an ingester. bc may be nil (backfill runs without a web UI).
 func NewIngester(sink SessionSink, state *IngestStore, bc Broadcaster) *Ingester {
 	return &Ingester{
-		sink:    sink,
-		state:   state,
-		bc:      bc,
-		mappers: map[string]*Mapper{},
-		pending: map[string][]Mapped{},
-		fileMu:  map[string]*sync.Mutex{},
+		sink:       sink,
+		state:      state,
+		bc:         bc,
+		mappers:    map[string]*Mapper{},
+		pending:    map[string][]Mapped{},
+		fileMu:     map[string]*sync.Mutex{},
+		agentOwned: map[string]bool{},
 	}
+}
+
+// SetAgentOwned marks Claude Code sessions that a Huginn agent drives. Their
+// transcripts are skipped: the agent's chat path already persists those turns,
+// and ingesting them too would duplicate every message.
+//
+// Replaces the whole set, so callers pass the full list on every change.
+func (i *Ingester) SetAgentOwned(externalIDs []string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	m := make(map[string]bool, len(externalIDs))
+	for _, id := range externalIDs {
+		if id != "" {
+			m[id] = true
+		}
+	}
+	i.agentOwned = m
+}
+
+func (i *Ingester) isAgentOwned(externalID string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.agentOwned[externalID]
 }
 
 // mapperFor returns the retained Mapper for a Claude session, creating it on
@@ -164,6 +191,12 @@ func (i *Ingester) FlushIdle() {
 func (i *Ingester) IngestFile(path string) (int, error) {
 	externalID := sessionIDFromPath(path)
 	if externalID == "" {
+		return 0, nil
+	}
+	// Checked before any state is touched: an agent-owned transcript must not
+	// even advance the tail offset, or unbinding the agent later would silently
+	// swallow everything written while it was bound.
+	if i.isAgentOwned(externalID) {
 		return 0, nil
 	}
 
