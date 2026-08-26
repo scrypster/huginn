@@ -542,6 +542,19 @@ describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
     expect(wrapper.html()).not.toContain('· done')
   })
 
+  it('bare TOOL_FAIL token is a system chip without an empty reason span', () => {
+    const msg = makeMessage({
+      role: 'assistant',
+      content: 'TOOL_FAIL',
+    })
+    const wrapper = mountComponent({ messages: [msg] })
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text().trim()).toBe('TOOL_FAIL')
+    expect(fail.text()).not.toContain('·')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
   it('renders chip on assistant message when toolCalls is present', () => {
     const msg = makeMessage({
       role: 'assistant',
