@@ -1419,12 +1419,9 @@ function spaceSearchGroups(): SpaceMessageGroup[] {
 const globalSearchResults = computed((): GlobalSearchHit[] => {
   return buildGlobalSearchResults({
     query: globalSearchQuery.value,
-    sessions: sessions.value.map(s => ({
-      id: s.id,
-      space_id: (s as { space_id?: string }).space_id,
-    })),
+    sessions: sessions.value,
     getMessages,
-    formatSessionLabel,
+    formatSessionLabel: (session) => formatSessionLabel(session as typeof sessions.value[number]),
     spaceMessageGroups: spaceSearchGroups(),
     resolveSpaceId: getSessionSpaceId,
   })
