@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- `/chat/:name` for an agent name (e.g. `/#/chat/Steve`) now redirects to that agent's DM space instead of treating the name as a new empty session
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

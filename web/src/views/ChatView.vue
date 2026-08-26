@@ -349,8 +349,9 @@
           </div>
         </div>
 
-        <!-- Empty chat -->
-        <div v-else-if="messages.length === 0 && !streaming" class="flex flex-col items-center justify-center h-full gap-3 pb-16">
+        <!-- Empty chat — hide while a space timeline is still hydrating so /space/:id
+             does not flash "Send your first message" over the spinner. -->
+        <div v-else-if="messages.length === 0 && !streaming && !spaceLoadingInitial" class="flex flex-col items-center justify-center h-full gap-3 pb-16">
           <div class="w-12 h-12 rounded-2xl flex items-center justify-center select-none"
             :style="displayAgent
               ? `background:${displayAgent.color}18;border:1px solid ${displayAgent.color}33`
@@ -1180,7 +1181,34 @@ watch(() => props.spaceId, async (newId) => {
 
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
   getLastSeenMessageId, setLastSeenMessageId } = useSessions()
-const { activeSpace } = useSpaces()
+const { activeSpace, dms, openDM } = useSpaces()
+
+function isKnownSession(id: string): boolean {
+  return sessions.value.some(s => s.id === id)
+}
+
+// /chat/:sessionId is session-mode. Bookmarks like /#/chat/Steve are not session
+// IDs — they collide with the agent DM at /space/<ulid>. Resolve via spaces and
+// replace so we never fetch, send, or persist a session named after the agent.
+async function redirectUnknownSessionToAgentDM(sessionId: string): Promise<boolean> {
+  const needle = sessionId.toLowerCase()
+  const existing = dms.value.find(dm => dm.leadAgent.toLowerCase() === needle)
+  if (existing) {
+    await router.replace(`/space/${existing.id}`)
+    return true
+  }
+  const space = await openDM(sessionId)
+  if (space) {
+    await router.replace(`/space/${space.id}`)
+    return true
+  }
+  return false
+}
+
+watch(() => props.sessionId, async (id) => {
+  if (!id || props.spaceId || isKnownSession(id)) return
+  await redirectUnknownSessionToAgentDM(id)
+}, { immediate: true })
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
 // When the pre-hydration WS event queue overflows (> 500 events dropped while
@@ -1930,7 +1958,7 @@ async function handleEditorSend(markdown: string) {
   }
 
   // ── Session mode ────────────────────────────────────────────────────
-  if (!props.sessionId) return
+  if (!props.sessionId || !isKnownSession(props.sessionId)) return
 
   // Auto-select default agent on first send if none chosen yet
   if (!selectedAgentName.value && agentsList.value.length > 0) {
@@ -2705,7 +2733,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   fetchStatus()
   nextTick(() => chatEditorRef.value?.focus())
   // Load existing threads and message history for this session
-  if (props.sessionId) {
+  if (props.sessionId && isKnownSession(props.sessionId)) {
     loadThreads(props.sessionId)
     // Only show skeleton if the session has no cached messages yet
     const alreadyCached = getMessages(props.sessionId).length > 0
@@ -2764,7 +2792,7 @@ onMounted(async () => {
   await loadAgents()
   syncSessionAgent()
   fetchStatus()
-  if (props.sessionId) {
+  if (props.sessionId && isKnownSession(props.sessionId)) {
     await fetchMessages(props.sessionId)
     hydrateThreadBadges(props.sessionId)
     markCurrentSessionSeen()
