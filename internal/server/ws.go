@@ -1702,10 +1702,16 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		// When we have accumulated response content or tool calls, persist them.
 		if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
+			persistedContent := backend.VisibleAssistantContent(assistantBuf.String())
+			if len(collectedToolCalls) > 0 {
+				// Tools ran this turn: leftover tool JSON and echoed result
+				// objects are residue, not speech. toolCalls keeps the facts.
+				persistedContent = backend.VisibleAssistantContentAfterTools(assistantBuf.String())
+			}
 			assistantMsg := session.SessionMessage{
 				ID:        assistantMsgID,
 				Role:      "assistant",
-				Content:   backend.VisibleAssistantContent(assistantBuf.String()),
+				Content:   persistedContent,
 				Agent:     agentName,
 				Ts:        time.Now().UTC(),
 				ToolCalls: collectedToolCalls,

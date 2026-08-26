@@ -46,3 +46,11 @@ describe('visibleAssistantContent', () => {
     expect(visibleAssistantContent('{"function_name":"bash"} leftover')).toBe('leftover')
   })
 })
+
+describe('visibleAssistantContent residual speech', () => {
+  it('strips wait tags always and leftover JSON only afterTools', () => {
+    const s = '<wait for Reggie to finish>\nReggie said PONG.\n{"name":"wait_for_threads"}'
+    expect(visibleAssistantContent(s)).toBe('Reggie said PONG.\n{"name":"wait_for_threads"}')
+    expect(visibleAssistantContent(s, { afterTools: true })).toBe('Reggie said PONG.')
+  })
+})
