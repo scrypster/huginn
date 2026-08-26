@@ -1982,6 +1982,8 @@ describe('ChatView — space mode', () => {
     mockSpaceState = makeSpaceState()
     mockSpaceHydrate.mockResolvedValue(undefined)
     mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
   })
 
   it('first send: auto-creates session and registers it in sessionToSpaceMap', async () => {
@@ -2097,14 +2099,21 @@ describe('ChatView — space mode', () => {
 
 describe('ChatView — /chat/:agentName alias', () => {
   const STEVE_SPACE_ID = '01huginn-steve-dm'
+  let wrapper: ReturnType<typeof mountChatView> | undefined
 
   beforeEach(() => {
     vi.clearAllMocks()
     mockSessions.value = []
     mockDms.value = []
     mockOpenDM.mockResolvedValue(null)
+    mockApiAgentsList.mockResolvedValue([])
     mockSpaceState = makeSpaceState()
     mockActiveSpace.value = null
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
   })
 
   it('redirects /chat/Steve to the Steve DM space', async () => {
@@ -2119,7 +2128,7 @@ describe('ChatView — /chat/:agentName alias', () => {
       unseenCount: 0,
     }]
 
-    mountChatView({ sessionId: 'Steve' })
+    wrapper = mountChatView({ sessionId: 'Steve' })
     await flushPromises()
 
     expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
@@ -2128,6 +2137,9 @@ describe('ChatView — /chat/:agentName alias', () => {
   })
 
   it('resolves /chat/Steve via openDM when the DM is not already listed', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'gpt-4', color: '#58a6ff', icon: 'S' },
+    ])
     mockOpenDM.mockResolvedValue({
       id: STEVE_SPACE_ID,
       name: 'Steve',
@@ -2139,11 +2151,24 @@ describe('ChatView — /chat/:agentName alias', () => {
       unseenCount: 0,
     })
 
-    mountChatView({ sessionId: 'Steve' })
+    wrapper = mountChatView({ sessionId: 'Steve' })
     await flushPromises()
 
     expect(mockOpenDM).toHaveBeenCalledWith('Steve')
     expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
     expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a regular session id as an agent DM', async () => {
+    mockSessions.value = []
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Coder', model: 'gpt-4', color: '#58a6ff', icon: 'C' },
+    ])
+
+    wrapper = mountChatView({ sessionId: 'test-chat-session' })
+    await flushPromises()
+
+    expect(mockRouterReplace).not.toHaveBeenCalled()
+    expect(mockOpenDM).not.toHaveBeenCalled()
   })
 })
