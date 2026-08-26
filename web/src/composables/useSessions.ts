@@ -77,6 +77,8 @@ export interface ChatMessage {
   permissionDenials?: PermissionDenial[]
   threadSummary?: boolean       // true for synthetic completion cards injected on thread_done
   threadSummaryThreadId?: string // thread ID this completion card belongs to (dedup guard)
+  systemLine?: boolean          // harness announcement rendered as a system/delegation row
+  hideFailSpeech?: boolean      // suppress bare TOOL_FAIL/DELEGATE_FAIL on a parent A2A row
   // Space-mode fields present on messages fetched from container history
   session_id?: string
   seq?: number

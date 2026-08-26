@@ -76,6 +76,48 @@ describe('useMessageEnrichment utilities', () => {
     expect(msgs[1]!.showHeader).toBe(true)
   })
 
+  it('adaptSpaceMessages treats harness announcements as system/completion rows', () => {
+    const out = adaptSpaceMessages([
+      {
+        id: 'ann-1',
+        role: 'assistant',
+        content: 'Delegation to @Steve was auto-approved after 30s.',
+        agent: 'Steve',
+        ts: '2026-05-01T10:00:00Z',
+      },
+      {
+        id: 'ann-2',
+        role: 'assistant',
+        content: '**Steve** completed delegated work: TOOL_FAIL',
+        agent: 'Steve',
+        ts: '2026-05-01T10:00:01Z',
+      },
+    ] as any)
+
+    expect(out[0]!.systemLine).toBe(true)
+    expect(out[0]!.threadSummary).toBeFalsy()
+    expect(out[1]!.threadSummary).toBe(true)
+    expect(out[1]!.systemLine).toBeFalsy()
+  })
+
+  it('enrichMessages omits A2A tools from the chip list', () => {
+    const msgs = enrichMessages([
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'delegating',
+        agent: 'Tess',
+        toolCalls: [
+          { id: '1', name: 'delegate_to_agent', args: {}, done: true },
+          { id: '2', name: 'wait_for_threads', args: {}, result: 'TOOL_FAIL', done: true },
+          { id: '3', name: 'read_file', args: {}, done: true },
+        ],
+      },
+    ] as any)
+
+    expect(msgs[0]!.toolCalls?.map(tc => tc.name)).toEqual(['read_file'])
+  })
+
   it('enrichMessages keeps header for follow-up synthesis', () => {
     const msgs = enrichMessages([
       {
