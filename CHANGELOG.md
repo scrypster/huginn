@@ -47,6 +47,7 @@ All notable changes to Huginn are documented here.
 - Model tool warning persists on agent cards, the editor, and chat header/composer (not only the create-agent picker)
 - **bash `~` / `$HOME`** — the bash tool now expands `~` and `$HOME` in the command string the way a shell does (process home, not the session temp HOME). `ls ~` lists the real home (or a test fake home). If home cannot be resolved, the tool returns a loud expansion error instead of empty-success.
 - **Permission-deny leftover JSON** — after a tool is denied, leftover harness JSON such as `{"name":"gh_issue_create",...}` is stripped from VisibleAssistantContent and oneshot `agentOutput` so it never appears in the visible answer.
+- Follow-up JSON-in-content tool calls with missing arguments (e.g. `{"name":"wait_for_threads"}` after `delegate_to_agent`) are promoted and executed instead of becoming the oneshot `agentOutput`. `{"function_name":"bash"}` leftovers are treated the same; mixed JSON+prose is still stripped, not executed. Visible `agentOutput` also drops leftover `TOOL_FAIL` / `DELEGATE_FAIL` tokens and bare harness tool-name lines (names stay in `toolsCalled`).
 
 ## [0.4.0] - 2026-06-10
 

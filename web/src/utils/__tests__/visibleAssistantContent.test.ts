@@ -37,4 +37,12 @@ describe('visibleAssistantContent', () => {
     expect(visibleAssistantContent('P')).toBe('P')
     expect(visibleAssistantContent('PONG')).not.toBe('ONG')
   })
+
+  it('strips name-only wait_for_threads JSON and leftover function_name', () => {
+    expect(visibleAssistantContent('{"name": "wait_for_threads"}')).toBe('')
+    expect(visibleAssistantContent('{"name":"wait_for_threads"} then he said PONG')).toBe(
+      'then he said PONG',
+    )
+    expect(visibleAssistantContent('{"function_name":"bash"} leftover')).toBe('leftover')
+  })
 })

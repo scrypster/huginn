@@ -317,9 +317,10 @@ func threadIDFromHistory(msgs []backend.Message) string {
 // chiefOfStaffBackend scripts Winston → delegate_to_agent → wait_for_threads
 // and Reggie → PONG. Routing is by tool schema (specialists get finish()).
 type chiefOfStaffBackend struct {
-	mu          sync.Mutex
-	winstonCall int
-	requests    []backend.ChatRequest
+	mu                sync.Mutex
+	winstonCall       int
+	requests          []backend.ChatRequest
+	waitAsContentJSON bool
 }
 
 func (f *chiefOfStaffBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
@@ -355,6 +356,13 @@ func (f *chiefOfStaffBackend) ChatCompletion(_ context.Context, req backend.Chat
 			}},
 		}, nil
 	case 1:
+		if f.waitAsContentJSON {
+			// Live 2026-08-26 10:29 ET: entire follow-up content, no arguments.
+			return &backend.ChatResponse{
+				Content:    `{"name": "wait_for_threads"}`,
+				DoneReason: "stop",
+			}, nil
+		}
 		args := map[string]any{"timeout_seconds": float64(10)}
 		if id := threadIDFromHistory(req.Messages); id != "" {
 			args["thread_ids"] = []any{id}
@@ -500,6 +508,74 @@ system_prompt: You are Reggie. Reply with exactly PONG.
 	}
 }
 
+func TestRun_ChiefOfStaff_WaitForThreadsContentJSON(t *testing.T) {
+	// Live 2026-08-26 10:29 ET: after delegate_to_agent, Winston wrote
+	// {"name": "wait_for_threads"} (no arguments) as the entire content.
+	// That must execute, not become agentOutput.
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff. Delegate and wait.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	b := &chiefOfStaffBackend{waitAsContentJSON: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := Run(ctx, Config{
+		Prompt:          "Ask Reggie to reply PONG. Wait for him. Then tell me what he said, and also what is 7 times 8.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		MaxTurns:        8,
+		Backend:         b,
+		SessionStore:    session.NewStore(t.TempDir()),
+		LoadRegistry: func() (*agents.AgentRegistry, error) {
+			cfg, err := agents.LoadAgentsFromBase(base)
+			if err != nil {
+				return nil, err
+			}
+			return agents.BuildRegistry(cfg, modelconfig.DefaultModels()), nil
+		},
+		Tools:  tools.NewRegistry(),
+		Models: modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(res.AgentOutput, `"name"`) || strings.TrimSpace(res.AgentOutput) == `{"name": "wait_for_threads"}` {
+		t.Fatalf("wait_for_threads JSON was returned as agentOutput: %q", res.AgentOutput)
+	}
+	if !strings.Contains(res.AgentOutput, "PONG") {
+		t.Fatalf("agentOutput = %q, want PONG", res.AgentOutput)
+	}
+
+	var names []string
+	for _, tc := range res.ToolsCalled {
+		names = append(names, tc.Name)
+	}
+	got := strings.Join(names, ",")
+	if !strings.Contains(got, "delegate_to_agent") {
+		t.Errorf("toolsCalled = %v, want delegate_to_agent", names)
+	}
+	if !strings.Contains(got, "wait_for_threads") {
+		t.Errorf("toolsCalled = %v, want wait_for_threads (name-only content JSON must be promoted)", names)
+	}
+	for _, tc := range res.ToolsCalled {
+		if tc.Name == "wait_for_threads" && !strings.Contains(tc.Result, "PONG") {
+			t.Errorf("wait_for_threads result = %q, want PONG from Reggie", tc.Result)
+		}
+	}
+}
+
 func TestRun_DelegationToolsInSchema(t *testing.T) {
 	b := bashThenAnswerBackend()
 	_, err := Run(context.Background(), Config{
@@ -518,6 +594,42 @@ func TestRun_DelegationToolsInSchema(t *testing.T) {
 		if !hasToolSchema(b.lastTools(), name) {
 			t.Errorf("lead schemas missing %s", name)
 		}
+	}
+}
+
+func TestRun_FailTokenNotAgentOutput(t *testing.T) {
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID:       "call_bash_1",
+					Function: backend.ToolCallFunction{Name: "bash", Arguments: map[string]any{"command": "hostname"}},
+				}},
+			},
+			{Content: "TOOL_FAIL", DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "hostname",
+		AgentName:       "Steve",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) == 0 || res.ToolsCalled[0].Name != "bash" {
+		t.Fatalf("toolsCalled = %+v, want bash in structured log", res.ToolsCalled)
+	}
+	if strings.Contains(res.AgentOutput, "TOOL_FAIL") || strings.Contains(res.AgentOutput, "DELEGATE_FAIL") {
+		t.Errorf("agentOutput leaked fail token: %q", res.AgentOutput)
+	}
+	if strings.Contains(res.AgentOutput, "wait_for_threads") || strings.Contains(res.AgentOutput, `"name"`) {
+		t.Errorf("agentOutput leaked harness JSON: %q", res.AgentOutput)
 	}
 }
 

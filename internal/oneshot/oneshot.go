@@ -203,18 +203,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 
-	denied := false
-	for _, c := range pending {
-		if strings.Contains(strings.ToLower(c.Result), "permission denied") {
-			denied = true
-			break
-		}
-	}
-	if denied {
-		result.AgentOutput = backend.VisibleAssistantContentAfterDeny(buf.String())
-	} else {
-		result.AgentOutput = backend.VisibleAssistantContent(buf.String())
-	}
+	// Always the deny-strength filter: leftover harness JSON, TOOL_FAIL /
+	// DELEGATE_FAIL tokens, and bare tool-name lines must never be agentOutput.
+	// Structured toolsCalled keeps the real names and results.
+	result.AgentOutput = backend.VisibleAssistantContentAfterDeny(buf.String())
 	result.ToolsCalled = pending
 	if result.ToolsCalled == nil {
 		result.ToolsCalled = []ToolCall{}

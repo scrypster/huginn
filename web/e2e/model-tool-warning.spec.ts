@@ -110,7 +110,7 @@ test.describe('Chat model tool warning', () => {
     await page.goto(`/#/chat/${SESSION}`)
     await expect(page.getByTestId('chat-model-tools-warning')).toHaveText(WARNING)
     await expect(page.getByTestId('composer-model-tools-warning')).toHaveText(WARNING)
-    await expect(page.getByTestId('tool-fail-chip')).toContainText('The "json" tool is not available.')
+    await expect(page.getByTestId('system-fail-line')).toContainText('The "json" tool is not available.')
     await expect(page.locator('.md-content')).toHaveCount(0)
     await page.screenshot({ path: '/opt/cursor/artifacts/chat_tool_warning_and_fail_chip.png', fullPage: true })
   })

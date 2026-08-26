@@ -543,7 +543,7 @@ test.describe('Chat — streaming indicator', () => {
     await expect(banner).not.toBeVisible({ timeout: 3000 })
   })
 
-  test('send button disabled while streaming', async ({ page }) => {
+  test('composer stays editable while streaming so a second message can be queued', async ({ page }) => {
     const ws = createInteractiveWS()
     await page.routeWebSocket('**/ws**', ws.handler)
     await gotoChatSession(page)
@@ -553,12 +553,9 @@ test.describe('Chat — streaming indicator', () => {
     const runId = await ws.waitForRunId()
     ws.send(JSON.stringify({ type: 'token', session_id: SESSION, content: 'Streaming...', run_id: runId }))
 
-    // The ProseMirror editor should be non-editable while streaming
-    // (ChatEditor :disabled="streaming" sets editable:false on the editor)
     const editor = page.locator('.editor-content .ProseMirror')
-    await expect(editor).toHaveAttribute('contenteditable', 'false', { timeout: 3000 })
+    await expect(editor).toHaveAttribute('contenteditable', 'true', { timeout: 3000 })
 
-    // Send done — editor should become editable again
     ws.send(JSON.stringify({ type: 'done', session_id: SESSION, run_id: runId }))
     await expect(editor).toHaveAttribute('contenteditable', 'true', { timeout: 3000 })
   })

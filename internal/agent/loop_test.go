@@ -52,6 +52,7 @@ type mockTool struct {
 	name        string
 	result      tools.ToolResult
 	callCount   int
+	lastArgs    map[string]any
 	mu          sync.Mutex
 	shouldPanic bool
 }
@@ -62,13 +63,14 @@ func (t *mockTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *mockTool) Schema() backend.Tool {
 	return backend.Tool{Function: backend.ToolFunction{Name: t.name}}
 }
-func (t *mockTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
+func (t *mockTool) Execute(_ context.Context, args map[string]any) tools.ToolResult {
 	if t.shouldPanic {
 		panic(fmt.Sprintf("mockTool %s intentional panic", t.name))
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.callCount++
+	t.lastArgs = args
 	return t.result
 }
 
@@ -219,6 +221,107 @@ func TestRunLoop_ContentJSONExecutesTool(t *testing.T) {
 	}
 	if result.FinalContent != "the hostname is testhost" {
 		t.Errorf("FinalContent = %q", result.FinalContent)
+	}
+}
+
+func TestRunLoop_FollowUpWaitForThreadsJSONIsPromoted(t *testing.T) {
+	// Live 2026-08-26 10:29 ET: Winston called delegate_to_agent, then wrote
+	// {"name": "wait_for_threads"} as the entire next completion. That must
+	// be promoted and executed — never returned as the final answer.
+	delegate := &mockTool{
+		name:   "delegate_to_agent",
+		result: tools.ToolResult{Output: `delegated task to agent "Reggie" (thread 01M0Z7KQ4F6EZY4VTS6WSMBDK4) — spawned immediately. Use wait_for_threads to block until it finishes and collect the result.`},
+	}
+	wait := &mockTool{
+		name:   "wait_for_threads",
+		result: tools.ToolResult{Output: "Reggie: PONG"},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_delegate_1",
+					Function: backend.ToolCallFunction{
+						Name: "delegate_to_agent",
+						Arguments: map[string]any{
+							"agent": "Reggie",
+							"task":  "reply PONG",
+						},
+					},
+				}},
+			},
+			{
+				Content:    `{"name": "wait_for_threads"}`,
+				DoneReason: "stop",
+			},
+			stopResponse("He said PONG. 7 times 8 is 56."),
+		},
+	}
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 8,
+		Backend:  mb,
+		Tools:    newRegistryWith(delegate, wait),
+		Messages: []backend.Message{{Role: "user", Content: "Ask Reggie to reply PONG. Wait for him. Then tell me what he said, and also what is 7 times 8."}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if delegate.callCount != 1 {
+		t.Fatalf("delegate_to_agent callCount=%d, want 1", delegate.callCount)
+	}
+	if wait.callCount != 1 {
+		t.Fatalf("wait_for_threads was not executed: callCount=%d (name-only content JSON must be promoted)", wait.callCount)
+	}
+	if wait.lastArgs == nil {
+		t.Fatal("wait_for_threads lastArgs is nil")
+	}
+	if len(wait.lastArgs) != 0 {
+		t.Errorf("wait_for_threads args = %#v, want empty (default wait for spawned threads)", wait.lastArgs)
+	}
+	if result.FinalContent != "He said PONG. 7 times 8 is 56." {
+		t.Errorf("FinalContent = %q, want the real answer (not the wait JSON)", result.FinalContent)
+	}
+	if strings.Contains(result.FinalContent, `"name"`) || strings.Contains(result.FinalContent, "wait_for_threads") {
+		t.Errorf("tool JSON leaked as FinalContent: %q", result.FinalContent)
+	}
+	if result.TurnCount != 3 {
+		t.Errorf("TurnCount = %d, want 3 (delegate, wait, answer)", result.TurnCount)
+	}
+	var toolNames []string
+	for _, msg := range result.Messages {
+		if msg.Role == "tool" {
+			toolNames = append(toolNames, msg.ToolName)
+		}
+	}
+	if len(toolNames) != 2 || toolNames[0] != "delegate_to_agent" || toolNames[1] != "wait_for_threads" {
+		t.Errorf("executed tools = %v, want [delegate_to_agent wait_for_threads]", toolNames)
+	}
+}
+
+func TestRunLoop_FailTokenNotFinalContent(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "testhost"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("bash", "call-1"),
+			{Content: "TOOL_FAIL", DoneReason: "stop"},
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "hostname"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Fatalf("bash callCount=%d, want 1", tool.callCount)
+	}
+	if strings.Contains(result.FinalContent, "TOOL_FAIL") || strings.Contains(result.FinalContent, "bash") {
+		t.Errorf("FinalContent leaked fail token / tool name: %q", result.FinalContent)
 	}
 }
 

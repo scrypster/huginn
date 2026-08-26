@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -74,6 +75,94 @@ func TestVisibleAssistantContent_TwoObjectsPlusThanks(t *testing.T) {
 	content := winstonTwoObjectContent + "\n\nthanks"
 	if got := VisibleAssistantContent(content); got != "thanks" {
 		t.Errorf("VisibleAssistantContent = %q, want thanks", got)
+	}
+}
+
+func TestVisibleAssistantContent_FailTokensHidden(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"TOOL_FAIL", ""},
+		{"DELEGATE_FAIL", ""},
+		{"TOOL_FAIL: The \"json\" tool is not available.", ""},
+		{"DELEGATE_FAIL: agent tesla is unavailable", ""},
+		{"wait_for_threads", ""},
+		{"delegate_to_agent", ""},
+		{"He said PONG.\nTOOL_FAIL", "He said PONG."},
+		{"I can't run bash.", "I can't run bash."},
+		{"hello", "hello"},
+		{"TOOL_FAIL\n{\"name\": \"wait_for_threads\"}", ""},
+	}
+	for _, tc := range cases {
+		if got := VisibleAssistantContent(tc.in); got != tc.want {
+			t.Errorf("VisibleAssistantContent(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestVisibleAssistantContentAfterDeny_FailTokenAndJSONHidden(t *testing.T) {
+	mixed := "I can't run bash.\nTOOL_FAIL\n" + leftoverIssueJSON
+	got := VisibleAssistantContentAfterDeny(mixed)
+	if strings.Contains(got, "TOOL_FAIL") || strings.Contains(got, "gh_issue_create") || strings.Contains(got, `"name"`) {
+		t.Errorf("AfterDeny leaked harness token/JSON: %q", got)
+	}
+	if !strings.Contains(got, "I can't run bash") {
+		t.Errorf("prose was stripped: %q", got)
+	}
+	if got := VisibleAssistantContentAfterDeny("TOOL_FAIL"); got != "" {
+		t.Errorf("pure TOOL_FAIL should be hidden, got %q", got)
+	}
+}
+
+func TestVisibleAssistantContent_NameOnlyJSONThenProse(t *testing.T) {
+	const mixed = `{"name":"wait_for_threads"} then he said PONG`
+	if got := VisibleAssistantContent(mixed); got != "then he said PONG" {
+		t.Errorf("VisibleAssistantContent = %q, want leftover prose", got)
+	}
+	if got := VisibleAssistantContent(`{"name": "wait_for_threads"}`); got != "" {
+		t.Errorf("pure name-only tool JSON should be hidden, got %q", got)
+	}
+	if got := VisibleAssistantContent(`{"function_name":"bash"} leftover`); got != "leftover" {
+		t.Errorf("function_name leftover = %q, want leftover", got)
+	}
+}
+
+func TestPromoteContentToolCalls_NameOnlyMixedProseStillNotExecuted(t *testing.T) {
+	const mixed = `{"name":"wait_for_threads"} then he said PONG`
+	resp := &ChatResponse{Content: mixed, DoneReason: "stop"}
+	PromoteContentToolCalls(resp)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("mixed name-only JSON+prose produced ToolCalls %+v, want none", resp.ToolCalls)
+	}
+	if resp.Content != mixed {
+		t.Errorf("Promote must leave mixed content unchanged, got %q", resp.Content)
+	}
+	RevealContentToolCalls(resp)
+	if resp.Content != "then he said PONG" {
+		t.Errorf("Reveal Content = %q, want leftover prose", resp.Content)
+	}
+}
+
+// CreateFromMentions can SpawnThread two agents that share one ChatResponse
+// pointer (fakeBackend). Reveal must not write Content when it is already
+// visible prose — that write raced a concurrent read in runOnce.
+func TestRevealContentToolCalls_SharedResponseNoWriteRace(t *testing.T) {
+	shared := &ChatResponse{Content: "Done", DoneReason: "stop"}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				PromoteContentToolCalls(shared)
+				RevealContentToolCalls(shared)
+				_ = shared.Content
+			}
+		}()
+	}
+	wg.Wait()
+	if shared.Content != "Done" {
+		t.Errorf("Content = %q, want Done", shared.Content)
 	}
 }
 

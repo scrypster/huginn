@@ -20,9 +20,10 @@ const contentToolCallID = "content_call_1"
 // structured tool_calls. Native ToolCalls always win.
 //
 // Content is treated as tool calls only when the entire trimmed message is
-// one or more invocations: whitespace-separated JSON objects each with
-// name+arguments, a <tool_call> fence, or Qwen XML. If any leftover prose
-// remains, nothing is promoted so code samples are not executed.
+// one or more invocations: whitespace-separated JSON objects each with a
+// tool name (arguments may be missing or empty — wait_for_threads defaults
+// to all spawned threads), a <tool_call> fence, or Qwen XML. If any leftover
+// prose remains, nothing is promoted so code samples are not executed.
 //
 // When calls are promoted, Content is cleared (same mutual-exclusion rule
 // buildRequest applies when sending tool_calls back to the model) and
@@ -48,7 +49,7 @@ func PromoteContentToolCalls(resp *ChatResponse) {
 
 // parseContentToolCalls returns tool calls when content is a lone invocation
 // or a whitespace-separated sequence of JSON tool objects. It returns nil
-// when content is normal prose or any object fails name+arguments checks.
+// when content is normal prose or any object fails the name check.
 func parseContentToolCalls(content string) []ToolCall {
 	payload, kind, ok := extractLoneToolCallPayload(content)
 	if !ok {
@@ -126,8 +127,8 @@ func looksLikeQwenFunction(s string) bool {
 }
 
 // parseToolCallJSONStream decodes one or more whitespace-separated JSON
-// objects from s. Every object must have name+arguments; any decode error
-// or leftover prose causes a full miss (nothing is promoted).
+// objects from s. Every object must have a tool name (arguments optional);
+// any decode error or leftover prose causes a full miss (nothing is promoted).
 func parseToolCallJSONStream(s string) []ToolCall {
 	calls, leftover, ok := parseLeadingToolCallJSONStream(s)
 	if !ok || strings.TrimSpace(leftover) != "" {
@@ -257,8 +258,11 @@ func jsonObjectEnd(s string) (int, bool) {
 
 func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
 	nameRaw, hasName := raw["name"]
-	argsRaw, hasArgs := raw["arguments"]
-	if !hasName || !hasArgs {
+	if !hasName {
+		// qwen2.5-coder leftovers after a successful tool: {"function_name":"bash"}
+		nameRaw, hasName = raw["function_name"]
+	}
+	if !hasName {
 		return ToolCall{}, false
 	}
 	var name string
@@ -269,9 +273,16 @@ func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
 	if !validToolName(name) {
 		return ToolCall{}, false
 	}
-	args, ok := parseArgumentsRaw(argsRaw)
-	if !ok {
-		return ToolCall{}, false
+	// Missing / empty arguments still execute (wait_for_threads waits on
+	// spawned threads; bash then returns a tool error instead of becoming
+	// the final answer).
+	args := map[string]any{}
+	if argsRaw, hasArgs := raw["arguments"]; hasArgs {
+		parsed, ok := parseArgumentsRaw(argsRaw)
+		if !ok {
+			return ToolCall{}, false
+		}
+		args = parsed
 	}
 	return newContentToolCall(name, args), true
 }
@@ -435,15 +446,20 @@ func newContentToolCall(name string, args map[string]any) ToolCall {
 }
 
 // VisibleAssistantContent returns the user-visible remainder of assistant
-// content after removing a leading tool-call JSON/XML prefix. Code samples
-// with leading prose, fenced JSON that is not a lone invocation, and other
-// ordinary text are returned unchanged.
+// content after removing a leading tool-call JSON/XML prefix and any
+// leftover TOOL_FAIL / DELEGATE_FAIL tokens or bare harness tool-name lines.
+// Code samples with leading prose, fenced JSON that is not a lone
+// invocation, and other ordinary text are returned unchanged.
 //
 // This does not promote or execute anything. PromoteContentToolCalls still
 // requires the entire trimmed message to be tool objects.
 func VisibleAssistantContent(content string) string {
 	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
-		return leftover
+		content = leftover
+	}
+	content = stripHarnessVisibleTokens(content)
+	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
+		content = stripHarnessVisibleTokens(leftover)
 	}
 	return content
 }
@@ -451,19 +467,81 @@ func VisibleAssistantContent(content string) string {
 // RevealContentToolCalls replaces Content with its user-visible remainder so
 // harness JSON never lands in the transcript. Safe to call after
 // PromoteContentToolCalls (pure tool JSON is already empty).
+//
+// When the visible remainder equals Content, this is a no-op: it must not
+// write the field. SpawnThread / CreateFromMentions can share one
+// ChatResponse across goroutines (test backends return the same pointer),
+// and a write here races a concurrent read of Content.
 func RevealContentToolCalls(resp *ChatResponse) {
 	if resp == nil {
 		return
 	}
-	resp.Content = VisibleAssistantContent(resp.Content)
+	visible := VisibleAssistantContent(resp.Content)
+	if visible == resp.Content {
+		return
+	}
+	resp.Content = visible
 }
 
 // VisibleAssistantContentAfterDeny is the display filter used after a tool
-// permission deny. It strips a leading tool-call prefix (same as
-// VisibleAssistantContent) and any remaining unfenced harness JSON objects
-// so leftover `{"name":"gh_issue_create",...}` never appears as an answer.
+// permission deny (and for oneshot agentOutput). It strips a leading
+// tool-call prefix (same as VisibleAssistantContent), remaining unfenced
+// harness JSON, and leftover TOOL_FAIL / DELEGATE_FAIL tokens so they never
+// appear as the visible answer.
 func VisibleAssistantContentAfterDeny(content string) string {
-	return stripEmbeddedHarnessToolJSON(VisibleAssistantContent(content))
+	return stripHarnessVisibleTokens(stripEmbeddedHarnessToolJSON(VisibleAssistantContent(content)))
+}
+
+// stripHarnessVisibleTokens removes leftover fail tokens and lines that are
+// only a harness tool name. Ordinary prose that happens to mention "bash"
+// is left alone — only a line that is exactly the token or tool name goes.
+func stripHarnessVisibleTokens(content string) string {
+	if content == "" {
+		return content
+	}
+	if isFailSpeech(strings.TrimSpace(content)) || isHarnessToolNameLine(content) {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		if isFailSpeech(strings.TrimSpace(line)) || isHarnessToolNameLine(line) {
+			changed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !changed {
+		return content
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func isFailSpeech(s string) bool {
+	if s == "" {
+		return false
+	}
+	upper := strings.ToUpper(s)
+	for _, tok := range []string{"TOOL_FAIL", "DELEGATE_FAIL"} {
+		if upper == tok {
+			return true
+		}
+		if strings.HasPrefix(upper, tok) {
+			rest := strings.TrimSpace(upper[len(tok):])
+			return rest == "" || strings.HasPrefix(rest, ":")
+		}
+	}
+	return false
+}
+
+func isHarnessToolNameLine(s string) bool {
+	switch strings.TrimSpace(s) {
+	case "wait_for_threads", "delegate_to_agent", "recall_thread_result", "list_team_status", "bash":
+		return true
+	default:
+		return false
+	}
 }
 
 // stripEmbeddedHarnessToolJSON removes unfenced JSON objects that parse as
