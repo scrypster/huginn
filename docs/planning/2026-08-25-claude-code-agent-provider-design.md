@@ -1,7 +1,7 @@
 # Claude Code as a Huginn Agent Provider — Design
 
 **Date:** 2026-08-25
-**Status:** Approved, not implemented
+**Status:** Implemented on `feat/claude-code-agent-provider`
 **Depends on:** the Claude Code bridge (`feat/claude-code-bridge`) — watcher, mapper, tailer,
 ingester, session linkage and `internal/claudecode/delegate.go` are all reused.
 **Companion project (separate spec, not this one):** a Huginn toolbelt MCP server.
