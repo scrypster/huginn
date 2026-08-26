@@ -454,8 +454,10 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		}
 
 		// Local Qwen/Ollama models sometimes put a lone function-call JSON
-		// object in content instead of structured tool_calls. Promote it so
-		// the loop executes the grant instead of treating it as a final answer.
+		// object in content instead of structured tool_calls — including
+		// follow-ups like {"name":"wait_for_threads"} with no arguments.
+		// Promote on every turn so the loop keeps running instead of
+		// treating that JSON as the final answer.
 		backend.PromoteContentToolCalls(chatResult)
 		backend.RevealContentToolCalls(chatResult)
 		if denied.Load() {

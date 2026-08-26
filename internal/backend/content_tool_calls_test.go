@@ -122,7 +122,6 @@ func TestPromoteContentToolCalls_RejectsEmbeddedSample(t *testing.T) {
 		`Sure, run {"name": "bash", "arguments": {"command": "hostname"}}`,
 		"Here is an example:\n```json\n" + qwen14bContentJSON + "\n```",
 		`{"hello": "world"}`,
-		`{"name": "bash"}`,
 		`[{"name": "bash", "arguments": {"command": "hostname"}}]`,
 	}
 	for _, content := range cases {
@@ -198,6 +197,77 @@ func TestPromoteContentToolCalls_TwoObjectsPlusProseRejected(t *testing.T) {
 	}
 	if resp.Content != content {
 		t.Errorf("content was rewritten: got %q", resp.Content)
+	}
+}
+
+func TestPromoteContentToolCalls_NameOnlyWaitForThreads(t *testing.T) {
+	// Live 2026-08-26 10:29 ET Winston follow-up: after delegate_to_agent,
+	// qwen2.5-coder:14b wrote the entire assistant content as this object.
+	resp := &ChatResponse{
+		Content:    `{"name": "wait_for_threads"}`,
+		DoneReason: "stop",
+	}
+	PromoteContentToolCalls(resp)
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1; content=%q", len(resp.ToolCalls), resp.Content)
+	}
+	if resp.ToolCalls[0].Function.Name != "wait_for_threads" {
+		t.Errorf("Name = %q, want wait_for_threads", resp.ToolCalls[0].Function.Name)
+	}
+	if resp.ToolCalls[0].Function.Arguments == nil {
+		t.Fatal("Arguments is nil, want empty map")
+	}
+	if len(resp.ToolCalls[0].Function.Arguments) != 0 {
+		t.Errorf("Arguments = %#v, want empty (default wait for spawned threads)", resp.ToolCalls[0].Function.Arguments)
+	}
+	if resp.Content != "" {
+		t.Errorf("Content = %q, want empty after promote", resp.Content)
+	}
+	if resp.DoneReason != "tool_calls" {
+		t.Errorf("DoneReason = %q, want tool_calls", resp.DoneReason)
+	}
+}
+
+func TestPromoteContentToolCalls_TwoObjectsSecondNameOnly(t *testing.T) {
+	content := `{
+  "name": "delegate_to_agent",
+  "arguments": {
+    "agent": "Reggie",
+    "task": "Reply with exactly PONG"
+  }
+}
+
+{"name": "wait_for_threads"}`
+	resp := &ChatResponse{Content: content, DoneReason: "stop"}
+	PromoteContentToolCalls(resp)
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2; content=%q", len(resp.ToolCalls), resp.Content)
+	}
+	if resp.ToolCalls[0].Function.Name != "delegate_to_agent" {
+		t.Errorf("ToolCalls[0].Name = %q", resp.ToolCalls[0].Function.Name)
+	}
+	if resp.ToolCalls[1].Function.Name != "wait_for_threads" {
+		t.Errorf("ToolCalls[1].Name = %q", resp.ToolCalls[1].Function.Name)
+	}
+	if len(resp.ToolCalls[1].Function.Arguments) != 0 {
+		t.Errorf("wait args = %#v, want empty", resp.ToolCalls[1].Function.Arguments)
+	}
+}
+
+func TestPromoteContentToolCalls_FunctionNameAlias(t *testing.T) {
+	resp := &ChatResponse{
+		Content:    `{"function_name":"bash"}`,
+		DoneReason: "stop",
+	}
+	PromoteContentToolCalls(resp)
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Function.Name != "bash" {
+		t.Fatalf("function_name was not promoted: %+v content=%q", resp.ToolCalls, resp.Content)
+	}
+	if len(resp.ToolCalls[0].Function.Arguments) != 0 {
+		t.Errorf("Arguments = %#v, want empty", resp.ToolCalls[0].Function.Arguments)
+	}
+	if resp.Content != "" {
+		t.Errorf("Content = %q, want empty after promote", resp.Content)
 	}
 }
 

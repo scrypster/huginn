@@ -62,8 +62,10 @@ function readJSONObject(s: string): { value: unknown; after: string } | null {
 function isToolCallObject(v: unknown): boolean {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return false
   const o = v as Record<string, unknown>
-  if (typeof o.name !== 'string' || !o.name.trim()) return false
-  if (!('arguments' in o)) return false
+  const name = typeof o.name === 'string' ? o.name : typeof o.function_name === 'string' ? o.function_name : ''
+  if (!name.trim()) return false
+  // Missing arguments still counts as a tool invocation (wait_for_threads).
+  if (!('arguments' in o)) return true
   const args = o.arguments
   if (args == null) return true
   if (typeof args === 'object' && !Array.isArray(args)) return true

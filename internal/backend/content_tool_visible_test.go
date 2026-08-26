@@ -77,6 +77,35 @@ func TestVisibleAssistantContent_TwoObjectsPlusThanks(t *testing.T) {
 	}
 }
 
+func TestVisibleAssistantContent_NameOnlyJSONThenProse(t *testing.T) {
+	const mixed = `{"name":"wait_for_threads"} then he said PONG`
+	if got := VisibleAssistantContent(mixed); got != "then he said PONG" {
+		t.Errorf("VisibleAssistantContent = %q, want leftover prose", got)
+	}
+	if got := VisibleAssistantContent(`{"name": "wait_for_threads"}`); got != "" {
+		t.Errorf("pure name-only tool JSON should be hidden, got %q", got)
+	}
+	if got := VisibleAssistantContent(`{"function_name":"bash"} leftover`); got != "leftover" {
+		t.Errorf("function_name leftover = %q, want leftover", got)
+	}
+}
+
+func TestPromoteContentToolCalls_NameOnlyMixedProseStillNotExecuted(t *testing.T) {
+	const mixed = `{"name":"wait_for_threads"} then he said PONG`
+	resp := &ChatResponse{Content: mixed, DoneReason: "stop"}
+	PromoteContentToolCalls(resp)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("mixed name-only JSON+prose produced ToolCalls %+v, want none", resp.ToolCalls)
+	}
+	if resp.Content != mixed {
+		t.Errorf("Promote must leave mixed content unchanged, got %q", resp.Content)
+	}
+	RevealContentToolCalls(resp)
+	if resp.Content != "then he said PONG" {
+		t.Errorf("Reveal Content = %q, want leftover prose", resp.Content)
+	}
+}
+
 func TestPromoteContentToolCalls_MixedJSONProseStillNotExecuted(t *testing.T) {
 	resp := &ChatResponse{Content: liveMixedJSONProse, DoneReason: "stop"}
 	PromoteContentToolCalls(resp)

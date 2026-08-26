@@ -20,9 +20,10 @@ const contentToolCallID = "content_call_1"
 // structured tool_calls. Native ToolCalls always win.
 //
 // Content is treated as tool calls only when the entire trimmed message is
-// one or more invocations: whitespace-separated JSON objects each with
-// name+arguments, a <tool_call> fence, or Qwen XML. If any leftover prose
-// remains, nothing is promoted so code samples are not executed.
+// one or more invocations: whitespace-separated JSON objects each with a
+// tool name (arguments may be missing or empty — wait_for_threads defaults
+// to all spawned threads), a <tool_call> fence, or Qwen XML. If any leftover
+// prose remains, nothing is promoted so code samples are not executed.
 //
 // When calls are promoted, Content is cleared (same mutual-exclusion rule
 // buildRequest applies when sending tool_calls back to the model) and
@@ -48,7 +49,7 @@ func PromoteContentToolCalls(resp *ChatResponse) {
 
 // parseContentToolCalls returns tool calls when content is a lone invocation
 // or a whitespace-separated sequence of JSON tool objects. It returns nil
-// when content is normal prose or any object fails name+arguments checks.
+// when content is normal prose or any object fails the name check.
 func parseContentToolCalls(content string) []ToolCall {
 	payload, kind, ok := extractLoneToolCallPayload(content)
 	if !ok {
@@ -126,8 +127,8 @@ func looksLikeQwenFunction(s string) bool {
 }
 
 // parseToolCallJSONStream decodes one or more whitespace-separated JSON
-// objects from s. Every object must have name+arguments; any decode error
-// or leftover prose causes a full miss (nothing is promoted).
+// objects from s. Every object must have a tool name (arguments optional);
+// any decode error or leftover prose causes a full miss (nothing is promoted).
 func parseToolCallJSONStream(s string) []ToolCall {
 	calls, leftover, ok := parseLeadingToolCallJSONStream(s)
 	if !ok || strings.TrimSpace(leftover) != "" {
@@ -257,8 +258,11 @@ func jsonObjectEnd(s string) (int, bool) {
 
 func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
 	nameRaw, hasName := raw["name"]
-	argsRaw, hasArgs := raw["arguments"]
-	if !hasName || !hasArgs {
+	if !hasName {
+		// qwen2.5-coder leftovers after a successful tool: {"function_name":"bash"}
+		nameRaw, hasName = raw["function_name"]
+	}
+	if !hasName {
 		return ToolCall{}, false
 	}
 	var name string
@@ -269,9 +273,16 @@ func toolCallFromRaw(raw map[string]json.RawMessage) (ToolCall, bool) {
 	if !validToolName(name) {
 		return ToolCall{}, false
 	}
-	args, ok := parseArgumentsRaw(argsRaw)
-	if !ok {
-		return ToolCall{}, false
+	// Missing / empty arguments still execute (wait_for_threads waits on
+	// spawned threads; bash then returns a tool error instead of becoming
+	// the final answer).
+	args := map[string]any{}
+	if argsRaw, hasArgs := raw["arguments"]; hasArgs {
+		parsed, ok := parseArgumentsRaw(argsRaw)
+		if !ok {
+			return ToolCall{}, false
+		}
+		args = parsed
 	}
 	return newContentToolCall(name, args), true
 }
