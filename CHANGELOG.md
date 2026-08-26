@@ -28,6 +28,7 @@ All notable changes to Huginn are documented here.
 - Desktop notifications now fire for space-mode agent replies when the Huginn tab is in the background
 - Composer `@` picker lists only agents in the active space roster (channel = lead + members, DM = that agent); leftover `@Name` of a non-member is dropped with a "not in this channel" hint instead of silently hitting the lead
 - Cmd+K global search now finds channel/DM (space) messages and opens `/#/space/:id` instead of leftover `/#/chat/:sessionId` chrome
+- Persist inbound user messages at accept so mid-turn harness announcements no longer appear before the prompt after reload
 
 ## [0.4.0] - 2026-06-10
 

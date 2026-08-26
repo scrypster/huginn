@@ -1416,8 +1416,10 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	ag := s.resolveAgentForMessage(sessionID, userMsg)
 
 	// Pre-generate the user message ID so the delegate_to_agent tool can
-	// thread replies under it. The same ID is reused in persistAccumulated.
+	// thread replies under it. Persist at accept so mid-turn Appends cannot
+	// win seq before the prompt (reload would otherwise play cause after effect).
 	userMsgID := session.NewID()
+	userPersisted := s.persistInboundUserMessage(sessionID, userMsgID, userMsg)
 
 	// Derive the run context from the server lifetime and register it as the
 	// session's active run so a "chat_cancel" message can stop it explicitly.
@@ -1487,10 +1489,11 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			err = runChat()
 		}
 	}
-	// persistAccumulated saves the user message and whatever assistant
-	// content/tool-calls have been accumulated so far. Called on
-	// success (done), cancellation (chat_cancel / server shutdown),
-	// and real errors — it must run regardless of client disconnects.
+	// persistAccumulated saves whatever assistant content/tool-calls have
+	// been accumulated so far. The inbound user row is written at accept;
+	// this is the fallback if that write failed. Called on success (done),
+	// cancellation (chat_cancel / server shutdown), and real errors — it
+	// must run regardless of client disconnects.
 	persistAccumulated := func(errContent string) {
 		if s.store == nil || sessionID == "" {
 			return
@@ -1503,11 +1506,14 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if ag != nil {
 			agentName = ag.Name
 		}
-		now := time.Now().UTC()
-		if appendErr := s.store.Append(sess, session.SessionMessage{
-			ID: userMsgID, Role: "user", Content: userMsg, Ts: now,
-		}); appendErr != nil {
-			logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
+		if !userPersisted {
+			if appendErr := s.store.Append(sess, session.SessionMessage{
+				ID: userMsgID, Role: "user", Content: userMsg, Ts: time.Now().UTC(),
+			}); appendErr != nil {
+				logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
+			} else {
+				userPersisted = true
+			}
 		}
 		// When we have accumulated response content or tool calls, persist them.
 		if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
@@ -1563,8 +1569,9 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			"message_id": assistantMsgID,
 		}})
 
-		// Persist user + assistant messages to the session store so history
-		// survives page reload. Also emits space_activity for unseen badges.
+		// Persist assistant content. The user row was written at accept so
+		// mid-turn announcements keep chronological seq. Also emits
+		// space_activity for unseen badges.
 		persistAccumulated("")
 	}
 
