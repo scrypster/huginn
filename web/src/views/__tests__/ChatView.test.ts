@@ -2732,6 +2732,64 @@ describe('ChatView — space mode', () => {
     expect(stateA.messages.some((m: any) => m.content === 'Owner-space follow-up')).toBe(true)
     expect(wrapper.html()).toContain('Permission required')
   })
+
+  it('in-flight @mention status names the addressed agent, not the lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Steve say PONG and nothing else')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Steve is responding')
+    expect(banner.text()).not.toContain('Tess is responding')
+  })
+
+  it('in-flight unmentioned status names the channel lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'what is the status?')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Tess is responding')
+    expect(banner.text()).not.toContain('Steve is responding')
+  })
 })
 
 describe('ChatView — /chat/:agentName alias', () => {
@@ -2807,64 +2865,6 @@ describe('ChatView — /chat/:agentName alias', () => {
 
     expect(mockRouterReplace).not.toHaveBeenCalled()
     expect(mockOpenDM).not.toHaveBeenCalled()
-  })
-
-  it('in-flight @mention status names the addressed agent, not the lead', async () => {
-    mockActiveSpace.value = {
-      id: SPACE_ID,
-      name: 'mention-proof',
-      kind: 'channel',
-      leadAgent: 'Tess',
-      memberAgents: ['Steve'],
-    }
-    mockApiAgentsList.mockResolvedValue([
-      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
-      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
-    ])
-    mockSpaceState.activeSessionId = 'sess-mention'
-    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
-
-    const mockWs = createMockWs()
-    const wrapper = mountSpaceChatView(mockWs)
-    await flushPromises()
-
-    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
-    await chatEditor.vm.$emit('send', '@Steve say PONG and nothing else')
-    await flushPromises()
-
-    const banner = wrapper.find('[data-testid="streaming-banner"]')
-    expect(banner.exists()).toBe(true)
-    expect(banner.text()).toContain('Steve is responding')
-    expect(banner.text()).not.toContain('Tess is responding')
-  })
-
-  it('in-flight unmentioned status names the channel lead', async () => {
-    mockActiveSpace.value = {
-      id: SPACE_ID,
-      name: 'mention-proof',
-      kind: 'channel',
-      leadAgent: 'Tess',
-      memberAgents: ['Steve'],
-    }
-    mockApiAgentsList.mockResolvedValue([
-      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
-      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
-    ])
-    mockSpaceState.activeSessionId = 'sess-mention'
-    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
-
-    const mockWs = createMockWs()
-    const wrapper = mountSpaceChatView(mockWs)
-    await flushPromises()
-
-    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
-    await chatEditor.vm.$emit('send', 'what is the status?')
-    await flushPromises()
-
-    const banner = wrapper.find('[data-testid="streaming-banner"]')
-    expect(banner.exists()).toBe(true)
-    expect(banner.text()).toContain('Tess is responding')
-    expect(banner.text()).not.toContain('Steve is responding')
   })
 })
 

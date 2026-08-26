@@ -233,6 +233,8 @@ describe('AgentsView', () => {
 
     await wrapper.get('[data-testid="local-access-allow-all-btn"]').trigger('click')
     await flushPromises()
+    await wrapper.get('[data-testid="local-access-allow-all-confirm-btn"]').trigger('click')
+    await flushPromises()
     expect(wrapper.get('[data-testid="local-access-model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
 
     await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
