@@ -10,6 +10,21 @@ import (
 	"github.com/scrypster/huginn/internal/sqlitedb"
 )
 
+// SetClaudeAgentOwnedSource registers where the bridge should get the set of
+// agent-owned Claude Code sessions when it starts.
+//
+// This exists because SetClaudeAgentOwned cannot be called early enough:
+// StartClaudeBridge creates the ingester AND launches backfill, so any caller
+// publishing the set afterwards leaves a window in which backfill can ingest
+// an agent-owned transcript. Ingestion is append-only, so those duplicate
+// messages are permanent — there is no later correction. Call this BEFORE
+// StartClaudeBridge; the bridge reads it before any goroutine starts.
+func (s *Server) SetClaudeAgentOwnedSource(fn func() []string) {
+	s.claudeMu.Lock()
+	s.claudeAgentOwnedSource = fn
+	s.claudeMu.Unlock()
+}
+
 // SetClaudeAgentOwned tells the transcript ingester which Claude Code sessions
 // are driven by a Huginn agent, so the bridge does not import turns the agent's
 // own chat path has already persisted — without this every message from a
@@ -58,6 +73,18 @@ func (s *Server) StartClaudeBridge(ctx context.Context, cfg claudecode.Config, d
 	}
 
 	ing := claudecode.NewIngester(sink, claudecode.NewIngestStore(db), s)
+
+	// Publish the agent-owned sessions BEFORE anything can read the ingester.
+	// This is straight-line code ahead of both the backfill goroutine and the
+	// watcher goroutine below, so there is no window at all — not merely a
+	// smaller one. Ordering matters permanently here: ingestion appends, so a
+	// transcript ingested during a gap stays duplicated forever.
+	s.claudeMu.RLock()
+	ownedSource := s.claudeAgentOwnedSource
+	s.claudeMu.RUnlock()
+	if ownedSource != nil {
+		ing.SetAgentOwned(ownedSource())
+	}
 
 	// Compute everything locally, then assign once under a single lock — easier
 	// to see as correct than locking around each individual field write.

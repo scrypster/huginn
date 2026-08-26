@@ -14,9 +14,17 @@ import (
 )
 
 // writeOverlapCLI writes a stand-in `claude` that records when it starts and
-// finishes, with a real gap in between. If two runs overlap, the log reads
+// finishes, with a gap in between. If two runs overlap, the log reads
 // start,start,... instead of start,end,start,end.
-func writeOverlapCLI(t *testing.T) (binary, logFile string) {
+//
+// gateFile selects how the gap is produced. Empty means a fixed sleep, which
+// is right for the serialisation test: there, correct behaviour is what the
+// log ORDER shows, and the sleep only has to be long enough that a broken
+// implementation is caught. A non-empty gateFile makes each run block until
+// that file appears, which is what the NON-serialisation test needs — its
+// passing condition is "both started at once", and hanging that on elapsed
+// time is exactly the flake a loaded CI machine produces.
+func writeOverlapCLI(t *testing.T, gateFile string) (binary, logFile string) {
 	t.Helper()
 	dir := t.TempDir()
 	binary = filepath.Join(dir, "fake-claude.sh")
@@ -25,7 +33,11 @@ func writeOverlapCLI(t *testing.T) (binary, logFile string) {
 	var sb strings.Builder
 	sb.WriteString("#!/bin/sh\n")
 	fmt.Fprintf(&sb, "printf 'start\\n' >> %q\n", logFile)
-	sb.WriteString("sleep 0.3\n")
+	if gateFile == "" {
+		sb.WriteString("sleep 0.3\n")
+	} else {
+		fmt.Fprintf(&sb, "while [ ! -f %q ]; do sleep 0.01; done\n", gateFile)
+	}
 	fmt.Fprintf(&sb, "printf 'end\\n' >> %q\n", logFile)
 	sb.WriteString("cat <<'HUGINN_EOF'\n")
 	sb.WriteString(`{"type":"result","subtype":"success","result":"done","session_id":"S"}` + "\n")
@@ -36,6 +48,21 @@ func writeOverlapCLI(t *testing.T) (binary, logFile string) {
 		t.Fatalf("write fake cli: %v", err)
 	}
 	return binary, logFile
+}
+
+// countStarts returns how many runs have announced themselves so far.
+func countStarts(logFile string) int {
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, f := range strings.Fields(string(raw)) {
+		if f == "start" {
+			n++
+		}
+	}
+	return n
 }
 
 // TestConcurrentTurnsOnOneSessionSerialise is the regression test for a
@@ -49,7 +76,7 @@ func writeOverlapCLI(t *testing.T) (binary, logFile string) {
 // With the package-level, session-keyed semaphore the log must read
 // start,end,start,end. With a per-instance one it reads start,start,end,end.
 func TestConcurrentTurnsOnOneSessionSerialise(t *testing.T) {
-	binary, logFile := writeOverlapCLI(t)
+	binary, logFile := writeOverlapCLI(t, "")
 	const sessionID = "11111111-2222-3333-4444-555555555555"
 
 	newBackend := func() *AgentBackend {
@@ -105,8 +132,17 @@ func TestConcurrentTurnsOnOneSessionSerialise(t *testing.T) {
 
 // TestConcurrentTurnsOnDifferentSessionsDoNotSerialise is the other half: the
 // slot is per session, not global. Two agents must not queue behind each other.
+//
+// Synchronised on an observable event rather than on elapsed time. Both fake
+// CLIs block until a gate file appears, so "did they overlap?" is answered by
+// whether the second one ever started while the first was still running —
+// which is a fact, not a race against a 300ms window on a loaded machine.
+// Serialisation shows up as a timeout with a specific message, never as a
+// flaky comparison.
 func TestConcurrentTurnsOnDifferentSessionsDoNotSerialise(t *testing.T) {
-	binary, logFile := writeOverlapCLI(t)
+	gate := filepath.Join(t.TempDir(), "gate")
+	binary, logFile := writeOverlapCLI(t, gate)
+	openGate := func() { _ = os.WriteFile(gate, []byte("go\n"), 0o600) }
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -121,22 +157,51 @@ func TestConcurrentTurnsOnDifferentSessionsDoNotSerialise(t *testing.T) {
 				TimeoutSecs: 30,
 			})
 			<-start
+			// No t.* calls in here: this goroutine can outlive a failed test.
 			_, _ = b.ChatCompletion(context.Background(), backend.ChatRequest{
 				Messages: []backend.Message{{Role: "user", Content: "hi"}},
 			})
 		}(i)
 	}
+	// Whatever happens below, release the children and reap them, so a failure
+	// cannot leave a blocked `sh` behind.
+	t.Cleanup(func() {
+		openGate()
+		wg.Wait()
+	})
 	close(start)
+
+	// Wait for BOTH runs to be in flight. If the slot were global, the second
+	// could not start until the first finished — and the first cannot finish
+	// until the gate opens, which happens only after this loop succeeds.
+	deadline := time.Now().Add(15 * time.Second)
+	for countStarts(logFile) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("only one turn ever started: distinct sessions were serialised against each other; " +
+				"the semaphore slot must be keyed by session id, not global")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	openGate()
 	wg.Wait()
 
-	raw, _ := os.ReadFile(logFile)
-	got := strings.Fields(string(raw))
+	got := strings.Fields(mustRead(t, logFile))
 	if len(got) != 4 {
 		t.Fatalf("overlap log = %v, want four entries", got)
 	}
 	if got[0] != "start" || got[1] != "start" {
-		t.Errorf("distinct sessions were serialised against each other: log = %v; the slot must be keyed by session id, not global", got)
+		t.Errorf("log = %v, want both runs to have started before either finished", got)
 	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(raw)
 }
 
 func TestSemKeyForGivesEveryEmptySessionItsOwnSlot(t *testing.T) {

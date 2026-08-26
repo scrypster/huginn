@@ -2780,6 +2780,133 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 	}
 
+	// Working directory, shared by the Claude Code wiring below and by the
+	// agent block's tool registry.
+	srvCWD, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		srvCWD = huginnHome
+	}
+
+	// --- Claude Code agent backends -------------------------------------
+	//
+	// A claude-code agent is backed by a real `claude` process bound to one
+	// session, not by a provider API, so it deliberately bypasses the
+	// BackendCache: that cache is keyed by provider+endpoint+key+model and
+	// would hand two different agents the same session-bound backend.
+	//
+	// The backend is rebuilt per turn on purpose. Its config is a snapshot
+	// of the agent's prompt, skills, notepad and tool grants, and
+	// AssembleSystemPrompt is documented to be reassembled every turn so an
+	// edit takes effect on the next message instead of needing a new session.
+	huginnExe, exeErr := os.Executable()
+	if exeErr != nil || huginnExe == "" {
+		// Fall back to the bare name and let PATH resolve it. A hook that
+		// cannot be executed exits non-zero, which Claude Code treats as a
+		// block — the failure mode is a denied tool, not an ungated one.
+		huginnExe = "huginn"
+		logger.Warn("claudecode: cannot resolve own executable; approval hook falls back to PATH", "err", exeErr)
+	}
+	// agentSkillTexts renders the agent's assigned skills as prompt text,
+	// through the same per-agent resolution the native agent path uses, so a
+	// claude-code agent sees exactly the skills its config grants it.
+	agentSkillTexts := func(ag *agentslib.Agent) []string {
+		frag := orch.SkillsFragmentForAgent(ag)
+		if strings.TrimSpace(frag) == "" {
+			return nil
+		}
+		return []string{frag}
+	}
+	// notepadText renders the active notepads. Reloaded per turn so an edit
+	// in the UI reaches the next message; capped like the native context
+	// builder so a large notepad cannot crowd out the conversation.
+	notepadText := func() string {
+		if !cfg.NotepadsEnabled {
+			return ""
+		}
+		npMgr, npErr := notepad.DefaultManager(srvCWD)
+		if npErr != nil {
+			return ""
+		}
+		loaded, loadErr := npMgr.Load()
+		if loadErr != nil {
+			return ""
+		}
+		const maxNotepadChars = 32768
+		remaining := maxNotepadChars
+		var sb strings.Builder
+		for _, np := range loaded {
+			if np == nil || strings.TrimSpace(np.Content) == "" {
+				continue
+			}
+			entry := "### " + np.Name + "\n" + np.Content + "\n\n"
+			if len(entry) > remaining {
+				continue
+			}
+			sb.WriteString(entry)
+			remaining -= len(entry)
+		}
+		return strings.TrimSpace(sb.String())
+	}
+	// claudeCodeBackend builds the per-turn backend for a claude-code agent.
+	//
+	// AllowedTools is ag.ClaudeAllowedTools, NEVER ag.LocalTools: LocalTools
+	// names Huginn's own builtins ("bash", "read_file") and supports a "*"
+	// wildcard, while this list names Claude Code CLI tools ("Bash",
+	// "Read"). Feeding LocalTools in here would pre-authorise every Claude
+	// Code tool for an unattended agent.
+	claudeCodeBackend := func(ag *agentslib.Agent) backend.Backend {
+		return claudecode.NewAgentBackend(claudecode.AgentBackendConfig{
+			Binary:       cfg.ClaudeCode.Binary,
+			SessionID:    ag.ClaudeSessionID,
+			CWD:          ag.ClaudeCWD,
+			Model:        ag.GetModelID(),
+			SystemPrompt: claudecode.AssembleSystemPrompt(ag.SystemPrompt, agentSkillTexts(ag), notepadText()),
+			AllowedTools: ag.ClaudeAllowedTools,
+			GatedTools:   gatedToolsFor(ag),
+			HookCommand:  claudeHookCommand(huginnExe, goruntime.GOOS),
+			FirstTurn:    !claudeSessionExists(ag.ClaudeCWD, ag.ClaudeSessionID),
+			TimeoutSecs:  claudecode.DefaultAgentTurnTimeoutSecs,
+		})
+	}
+	// claudeCodeResolver is the ONE place that decides whether an agent is
+	// backed by Claude Code. Both the orchestrator's primary chat path and
+	// the completion notifier's follow-up call go through it; two copies of
+	// this decision would drift, and the two paths would disagree about
+	// which process is driving the agent's session.
+	//
+	// Declining (false) means "not a Claude Code agent" and leaves the
+	// caller to resolve it exactly as before.
+	claudeCodeResolver := func(ag *agentslib.Agent) (backend.Backend, bool, error) {
+		if ag == nil || ag.Provider != "claude-code" {
+			return nil, false, nil
+		}
+		// Claim it either way. Falling through to the cache on a bad
+		// binding would resolve a claude-code agent to some unrelated
+		// provider backend and quietly answer as if nothing were wrong.
+		if err := validateClaudeBinding(ag.Name, ag.ClaudeSessionID); err != nil {
+			logger.Error("claudecode: unusable agent binding", "agent", ag.Name, "err", err)
+			return nil, true, err
+		}
+		return claudeCodeBackend(ag), true, nil
+	}
+	// The primary chat path resolves backends inside the orchestrator, which
+	// only ever saw the BackendCache — and that cache is keyed by
+	// (provider, endpoint, key, model), a tuple that cannot express "this
+	// agent's Claude session id and cwd". Hence the override hook.
+	orch.SetAgentBackendOverride(claudeCodeResolver)
+
+	// Republish the agent-owned Claude Code sessions whenever agents change.
+	// Installed OUTSIDE the agent block below because that block is skipped
+	// when the server boots with no agents configured — precisely the state in
+	// which the user then creates their first claude-code agent. The block's
+	// own SetOnAgentsChanged supersedes this one and does the same republish
+	// alongside the registry reload.
+	srv.SetOnAgentsChanged(func() {
+		if fresh, loadErr := agentslib.LoadAgents(); loadErr == nil {
+			srv.SetClaudeAgentOwned(claudeSessionIDsOf(fresh))
+		}
+	})
+
 	// Wire delegate_to_agent tool so the primary agent can spawn sub-threads
 	// during web chat. Agents are loaded fresh; failure is non-fatal.
 	if agentsCfg, agentsErr := agentslib.LoadAgents(); agentsErr == nil && agentsCfg != nil && len(agentsCfg.Agents) > 0 {
@@ -2807,11 +2934,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			logger.Info("agents changed: registry reloaded", "count", len(freshCfg.Agents), "names", agentReg.Names())
 		})
 
-		// Compute working dir and bash timeout; shared by toolReg below.
-		srvCWD, cwdErr := os.Getwd()
-		if cwdErr != nil {
-			srvCWD = huginnHome
-		}
+		// Compute the bash timeout; shared by toolReg below. (srvCWD is
+		// computed before this block — the Claude Code wiring needs it too.)
 		srvBashTimeout := time.Duration(cfg.BashTimeoutSecs) * time.Second
 		if srvBashTimeout == 0 {
 			srvBashTimeout = 120 * time.Second
@@ -3122,107 +3246,6 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		}
 		tm.SetHelpResolver(helpResolver)
 
-		// --- Claude Code agent backends -------------------------------------
-		//
-		// A claude-code agent is backed by a real `claude` process bound to one
-		// session, not by a provider API, so it deliberately bypasses the
-		// BackendCache: that cache is keyed by provider+endpoint+key+model and
-		// would hand two different agents the same session-bound backend.
-		//
-		// The backend is rebuilt per turn on purpose. Its config is a snapshot
-		// of the agent's prompt, skills, notepad and tool grants, and
-		// AssembleSystemPrompt is documented to be reassembled every turn so an
-		// edit takes effect on the next message instead of needing a new session.
-		huginnExe, exeErr := os.Executable()
-		if exeErr != nil || huginnExe == "" {
-			// Fall back to the bare name and let PATH resolve it. A hook that
-			// cannot be executed exits non-zero, which Claude Code treats as a
-			// block — the failure mode is a denied tool, not an ungated one.
-			huginnExe = "huginn"
-			logger.Warn("claudecode: cannot resolve own executable; approval hook falls back to PATH", "err", exeErr)
-		}
-		// agentSkillTexts renders the agent's assigned skills as prompt text,
-		// through the same per-agent resolution the native agent path uses, so a
-		// claude-code agent sees exactly the skills its config grants it.
-		agentSkillTexts := func(ag *agentslib.Agent) []string {
-			frag := orch.SkillsFragmentForAgent(ag)
-			if strings.TrimSpace(frag) == "" {
-				return nil
-			}
-			return []string{frag}
-		}
-		// notepadText renders the active notepads. Reloaded per turn so an edit
-		// in the UI reaches the next message; capped like the native context
-		// builder so a large notepad cannot crowd out the conversation.
-		notepadText := func() string {
-			if !cfg.NotepadsEnabled {
-				return ""
-			}
-			npMgr, npErr := notepad.DefaultManager(srvCWD)
-			if npErr != nil {
-				return ""
-			}
-			loaded, loadErr := npMgr.Load()
-			if loadErr != nil {
-				return ""
-			}
-			const maxNotepadChars = 32768
-			remaining := maxNotepadChars
-			var sb strings.Builder
-			for _, np := range loaded {
-				if np == nil || strings.TrimSpace(np.Content) == "" {
-					continue
-				}
-				entry := "### " + np.Name + "\n" + np.Content + "\n\n"
-				if len(entry) > remaining {
-					continue
-				}
-				sb.WriteString(entry)
-				remaining -= len(entry)
-			}
-			return strings.TrimSpace(sb.String())
-		}
-		// claudeCodeBackend builds the per-turn backend for a claude-code agent.
-		//
-		// AllowedTools is ag.ClaudeAllowedTools, NEVER ag.LocalTools: LocalTools
-		// names Huginn's own builtins ("bash", "read_file") and supports a "*"
-		// wildcard, while this list names Claude Code CLI tools ("Bash",
-		// "Read"). Feeding LocalTools in here would pre-authorise every Claude
-		// Code tool for an unattended agent.
-		claudeCodeBackend := func(ag *agentslib.Agent) backend.Backend {
-			return claudecode.NewAgentBackend(claudecode.AgentBackendConfig{
-				Binary:       cfg.ClaudeCode.Binary,
-				SessionID:    ag.ClaudeSessionID,
-				CWD:          ag.ClaudeCWD,
-				Model:        ag.GetModelID(),
-				SystemPrompt: claudecode.AssembleSystemPrompt(ag.SystemPrompt, agentSkillTexts(ag), notepadText()),
-				AllowedTools: ag.ClaudeAllowedTools,
-				GatedTools:   gatedToolsFor(ag),
-				HookCommand:  claudeHookCommand(huginnExe, goruntime.GOOS),
-				FirstTurn:    !claudeSessionExists(ag.ClaudeSessionID),
-				TimeoutSecs:  claudecode.DefaultAgentTurnTimeoutSecs,
-			})
-		}
-		// claudeCodeResolver is the ONE place that decides whether an agent is
-		// backed by Claude Code. Both the orchestrator's primary chat path and
-		// the completion notifier's follow-up call go through it; two copies of
-		// this decision would drift, and the two paths would disagree about
-		// which process is driving the agent's session.
-		//
-		// Declining (false) means "not a Claude Code agent" and leaves the
-		// caller to resolve it exactly as before.
-		claudeCodeResolver := func(ag *agentslib.Agent) (backend.Backend, bool, error) {
-			if ag == nil || ag.Provider != "claude-code" {
-				return nil, false, nil
-			}
-			return claudeCodeBackend(ag), true, nil
-		}
-		// The primary chat path resolves backends inside the orchestrator, which
-		// only ever saw the BackendCache — and that cache is keyed by
-		// (provider, endpoint, key, model), a tuple that cannot express "this
-		// agent's Claude session id and cwd". Hence the override hook.
-		orch.SetAgentBackendOverride(claudeCodeResolver)
-
 		// Wire completion notifier: when a sub-agent finishes, the primary agent
 		// posts a brief natural-language summary in the main chat.
 		completionNotifier := &threadmgr.CompletionNotifier{
@@ -3525,19 +3548,36 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// Wire audit logger: non-blocking permission gate event recording to SQLite.
 	srv.StartAuditLog(sqlDB)
 
+	// Tell the bridge which transcripts belong to an agent BEFORE starting it.
+	// StartClaudeBridge creates the ingester and launches backfill in the same
+	// call, so publishing this afterwards leaves a window where backfill can
+	// ingest an agent-owned transcript — and ingestion is append-only, so those
+	// duplicates would be permanent. As a source rather than a value so the
+	// bridge reads it at the one moment that is provably before any goroutine.
+	srv.SetClaudeAgentOwnedSource(func() []string {
+		claudeAgents, claudeErr := agentslib.LoadAgents()
+		if claudeErr != nil {
+			logger.Warn("claudecode: cannot list agent-owned sessions; transcripts may be ingested twice", "err", claudeErr)
+			return nil
+		}
+		return claudeSessionIDsOf(claudeAgents)
+	})
+
+	// Report broken claude-code bindings at startup, before anyone chats with
+	// the agent and meets three unrelated-looking symptoms. Deliberately NOT
+	// folded into the source above: that is only consulted when the bridge is
+	// enabled, and a bad binding is just as broken with the bridge switched off.
+	if claudeAgents, claudeErr := agentslib.LoadAgents(); claudeErr == nil {
+		for _, problem := range claudeBindingProblems(claudeAgents) {
+			logger.Error("claudecode: " + problem)
+		}
+	}
+
 	// Wire the Claude Code bridge: ingests Claude Code transcripts into Huginn
 	// sessions. Disabled by default; a failure to start is logged and never
 	// aborts server startup.
 	if err := srv.StartClaudeBridge(ctx, cfg.ClaudeCode, sqlDB); err != nil {
 		logger.Warn("claudecode: bridge did not start", "err", err)
-	}
-	// Tell the freshly started bridge which transcripts belong to an agent, so
-	// backfill and the watcher skip them. Must come AFTER StartClaudeBridge:
-	// the ingester does not exist until then. Loaded fresh rather than reusing
-	// the registry, which is scoped to the agent-wiring block above and absent
-	// when no agents are configured.
-	if claudeAgents, claudeErr := agentslib.LoadAgents(); claudeErr == nil {
-		srv.SetClaudeAgentOwned(claudeSessionIDsOf(claudeAgents))
 	}
 
 	// Wire connection token refresh events → WS broadcast.
@@ -3756,6 +3796,76 @@ func claudeHookCommand(exe, goos string) string {
 	return "'" + strings.ReplaceAll(exe, "'", `'\''`) + "' claude-approve"
 }
 
+// isClaudeUUID reports whether s is the 8-4-4-4-12 hex form Claude Code's
+// --session-id requires. Hand-rolled rather than pulling in a UUID dependency
+// for one shape check.
+func isClaudeUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateClaudeBinding checks that a claude-code agent is actually bound to a
+// usable Claude Code session, and says plainly what is wrong when it is not.
+//
+// Nothing else notices a bad binding. An empty session id means no session
+// continuity (every turn starts fresh), no serialisation (an empty id gets a
+// private semaphore key, so concurrent turns are not held apart) and every
+// approval denied with "No Huginn agent is bound to this Claude Code session"
+// — three unrelated-looking mysteries from one cause.
+//
+// A MALFORMED id is treated exactly like a missing one, deliberately: the CLI
+// requires a UUID for --session-id and rejects anything else with an opaque
+// error of its own, and the approval endpoint matches session ids literally,
+// so a non-UUID fails in the same three ways. Better one clear message here
+// than the CLI's message later.
+func validateClaudeBinding(name, sessionID string) error {
+	who := name
+	if who == "" {
+		who = "an unnamed agent"
+	}
+	switch {
+	case strings.TrimSpace(sessionID) == "":
+		return fmt.Errorf("claude-code agent %q has no claude_session_id: it needs one to keep a conversation, to serialise its turns, and to be recognised by the tool-approval endpoint", who)
+	case !isClaudeUUID(sessionID):
+		return fmt.Errorf("claude-code agent %q has claude_session_id %q, which is not a UUID: Claude Code's --session-id requires the 8-4-4-4-12 hex form, and the approval endpoint matches this value literally", who, sessionID)
+	}
+	return nil
+}
+
+// claudeBindingProblems reports every unusable claude-code binding in a config,
+// so startup can log them all at once instead of one per discovery.
+func claudeBindingProblems(cfg *agentslib.AgentsConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	var out []string
+	for _, def := range cfg.Agents {
+		if def.Provider != "claude-code" {
+			continue
+		}
+		if err := validateClaudeBinding(def.Name, def.ClaudeSessionID); err != nil {
+			out = append(out, err.Error())
+		}
+	}
+	return out
+}
+
 // claudeSessionIDsOf collects the Claude Code session ids bound to agents, for
 // handing to the bridge as the set of transcripts it must not ingest.
 func claudeSessionIDsOf(cfg *agentslib.AgentsConfig) []string {
@@ -3778,21 +3888,49 @@ func claudeSessionIDsOf(cfg *agentslib.AgentsConfig) []string {
 // It answers from disk rather than from memory on purpose: the backend is
 // rebuilt per turn, so an in-process flag would forget that the session was
 // created and try to claim an id the CLI already owns.
-func claudeSessionExists(id string) bool {
-	return claudeSessionExistsUnder(claudecode.DefaultRoot(), id)
+func claudeSessionExists(cwd, id string) bool {
+	return claudeSessionExistsUnder(claudecode.DefaultRoot(), cwd, id)
+}
+
+// claudeProjectDirName derives the per-project directory Claude Code stores a
+// transcript under from the session's working directory.
+//
+// Only the separator rule is VERIFIED against real transcript directories on
+// this machine ("/Users/me/Development/huginn" → "-Users-me-Development-huginn",
+// and an existing dash survives, so "/tmp/-Users-x" → "-tmp--Users-x"). How the
+// CLI treats other characters — dots, spaces, underscores — is NOT verified, so
+// this is used strictly as a FAST PATH: a hit is conclusive, a miss falls back
+// to the full walk. Getting the derivation wrong therefore costs a scan, never
+// a wrong answer.
+func claudeProjectDirName(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	return strings.ReplaceAll(filepath.Clean(cwd), string(filepath.Separator), "-")
 }
 
 // claudeSessionExistsUnder is claudeSessionExists with the transcript root
 // injected, so it can be exercised against a temporary tree instead of the
 // developer's real ~/.claude.
-func claudeSessionExistsUnder(root, id string) bool {
+func claudeSessionExistsUnder(root, cwd, id string) bool {
 	if id == "" || root == "" {
 		return false
 	}
 	want := id + ".jsonl"
+
+	// Fast path: one stat instead of walking every transcript on the machine.
+	// This runs on EVERY turn, and a developer's ~/.claude routinely holds
+	// hundreds of project directories and a thousand transcripts.
+	if dir := claudeProjectDirName(cwd); dir != "" {
+		if st, err := os.Stat(filepath.Join(root, dir, want)); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+
+	// Fallback: the cwd was empty, or the CLI's directory naming differs from
+	// the rule above for this path. Correctness wins over speed here — a false
+	// "does not exist" makes the turn claim a session id the CLI already owns.
 	found := false
-	// Transcripts live one level down, under a per-project directory whose
-	// name is derived from the cwd, so the id alone cannot locate the file.
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable project dir: keep looking elsewhere

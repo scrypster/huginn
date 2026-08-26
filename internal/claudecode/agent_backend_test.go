@@ -140,9 +140,11 @@ func TestAgentBackendNeverReturnsDispatchableToolCalls(t *testing.T) {
 	}
 }
 
-// This is the proof for the FirstTurn fix: ONE backend, TWO turns. Backends are
-// cached per agent, so a config flag that nothing ever flips would leave every
-// turn after the first re-creating a session that already exists.
+// This is the proof for the FirstTurn fix: ONE backend, TWO turns. A config
+// flag that nothing ever flips would leave the second turn re-creating a
+// session that already exists. Across turns the resolver rebuilds the backend
+// and recomputes FirstTurn from disk (claudeSessionExists); within a turn the
+// instance has to track it itself, which is what this pins.
 func TestAgentBackendSwitchesToResumeOnItsSecondTurn(t *testing.T) {
 	cfg := agentBackendCfg(t)
 	bin, argvFile := writeFakeCLI(t, fakeCLI{stream: execToolStream})

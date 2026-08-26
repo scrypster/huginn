@@ -239,6 +239,11 @@ type Server struct {
 	claudeRoot string
 	// claudeWatching reports whether the transcript watcher is running.
 	claudeWatching bool
+	// claudeAgentOwnedSource supplies the Claude Code sessions driven by a
+	// Huginn agent. Read by StartClaudeBridge before it starts any goroutine,
+	// so agent-owned transcripts are never ingested — see
+	// SetClaudeAgentOwnedSource.
+	claudeAgentOwnedSource func() []string
 }
 
 // SetDB wires the SQLite database for thread/message handlers.

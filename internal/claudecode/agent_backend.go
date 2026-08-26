@@ -28,8 +28,9 @@ var DefaultGatedTools = []string{
 
 // DefaultAgentTurnTimeoutSecs bounds one agent turn when the config leaves
 // TimeoutSecs zero. It matches Delegate's own fallback. Zero must never mean
-// "forever": a wedged turn holds the session semaphore, and because backends
-// are cached per agent, that would stall every session on that agent.
+// "forever": a wedged turn holds the session's slot in the package-level
+// semaphore (session_sem.go), and that slot is shared by every backend bound
+// to the same session id — so one wedged turn would stall all of them.
 const DefaultAgentTurnTimeoutSecs = 900
 
 // agentStderrTailBytes caps how much of the CLI's stderr is retained for error
@@ -78,8 +79,12 @@ type AgentBackendConfig struct {
 //     are reported via ExecutedTools for persistence and must never be
 //     dispatched by the agent loop.
 //
-// One instance is CACHED AND SHARED per agent, so all mutable state below is
-// guarded and every wait is bounded.
+// One instance serves ONE TURN: the resolver rebuilds it per message so the
+// system prompt is reassembled from the agent's current prompt, skills and
+// notepad. Turns are therefore serialised by the package-level, session-keyed
+// semaphore rather than by anything on this struct — see semKey below. The
+// mutable state that remains is still guarded and every wait is still bounded,
+// because a single turn streams from a child process on another goroutine.
 type AgentBackend struct {
 	cfg AgentBackendConfig
 
@@ -104,8 +109,10 @@ func NewAgentBackend(cfg AgentBackendConfig) *AgentBackend {
 	return &AgentBackend{
 		cfg:    cfg,
 		semKey: semKeyFor(cfg.SessionID),
-		// FirstTurn seeds the state; from here on the backend tracks it
-		// itself, because the same instance serves every later turn.
+		// FirstTurn seeds the state. Within this turn the backend then tracks
+		// it itself (markSessionExists), which matters when a turn re-invokes
+		// the CLI. Across turns the instance is gone, so the resolver
+		// recomputes FirstTurn from disk instead of relying on this field.
 		sessionExists: !cfg.FirstTurn,
 	}
 }
