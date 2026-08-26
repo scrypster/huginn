@@ -14,7 +14,8 @@ package server
 // Fix 3 (ws.go): block set_primary_agent in DM spaces (fail-closed).
 // Fix 4 (ws.go): user @mention is the addressee for this turn, even when
 //   Manifest.Agent is already stamped to the space lead. First matching
-//   @Name replies; additional @names spawn via CreateFromMentions.
+//   roster @Name replies; additional roster @names spawn via CreateFromMentions.
+//   A space with a roster does not address or extra-spawn non-members.
 
 import (
 	"bytes"
@@ -540,39 +541,49 @@ func TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough(t *t
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
-	// @Kimi is not a channel member but is a known agent — route to Kimi.
+	// @Kimi is a known agent but not a channel member — stay with lead Mark.
 	ag := s.resolveAgentForMessage(sess.ID, "@Kimi are you there?")
 	if ag == nil {
-		t.Fatal("expected known-agent mention to resolve, got nil")
+		t.Fatal("expected fallback to lead agent, got nil")
 	}
-	if ag.Name != "Kimi" {
-		t.Errorf("expected known non-member @Kimi to be the addressee, got %q", ag.Name)
+	if ag.Name != "Mark" {
+		t.Errorf("expected fallback to lead agent %q, got %q", "Mark", ag.Name)
+	}
+
+	// Mid-text leftover of a non-member is the same class of bug.
+	ag = s.resolveAgentForMessage(sess.ID, "please ask @Kimi about hostname")
+	if ag == nil {
+		t.Fatal("expected fallback to lead agent for mid-text non-member, got nil")
+	}
+	if ag.Name != "Mark" {
+		t.Errorf("expected mid-text @Kimi in a Mark-only channel to stay with Mark, got %q", ag.Name)
 	}
 }
 
-// TestResolveAgentForMessage_DMMention_RoutesToMentionedAgent verifies that
-// @anotherAgent in a 1:1 DM is a real address — Kimi takes the turn, not Mark.
-func TestResolveAgentForMessage_DMMention_RoutesToMentionedAgent(t *testing.T) {
+// TestResolveAgentForMessage_DMMention_NonMember_DoesNotAddress verifies that
+// a 1:1 DM only addresses that one agent. Mid-text @Steve in Tess's DM must
+// not silently give Steve the turn.
+func TestResolveAgentForMessage_DMMention_NonMember_DoesNotAddress(t *testing.T) {
 	dir := t.TempDir()
 	sessStore := session.NewStore(dir)
 	db := openSpaceDB(t)
 	spaceStore := spaces.NewSQLiteSpaceStore(db)
 
-	dm, err := spaceStore.OpenDM("Mark")
+	dm, err := spaceStore.OpenDM("Tess")
 	if err != nil {
 		t.Fatalf("OpenDM: %v", err)
 	}
 
 	sess := sessStore.New("test", "/workspace", "model")
 	sess.Manifest.SpaceID = dm.ID
-	sess.Manifest.Agent = "Mark"
+	sess.Manifest.Agent = "Tess"
 	if err := sessStore.SaveManifest(sess); err != nil {
 		t.Fatalf("SaveManifest: %v", err)
 	}
 
 	cfg := testAgentConfig(
-		testAgent("Mark", "model-a", "#fff", "M", true),
-		testAgent("Kimi", "model-b", "#000", "K", false),
+		testAgent("Tess", "model-t", "#fff", "T", true),
+		testAgent("Steve", "model-s", "#000", "S", false),
 	)
 	s := &Server{
 		store:      sessStore,
@@ -580,12 +591,28 @@ func TestResolveAgentForMessage_DMMention_RoutesToMentionedAgent(t *testing.T) {
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
-	ag := s.resolveAgentForMessage(sess.ID, "@Kimi is anyone there?")
+	ag := s.resolveAgentForMessage(sess.ID, "please ask @Steve about hostname")
 	if ag == nil {
-		t.Fatal("expected non-nil agent, got nil")
+		t.Fatal("expected Tess to keep the turn, got nil")
 	}
-	if ag.Name != "Kimi" {
-		t.Errorf("expected DM @Kimi to address Kimi, got %q", ag.Name)
+	if ag.Name != "Tess" {
+		t.Errorf("expected Tess-only DM mid-text @Steve to stay with Tess, got %q", ag.Name)
+	}
+
+	ag = s.resolveAgentForMessage(sess.ID, "@Steve is anyone there?")
+	if ag == nil {
+		t.Fatal("expected Tess to keep the turn for leading leftover, got nil")
+	}
+	if ag.Name != "Tess" {
+		t.Errorf("expected Tess-only DM leading @Steve to stay with Tess, got %q", ag.Name)
+	}
+
+	ag = s.resolveAgentForMessage(sess.ID, "@Tess what is the hostname?")
+	if ag == nil {
+		t.Fatal("expected roster member @Tess to resolve, got nil")
+	}
+	if ag.Name != "Tess" {
+		t.Errorf("expected @Tess in Tess's DM to address Tess, got %q", ag.Name)
 	}
 }
 
@@ -627,6 +654,14 @@ func TestResolveAgentForMessage_LeadStamped_UserAtSteve_RoutesToSteve(t *testing
 	}
 	if ag.Name != "Steve" {
 		t.Errorf("expected @Steve in a Chris-led channel to reach Steve, got %q", ag.Name)
+	}
+
+	ag = s.resolveAgentForMessage(sess.ID, "please ask @Steve about hostname")
+	if ag == nil {
+		t.Fatal("expected mid-text @Steve to run, got nil")
+	}
+	if ag.Name != "Steve" {
+		t.Errorf("expected mid-text @Steve in a Chris-led channel to reach Steve, got %q", ag.Name)
 	}
 }
 
@@ -724,6 +759,55 @@ func TestAdditionalMentionNames_SkipsAddressee(t *testing.T) {
 	}
 }
 
+func TestAdditionalMentionNames_SkipsNonMembersWhenRosterSet(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Chris", "m", "#fff", "C", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Tess", "m", "#fff", "T", false),
+	)
+	extras := additionalMentionNames("@Steve please ask @Tess too", "Steve", cfg, []string{"Chris", "Steve"})
+	if len(extras) != 0 {
+		t.Errorf("got %v, want none — Tess is not on the roster", extras)
+	}
+}
+
+func TestAdditionalMentionNames_StandaloneAllowsKnownAgents(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Tess", "m", "#fff", "T", false),
+	)
+	extras := additionalMentionNames("@Steve @Tess do X", "Steve", cfg, nil)
+	if len(extras) != 1 || extras[0] != "Tess" {
+		t.Errorf("got %v, want [Tess] when there is no space roster", extras)
+	}
+}
+
+func TestResolveAgentForMessage_Standalone_KnownAgentStillWins(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	sess := sessStore.New("test", "/workspace", "model")
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Chris", "model-c", "#fff", "C", true),
+		testAgent("Steve", "model-s", "#000", "S", false),
+	)
+	s := &Server{
+		store: sessStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	ag := s.resolveAgentForMessage(sess.ID, "please ask @Steve about hostname")
+	if ag == nil {
+		t.Fatal("expected standalone @Steve to resolve, got nil")
+	}
+	if ag.Name != "Steve" {
+		t.Errorf("expected standalone session-mode @Steve to address Steve, got %q", ag.Name)
+	}
+}
+
 func TestAdditionalMentionNames_NoneWhenOnlyAddressee(t *testing.T) {
 	cfg := testAgentConfig(
 		testAgent("Steve", "m", "#fff", "S", false),
@@ -731,6 +815,55 @@ func TestAdditionalMentionNames_NoneWhenOnlyAddressee(t *testing.T) {
 	extras := additionalMentionNames("@Steve do X", "Steve", cfg, []string{"Steve"})
 	if len(extras) != 0 {
 		t.Errorf("got %v, want none", extras)
+	}
+}
+
+func TestSpaceMemberNames_DMIsOnlyLead(t *testing.T) {
+	dm := &spaces.Space{Kind: spaces.KindDM, LeadAgent: "Tess", Members: []string{"Steve"}}
+	got := spaceMemberNames(dm)
+	if len(got) != 1 || got[0] != "Tess" {
+		t.Errorf("DM roster = %v, want [Tess]", got)
+	}
+
+	ch := &spaces.Space{Kind: spaces.KindChannel, LeadAgent: "Chris", Members: []string{"Steve", "Sam"}}
+	got = spaceMemberNames(ch)
+	if len(got) != 3 || got[0] != "Chris" || got[1] != "Steve" || got[2] != "Sam" {
+		t.Errorf("channel roster = %v, want [Chris Steve Sam]", got)
+	}
+}
+
+func TestSpawnAdditionalUserMentions_SkipsNonMembersWhenSpaceHasRoster(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	dm, err := spaceStore.OpenDM("Tess")
+	if err != nil {
+		t.Fatalf("OpenDM: %v", err)
+	}
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = dm.ID
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	called := false
+	cfg := testAgentConfig(
+		testAgent("Tess", "m", "#fff", "T", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+	)
+	s := &Server{
+		store:      sessStore,
+		spaceStore: spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+	s.SetMentionDelegate(func(context.Context, string, string, string, string) {
+		called = true
+	})
+	s.spawnAdditionalUserMentions(context.Background(), sess.ID, "please ask @Steve about hostname", "parent", &agents.Agent{Name: "Tess"})
+	if called {
+		t.Error("non-member @Steve in a Tess DM must not extra-spawn")
 	}
 }
 

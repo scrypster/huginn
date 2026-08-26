@@ -6,6 +6,7 @@ All notable changes to Huginn are documented here.
 
 ### Fixed
 - Composer `@` picker lists only agents in the active space roster (channel = lead + members, DM = that agent); leftover `@Name` of a non-member is dropped with a "not in this channel" hint instead of silently hitting the lead
+- Mid-text `@Name` of someone not in the space no longer addresses them or extra-spawns a thread; leftover is dropped with the same "not in this channel" hint as a leading leftover. Spaces with a roster only address or extra-spawn roster names
 
 ## [0.4.0] - 2026-06-10
 

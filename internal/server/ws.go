@@ -767,12 +767,13 @@ func (s *Server) resolveAgent(sessionID string) *agents.Agent {
 // server restart.
 //
 // Resolution order:
-//  1. User @mention addressee — the first @Name in the message that matches a
-//     real agent. Channel members are preferred; otherwise any known agent.
-//     This is stateless per-message and does NOT require PrimaryAgent to be
-//     empty. A Chris-led channel with Manifest.Agent=Chris still routes
-//     "@Steve do X" to Steve. Applies to channels, DMs, and any session
-//     with a lead: a user @mention is a real address, not decoration.
+//  1. User @mention addressee — the first @Name in the message that is
+//     allowed to take this turn. When the space has a roster (DM = that
+//     one agent; channel = lead+members), only roster names may be the
+//     addressee. Standalone session-mode with no roster still matches any
+//     known agent. This is stateless per-message and does NOT require
+//     PrimaryAgent to be empty. A Chris-led channel with Manifest.Agent=Chris
+//     still routes "@Steve do X" to Steve when Steve is on the roster.
 //  2. Session's primary agent (set via "set_primary_agent" or stamped at
 //     session-creation time from the space's lead agent)
 //  3. Space lead agent — defence-in-depth for sessions created before
@@ -847,10 +848,19 @@ func (s *Server) resolveAgentForMessage(sessionID, content string) *agents.Agent
 	return agentFromDefWithVault(cfg.Agents[0])
 }
 
-// spaceMemberNames returns the lead plus roster members of a space.
+// spaceMemberNames returns the addressee roster for a space.
+// DMs are 1:1 — only the DM agent. Channels are lead + members.
+// An empty result means "no roster" (standalone / lookup failed) and
+// mention routing may fall back to any known agent.
 func spaceMemberNames(sp *spaces.Space) []string {
 	if sp == nil {
 		return nil
+	}
+	if sp.Kind == spaces.KindDM {
+		if sp.LeadAgent == "" {
+			return nil
+		}
+		return []string{sp.LeadAgent}
 	}
 	out := make([]string, 0, len(sp.Members)+1)
 	if sp.LeadAgent != "" {
@@ -877,24 +887,25 @@ func agentFromConfig(cfg *agents.AgentsConfig, name string) *agents.Agent {
 }
 
 // resolveMentionAddressee returns the agent addressed by the first @mention
-// in content that matches a real agent. Channel/space members are tried
-// first for each mention; if that name is not a member, any known agent
-// with that name still wins. Mentions are walked in order so the first
-// matching @ is the addressee.
+// in content that is allowed to take this turn. When memberNames is
+// non-empty (the space has a roster), only those names may be the
+// addressee — a known agent who is not in the room does not win.
+// When memberNames is empty (standalone session-mode), any known agent
+// still matches. Mentions are walked in order so the first allowed @
+// is the addressee.
 func resolveMentionAddressee(content string, cfg *agents.AgentsConfig, memberNames []string) *agents.Agent {
 	mentions := extractMentionNames(content)
 	if len(mentions) == 0 || cfg == nil {
 		return nil
 	}
+	restrictToRoster := len(memberNames) > 0
 	members := make(map[string]bool, len(memberNames))
 	for _, m := range memberNames {
 		members[strings.ToLower(m)] = true
 	}
 	for _, name := range mentions {
-		if len(members) > 0 && members[strings.ToLower(name)] {
-			if ag := agentFromConfig(cfg, name); ag != nil {
-				return ag
-			}
+		if restrictToRoster && !members[strings.ToLower(name)] {
+			continue
 		}
 		if ag := agentFromConfig(cfg, name); ag != nil {
 			return ag
@@ -903,9 +914,10 @@ func resolveMentionAddressee(content string, cfg *agents.AgentsConfig, memberNam
 	return nil
 }
 
-// additionalMentionNames returns @mentions after the addressee that match
-// known agents. The first matching mention is the addressee and is omitted
-// so CreateFromMentions can spawn threads for the rest.
+// additionalMentionNames returns @mentions after the addressee that may
+// extra-spawn. The first allowed mention is the addressee and is omitted
+// so CreateFromMentions can spawn threads for the rest. When memberNames
+// is non-empty, extras are also restricted to the roster.
 func additionalMentionNames(content, addressee string, cfg *agents.AgentsConfig, memberNames []string) []string {
 	mentions := extractMentionNames(content)
 	if len(mentions) == 0 {
@@ -916,6 +928,11 @@ func additionalMentionNames(content, addressee string, cfg *agents.AgentsConfig,
 	if addr != nil {
 		addrName = addr.Name
 	}
+	restrictToRoster := len(memberNames) > 0
+	members := make(map[string]bool, len(memberNames))
+	for _, m := range memberNames {
+		members[strings.ToLower(m)] = true
+	}
 	var extra []string
 	seen := map[string]bool{}
 	if addrName != "" {
@@ -924,6 +941,9 @@ func additionalMentionNames(content, addressee string, cfg *agents.AgentsConfig,
 	for _, name := range mentions {
 		key := strings.ToLower(name)
 		if seen[key] {
+			continue
+		}
+		if restrictToRoster && !members[key] {
 			continue
 		}
 		if ag := agentFromConfig(cfg, name); ag != nil {

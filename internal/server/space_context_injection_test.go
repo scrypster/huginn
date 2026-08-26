@@ -529,13 +529,21 @@ func TestResolveAgentForMessage_ChannelAtMention_NonMember_FallsToLead(t *testin
 		}, nil
 	}
 
-	// @Dave is not a channel member but is a known agent — route to Dave.
+	// @Dave is a known agent but not a channel member — stay with lead Tom.
 	ag := srv.resolveAgentForMessage(sess.ID, "@Dave deploy to staging")
 	if ag == nil {
 		t.Fatal("expected agent, got nil")
 	}
-	if ag.Name != "Dave" {
-		t.Errorf("expected known non-member @Dave to be the addressee, got %q", ag.Name)
+	if ag.Name != "Tom" {
+		t.Errorf("expected fallback to lead agent Tom for non-member mention, got %q", ag.Name)
+	}
+
+	ag = srv.resolveAgentForMessage(sess.ID, "please ask @Dave about hostname")
+	if ag == nil {
+		t.Fatal("expected agent for mid-text non-member, got nil")
+	}
+	if ag.Name != "Tom" {
+		t.Errorf("expected mid-text @Dave in a Tom/Sam channel to stay with Tom, got %q", ag.Name)
 	}
 }
 
