@@ -37,3 +37,17 @@ func newOneShotConfig(opts oneshotRunOpts) oneshot.Config {
 		Models:          opts.models,
 	}
 }
+
+
+func oneshotToolNames(calls []oneshot.ToolCall) []string {
+	if len(calls) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(calls))
+	for _, c := range calls {
+		if c.Name != "" {
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
