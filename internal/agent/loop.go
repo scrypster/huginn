@@ -422,6 +422,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	// dropped, residual stripped, run stops. Small leads otherwise re-run
 	// the playbook (recall / delegate again) against a task that is done.
 	var specialistResult bool
+	var speechHinted bool
 	var contentBeforeAutoWait string
 	var denied atomic.Bool
 	origDenied := cfg.OnPermissionDenied
@@ -447,6 +448,15 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			onToken = tokenGate.OnToken
 		}
 		speechOnly := specialistResult
+		if speechOnly && !speechHinted {
+			// 14b otherwise answers the last leftover question (the math)
+			// and never says what the specialist reported.
+			speechHinted = true
+			messages = append(messages, backend.Message{
+				Role:    "user",
+				Content: "[system] Specialists already finished. Speak to the human: say what they reported, then finish any leftover question. No tools. No playbook. No templates.",
+			})
+		}
 		turnCtx := ctx
 		var cutter *speechTurnCutter
 		if speechOnly {

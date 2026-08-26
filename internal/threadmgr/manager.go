@@ -916,13 +916,56 @@ type WaitReport struct {
 // WaitForThreads blocks until every thread in threadIDs reaches a terminal
 // status (done, cancelled, error), the timeout expires, or ctx is cancelled.
 // Threads not found or belonging to a different session are ignored.
+// When threadIDs is empty, includes uncollected terminal threads (that finished
+// before wait was called) to prevent the race where fast specialists finish before
+// wait_for_threads runs. Returns them as Completed immediately.
 // It polls thread state — completion latency is bounded by the poll interval.
 func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, threadIDs []string, timeout time.Duration) WaitReport {
 	const pollInterval = 500 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 
-	collect := func() (completed, pending []*Thread) {
+	// If no threadIDs provided (session-wide wait), include uncollected terminal threads
+	// to handle fast specialists that finish before wait was called.
+	// Placeholder / invented IDs ("<thread_id>", "thread_id_retrieved…") never
+	// match a real thread. Treat that the same as an empty wait so the lead
+	// still collects uncollected finished work instead of inventing an answer.
+	if len(threadIDs) > 0 {
+		real := make([]string, 0, len(threadIDs))
 		for _, id := range threadIDs {
+			id = strings.TrimSpace(id)
+			if id == "" || strings.ContainsAny(id, "<>") || strings.Contains(id, "thread_id") {
+				continue
+			}
+			if _, ok := tm.Get(id); !ok {
+				continue
+			}
+			real = append(real, id)
+		}
+		threadIDs = real
+	}
+
+	var activeToWait []string
+	var immediatelyCompleted []*Thread
+	if len(threadIDs) == 0 {
+		all := tm.ListBySession(sessionID)
+		for _, t := range all {
+			switch t.Status {
+			case StatusDone, StatusCancelled, StatusError:
+				if t.CollectedAt.IsZero() {
+					// Uncollected terminal thread — include in results immediately
+					immediatelyCompleted = append(immediatelyCompleted, t)
+				}
+			default:
+				// Active thread — wait for it
+				activeToWait = append(activeToWait, t.ID)
+			}
+		}
+	} else {
+		activeToWait = threadIDs
+	}
+
+	collect := func() (completed, pending []*Thread) {
+		for _, id := range activeToWait {
 			t, ok := tm.Get(id)
 			if !ok || (sessionID != "" && t.SessionID != sessionID) {
 				continue
@@ -941,6 +984,8 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 	defer ticker.Stop()
 	for {
 		completed, pending := collect()
+		// Add any immediately-completed threads (uncollected terminal threads from session-wide wait)
+		completed = append(immediatelyCompleted, completed...)
 		if len(pending) == 0 {
 			tm.markCollected(completed)
 			return WaitReport{Completed: completed}

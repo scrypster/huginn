@@ -2817,6 +2817,10 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					logger.Error("delegate_to_agent: unknown agent", "agent", p.AgentName)
 					return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: unknown agent %q", p.AgentName)}
 				}
+				if caller := threadmgr.GetCallingAgent(ctx); caller != "" && strings.EqualFold(caller, p.AgentName) {
+					logger.Warn("delegate_to_agent: self-delegation rejected", "agent", p.AgentName)
+					return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: cannot delegate to yourself (%s) — do that work directly or pick a specialist", caller)}
+				}
 				logger.Info("delegate_to_agent: agent validated", "agent", p.AgentName)
 
 				// Load the session for SpawnThread (may be a stub if not yet persisted).
@@ -2980,9 +2984,6 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				sessionID := agent.GetSessionID(ctx)
 				if sessionID == "" {
 					return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
-				}
-				if len(threadIDs) == 0 {
-					threadIDs = tm.ActiveThreadIDs(sessionID)
 				}
 				return tm.WaitForThreads(ctx, sessionID, threadIDs, timeout), nil
 			},

@@ -228,6 +228,28 @@ func TestWaitForThreads_MarksCollected(t *testing.T) {
 	}
 }
 
+// TestWaitForThreads_UncollectedFinished verifies that wait with empty thread_ids
+// includes uncollected terminal threads (that finished before wait was called).
+// This reproduces the bug where a fast specialist finishes before wait runs,
+// and wait incorrectly returned "No matching threads" instead of the result.
+func TestWaitForThreads_UncollectedFinished(t *testing.T) {
+	tm := New()
+	specialist, _ := tm.Create(CreateParams{SessionID: "s1", AgentID: "Reggie", Task: "fast task"})
+
+	// Specialist finishes immediately before wait is called
+	tm.Complete(specialist.ID, FinishSummary{Summary: "PONG", Status: "completed"})
+
+	// Wait with empty thread_ids (no thread_ids provided) should still return the finished thread
+	report := tm.WaitForThreads(context.Background(), "s1", []string{}, 5*time.Second)
+	if len(report.Completed) != 1 || report.Completed[0].ID != specialist.ID {
+		t.Errorf("wait with empty ids should return finished specialist, got completed=%d pending=%d",
+			len(report.Completed), len(report.Pending))
+	}
+	if !tm.WasCollected(specialist.ID) {
+		t.Error("thread must be marked collected after wait returns it")
+	}
+}
+
 // TestCompletionNotify_StampsThreadID verifies Notify stamps ThreadID onto the
 // summary so FollowUpFn implementations can identify the thread.
 func TestCompletionNotify_StampsThreadID(t *testing.T) {
@@ -246,5 +268,16 @@ func TestCompletionNotify_StampsThreadID(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("FollowUpFn never ran")
+	}
+}
+
+func TestWaitForThreads_PlaceholderIDsFallBackToUncollected(t *testing.T) {
+	tm := New()
+	specialist, _ := tm.Create(CreateParams{SessionID: "s1", AgentID: "Reggie", Task: "fast"})
+	tm.Complete(specialist.ID, FinishSummary{Summary: "PONG", Status: "completed"})
+
+	report := tm.WaitForThreads(context.Background(), "s1", []string{"<thread_id_retrieved_from_delegation>"}, 5*time.Second)
+	if len(report.Completed) != 1 || report.Completed[0].ID != specialist.ID {
+		t.Fatalf("placeholder wait should fall back to uncollected, got completed=%d pending=%d", len(report.Completed), len(report.Pending))
 	}
 }

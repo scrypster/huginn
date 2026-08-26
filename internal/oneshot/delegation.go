@@ -71,6 +71,9 @@ func attachDelegation(
 			if _, found := agentReg.ByName(p.AgentName); !found {
 				return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: unknown agent %q", p.AgentName)}
 			}
+			if caller := threadmgr.GetCallingAgent(ctx); caller != "" && strings.EqualFold(caller, p.AgentName) {
+				return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: cannot delegate to yourself (%s) — do that work directly or pick a specialist", caller)}
+			}
 
 			sess := loadSess(sid)
 			t, createErr := tm.Create(threadmgr.CreateParams{
@@ -158,9 +161,6 @@ func attachDelegation(
 			}
 			if sid == "" {
 				return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
-			}
-			if len(threadIDs) == 0 {
-				threadIDs = tm.ActiveThreadIDs(sid)
 			}
 			return tm.WaitForThreads(ctx, sid, threadIDs, timeout), nil
 		},
