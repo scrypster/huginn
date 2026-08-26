@@ -198,6 +198,10 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "claude-approve":
+			os.Exit(runClaudeApprove(os.Stdin, os.Stdout,
+				fmt.Sprintf("http://127.0.0.1:%d/api/v1/claude/approve", cfg.WebUI.Port),
+				claudeApproveTimeout))
 		case "upgrade":
 			if err := cmdUpgrade(flag.Args()[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
