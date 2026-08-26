@@ -316,6 +316,12 @@ func redactAgentDef(a agents.AgentDef) agents.AgentDef {
 	if a.LocalTools == nil {
 		a.LocalTools = []string{}
 	}
+	// Legacy YAML often has no description key. Fill a display fallback from
+	// the system prompt so list/GET never surface an empty description when a
+	// role blurb can be derived. Disk is unchanged until the next save.
+	if a.Description == "" {
+		a.Description = agents.ExtractRoleBlurb(a.SystemPrompt, "")
+	}
 	return a
 }
 
@@ -426,6 +432,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "invalid memory_type: "+err.Error())
 		return
 	}
+	// Persist a one-line description when the client omitted one so list rows
+	// never have to render a "No description" placeholder.
+	if incoming.Description == "" {
+		incoming.Description = agents.ExtractRoleBlurb(incoming.SystemPrompt, "")
+	}
 	if err := incoming.Validate(); err != nil {
 		jsonError(w, 422, "invalid agent: "+err.Error())
 		return
@@ -498,29 +509,36 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	} else {
 		defer resp.Body.Close()
 		var result struct {
-			Models []any `json:"models"`
+			Models []map[string]any `json:"models"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			ollamaErr = "decode error: " + err.Error()
 		} else {
-			ollamaModels = result.Models
+			ollamaModels = enrichOllamaModels(r.Context(), s, baseURL, result.Models)
 		}
 	}
 
 	// Built-in llama.cpp managed models.
 	type builtinModel struct {
-		Name      string `json:"name"`
-		Source    string `json:"source"`
-		SizeBytes int64  `json:"size_bytes,omitempty"`
+		Name               string `json:"name"`
+		Source             string `json:"source"`
+		SizeBytes          int64  `json:"size_bytes,omitempty"`
+		SupportsTools      bool   `json:"supportsTools"`
+		SupportsDelegation bool   `json:"supportsDelegation"`
+		Tier               string `json:"tier,omitempty"`
 	}
 	var builtinModels []builtinModel
 	if s.modelStore != nil {
 		if installed, err := s.modelStore.Installed(); err == nil {
 			for name, entry := range installed {
+				caps := inferListedModelCaps(name, true)
 				builtinModels = append(builtinModels, builtinModel{
-					Name:      name,
-					Source:    "built-in",
-					SizeBytes: entry.SizeBytes,
+					Name:               name,
+					Source:             "built-in",
+					SizeBytes:          entry.SizeBytes,
+					SupportsTools:      caps.SupportsTools,
+					SupportsDelegation: caps.SupportsDelegation,
+					Tier:               string(caps.Tier),
 				})
 			}
 		}
@@ -534,7 +552,14 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	var cloudModels []any
 	addProvider := func(name string, models []providerModel) {
 		for _, m := range models {
-			cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": name})
+			caps := inferListedModelCaps(m.ID, true)
+			cloudModels = append(cloudModels, map[string]any{
+				"name":               m.ID,
+				"source":             name,
+				"supportsTools":      caps.SupportsTools,
+				"supportsDelegation": caps.SupportsDelegation,
+				"tier":               caps.Tier,
+			})
 		}
 	}
 
@@ -791,7 +816,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			}
 			if buf.Len() > 0 {
 				assistantMsg := session.SessionMessage{
-					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
+					ID: session.NewID(), Role: "assistant", Content: backend.VisibleAssistantContent(buf.String()), Agent: agentName, Ts: time.Now().UTC(),
 				}
 				s.applyKnownUsage(&assistantMsg, id, persistModelName(sess, ag))
 				if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {

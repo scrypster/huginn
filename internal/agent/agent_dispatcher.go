@@ -110,13 +110,15 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 	var agentGate *permissions.Gate
 	if gate != nil {
 		// Always allow "muninndb" (vault tools) and "builtin" (delegation tools and
-		// other builtins) even when the agent has an explicit toolbelt. Without this,
-		// the gate would reject calls to delegate_to_agent (tagged "builtin") and
-		// muninn tools (tagged "muninndb") with "permission denied" for agents that
-		// have a non-empty toolbelt. The schemas are already included by steps 3 and
-		// 4 above; the gate bypass ensures those calls are also permitted at runtime.
+		// other builtins) even when the agent has an explicit (or empty) toolbelt.
+		// Without this, the gate would reject calls to delegate_to_agent (tagged
+		// "builtin") and muninn tools (tagged "muninndb") with "permission denied"
+		// once AllowedProviders is a non-nil map. The schemas are already included
+		// by steps 3 and 4 above; the gate bypass keeps those calls permitted.
 		allowed := agents.AllowedProviders(ag.Toolbelt)
-		if allowed != nil {
+		// Empty map = deny external providers. Wildcard {"*": true} is
+		// explicit allow-all and already covers vault/delegation tags.
+		if allowed != nil && !allowed["*"] {
 			allowed["muninndb"] = true
 			allowed["builtin"] = true
 		}
@@ -731,8 +733,12 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	}
 	reg := o.toolRegistry
 	gate := o.permGate
+	maxTurns := o.defaultMaxTurns
 	memReplicator := o.optionalMemoryReplicatorLocked()
 	o.mu.RUnlock()
+	if maxTurns <= 0 {
+		maxTurns = 50
+	}
 
 	// Slow path: named session not found — create it under write lock (double-check pattern).
 	if sess == nil && sessionID != "" {
@@ -902,7 +908,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			sess:             sess,
 			reg:              reg,
 			gate:             gate,
-			maxTurns:         50,
+			maxTurns:         maxTurns,
 			errorPrefix:      "chat",
 			latencySlot:      "agent-chat",
 			sessionID:        sessionID,

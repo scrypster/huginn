@@ -977,7 +977,7 @@ const skillsNavItems = [
 ]
 
 // ── Agents list (for sidebar panel) ─────────────────────────────────
-const { agents, loading: agentsLoading, fetchAgents } = useAgents()
+const { agents, loading: agentsLoading, fetchAgents, wireWS: wireAgentsWS } = useAgents()
 
 async function loadAgents() {
   await fetchAgents()
@@ -1180,6 +1180,7 @@ async function initApp() {
     fetchAgents().catch(() => {})
     fetchCloudStatus().catch(() => {})
     wireWS(ws)
+    wireAgentsWS(ws)
     wireWorkflowsWS(ws)
     wireThreadDetailWS(ws)
     wireSpaceWS(ws)

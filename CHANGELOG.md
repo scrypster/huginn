@@ -6,6 +6,9 @@ All notable changes to Huginn are documented here.
 
 ### Added
 - Space-routed DMs/channels now load REST threads after timeline hydrate (active session and every `session_id` on the timeline) so ThreadPanel, previews, and A2A strips use the same helpers as session mode
+- CLI `--print` / `--agent` oneshot now wires A2A delegation (`delegate_to_agent`, `wait_for_threads`, `list_team_status`, `recall_thread_result`) with an ephemeral session, ThreadManager, and SpawnThread. Preview is always auto-approved (`HUGINN_DELEGATION_PREVIEW=off`). Named agents resolve from `~/.huginn/agents/*.{yaml,json}`.
+- Model picker warns when the selected model cannot reliably use tools (7b / `supportsTools: false`)
+- User `@Name` in a channel or DM addresses that agent for the turn when they are on the space roster (stamped lead no longer swallows the mention). A leftover `@Name` of someone not in the roster still does not address them or extra-spawn a thread
 
 ### Fixed
 - Settings → Tools no longer presents `tools_enabled` as a master off switch for `huginn serve`; the copy matches serve (builtins still register; allow/deny still apply; deny wins on conflict)
@@ -34,6 +37,16 @@ All notable changes to Huginn are documented here.
 - Switching DMs no longer dumps another space's follow-up cards, thread completion cards, permission prompts, warnings, or thread-help toasts onto the room you opened — those events write to the owner space's timeline and only surface permission/toasts when that space is in view
 - Assistant or user `@Name` of someone not in the space no longer extra-spawns a thread via CreateFromMentions (Tess DM `@Steve` stays Tess-only; channel roster members still spawn; standalone session-mode is unchanged)
 - `delegate_to_agent` targeting someone not in the space roster now fails visibly (DELEGATE_FAIL) instead of spawning (Tess-only DM cannot spawn Steve; channel roster members still delegate; standalone session-mode is unchanged)
+- Creating an agent now refreshes the chat sidebar and persists a derived description from the system prompt instead of leaving DMs stale and cards showing "No description"
+- CLI `--print` / `--agent NAME MSG` now run the agentic tool loop (`ChatWithAgent` / `RunLoop`) instead of a bare ChatCompletion. `--print` honors `--agent`, `--model` (via SwapModel), `--no-tools`, `--max-turns`, and `--dangerously-skip-permissions` without requiring `--headless`. `--json` emits `agentOutput` plus `toolsCalled` `{name, args, result}` for each tool.
+- Local Qwen 14b (Ollama) tool calls that arrive as JSON-in-content instead of structured `tool_calls` are promoted so the agent loop actually executes them. One or more whitespace-separated `{"name","arguments"}` objects in a single content blob are all promoted (Winston oneshot sent two).
+- Empty agent toolbelt no longer grants every connection provider. `AllowedProviders` fails closed; `provider: "*"` / `connection_id: "*"` remains explicit allow-all. Server auto-approve (`NewGate(true, nil)` skipAll) no longer bypasses an empty toolbelt.
+- In-flight responding status names the addressed `@mention` agent instead of always showing the channel lead; per-space run chrome from owner-scoped events is unchanged
+- Mixed JSON-in-content tool calls (and streamed JSON tokens) are stripped from the user-visible assistant bubble so harness invocations never render as chat text.
+- Streamed leftover after JSON-in-content (`}PONG`) stays one bubble — the first character is not dropped or forked into a nameless `ONG` row, and the sidebar preview keeps `PONG`.
+- Model tool warning persists on agent cards, the editor, and chat header/composer (not only the create-agent picker)
+- **bash `~` / `$HOME`** — the bash tool now expands `~` and `$HOME` in the command string the way a shell does (process home, not the session temp HOME). `ls ~` lists the real home (or a test fake home). If home cannot be resolved, the tool returns a loud expansion error instead of empty-success.
+- **Permission-deny leftover JSON** — after a tool is denied, leftover harness JSON such as `{"name":"gh_issue_create",...}` is stripped from VisibleAssistantContent and oneshot `agentOutput` so it never appears in the visible answer.
 
 ## [0.4.0] - 2026-06-10
 

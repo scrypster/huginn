@@ -362,7 +362,10 @@ same constraint at the execution layer. Each toolbelt entry can also set
 operation against that provider, even when `--dangerously-skip-permissions` is
 active.
 
-An empty toolbelt imposes no restriction and is the backward-compatible default.
+An empty toolbelt denies every external provider (fail closed). Auto-approve
+(`Gate.skipAll`, including server `NewGate(true, nil)`) skips the approval
+prompt; it does not treat an empty toolbelt as allow-all. Explicit allow-all
+is `{ "provider": "*" }` or `connection_id: "*"`.
 
 See [agent-toolbelt.md](agent-toolbelt.md) for the full data model, enforcement
 flow, approval gate behavior, and threat model.

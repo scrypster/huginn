@@ -39,7 +39,7 @@
           </div>
           <p class="text-[11px] mt-0.5 leading-snug"
              style="color:#8b949e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">
-            {{ member.description || 'No description' }}
+            {{ member.description || defaultDescription }}
           </p>
           <p v-if="member.vaultName" class="text-[10px] mt-0.5 truncate" style="color:#8b949e">
             🧠 {{ member.vaultName }}
@@ -51,6 +51,8 @@
 </template>
 
 <script setup lang="ts">
+import { DEFAULT_AGENT_DESCRIPTION } from '../utils/agentDescription'
+
 interface SpaceMemberCard {
   name: string
   description: string
@@ -65,4 +67,6 @@ defineProps<{
 }>()
 
 defineEmits<{ (e: 'toggle'): void }>()
+
+const defaultDescription = DEFAULT_AGENT_DESCRIPTION
 </script>

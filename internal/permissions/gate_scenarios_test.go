@@ -349,6 +349,43 @@ func TestGate_SetAllowedProviders_NilAllowsAll(t *testing.T) {
 	}
 }
 
+// TestGate_SetAllowedProviders_EmptyMapDeniesEvenWithSkipAll is the
+// empty-toolbelt skipAll hole: NewGate(true, nil) auto-approves prompts
+// but an empty provider set must still reject external tools.
+func TestGate_SetAllowedProviders_EmptyMapDeniesEvenWithSkipAll(t *testing.T) {
+	g := NewGate(true, nil)
+	g.SetAllowedProviders(map[string]bool{})
+
+	if g.Check(PermissionRequest{
+		ToolName: "aws_ec2_terminate_instance",
+		Level:    tools.PermWrite,
+		Provider: "aws",
+	}) {
+		t.Error("empty AllowedProviders must deny aws; skipAll is not allow-all-providers")
+	}
+
+	// Untagged builtins are unaffected.
+	if !g.Check(PermissionRequest{
+		ToolName: "read_file",
+		Level:    tools.PermRead,
+		Provider: "",
+	}) {
+		t.Error("expected untagged builtin to be allowed")
+	}
+}
+
+func TestGate_SetAllowedProviders_WildcardAllowsExternal(t *testing.T) {
+	g := NewGate(true, nil)
+	g.SetAllowedProviders(map[string]bool{"*": true})
+	if !g.Check(PermissionRequest{
+		ToolName: "aws_ec2_terminate_instance",
+		Level:    tools.PermWrite,
+		Provider: "aws",
+	}) {
+		t.Error("expected \"*\" AllowedProviders to allow aws")
+	}
+}
+
 // TestGate_AllowedProviders_RejectsUnknownProvider verifies toolbelt restriction works.
 func TestGate_AllowedProviders_RejectsUnknownProvider(t *testing.T) {
 	g := NewGate(true, nil)

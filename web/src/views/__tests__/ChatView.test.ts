@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
-import { ref, nextTick } from 'vue'
+import { ref, reactive, nextTick } from 'vue'
 
 // ── Composable mocks (hoisted before component import) ────────────────
 
@@ -92,7 +92,7 @@ vi.mock('../../composables/useApi', () => ({
 // ── useSpaceTimeline mock ─────────────────────────────────────────────
 // Provides a controllable timeline with a real Map for sessionToSpaceMap
 // so .set() / .has() calls work correctly in production code.
-const makeSpaceState = () => ({
+const makeSpaceState = () => reactive({
   messages: [] as any[],
   sessionToSpaceMap: new Map<string, string>(),
   activeSessionId: null as string | null,
@@ -1982,6 +1982,73 @@ describe('ChatView — message display edge cases', () => {
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 
+  it('does not show leading tool-call JSON in the assistant bubble', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: '@Steve say PONG and nothing else' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '{"name": "bash", "arguments": {"command": "echo PONG"}}PONG',
+        agent: 'Steve',
+        streaming: true,
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    const html = wrapper.html()
+    expect(html).toContain('PONG')
+    expect(html).not.toContain('{"name"')
+    expect(html).not.toContain('"arguments"')
+
+    mockWs.simulateMessage({ type: 'token', content: '' })
+    const msgs = mockGetMessages('test-session-id')
+    const streamingMsg = msgs.find((m: any) => m.streaming)
+    expect(streamingMsg?.content).toBe('PONG')
+  })
+
+  it('streamed leftover P then ONG stays one PONG bubble', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: '@Steve say PONG and nothing else' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({ type: 'token', content: 'P' })
+    mockWs.simulateMessage({ type: 'token', content: 'ONG' })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streaming = msgs.filter((m: any) => m.role === 'assistant')
+    expect(streaming).toHaveLength(1)
+    expect(streaming[0].content).toBe('PONG')
+  })
+
+  it('plain streamed PONG does not drop the first character', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: 'ping' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    for (const ch of 'PONG') {
+      mockWs.simulateMessage({ type: 'token', content: ch })
+    }
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streamingMsg = msgs.find((m: any) => m.streaming)
+    expect(streamingMsg?.content).toBe('PONG')
+  })
+
   it('completed tool-use message renders the tool call chip', async () => {
     mockMessages['test-session-id'] = [
       {
@@ -2238,6 +2305,7 @@ describe('ChatView — space mode', () => {
     mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
     mockDms.value = []
     mockOpenDM.mockResolvedValue(null)
+    mockActiveSpace.value = null
   })
 
   it('first send: auto-creates session and registers it in sessionToSpaceMap', async () => {
@@ -2664,6 +2732,64 @@ describe('ChatView — space mode', () => {
     expect(stateA.messages.some((m: any) => m.content === 'Owner-space follow-up')).toBe(true)
     expect(wrapper.html()).toContain('Permission required')
   })
+
+  it('in-flight @mention status names the addressed agent, not the lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Steve say PONG and nothing else')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Steve is responding')
+    expect(banner.text()).not.toContain('Tess is responding')
+  })
+
+  it('in-flight unmentioned status names the channel lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'what is the status?')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Tess is responding')
+    expect(banner.text()).not.toContain('Steve is responding')
+  })
 })
 
 describe('ChatView — /chat/:agentName alias', () => {
@@ -2739,5 +2865,62 @@ describe('ChatView — /chat/:agentName alias', () => {
 
     expect(mockRouterReplace).not.toHaveBeenCalled()
     expect(mockOpenDM).not.toHaveBeenCalled()
+  })
+})
+
+describe('ChatView — model tool capability warning', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockMessages['test-session-id'] = []
+    mockSessions.value = [{ id: 'test-session-id', title: 'DM Steve', agent: 'Steve' }]
+    mockActiveSpace.value = null
+    mockGetSessionThreads.mockReturnValue([])
+    mockGetActiveThreadCount.mockReturnValue(0)
+    mockGetSessionPreviews.mockReturnValue([])
+  })
+
+  it('shows the tools warning in header and composer for a 7b displayAgent', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-testid="chat-model-tools-warning"]').text()).toContain(
+      'This model is unlikely to use tools or delegate',
+    )
+    expect(wrapper.get('[data-testid="composer-model-tools-warning"]').text()).toContain(
+      'This model is unlikely to use tools or delegate',
+    )
+  })
+
+  it('hides the tools warning for a 14b displayAgent with tools', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Chris', model: 'qwen2.5-coder:14b', color: '#3FB950', icon: 'C', is_default: true },
+    ])
+    mockSessions.value = [{ id: 'test-session-id', title: 'DM Chris', agent: 'Chris' }]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="chat-model-tools-warning"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-model-tools-warning"]').exists()).toBe(false)
+  })
+
+  it('renders raw TOOL_FAIL assistant text as a system chip', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    mockMessages['test-session-id'] = [
+      { id: 'a1', role: 'assistant', content: 'TOOL_FAIL: The "json" tool is not available.', agent: 'Steve' },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    const chip = wrapper.get('[data-testid="system-fail-line"]')
+    expect(chip.text()).toContain('The "json" tool is not available.')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 })

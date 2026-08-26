@@ -156,7 +156,7 @@ Disabling a tool in `local_tools` is therefore stronger than relying on the perm
 | | `local_tools` | Toolbelt |
 |--|--|--|
 | Controls | Huginn's built-in tools | External connection providers (GitHub, Slack, AWS, etc.) |
-| Default (new agent) | None | All connections accessible (backward-compat) |
+| Default (new agent) | None | None (fail closed; `provider: "*"` is explicit allow-all) |
 | Restricts | File I/O, shell, code search | OAuth tools, API-key tools, CLI tools |
 
 An agent can have `local_tools: ["read_file"]` but a full toolbelt — or vice versa. Configure each independently based on the agent's job.

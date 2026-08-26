@@ -186,6 +186,209 @@ func TestRunLoop_ToolCallExecuted(t *testing.T) {
 	}
 }
 
+func TestRunLoop_ContentJSONExecutesTool(t *testing.T) {
+	tool := &mockTool{
+		name:   "bash",
+		result: tools.ToolResult{Output: "testhost"},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				Content:    `{"name": "bash", "arguments": {"command": "hostname"}}`,
+				DoneReason: "stop",
+			},
+			stopResponse("the hostname is testhost"),
+		},
+	}
+	reg := newRegistryWith(tool)
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    reg,
+		Messages: []backend.Message{{Role: "user", Content: "what host?"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Fatalf("bash was not executed: callCount=%d (content JSON should become a tool call)", tool.callCount)
+	}
+	if result.TurnCount != 2 {
+		t.Errorf("TurnCount = %d, want 2", result.TurnCount)
+	}
+	if result.FinalContent != "the hostname is testhost" {
+		t.Errorf("FinalContent = %q", result.FinalContent)
+	}
+}
+
+func TestRunLoop_ContentJSONThenProseHidesJSONAndDoesNotExecute(t *testing.T) {
+	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
+	var streamed strings.Builder
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{Content: mixed, DoneReason: "stop"},
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "@Steve say PONG and nothing else"}},
+		OnToken:  func(s string) { streamed.WriteString(s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("mixed JSON+prose must not execute bash, callCount=%d", tool.callCount)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+	if strings.Contains(streamed.String(), `{"name"`) {
+		t.Errorf("tool JSON leaked into OnToken: %q", streamed.String())
+	}
+	if streamed.String() != "PONG" {
+		t.Errorf("streamed %q, want PONG", streamed.String())
+	}
+}
+
+// tokenStreamBackend fires OnToken per rune then StreamDone, matching Ollama
+// parseSSE + the WS onEvent that used to close the bubble before RunLoop Finish.
+type tokenStreamBackend struct {
+	content string
+}
+
+func (b *tokenStreamBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	for _, r := range b.content {
+		if req.OnToken != nil {
+			req.OnToken(string(r))
+		}
+	}
+	if req.OnEvent != nil {
+		req.OnEvent(backend.StreamEvent{Type: backend.StreamDone})
+	}
+	return &backend.ChatResponse{Content: b.content, DoneReason: "stop"}, nil
+}
+func (b *tokenStreamBackend) Health(_ context.Context) error   { return nil }
+func (b *tokenStreamBackend) Shutdown(_ context.Context) error { return nil }
+func (b *tokenStreamBackend) ContextWindow() int               { return 128_000 }
+
+func TestRunLoop_StreamedJSONThenPONG_NoONGFork(t *testing.T) {
+	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
+	var tokens []string
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 1,
+		Backend:  &tokenStreamBackend{content: mixed},
+		Tools:    newRegistryWith(&mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}),
+		Messages: []backend.Message{{Role: "user", Content: "@Steve say PONG and nothing else"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("streamed %q tokens %q, want PONG (dropped or forked first char?)", got, tokens)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+	for _, tok := range tokens {
+		if tok == "ONG" {
+			t.Fatalf("forked ONG after StreamDone: %q", tokens)
+		}
+	}
+}
+
+func TestRunLoop_StreamedPlainPONG_DoesNotDropFirstChar(t *testing.T) {
+	var tokens []string
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 1,
+		Backend:  &tokenStreamBackend{content: "PONG"},
+		Messages: []backend.Message{{Role: "user", Content: "ping"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("plain PONG streamed %q tokens %q", got, tokens)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+}
+
+func TestRunLoop_ContentProseDoesNotExecuteTool(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			stopResponse("hello"),
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("prose should not execute bash, callCount=%d", tool.callCount)
+	}
+	if result.StopReason != "stop" || result.TurnCount != 1 {
+		t.Errorf("StopReason=%q TurnCount=%d", result.StopReason, result.TurnCount)
+	}
+}
+
+func TestRunLoop_NativeToolCallsNotDoubleParsed(t *testing.T) {
+	tool := &mockTool{name: "read_file", result: tools.ToolResult{Output: "ok"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				Content:    `{"name": "bash", "arguments": {"command": "hostname"}}`,
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_native",
+					Function: backend.ToolCallFunction{
+						Name:      "read_file",
+						Arguments: map[string]any{"file_path": "main.go"},
+					},
+				}},
+			},
+			stopResponse("done"),
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool, &mockTool{name: "bash"}),
+		Messages: []backend.Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Errorf("read_file callCount=%d, want 1", tool.callCount)
+	}
+	// Content JSON must not be promoted into a second bash call.
+	var toolNames []string
+	for _, msg := range result.Messages {
+		if msg.Role == "tool" {
+			toolNames = append(toolNames, msg.ToolName)
+		}
+	}
+	if len(toolNames) != 1 || toolNames[0] != "read_file" {
+		t.Errorf("executed tools = %v, want [read_file] only", toolNames)
+	}
+}
+
 // TestRunLoop_MaxTurnsReached verifies that a backend that never stops tool calls
 // is cut off at MaxTurns with StopReason="max_turns".
 func TestRunLoop_MaxTurnsReached(t *testing.T) {
@@ -1073,10 +1276,10 @@ func TestRunLoop_PanicPath_OnToolDoneStillFires(t *testing.T) {
 	var doneIsError bool
 
 	_, err := RunLoop(context.Background(), RunLoopConfig{
-		MaxTurns: 5,
-		Backend:  mb,
-		Tools:    reg,
-		Messages: []backend.Message{{Role: "user", Content: "trigger panic"}},
+		MaxTurns:   5,
+		Backend:    mb,
+		Tools:      reg,
+		Messages:   []backend.Message{{Role: "user", Content: "trigger panic"}},
 		OnToolCall: func(callID string, name string, args map[string]any) {},
 		OnToolDone: func(callID string, name string, result tools.ToolResult) {
 			doneCalled = true

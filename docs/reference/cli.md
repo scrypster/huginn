@@ -11,14 +11,14 @@ These flags apply to the root `huginn` command and to subcommands where noted.
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--version` | bool | false | Print version and exit |
-| `--print`, `-p` | string | — | Non-interactive: run message and print response, then exit |
+| `--print`, `-p` | string | — | Non-interactive: run the agentic tool loop for this message and exit |
 | `--agent` | string | — | Run with a specific named agent (e.g. `Chris`, `Steve`, `Mark`) |
 | `--model` | string | — | Override the coder agent model for this session (overrides `coder_model` in config). Does not affect planner or reasoner models. |
 | `--endpoint` | string | — | OpenAI-compatible backend endpoint, overrides config |
 | `--headless` | bool | false | Headless mode — no TUI, output to stdout |
 | `--cwd` | string | — | Working directory override (headless mode) |
 | `--command` | string | — | Slash command to run on start (headless mode) |
-| `--json` | bool | false | Output JSON; use with `--headless --print` |
+| `--json` | bool | false | Output JSON from `--print` (`agentOutput` + `toolsCalled`) or headless mode |
 | `--workspace` | string | — | Path to `huginn.workspace.json`, overrides workspace auto-detection |
 | `--max-turns` | int | 0 | Max agentic loop iterations (0 = use config default of 50) |
 | `--no-tools` | bool | false | Disable all tool use — plain chat mode |
@@ -275,11 +275,14 @@ The keychain format is the most secure option for persistent installations becau
 ## Examples
 
 ```bash
-# Ask a question without launching TUI
+# Ask a question without launching TUI (runs the agentic tool loop)
 huginn --print "what does the auth middleware do?"
 huginn -p "summarize internal/payment/gateway.go"
 
-# Run a specific agent
+# Named agent + tools, no TUI (scriptable)
+huginn --agent Steve --print "Use bash to run hostname" --dangerously-skip-permissions --json
+
+# Run a specific agent (positional message is equivalent to --print)
 huginn --agent Steve "implement the login handler"
 huginn --agent Chris "design the payment module architecture"
 

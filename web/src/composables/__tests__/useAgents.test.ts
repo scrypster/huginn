@@ -170,3 +170,46 @@ describe('useAgents — removeAgent', () => {
     expect(agents.value).toHaveLength(2)
   })
 })
+
+describe('useAgents — wireWS', () => {
+  it('refetches agents on agent_changed created without a page reload', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(ok([]))
+      .mockResolvedValueOnce(ok([{ name: 'Steve', color: '#58a6ff', icon: 'S', model: 'qwen' }]))
+
+    const useAgents = await freshUseAgents()
+    const { agents, fetchAgents, wireWS } = useAgents()
+    await fetchAgents()
+    expect(agents.value).toHaveLength(0)
+
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    wireWS({
+      on: (type: string, fn: (msg: unknown) => void) => { handlers[type] = fn },
+      off: vi.fn(),
+    } as any)
+
+    handlers.agent_changed?.({ type: 'agent_changed', payload: { name: 'Steve', action: 'created' } })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(agents.value.map(a => a.name)).toContain('Steve')
+  })
+
+  it('removes an agent on agent_changed deleted', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok(sampleAgents))
+
+    const useAgents = await freshUseAgents()
+    const { agents, fetchAgents, wireWS } = useAgents()
+    await fetchAgents()
+
+    const handlers: Record<string, (msg: unknown) => void> = {}
+    wireWS({
+      on: (type: string, fn: (msg: unknown) => void) => { handlers[type] = fn },
+      off: vi.fn(),
+    } as any)
+
+    handlers.agent_changed?.({ type: 'agent_changed', payload: { name: 'Coder', action: 'deleted' } })
+    expect(agents.value.find(a => a.name === 'Coder')).toBeUndefined()
+  })
+})

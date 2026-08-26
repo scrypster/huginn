@@ -253,6 +253,12 @@
         </div>
       </div>
 
+      <div v-if="displayAgentUnreliableTools"
+        data-testid="chat-model-tools-warning"
+        class="flex-shrink-0 px-5 py-1.5 border-b border-huginn-yellow/25 bg-huginn-yellow/8">
+        <p class="text-[11px] text-huginn-yellow leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+      </div>
+
       <!-- ── In-chat search bar (Ctrl+F) ────────────────────────── -->
       <Transition
         enter-active-class="transition-all duration-150 ease-out"
@@ -539,7 +545,7 @@
                 />
                 <!-- Message text — system-fail prefixes are not teammate speech -->
                 <div
-                  v-if="isBareFailSpeech(msg.content)"
+                  v-if="isBareFailSpeech(visibleAssistantText(msg) || msg.content)"
                   data-testid="system-fail-line"
                   class="inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
                          border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
@@ -548,12 +554,12 @@
                     <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
                   </svg>
                   <span>
-                    <span class="font-semibold">{{ parseSystemFailSpeech(msg.content)!.kind }}</span>
-                    <span v-if="parseSystemFailSpeech(msg.content)!.message"> · {{ parseSystemFailSpeech(msg.content)!.message }}</span>
+                    <span class="font-semibold">{{ parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.kind }}</span>
+                    <span v-if="parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.message"> · {{ parseSystemFailSpeech(visibleAssistantText(msg) || msg.content)!.message }}</span>
                   </span>
                 </div>
-                <div v-else-if="msg.content && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
-                  v-html="renderWithMentions(msg.content)" />
+                <div v-else-if="visibleAssistantText(msg) && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                  v-html="renderWithMentions(visibleAssistantText(msg))" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
                 <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2">
@@ -991,6 +997,11 @@
 
       <!-- ── Input area ──────────────────────────────────────────── -->
       <div class="px-4 pb-4 flex-shrink-0">
+        <p v-if="displayAgentUnreliableTools"
+          data-testid="composer-model-tools-warning"
+          class="text-[10px] text-huginn-yellow/90 leading-snug px-1 pb-2">
+          {{ MODEL_TOOL_WARNING }}
+        </p>
         <ChatEditor
           ref="chatEditorRef"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
@@ -1128,6 +1139,8 @@ import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
+import { visibleAssistantContent } from '../utils/visibleAssistantContent'
+import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 import { isBareFailSpeech, messageToolChipFailed, parseSystemFailSpeech, visibleToolCalls } from '../utils/honesty'
 
@@ -1743,6 +1756,15 @@ const selectedAgent = computed(() =>
   agentsList.value.find(a => a.name === selectedAgentName.value) ?? null
 )
 
+const inFlightUserContent = computed(() => {
+  if (!streaming.value) return ''
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m?.role === 'user') return m.content ?? ''
+  }
+  return ''
+})
+
 const {
   headerEditing,
   headerEditValue,
@@ -1763,14 +1785,23 @@ const {
   spaceId: computed(() => props.spaceId),
   formatSessionLabel: formatSessionLabel as (s: { id: string; title?: string }) => string,
   renameSession,
-  activeSpace: activeSpace as Ref<{ leadAgent: string; memberAgents: string[] } | null>,
+  activeSpace: activeSpace as Ref<{ kind?: string; leadAgent: string; memberAgents: string[] } | null>,
   agentsList: agentsList as Ref<Array<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string }>>,
   selectedAgentName,
   threadPanelOpen,
   selectedAgent: selectedAgent as Ref<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string } | null>,
+  streaming,
+  inFlightUserContent,
 })
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (headerInputEl satisfies unknown)
+
+const displayAgentUnreliableTools = computed(() =>
+  modelUnreliableForTools({
+    name: displayAgent.value?.model,
+    supportsTools: (displayAgent.value as { supportsTools?: boolean } | null)?.supportsTools,
+  }),
+)
 
 function exportSession() {
   if (!messages.value.length) return
@@ -1883,6 +1914,12 @@ function isForActiveSession(msg: WSMessage): boolean {
   if (!props.sessionId) return true
   const sid = msg.session_id || props.sessionId
   return sid === props.sessionId
+}
+
+function visibleAssistantText(msg: { role?: string; content?: string }): string {
+  const content = msg.content ?? ''
+  if (msg.role !== 'assistant') return content
+  return visibleAssistantContent(content)
 }
 
 function isMemoryToolName(name: string): boolean {
@@ -2315,6 +2352,7 @@ watch(wsRef, (ws) => {
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
       if (streamMsg?.streaming) {
         streamMsg.content += msg.content ?? ''
+        streamMsg.content = visibleAssistantContent(streamMsg.content)
         scrollToBottom()
         return
       }
@@ -2323,7 +2361,7 @@ watch(wsRef, (ws) => {
       msgs.push({
         id: `h-${Date.now()}`,
         role: 'assistant',
-        content: msg.content ?? '',
+        content: visibleAssistantContent(msg.content ?? ''),
         streaming: true,
         agent: selectedAgentName.value || undefined,
         createdAt: new Date().toISOString(),
@@ -2441,7 +2479,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
       const last = msgs.at(-1)
       const agentName = last?.agent ?? 'Agent'
-      const preview = last?.content?.slice(0, 80) ?? ''
+      const preview = visibleAssistantContent(last?.content ?? '').slice(0, 80)
       const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName,

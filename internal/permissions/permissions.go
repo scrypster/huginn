@@ -75,7 +75,7 @@ type Gate struct {
 	mu               sync.Mutex
 	skipAll          bool            // --dangerously-skip-permissions
 	watchedProviders map[string]bool // prompt for these even in skipAll mode
-	allowedProviders map[string]bool // nil = all providers allowed; non-nil = toolbelt restriction
+	allowedProviders map[string]bool // nil = unrestricted (legacy); empty = deny external; {"*":true} = explicit allow-all
 	sessionAllowed   map[string]bool // tool name → always allow this session
 	sessionOrder     []string        // kept for backwards compat; unused when lruList is non-nil
 	// lruList is the doubly-linked list for true LRU eviction (front = MRU, back = LRU).
@@ -215,7 +215,15 @@ func (g *Gate) SetWatchedProviders(providers map[string]bool) {
 }
 
 // SetAllowedProviders configures the set of connection providers whose tools
-// this gate will allow. Pass nil to allow all providers (no toolbelt restriction).
+// this gate will allow.
+//
+//   - nil: no toolbelt restriction (legacy / gate not yet scoped to an agent)
+//   - empty map: deny every tagged external provider (fail closed)
+//   - {"*": true}: explicit allow-all, same as a toolbelt wildcard
+//   - named keys: only those providers
+//
+// Auto-approve (skipAll) is independent of this set. skipAll skips the
+// approval prompt; it does not grant providers the agent was not given.
 func (g *Gate) SetAllowedProviders(providers map[string]bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -340,13 +348,15 @@ func (g *Gate) Check(req PermissionRequest) bool {
 // Callers that only need a bool can use Check.
 func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 	// Toolbelt enforcement: reject calls from providers not in the allowed set.
-	// Only applies when allowedProviders is non-nil (agent has an explicit toolbelt)
-	// and req.Provider is non-empty (connection tool, not an internal tool).
+	// Applies when allowedProviders is non-nil (an agent-scoped gate) and
+	// req.Provider is non-empty (connection tool, not an untagged builtin).
+	// An empty map fails closed. provider "*" is an explicit allow-all.
+	// skipAll does not bypass this check — auto-approve is not allow-all-providers.
 	if req.Provider != "" {
 		g.mu.Lock()
 		allowed := g.allowedProviders
 		g.mu.Unlock()
-		if allowed != nil && !allowed[req.Provider] {
+		if allowed != nil && !allowed[req.Provider] && !allowed["*"] {
 			return CheckResult{
 				Allowed:    false,
 				ReasonCode: ReasonProviderNotAllowed,

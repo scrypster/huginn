@@ -37,6 +37,14 @@ func TestOrchestrator_Backend(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_ModelRegistry(t *testing.T) {
+	reg := modelconfig.NewRegistry(modelconfig.DefaultModels())
+	o := mustNewOrchestrator(t, newMockBackend(""), modelconfig.DefaultModels(), nil, reg, nil, nil)
+	if o.ModelRegistry() != reg {
+		t.Error("ModelRegistry() should return the injected registry")
+	}
+}
+
 func TestOrchestrator_ToolRegistry_Nil(t *testing.T) {
 	o := mustNewOrchestrator(t, newMockBackend(""), modelconfig.DefaultModels(), nil, nil, nil, nil)
 	if o.ToolRegistry() != nil {
@@ -128,6 +136,37 @@ func TestOrchestrator_ChatWithAgent_NoModel(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "model") {
 		t.Errorf("expected error to mention 'model', got: %v", err)
+	}
+}
+
+func TestOrchestrator_ChatWithAgent_SetMaxTurns(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "ok"}}
+	reg := newRegistryWith(tool)
+	reg.TagTools([]string{"bash"}, "builtin")
+
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("bash", "c1"),
+			toolCallResponse("bash", "c2"),
+			toolCallResponse("bash", "c3"),
+			stopResponse("done"),
+		},
+	}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	gate := permissions.NewGate(true, nil)
+	defer gate.Close()
+	o.SetTools(reg, gate)
+	o.SetMaxTurns(2)
+
+	ag := &agents.Agent{Name: "Steve", ModelID: "m", LocalTools: []string{"*"}}
+	if err := o.ChatWithAgent(context.Background(), ag, "loop", "", nil, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	n := mb.callCount
+	mb.mu.Unlock()
+	if n != 2 {
+		t.Errorf("backend calls = %d, want 2 (SetMaxTurns)", n)
 	}
 }
 

@@ -1,15 +1,10 @@
 import { ref, computed, nextTick, watch, type Ref } from 'vue'
+import { agentDisplayDescription } from '../../utils/agentDescription'
+import { resolveDisplayAgent, type DisplayAgentLike, type DisplaySpaceLike } from './respondingAgent'
 
 type SessionLike = { id: string; title?: string }
-type SpaceLike = { leadAgent: string; memberAgents: string[] } | null
-type AgentLike = {
-  name: string
-  icon?: string
-  model?: string
-  description?: string
-  vault_name?: string
-  color?: string
-}
+type SpaceLike = DisplaySpaceLike
+type AgentLike = DisplayAgentLike & { system_prompt?: string }
 
 interface SpaceMemberCard {
   name: string
@@ -30,6 +25,8 @@ type Params = {
   selectedAgentName: Ref<string>
   threadPanelOpen: Ref<boolean>
   selectedAgent: Ref<AgentLike | null>
+  streaming?: Ref<boolean>
+  inFlightUserContent?: Ref<string>
 }
 
 export function useChatViewHeaderAndMembers(params: Params) {
@@ -79,7 +76,7 @@ export function useChatViewHeaderAndMembers(params: Params) {
       const agent = params.agentsList.value.find(a => a.name === n)
       return {
         name: n,
-        description: agent?.description ?? '',
+        description: agentDisplayDescription(agent ? { ...agent, name: n } : { name: n }),
         vaultName: agent?.vault_name ?? '',
         isLead: n === leadName,
         color: agent?.color ?? '#58a6ff',
@@ -88,7 +85,13 @@ export function useChatViewHeaderAndMembers(params: Params) {
   })
 
   const displayAgent = computed(() =>
-    (params.activeSpace.value ? spaceAgents.value[0] : null) ?? params.selectedAgent.value ?? null,
+    resolveDisplayAgent({
+      space: params.activeSpace.value,
+      agents: params.agentsList.value,
+      selectedAgent: params.selectedAgent.value,
+      streaming: params.streaming?.value ?? false,
+      inFlightUserContent: params.inFlightUserContent?.value ?? '',
+    }),
   )
 
   const memberPanelOpen = ref(false)

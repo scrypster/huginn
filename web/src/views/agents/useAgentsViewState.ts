@@ -1,16 +1,25 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Ref } from 'vue'
 import type { Router } from 'vue-router'
-import { api, apiFetch, getToken } from '../../composables/useApi'
+import { api, getToken } from '../../composables/useApi'
 import type { Connection, ToolbeltEntry, SystemToolStatus } from '../../composables/useApi'
 import { useInstalledSkills } from '../../composables/useSkills'
 import { useAgents, type AgentSummary } from '../../composables/useAgents'
+import { useSpaces } from '../../composables/useSpaces'
+import { agentDisplayDescription, DEFAULT_AGENT_DESCRIPTION } from '../../utils/agentDescription'
 import { useAgentCapabilityMatrix } from './useAgentCapabilityMatrix'
+import {
+  MODEL_TOOL_WARNING,
+  modelUnreliableForTools,
+} from './modelToolCapabilities'
 
 interface OllamaModel {
   name: string
   source?: string
   size_bytes?: number
   details?: { parameter_size?: string; quantization_level?: string }
+  supportsTools?: boolean
+  supportsDelegation?: boolean
+  tier?: string
 }
 
 type MemoryType = 'none' | 'context' | 'muninndb'
@@ -21,6 +30,7 @@ interface AgentForm {
   model: string
   provider: string
   system_prompt: string
+  description: string
   color: string
   icon: string
   memory_type: MemoryType
@@ -118,15 +128,16 @@ const SHELL_TOOL_NAMES = new Set(['bash', 'run_tests'])
 
 export function useAgentsViewState(agentName: Ref<string | undefined>, router: Router) {
   const { agents, loading, updateAgent, removeAgent: removeFromList, fetchAgents } = useAgents()
+  const { openDM: openSpaceDM } = useSpaces()
   const capabilityMatrix = useAgentCapabilityMatrix()
 
   async function openDM(agent: AgentSummary) {
-    try {
-      const space = await apiFetch<{ id: string }>(`/api/v1/spaces/dm/${encodeURIComponent(agent.name)}`)
+    const space = await openSpaceDM(agent.name)
+    if (space) {
       router.push(`/space/${space.id}`)
-    } catch {
-      router.push(`/agents/${agent.name}`)
+      return
     }
+    router.push(`/agents/${agent.name}`)
   }
 
   const isStaleRefreshing = ref(false)
@@ -166,6 +177,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     model: '',
     provider: '',
     system_prompt: '',
+    description: '',
     color: '#58a6ff',
     icon: '',
     memory_type: 'none',
@@ -327,6 +339,22 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       return oa !== ob ? oa - ob : a.provider.localeCompare(b.provider)
     })
   })
+
+  const selectedModelUnreliableTools = computed(() => {
+    const name = form.value.model
+    if (!name) return false
+    const listed = availableModels.value.find(m => m.name === name)
+    return modelUnreliableForTools({
+      name,
+      supportsTools: listed?.supportsTools,
+    })
+  })
+
+  function listedSupportsTools(name: string | undefined): boolean | undefined {
+    if (!name) return undefined
+    return availableModels.value.find(m => m.name === name)?.supportsTools
+  }
+
 
   function selectModel(name: string, source?: string) {
     form.value.model = name
@@ -716,6 +744,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     form.value.local_tools.length === 1 && form.value.local_tools[0] === '*',
   )
 
+  const showLocalAccessToolWarning = computed(() =>
+    selectedModelUnreliableTools.value && (isLocalAllowAll.value || form.value.local_tools.length > 0),
+  )
+
   const localAccessSummary = computed(() => {
     if (!form.value.local_tools.length) return 'none'
     if (isLocalAllowAll.value) return 'all (including shell ⚡)'
@@ -847,6 +879,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         model: data.model || '',
         provider: (data as any).provider || '',
         system_prompt: data.system_prompt || '',
+        description: (data as any).description || '',
         color: (data as AgentForm & { color?: string }).color || '#58a6ff',
         icon: (data as AgentForm & { icon?: string }).icon || '',
         memory_type: memType,
@@ -918,6 +951,16 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     saving.value = true
     saveMsg.value = ''
     saveError.value = false
+    const isCreate = !agentName.value || agentName.value === 'new'
+    if (!form.value.description.trim()) {
+      const derived = agentDisplayDescription({
+        system_prompt: form.value.system_prompt,
+        name: form.value.name,
+      })
+      if (derived !== DEFAULT_AGENT_DESCRIPTION) {
+        form.value.description = derived
+      }
+    }
     try {
       await ensureVault()
       const originalName = (agentName.value && agentName.value !== 'new') ? agentName.value : form.value.name
@@ -931,6 +974,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       dirty.value = false
       saveMsg.value = 'Saved successfully'
       setTimeout(() => { saveMsg.value = '' }, 3000)
+      if (isCreate) {
+        await openDM({ name: form.value.name, color: form.value.color, icon: form.value.icon, model: form.value.model })
+        return
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Save failed'
       if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
@@ -996,6 +1043,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           model: '',
           provider: '',
           system_prompt: '',
+          description: '',
           color: '#58a6ff',
           icon: '',
           memory_type: 'none',
@@ -1085,6 +1133,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     modalSkills,
     colorPalette,
     filteredModelGroups,
+    selectedModelUnreliableTools,
+    showLocalAccessToolWarning,
+    listedSupportsTools,
+    MODEL_TOOL_WARNING,
     memoryModes,
     availableSkills,
     modalAddableConnections,
