@@ -760,6 +760,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userMsgID := session.NewID()
+	userPersisted := s.persistInboundUserMessage(id, userMsgID, body.Content)
+
 	var buf strings.Builder
 	err := s.orch.ChatForSession(r.Context(), id, body.Content,
 		func(token string) { buf.WriteString(token) },
@@ -769,18 +772,20 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "chat error: "+err.Error())
 		return
 	}
-	// Persist user + assistant messages and emit space_activity.
+	// Persist assistant (user row was written at accept so mid-turn Appends
+	// cannot win seq). Fallback-persist the user row if accept write failed.
 	if s.store != nil {
 		if sess, loadErr := s.store.Load(id); loadErr == nil {
 			agentName := ""
 			if ag := s.resolveAgent(id); ag != nil {
 				agentName = ag.Name
 			}
-			now := time.Now().UTC()
-			if appendErr := s.store.Append(sess, session.SessionMessage{
-				ID: session.NewID(), Role: "user", Content: body.Content, Ts: now,
-			}); appendErr != nil {
-				slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
+			if !userPersisted {
+				if appendErr := s.store.Append(sess, session.SessionMessage{
+					ID: userMsgID, Role: "user", Content: body.Content, Ts: time.Now().UTC(),
+				}); appendErr != nil {
+					slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
+				}
 			}
 			if buf.Len() > 0 {
 				if appendErr := s.store.Append(sess, session.SessionMessage{

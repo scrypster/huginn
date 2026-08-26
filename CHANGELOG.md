@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Persist inbound user messages at accept so mid-turn harness announcements no longer appear before the prompt after reload
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
