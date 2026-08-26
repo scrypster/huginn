@@ -38,6 +38,15 @@ function makeState(): TimelineState {
 // Module-level reactive state per space (retained across route changes).
 const stateMap = new Map<string, TimelineState>()
 
+// Visit-independent last-message cache + session→space index. Prefetch writes
+// here so unvisited DMs show a preview and so getSessionSpaceId can map
+// sessions that were never hydrated. Must stay out of stateMap — putting even
+// one message there would make hydrate() skip the real timeline.
+const lastMessageCache = reactive<Record<string, { text: string; relTime: string }>>({})
+const sessionSpaceIndex = new Map<string, string>()
+const sidebarPrefetched = new Set<string>()
+const sidebarPrefetchInflight = new Map<string, Promise<void>>()
+
 function getState(spaceId: string): TimelineState {
   if (!stateMap.has(spaceId)) stateMap.set(spaceId, makeState())
   return stateMap.get(spaceId)!
@@ -328,7 +337,10 @@ export function useSpaceTimeline(spaceId: string) {
       const sessArr = Array.isArray(sessions) ? sessions : []
       for (const sess of sessArr as Array<{ id: string; updated_at: string }>) {
         s.sessionToSpaceMap.set(sess.id, spaceId)
+        sessionSpaceIndex.set(sess.id, spaceId)
       }
+      sidebarPrefetched.add(spaceId)
+      rememberLastMessage(spaceId, s.messages)
       if (sessArr.length > 0) {
         // Most recently updated session is the active one.
         const sorted = [...sessArr as Array<{ id: string; updated_at: string }>].sort(
@@ -386,19 +398,66 @@ export function useSpaceTimeline(spaceId: string) {
   }
 }
 
-// getSpaceLastMessage returns a { text, relTime } snippet for the sidebar preview.
-// Returns null if no messages are cached for this space yet.
-export function getSpaceLastMessage(spaceId: string): { text: string; relTime: string } | null {
-  const st = stateMap.get(spaceId)
-  if (!st?.messages.length) return null
-  const last = [...st.messages].reverse().find(m =>
+export { plaintextPreview } from '../utils/honesty'
+
+function snippetFromMessages(messages: SpaceMessage[] | undefined): { text: string; relTime: string } | null {
+  if (!messages?.length) return null
+  const last = [...messages].reverse().find(m =>
     (m.role === 'user' || m.role === 'assistant') && !!m.content
   )
   if (!last) return null
-  const raw = plaintextPreview(last.content)
-  const text = raw
+  const text = plaintextPreview(last.content)
+  if (!text) return null
   const prefix = last.role === 'user' ? 'You: ' : (last.agent ? `${last.agent}: ` : '')
   return { text: prefix + text, relTime: relativeTime(last.ts) }
+}
+
+function rememberSpaceSessions(spaceId: string, sessions: Array<{ id: string }>): void {
+  for (const sess of sessions) {
+    if (sess.id) sessionSpaceIndex.set(sess.id, spaceId)
+  }
+}
+
+function rememberLastMessage(spaceId: string, messages: SpaceMessage[]): void {
+  const snippet = snippetFromMessages(messages)
+  if (snippet) lastMessageCache[spaceId] = snippet
+}
+
+// prefetchSpaceSidebar fills session→space maps and last-message snippets for
+// spaces the user has not opened yet. Concurrent calls share the in-flight
+// promise so a second caller waits instead of skipping an unfinished index.
+export async function prefetchSpaceSidebar(spaceIds: string[]): Promise<void> {
+  await Promise.all(spaceIds.map((spaceId) => {
+    if (sidebarPrefetched.has(spaceId)) return Promise.resolve()
+    const inflight = sidebarPrefetchInflight.get(spaceId)
+    if (inflight) return inflight
+    const work = (async () => {
+      try {
+        const [sessions, msgResult] = await Promise.all([
+          api.spaces.sessions(spaceId),
+          api.spaces.messages(spaceId, undefined, 5),
+        ])
+        const sessArr = Array.isArray(sessions) ? sessions : []
+        rememberSpaceSessions(spaceId, sessArr as Array<{ id: string }>)
+        rememberLastMessage(spaceId, msgResult?.messages ?? [])
+        sidebarPrefetched.add(spaceId)
+      } catch {
+        // Allow a later retry if this space's listing failed.
+      } finally {
+        sidebarPrefetchInflight.delete(spaceId)
+      }
+    })()
+    sidebarPrefetchInflight.set(spaceId, work)
+    return work
+  }))
+}
+
+// getSpaceLastMessage returns a { text, relTime } snippet for the sidebar preview.
+// Prefers the live timeline (visited), then the prefetch cache (unvisited).
+export function getSpaceLastMessage(spaceId: string): { text: string; relTime: string } | null {
+  const fromTimeline = snippetFromMessages(stateMap.get(spaceId)?.messages)
+  if (fromTimeline) return fromTimeline
+  return lastMessageCache[spaceId] ?? null
 }
 
 function relativeTime(ts: string): string {
@@ -417,14 +476,27 @@ function relativeTime(ts: string): string {
 // clearSpaceTimeline removes cached state for a space (e.g. after archive).
 export function clearSpaceTimeline(spaceId: string) {
   stateMap.delete(spaceId)
+  delete lastMessageCache[spaceId]
+  sidebarPrefetched.delete(spaceId)
+  for (const [sid, sidSpace] of sessionSpaceIndex) {
+    if (sidSpace === spaceId) sessionSpaceIndex.delete(sid)
+  }
 }
 
 // getSessionSpaceId returns the space id that owns the given session, or null if
-// the session is not tracked in any cached space timeline. Used by App.vue to
-// suppress unread badges for sessions that belong to the currently-active space.
+// the session is not in a visited timeline and has not been indexed via
+// api.spaces.sessions. Uncached (never-indexed) IDs must not be treated as
+// orphans — they may belong to an unvisited space.
 export function getSessionSpaceId(sessionId: string): string | null {
   for (const [spaceId, st] of stateMap.entries()) {
     if (st.sessionToSpaceMap.has(sessionId)) return spaceId
   }
-  return null
+  return sessionSpaceIndex.get(sessionId) ?? null
+}
+
+// True once every listed space has been indexed via prefetch or a visit.
+// Orphan pruning must wait for this — otherwise unvisited space sessions
+// look unmapped and get dropped as orphans.
+export function spaceSessionsIndexed(spaceIds: string[]): boolean {
+  return spaceIds.length > 0 && spaceIds.every(id => sidebarPrefetched.has(id))
 }

@@ -21,6 +21,7 @@ All notable changes to Huginn are documented here.
 - Local Access “Allow all” now asks for confirmation before enabling God Mode (`local_tools: ["*"]`, including shell)
 - Harness announcement lines (`Delegated to @…`, auto-approved, completed delegated work, `TOOL_FAIL` / `DELEGATE_FAIL`) render as system/delegation rows instead of teammate speech; A2A tools are omitted from the “N tool calls” chip
 - Chat composer stays editable while an agent is responding so a second message can be queued without clearing the in-flight bubble
+- Space-mode unreads now match the Slack surface: the in-chat jump pill keys off the space timeline, opening one space no longer clears unseen for unvisited spaces, and sidebar DM previews prefetch a last-message snippet without stripping TOOL_FAIL underscores
 
 ## [0.4.0] - 2026-06-10
 

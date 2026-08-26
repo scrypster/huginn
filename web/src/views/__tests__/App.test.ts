@@ -157,6 +157,9 @@ vi.mock('../../composables/useApi', () => ({
     restart: vi.fn().mockResolvedValue({ status: 'restarting' }),
     spaces: {
       list: vi.fn().mockResolvedValue([]),
+      sessions: vi.fn().mockResolvedValue([]),
+      messages: vi.fn().mockResolvedValue({ messages: [], next_cursor: '' }),
+      markRead: vi.fn().mockResolvedValue({}),
     },
   },
   getToken: vi.fn().mockReturnValue('test-token'),
@@ -203,14 +206,18 @@ function dispatchKey(key: string, opts: Partial<KeyboardEventInit> = {}) {
 
 // ── Setup / Teardown ─────────────────────────────────────────────────────────
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks()
   mockSessions.value = []
   mockChannels.value = []
   mockDms.value = []
+  mockSpaces.value = []
   mockActiveSpaceId.value = null
   mockPendingCount.value = 0
   localStorage.clear()
+  const { clearSpaceTimeline } = await import('../../composables/useSpaceTimeline')
+  clearSpaceTimeline('space-a')
+  clearSpaceTimeline('space-b')
 })
 
 afterEach(() => {
@@ -317,6 +324,57 @@ describe('App', () => {
   // ── Unseen session tracking ────────────────────────────────────────────────
 
   describe('unseen session tracking', () => {
+    it('keeps unmapped unseen IDs when opening a space (not treated as orphans)', async () => {
+      localStorage.setItem('huginn:unseen_sessions', JSON.stringify(['sess-b-unvisited']))
+      const w = mountApp()
+      await flushPromises()
+
+      mockActiveSpaceId.value = 'space-a'
+      await nextTick()
+      await flushPromises()
+
+      const unseen = JSON.parse(localStorage.getItem('huginn:unseen_sessions') ?? '[]')
+      expect(unseen).toContain('sess-b-unvisited')
+      expect(w.exists()).toBe(true)
+    })
+
+    it('opening space A does not clear unseen for unvisited space B', async () => {
+      const { api } = await import('../../composables/useApi')
+      const { prefetchSpaceSidebar, clearSpaceTimeline } = await import('../../composables/useSpaceTimeline')
+
+      localStorage.setItem('huginn:unseen_sessions', JSON.stringify(['sess-a', 'sess-b']))
+      mockSpaces.value = [
+        { id: 'space-a', name: 'Alpha', kind: 'channel', leadAgent: 'atlas', memberAgents: [], icon: '', color: '#58a6ff', unseenCount: 1, archivedAt: null },
+        { id: 'space-b', name: 'Steve', kind: 'dm', leadAgent: 'Steve', memberAgents: [], icon: '', color: '#58a6ff', unseenCount: 2, archivedAt: null },
+      ]
+      mockChannels.value = [mockSpaces.value[0]]
+      mockDms.value = [mockSpaces.value[1]]
+
+      vi.mocked(api.spaces.sessions).mockImplementation(async (id: string) => {
+        if (id === 'space-a') return [{ id: 'sess-a', title: '', status: 'idle', created_at: '', updated_at: '', space_id: 'space-a' }]
+        if (id === 'space-b') return [{ id: 'sess-b', title: '', status: 'idle', created_at: '', updated_at: '', space_id: 'space-b' }]
+        return []
+      })
+      vi.mocked(api.spaces.messages).mockResolvedValue({ messages: [], next_cursor: '' } as any)
+
+      const w = mountApp()
+      await flushPromises()
+      await prefetchSpaceSidebar(['space-a', 'space-b'])
+
+      // Opening A must not treat B's uncached session as an orphan.
+      mockActiveSpaceId.value = 'space-a'
+      await nextTick()
+      await flushPromises()
+
+      const unseen = JSON.parse(localStorage.getItem('huginn:unseen_sessions') ?? '[]')
+      expect(unseen).toContain('sess-b')
+      expect(unseen).not.toContain('sess-a')
+      expect(w.exists()).toBe(true)
+
+      clearSpaceTimeline('space-a')
+      clearSpaceTimeline('space-b')
+    })
+
     it('inbox badge count shows pendingCount', async () => {
       mockPendingCount.value = 5
       const w = mountApp()
