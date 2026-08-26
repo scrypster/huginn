@@ -31,6 +31,17 @@
 - `backend.Message` is `{Role, Content, Parts, ToolCalls, ToolName, ToolCallID}`.
 - `backend.ToolCall` is `{ID, Function ToolCallFunction}`; `ToolCallFunction` is `{Name, Arguments map[string]any}`.
 - `internal/agent/loop.go:441` persists `chatResult.ToolCalls` into history; `:468` ends the loop when it is empty; `:475` dispatches it. One field, two jobs.
+- **Claude Code tool names are a DIFFERENT NAMESPACE from Huginn's
+  `LocalTools`.** Huginn's registry uses `read_file`, `write_file`, `bash`,
+  `git_status`, `web_search`. Claude Code's CLI uses `Read`, `Write`, `Edit`,
+  `Bash`, `Glob`, `Grep`, `WebFetch`, `Task`. They do not overlap, so a
+  Huginn allowlist can never authorise a Claude tool by accident — but
+  `LocalTools: ["*"]`, which a user may set meaning "all Huginn tools", WOULD
+  grant every Claude Code tool including `Bash`. Never gate Claude Code tool
+  calls on `LocalTools`. Use the dedicated `ClaudeAllowedTools` /
+  `ClaudeGatedTools` fields, which hold Claude Code names and support no
+  wildcard.
+
 - **A `PreToolUse` hook that TIMES OUT fails OPEN.** Verified against the real
   CLI: a hook entry accepts an explicit `"timeout"` (seconds) and Claude Code
   honours it, but when it fires the hook is killed and the tool runs anyway —
@@ -1521,7 +1532,7 @@ In `main.go`, in the agent backend resolver around line 3126, branch before the 
 					CWD:          ag.ClaudeCWD,
 					Model:        ag.GetModelID(),
 					SystemPrompt: claudecode.AssembleSystemPrompt(ag.SystemPrompt, agentSkillTexts(ag), notepadText()),
-					AllowedTools: ag.LocalTools,
+					AllowedTools: ag.ClaudeAllowedTools,
 					GatedTools:   gatedToolsFor(ag),
 					HookCommand:  huginnExe + " claude-approve",
 					FirstTurn:    !claudeSessionExists(ag.ClaudeSessionID),
@@ -1531,6 +1542,30 @@ In `main.go`, in the agent backend resolver around line 3126, branch before the 
 ```
 
 Write the four small helpers next to the resolver:
+
+- `gatedToolsFor(ag)` — the tools that must ask permission. Returns
+  `ag.ClaudeGatedTools` when the user has set it. When it is EMPTY, return
+  `claudecode.DefaultGatedTools` — do NOT return nil. An empty gated list makes
+  `BuildHookSettings` emit no hooks at all, which would leave an unattended
+  agent running with no approval gate whatsoever. An unconfigured agent must be
+  gated, not free:
+
+```go
+// DefaultGatedTools are gated when an agent has no explicit ClaudeGatedTools.
+// Every Claude Code tool that can mutate state or reach the network is here.
+// An unconfigured agent runs unattended, so the default must be restrictive:
+// an empty gated list emits no hooks and gates nothing.
+var DefaultGatedTools = []string{
+	"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "Task",
+}
+
+func gatedToolsFor(ag agents.Agent) []string {
+	if len(ag.ClaudeGatedTools) > 0 {
+		return ag.ClaudeGatedTools
+	}
+	return claudecode.DefaultGatedTools
+}
+```
 
 - `agentSkillTexts(ag)` — the agent's skills as prompt text. Follow how native agents already load skills (`grep -rn "Skills" internal/agent/ | grep -i prompt`).
 - `notepadText()` — the notepad body, via `internal/notepad`.
