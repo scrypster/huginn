@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Switching DMs no longer dumps another space's follow-up cards, thread completion cards, permission prompts, warnings, or thread-help toasts onto the room you opened — those events write to the owner space's timeline and only surface permission/toasts when that space is in view
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

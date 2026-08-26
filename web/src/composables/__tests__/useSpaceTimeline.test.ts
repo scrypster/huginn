@@ -21,6 +21,7 @@ import {
   useSpaceTimeline,
   clearSpaceTimeline,
   getSessionSpaceId,
+  getSpaceTimelineState,
 } from '../useSpaceTimeline'
 
 // ── Mock WS factory ───────────────────────────────────────────────────
@@ -686,5 +687,29 @@ describe('getSessionSpaceId', () => {
 
     expect(getSessionSpaceId(SESSION_ID)).toBe(SPACE_ID)
     expect(getSessionSpaceId(SESSION_B)).toBe(SPACE_B)
+  })
+})
+
+describe('getSpaceTimelineState', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns the same cached state as useSpaceTimeline for that space', () => {
+    const tl = useSpaceTimeline(SPACE_ID)
+    tl.getState().sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    tl.getState().messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: '', role: 'user', content: 'hi', agent: '',
+    })
+
+    const viaLookup = getSpaceTimelineState(SPACE_ID)
+    expect(viaLookup).toBe(tl.getState())
+    expect(viaLookup.messages).toHaveLength(1)
+    expect(getSpaceTimelineState(SPACE_B)).not.toBe(viaLookup)
   })
 })
