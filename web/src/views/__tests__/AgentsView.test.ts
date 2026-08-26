@@ -50,6 +50,14 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
       },
       agents: {
         ...orig.api.agents,
+        get: vi.fn().mockResolvedValue({
+          name: 'Alpha',
+          model: 'gpt-4',
+          system_prompt: '',
+          toolbelt: [],
+          skills: [],
+          local_tools: [],
+        }),
         capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
         validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
       },
@@ -154,19 +162,6 @@ describe('AgentsView', () => {
   })
 
   it('local access Allow all warning click must confirm first', async () => {
-    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/v1/agents/')) {
-        return {
-          name: 'Alpha',
-          model: 'gpt-4',
-          system_prompt: '',
-          toolbelt: [],
-          skills: [],
-          local_tools: [],
-        }
-      }
-      return {}
-    })
     await router.push('/agents/Alpha')
     await router.isReady()
     const wrapper = mount(AgentsView, {
