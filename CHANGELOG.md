@@ -33,6 +33,7 @@ All notable changes to Huginn are documented here.
 - Switching DMs no longer paints a quiet room as busy: the responding banner, preparing-context line, and update-active-work strip stay on the space that owns the in-flight run
 - Switching DMs no longer dumps another space's follow-up cards, thread completion cards, permission prompts, warnings, or thread-help toasts onto the room you opened — those events write to the owner space's timeline and only surface permission/toasts when that space is in view
 - Assistant or user `@Name` of someone not in the space no longer extra-spawns a thread via CreateFromMentions (Tess DM `@Steve` stays Tess-only; channel roster members still spawn; standalone session-mode is unchanged)
+- `delegate_to_agent` targeting someone not in the space roster now fails visibly (DELEGATE_FAIL) instead of spawning (Tess-only DM cannot spawn Steve; channel roster members still delegate; standalone session-mode is unchanged)
 
 ## [0.4.0] - 2026-06-10
 
