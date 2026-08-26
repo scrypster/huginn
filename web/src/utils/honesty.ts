@@ -6,7 +6,7 @@
  * plaintextPreview — never feed those strings back into the parsers.
  */
 
-import { visibleAssistantContent } from './visibleAssistantContent'
+import { stripLeadingToolCalls, visibleAssistantContent } from './visibleAssistantContent'
 
 export const TOOLS_ENABLED_SERVE_HINT =
   'TUI/CLI only. huginn serve always registers builtin tools; this switch does not turn them off. Use the deny list to block a tool in the web UI.'
@@ -124,7 +124,9 @@ export function conflictingTools(allowed: string[], disallowed: string[]): strin
 export function plaintextPreview(content: string, max = 48): string {
   const stripped = visibleAssistantContent(content)
   const raw = stripped.replace(/[`#*>[\]]/g, '').replace(/\s+/g, ' ').trim()
-  const source = isFailPreviewSource(content) ? content : isFailPreviewSource(raw) ? raw : ''
+  // Check the fail token before residual stripping removes it from speech.
+  const unfenced = stripLeadingToolCalls(content).trim()
+  const source = isFailPreviewSource(content) ? content : isFailPreviewSource(unfenced) ? unfenced : isFailPreviewSource(raw) ? raw : ''
   if (source) return failPreviewCopy(source)
   return raw.length > max ? raw.slice(0, max) + '…' : raw
 }

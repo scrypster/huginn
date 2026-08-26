@@ -14,7 +14,8 @@ export function visibleAssistantContent(content: string, opts: ResidualSpeechOpt
   return stripResidualSpeech(stripLeadingToolCalls(content), opts)
 }
 
-function stripLeadingToolCalls(content: string): string {
+/** Drop leading tool-call JSON only; residual speech (fail tokens included) is left intact. */
+export function stripLeadingToolCalls(content: string): string {
   const trimmed = content.trimStart()
   if (!trimmed.startsWith('{')) return content
   let rest = trimmed
