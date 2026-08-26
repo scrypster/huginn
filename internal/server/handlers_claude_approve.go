@@ -56,7 +56,7 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if toolAllowed(agent.LocalTools, req.ToolName) {
+	if toolAllowed(agent.ClaudeAllowedTools, req.ToolName) {
 		slog.Info("claudecode: tool call allowed",
 			"agent", agent.Name, "tool", req.ToolName, "tool_use_id", req.ToolUseID)
 		respondApprove(w, "allow",
@@ -95,13 +95,17 @@ func isLoopbackAddr(addr string) bool {
 	return ip.IsLoopback()
 }
 
-// toolAllowed reports whether tool is granted to an agent by its LocalTools
-// allowlist. Empty/nil = default-deny; ["*"] = all tools; otherwise the tool
-// name must appear in the list verbatim. Mirrors the semantics documented on
-// agents.AgentDef.LocalTools.
-func toolAllowed(localTools []string, tool string) bool {
-	for _, t := range localTools {
-		if t == "*" || t == tool {
+// toolAllowed reports whether tool is granted to an agent by its
+// ClaudeAllowedTools allowlist. Empty/nil = default-deny. Exact matches only —
+// deliberately NO wildcard support: this gate protects tool execution by an
+// unattended agent, so it must never be one character away from "allow
+// everything". ClaudeAllowedTools holds Claude Code CLI tool names ("Bash",
+// "Write", ...), a namespace distinct from and not interchangeable with
+// agents.AgentDef.LocalTools (Huginn's own builtin tool names) — do not widen
+// this to accept LocalTools or its "*" semantics.
+func toolAllowed(claudeAllowedTools []string, tool string) bool {
+	for _, t := range claudeAllowedTools {
+		if t == tool {
 			return true
 		}
 	}

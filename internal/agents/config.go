@@ -32,6 +32,24 @@ type AgentDef struct {
 	ClaudeSessionID string `json:"claude_session_id,omitempty" yaml:"claude_session_id,omitempty"`
 	ClaudeCWD       string `json:"claude_cwd,omitempty"        yaml:"claude_cwd,omitempty"`
 
+	// ClaudeAllowedTools and ClaudeGatedTools hold Claude Code CLI tool names
+	// ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "Task", ...)
+	// — NOT Huginn's own builtin tool names (those live in LocalTools, e.g.
+	// "read_file", "bash", "web_search"). The two namespaces are disjoint and
+	// must never be conflated: LocalTools:["*"] means "all Huginn tools" and
+	// must not be read as authorising any Claude Code CLI tool.
+	//
+	// ClaudeGatedTools are the tools that always require a PreToolUse hook
+	// round-trip to Huginn (see internal/claudecode.BuildHookSettings); tools
+	// not listed there are pre-authorised via --allowedTools and never reach
+	// the hook at all. ClaudeAllowedTools is the allowlist the approval
+	// endpoint (POST /api/v1/claude/approve) checks a gated tool call against.
+	// Default-deny: empty/nil grants nothing. No wildcard is supported here —
+	// this gate protects an unattended agent, so it must never be one
+	// character away from "allow everything".
+	ClaudeAllowedTools []string `json:"claude_allowed_tools,omitempty" yaml:"claude_allowed_tools,omitempty"`
+	ClaudeGatedTools   []string `json:"claude_gated_tools,omitempty"   yaml:"claude_gated_tools,omitempty"`
+
 	// VaultName is the fully-qualified MuninnDB vault name for this agent.
 	// If empty, defaults to "huginn:agent:<username>:<agentname>".
 	VaultName string `json:"vault_name,omitempty"   yaml:"vault_name,omitempty"`
@@ -303,6 +321,8 @@ func FromDef(def AgentDef) *Agent {
 		APIKey:              def.APIKey,
 		ClaudeSessionID:     def.ClaudeSessionID,
 		ClaudeCWD:           def.ClaudeCWD,
+		ClaudeAllowedTools:  def.ClaudeAllowedTools,
+		ClaudeGatedTools:    def.ClaudeGatedTools,
 		SystemPrompt:        def.SystemPrompt,
 		Color:               def.Color,
 		Icon:                def.Icon,

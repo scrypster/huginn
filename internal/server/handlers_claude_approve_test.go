@@ -103,7 +103,7 @@ func TestApproveDeniesNonLoopback_IPv6(t *testing.T) {
 }
 
 func TestApproveAllowsLoopbackIPv6(t *testing.T) {
-	s := serverWithAgent(t, "sess-1", []string{"Write"})
+	s := serverWithAgent(t, "sess-1", []string{"Write"}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/claude/approve",
 		strings.NewReader(`{"tool_name":"Write","session_id":"sess-1","tool_use_id":"t1"}`))
@@ -120,17 +120,21 @@ func TestApproveAllowsLoopbackIPv6(t *testing.T) {
 }
 
 // serverWithAgent returns a *Server whose agentLoader serves a single agent
-// bound to sessionID with the given LocalTools allowlist.
-func serverWithAgent(t *testing.T, sessionID string, localTools []string) *Server {
+// bound to sessionID with the given ClaudeAllowedTools (the Claude Code CLI
+// tool-name allowlist checked by handleClaudeApprove) and localTools (the
+// unrelated Huginn-builtin-tool allowlist — pass nil unless a test needs it,
+// e.g. to prove the two are decoupled).
+func serverWithAgent(t *testing.T, sessionID string, claudeAllowedTools, localTools []string) *Server {
 	t.Helper()
 	return &Server{
 		agentLoader: func() (*agents.AgentsConfig, error) {
 			return &agents.AgentsConfig{
 				Agents: []agents.AgentDef{
 					{
-						Name:            "claude-agent",
-						ClaudeSessionID: sessionID,
-						LocalTools:      localTools,
+						Name:               "claude-agent",
+						ClaudeSessionID:    sessionID,
+						ClaudeAllowedTools: claudeAllowedTools,
+						LocalTools:         localTools,
 					},
 				},
 			}, nil
@@ -139,14 +143,14 @@ func serverWithAgent(t *testing.T, sessionID string, localTools []string) *Serve
 }
 
 func TestApproveDeniesToolNotInAllowlist(t *testing.T) {
-	s := serverWithAgent(t, "sess-1", []string{"Write"})
+	s := serverWithAgent(t, "sess-1", []string{"Write"}, nil)
 	code, decision, reason := postApprove(t, s,
 		`{"tool_name":"Bash","session_id":"sess-1","tool_use_id":"t1"}`)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
 	if decision != "deny" {
-		t.Errorf("decision = %q, want deny — Bash is not in this agent's LocalTools", decision)
+		t.Errorf("decision = %q, want deny — Bash is not in this agent's ClaudeAllowedTools", decision)
 	}
 	if !strings.Contains(reason, "Bash") {
 		t.Errorf("reason = %q, want it to name the denied tool", reason)
@@ -155,37 +159,62 @@ func TestApproveDeniesToolNotInAllowlist(t *testing.T) {
 
 // TestApproveAllowsToolInAllowlist is the mirror of
 // TestApproveDeniesToolNotInAllowlist: same bound session, but the requested
-// tool IS in the agent's LocalTools. Only running both proves the branch
-// discriminates on the tool name rather than denying unconditionally.
+// tool IS in the agent's ClaudeAllowedTools. Only running both proves the
+// branch discriminates on the tool name rather than denying unconditionally.
 func TestApproveAllowsToolInAllowlist(t *testing.T) {
-	s := serverWithAgent(t, "sess-1", []string{"Write"})
+	s := serverWithAgent(t, "sess-1", []string{"Write"}, nil)
 	code, decision, reason := postApprove(t, s,
 		`{"tool_name":"Write","session_id":"sess-1","tool_use_id":"t1"}`)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
 	if decision != "allow" {
-		t.Errorf("decision = %q, want allow — Write is in this agent's LocalTools", decision)
+		t.Errorf("decision = %q, want allow — Write is in this agent's ClaudeAllowedTools", decision)
 	}
 	if reason == "" {
 		t.Error("reason must be populated even on allow")
 	}
 }
 
-func TestApproveDeniesWhenLocalToolsEmpty(t *testing.T) {
-	s := serverWithAgent(t, "sess-1", nil)
+func TestApproveDeniesWhenClaudeAllowedToolsEmpty(t *testing.T) {
+	s := serverWithAgent(t, "sess-1", nil, nil)
 	_, decision, _ := postApprove(t, s,
 		`{"tool_name":"Write","session_id":"sess-1","tool_use_id":"t1"}`)
 	if decision != "deny" {
-		t.Errorf("decision = %q, want deny — nil LocalTools is default-deny", decision)
+		t.Errorf("decision = %q, want deny — nil ClaudeAllowedTools is default-deny", decision)
 	}
 }
 
-func TestApproveAllowsWildcardLocalTools(t *testing.T) {
-	s := serverWithAgent(t, "sess-1", []string{"*"})
+// TestApproveDeniesClaudeAllowedToolsWildcard is the regression test for the
+// finding this whole gate exists to fix: ClaudeAllowedTools must NEVER honour
+// "*". Do not "restore" wildcard support here — a wildcard on an unattended
+// agent's tool gate is a privilege-escalation path (see the field's doc
+// comment in internal/agents/config.go).
+func TestApproveDeniesClaudeAllowedToolsWildcard(t *testing.T) {
+	s := serverWithAgent(t, "sess-1", []string{"*"}, nil)
+	_, decision, reason := postApprove(t, s,
+		`{"tool_name":"Bash","session_id":"sess-1","tool_use_id":"t1"}`)
+	if decision != "deny" {
+		t.Errorf(`decision = %q, want deny — ClaudeAllowedTools:["*"] must not grant Bash`, decision)
+	}
+	if !strings.Contains(reason, "Bash") {
+		t.Errorf("reason = %q, want it to name the denied tool", reason)
+	}
+}
+
+// TestApproveDeniesDespiteLocalToolsWildcard proves ClaudeAllowedTools and
+// LocalTools are fully decoupled: an agent whose Huginn-builtin-tool
+// allowlist is wide open ("*") gets no Claude Code CLI tool access at all
+// unless ClaudeAllowedTools separately grants it. Before ClaudeAllowedTools
+// existed, this endpoint mistakenly checked LocalTools directly, so
+// LocalTools:["*"] (meaning "all Huginn tools") would have granted every
+// Claude Code CLI tool, including Bash — this test is what catches that
+// conflation if it's ever reintroduced.
+func TestApproveDeniesDespiteLocalToolsWildcard(t *testing.T) {
+	s := serverWithAgent(t, "sess-1", nil, []string{"*"})
 	_, decision, _ := postApprove(t, s,
-		`{"tool_name":"AnyTool","session_id":"sess-1","tool_use_id":"t1"}`)
-	if decision != "allow" {
-		t.Errorf("decision = %q, want allow — [\"*\"] grants all tools", decision)
+		`{"tool_name":"Bash","session_id":"sess-1","tool_use_id":"t1"}`)
+	if decision != "deny" {
+		t.Errorf(`decision = %q, want deny — LocalTools:["*"] must not leak into Claude Code tool approval`, decision)
 	}
 }
