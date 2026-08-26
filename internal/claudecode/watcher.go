@@ -34,8 +34,26 @@ func NewWatcher(root string, ing *Ingester) *Watcher {
 	return &Watcher{root: root, ing: ing, pending: map[string]*time.Timer{}}
 }
 
-// DefaultRoot is where Claude Code stores session transcripts.
+// DefaultRoot is where Claude Code stores session transcripts:
+// <config dir>/projects/<project>/<session-id>.jsonl.
+//
+// CLAUDE_CONFIG_DIR RELOCATES THAT ENTIRE TREE and must be honoured. When it
+// is set and this returned ~/.claude/projects anyway, two things broke at
+// once, both silently:
+//
+//   - the transcript bridge watched a directory that does not exist and
+//     ingested nothing at all, forever;
+//   - the session-exists probe (claudeSessionExists in main.go) always
+//     returned false, so every turn re-spent the one --session-id chance and
+//     the agent broke permanently. See session_started.go for why that
+//     direction is the unrecoverable one.
+//
+// Returns "" only when there is no home directory to fall back to, which
+// callers treat as "no transcripts here".
 func DefaultRoot() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return filepath.Join(dir, "projects")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

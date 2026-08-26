@@ -3956,9 +3956,13 @@ func claudeSessionIDsOf(cfg *agentslib.AgentsConfig) []string {
 // transcript for this session id, i.e. whether the next turn must --resume
 // rather than claim the id with --session-id.
 //
-// It answers from disk rather than from memory on purpose: the backend is
-// rebuilt per turn, so an in-process flag would forget that the session was
-// created and try to claim an id the CLI already owns.
+// This is ONE OF TWO INPUTS, not the whole answer. It is a heuristic probe of
+// the CLI's own storage and it can be wrong in the unrecoverable direction (an
+// unflushed transcript, a root it does not know about). NewAgentBackend ORs it
+// with the package-level record of sessions this process has already launched
+// — see internal/claudecode/session_started.go — so any evidence at all that
+// the session exists resolves to --resume. Do not "simplify" the resolver to
+// trust this function alone; that is precisely the bug that was fixed.
 func claudeSessionExists(cwd, id string) bool {
 	return claudeSessionExistsUnder(claudecode.DefaultRoot(), cwd, id)
 }
@@ -3973,7 +3977,15 @@ func claudeSessionExists(cwd, id string) bool {
 // this is used strictly as a FAST PATH: a hit is conclusive, a miss falls back
 // to the full walk. Getting the derivation wrong therefore costs a scan, never
 // a wrong answer.
+// CLAUDE_CODE_PROJECT_DIR_NAME, when set, IS the directory name and overrides
+// the derivation entirely. Without honouring it the fast path would miss on
+// every lookup for such a user; that degrades safely (the full walk below
+// still finds the transcript, and TestClaudeSessionExistsFallsBackWhenTheProjectDirGuessIsWrong
+// pins that), but it costs a whole-tree scan on every single turn.
 func claudeProjectDirName(cwd string) string {
+	if name := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PROJECT_DIR_NAME")); name != "" {
+		return name
+	}
 	if cwd == "" {
 		return ""
 	}

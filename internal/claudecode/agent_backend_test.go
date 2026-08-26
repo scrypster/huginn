@@ -7,17 +7,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
 )
 
+// testSessionSeq gives every agentBackendCfg its own session id. The
+// --session-id/--resume decision is now recorded in a PACKAGE-LEVEL set keyed
+// by session id (session_started.go), exactly so it survives the per-turn
+// rebuild — which means a shared literal id would leak "already started" from
+// one test into the next and make turn 1 resume. Unique ids per test keep each
+// one honest.
+var testSessionSeq atomic.Uint64
+
 func agentBackendCfg(t *testing.T) AgentBackendConfig {
 	t.Helper()
 	return AgentBackendConfig{
 		Binary:       fakeClaude(t),
-		SessionID:    "11111111-2222-3333-4444-555555555555",
+		SessionID:    fmt.Sprintf("11111111-2222-3333-4444-%012d", testSessionSeq.Add(1)),
 		CWD:          t.TempDir(),
 		Model:        "opus",
 		SystemPrompt: "You are Elena.",
@@ -140,19 +149,23 @@ func TestAgentBackendNeverReturnsDispatchableToolCalls(t *testing.T) {
 	}
 }
 
-// This is the proof for the FirstTurn fix: ONE backend, TWO turns. A config
-// flag that nothing ever flips would leave the second turn re-creating a
-// session that already exists. Across turns the resolver rebuilds the backend
-// and recomputes FirstTurn from disk (claudeSessionExists); within a turn the
-// instance has to track it itself, which is what this pins.
+// THE WAY PRODUCTION RUNS TWO TURNS: a FRESH backend for each one.
+//
+// The resolver rebuilds the backend on every message — deliberately, so the
+// system prompt reassembles — and the old instance is discarded. The previous
+// version of this test reused ONE instance across both turns, which production
+// never does, so it passed against a markSessionExists() that recorded nothing
+// durable. Every turn here is a new NewAgentBackend with FirstTurn STILL TRUE,
+// which is what a disk probe that cannot see the transcript reports.
 func TestAgentBackendSwitchesToResumeOnItsSecondTurn(t *testing.T) {
 	cfg := agentBackendCfg(t)
 	bin, argvFile := writeFakeCLI(t, fakeCLI{stream: execToolStream})
 	cfg.Binary = bin
-	cfg.FirstTurn = true
+	cfg.FirstTurn = true // the probe says "no session" on BOTH turns
 
-	b := NewAgentBackend(cfg)
 	for _, msg := range []string{"turn one", "turn two"} {
+		// A new instance per turn, exactly as claudeCodeBackend does.
+		b := NewAgentBackend(cfg)
 		if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
 			Messages: []backend.Message{{Role: "user", Content: msg}},
 		}); err != nil {
@@ -173,6 +186,32 @@ func TestAgentBackendSwitchesToResumeOnItsSecondTurn(t *testing.T) {
 	}
 	if strings.Contains(two, "--session-id") {
 		t.Errorf("turn 2 still passed --session-id for a session that already exists: %v", runs[1])
+	}
+}
+
+// The same proof for a turn that also re-invokes the CLI within itself: one
+// instance must still flip after its own launch. This is what the old
+// single-instance test was actually covering, kept explicitly.
+func TestAgentBackendFlipsToResumeWithinASingleInstance(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, argvFile := writeFakeCLI(t, fakeCLI{stream: execToolStream})
+	cfg.Binary = bin
+	cfg.FirstTurn = true
+
+	b := NewAgentBackend(cfg)
+	for _, msg := range []string{"one", "two"} {
+		if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+			Messages: []backend.Message{{Role: "user", Content: msg}},
+		}); err != nil {
+			t.Fatalf("turn %q: %v", msg, err)
+		}
+	}
+	runs := readArgvRuns(t, argvFile)
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	if strings.Contains(strings.Join(runs[1], " "), "--session-id") {
+		t.Errorf("second launch re-spent the one --session-id chance: %v", runs[1])
 	}
 }
 
@@ -198,8 +237,9 @@ func TestAgentBackendKeepsCreatingWhenTheCLINeverLaunched(t *testing.T) {
 	cfg.Binary = filepath.Join(t.TempDir(), "definitely-not-here")
 	cfg.FirstTurn = true
 
-	b := NewAgentBackend(cfg)
+	var b *AgentBackend
 	for _, msg := range []string{"one", "two"} {
+		b = NewAgentBackend(cfg) // fresh per turn, as in production
 		if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
 			Messages: []backend.Message{{Role: "user", Content: msg}},
 		}); err == nil {
@@ -238,10 +278,11 @@ func TestAgentBackendResumesAfterAnyLaunchHoweverItEnded(t *testing.T) {
 			cfg := agentBackendCfg(t)
 			bin, argvFile := writeFakeCLI(t, tc.cli)
 			cfg.Binary = bin
-			cfg.FirstTurn = true
+			cfg.FirstTurn = true // the probe stays wrong on every turn
 
-			b := NewAgentBackend(cfg)
 			for _, msg := range []string{"one", "two"} {
+				// Fresh instance per turn — production discards the old one.
+				b := NewAgentBackend(cfg)
 				_, _ = b.ChatCompletion(context.Background(), backend.ChatRequest{
 					Messages: []backend.Message{{Role: "user", Content: msg}},
 				})

@@ -60,9 +60,13 @@ type AgentBackendConfig struct {
 	GatedTools   []string // require approval; one PreToolUse hook entry each
 	HookCommand  string
 	MCPConfig    string // empty in v1 — the seam for the toolbelt MCP server
-	// FirstTurn is the INITIAL state only: true when the session does not yet
-	// exist on disk. It is not consulted again after the first turn — see
-	// AgentBackend.sessionExists, which is what actually drives the flag.
+	// FirstTurn is the caller's INITIAL guess: true when the session does not
+	// appear to exist yet (the resolver's disk probe). It is only ever a
+	// guess, and it is OR'd with the package-level record of sessions this
+	// process has already launched (session_started.go) — a true FirstTurn is
+	// overridden to "resume" whenever that record disagrees, because ambiguity
+	// must resolve toward --resume. It is not consulted again after the first
+	// turn; see AgentBackend.sessionExists.
 	FirstTurn bool
 	// TimeoutSecs bounds a single turn. Zero means DefaultAgentTurnTimeoutSecs.
 	TimeoutSecs int
@@ -109,11 +113,21 @@ func NewAgentBackend(cfg AgentBackendConfig) *AgentBackend {
 	return &AgentBackend{
 		cfg:    cfg,
 		semKey: semKeyFor(cfg.SessionID),
-		// FirstTurn seeds the state. Within this turn the backend then tracks
-		// it itself (markSessionExists), which matters when a turn re-invokes
-		// the CLI. Across turns the instance is gone, so the resolver
-		// recomputes FirstTurn from disk instead of relying on this field.
-		sessionExists: !cfg.FirstTurn,
+		// Two independent sources, combined with OR so that ANY evidence the
+		// session exists resolves to --resume:
+		//
+		//   !cfg.FirstTurn        — the caller's disk probe.
+		//   sessionStarted(id)    — this PROCESS already launched the CLI for
+		//                           this session id, on some earlier turn,
+		//                           through some earlier (now discarded)
+		//                           instance.
+		//
+		// The second is what makes the decision survive a turn at all: the
+		// backend is rebuilt per turn, so the instance flag below is gone by
+		// the next message. Without it a wrong disk probe pinned FirstTurn
+		// true forever and every turn re-spent the one --session-id chance,
+		// which fails permanently. See session_started.go.
+		sessionExists: !cfg.FirstTurn || sessionStarted(cfg.SessionID),
 	}
 }
 
@@ -254,8 +268,11 @@ func (b *AgentBackend) ChatCompletion(ctx context.Context, req backend.ChatReque
 	// A scan error (typically a line past the buffer cap) means NOTHING is
 	// draining stdout any more. A child still writing fills the pipe and
 	// blocks forever, so WaitDelay never arms and Wait would sit here until
-	// the turn deadline — holding the semaphore and, since backends are cached
-	// per agent, stalling every session on that agent. Kill the child first.
+	// the turn deadline — holding the PACKAGE-LEVEL, session-keyed semaphore
+	// (session_sem.go) for that whole time and stalling every later turn on
+	// the same session id. (Backends are rebuilt per turn, not cached per
+	// agent — the slot, not the instance, is what is shared.) Kill the child
+	// first.
 	//
 	// This is the only path that reaches Wait with the reader stopped: there
 	// are no other returns between Start and Wait, and the deferred cancel
@@ -326,10 +343,17 @@ func (b *AgentBackend) wrap(stderr *tailBuffer, err error) error {
 // markSessionExists records that the session's one --session-id chance has been
 // spent. Monotonic: nothing ever clears it, because a session that exists never
 // stops existing. See the decision comment at the call site.
+//
+// It records in TWO places, and both matter:
+//   - on the instance, for a later launch within THIS turn;
+//   - in the package-level set, for every LATER TURN, whose backend is a
+//     different object entirely. Dropping the second line silently reverts to
+//     the per-instance-only behaviour that made the flag a no-op in production.
 func (b *AgentBackend) markSessionExists() {
 	b.mu.Lock()
 	b.sessionExists = true
 	b.mu.Unlock()
+	markSessionStarted(b.cfg.SessionID)
 }
 
 // buildArgs delegates to the package's single argument builder. The agent-only
