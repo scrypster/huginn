@@ -11,7 +11,7 @@ All notable changes to Huginn are documented here.
 - User `@Name` in a channel or DM addresses that agent for the turn when they are on the space roster (stamped lead no longer swallows the mention). A leftover `@Name` of someone not in the roster still does not address them or extra-spawn a thread
 
 ### Changed
-- Fail UX speaks like a teammate: transcript, chips, and sidebar previews say **I couldn't run that.** / **Couldn't run** / **Couldn't finish** instead of `TOOL_FAIL` or harness tool names; hover and Details keep the raw token, tool, and reason
+- Fail UX reads as people in a room: **I couldn't do that.** / **I asked Tesla and they haven't come back yet.** / sidebar **Couldn't do that** or **Still waiting on Tesla** — never `TOOL_FAIL` or a debug panel; hover keeps the raw token, tool, and reason
 
 ### Fixed
 - Residual playbook speech (`<wait for X to finish>`, "Once X has finished:", re-typed or invented tool JSON, echoed result objects) is stripped from CLI `agentOutput` and the web assistant bubble after tools ran; invented names are never executed and non-tool code fences stay intact

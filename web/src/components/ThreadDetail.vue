@@ -217,8 +217,9 @@
                 v-html="renderMarkdown(item.msg.content)" />
               <!-- Streaming cursor -->
               <span v-if="(item.msg as any).streaming" class="inline-block w-1.5 h-3.5 bg-huginn-muted/60 rounded-sm animate-pulse ml-0.5 align-middle" />
-              <!-- Tool call chip (persisted — from tool_calls_json) -->
-              <div v-if="item.msg.toolCalls?.length" class="mt-2">
+              <!-- Tool call chip (persisted — from tool_calls_json).
+                   Skip when the human fail line already said they got stuck. -->
+              <div v-if="item.msg.toolCalls?.length && !isBareFailSpeech(item.msg.content)" class="mt-2">
                 <button @click="toggleMsgToolCalls(item.msg.id)"
                   class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100"
                   :title="messageToolChipFailed(item.msg.content, item.msg.toolCalls) ? failDisplayFor(item.msg.content, item.msg.toolCalls)?.diagnostic : undefined"

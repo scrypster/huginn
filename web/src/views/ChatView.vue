@@ -724,7 +724,7 @@
                 <!-- Tool call chip (completed, attached to this message).
                      Visible as soon as no tool calls are actively running, so the
                      chip persists below the content even while text is still streaming. -->
-                <div v-if="msg.toolCalls?.length && (!msg.streaming || !visibleToolCalls(activeToolCalls).length)" class="mt-2">
+                <div v-if="msg.toolCalls?.length && !isBareFailSpeech(visibleAssistantText(msg) || msg.content) && (!msg.streaming || !visibleToolCalls(activeToolCalls).length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
                     class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100"

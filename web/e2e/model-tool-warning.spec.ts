@@ -110,7 +110,7 @@ test.describe('Chat model tool warning', () => {
     await page.goto(`/#/chat/${SESSION}`)
     await expect(page.getByTestId('chat-model-tools-warning')).toHaveText(WARNING)
     await expect(page.getByTestId('composer-model-tools-warning')).toHaveText(WARNING)
-    await expect(page.getByTestId('system-fail-line')).toContainText("I couldn't run that.")
+    await expect(page.getByTestId('system-fail-line')).toContainText("I couldn't do that.")
     await expect(page.getByTestId('system-fail-line')).not.toContainText('TOOL_FAIL')
     await expect(page.getByTestId('system-fail-line')).toHaveAttribute('title', /json/)
     await expect(page.locator('.md-content')).toHaveCount(0)

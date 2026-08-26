@@ -791,7 +791,7 @@ describe('getSessionSpaceId', () => {
 
     const preview = getSpaceLastMessage(SPACE_ID)
     expect(preview).not.toBeNull()
-    expect(preview!.text).toContain("Couldn't finish")
+    expect(preview!.text).toContain("Couldn't do that")
     expect(preview!.text).toContain('Steve:')
     expect(preview!.text).not.toContain('TOOL_FAIL')
     expect(preview!.text).not.toContain('wait_for_threads')
@@ -825,7 +825,7 @@ describe('getSessionSpaceId', () => {
     expect(useSpaceTimeline(SPACE_B).getState().messages).toHaveLength(0)
     const snippet = getSpaceLastMessage(SPACE_B)
     expect(snippet).not.toBeNull()
-    expect(snippet!.text).toContain("Couldn't finish")
+    expect(snippet!.text).toContain("Couldn't do that")
     expect(snippet!.text).not.toContain('TOOL_FAIL')
     expect(snippet!.text).not.toContain('wait_for_threads')
   })

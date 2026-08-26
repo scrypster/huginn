@@ -124,7 +124,8 @@ export function conflictingTools(allowed: string[], disallowed: string[]): strin
 export function plaintextPreview(content: string, max = 48): string {
   const stripped = visibleAssistantContent(content)
   const raw = stripped.replace(/[`#*>[\]]/g, '').replace(/\s+/g, ' ').trim()
-  if (isFailPreviewSource(content) || isFailPreviewSource(raw)) return FAIL_COPY.preview
+  const source = isFailPreviewSource(content) ? content : isFailPreviewSource(raw) ? raw : ''
+  if (source) return failPreviewCopy(source)
   return raw.length > max ? raw.slice(0, max) + '…' : raw
 }
 
@@ -341,12 +342,21 @@ export function isResultShapedObject(v: unknown): boolean {
 // ── Display copy (detection stays above; these never feed parsers) ────
 
 export const FAIL_COPY = {
-  tool: "I couldn't run that.",
-  delegate: "That handoff didn't finish.",
+  tool: "I couldn't do that.",
+  delegate: "They haven't come back yet.",
   shell: "I wasn't allowed to use the shell.",
-  chip: "Couldn't run",
-  preview: "Couldn't finish",
+  chip: "Couldn't do that",
+  preview: "Couldn't do that",
+  previewWaiting: 'Still waiting',
 } as const
+
+export function askedTeammateCopy(name: string): string {
+  return `I asked ${name} and they haven't come back yet.`
+}
+
+export function stillWaitingCopy(name?: string): string {
+  return name ? `Still waiting on ${displayTeammateName(name)}` : FAIL_COPY.previewWaiting
+}
 
 const PREFIXED_FAIL_RE = /^(?:You: |[^\n:]+: )?(TOOL_FAIL|DELEGATE_FAIL)(?:\s*:[\s\S]*)?$/i
 
@@ -366,6 +376,27 @@ function isShellDenied(message: string, toolName?: string): boolean {
   return /permission denied|not allowed|denied/.test(hay) && /\bbash\b|\bshell\b/.test(hay)
 }
 
+/** Best-effort teammate name from a DELEGATE_FAIL reason. Never a snake_case tool. */
+export function teammateFromFailMessage(message: string | undefined | null): string | undefined {
+  const text = (message ?? '').trim()
+  if (!text) return undefined
+  const m = text.match(/@([A-Za-z][\w.-]*)/)
+    || text.match(/\bagent\s+([A-Za-z][\w.-]*)/i)
+    || text.match(/\b([A-Z][a-z][\w.-]*)\b/)
+  const name = m?.[1]
+  if (!name || isA2ATool(name) || /_/u.test(name)) return undefined
+  return name
+}
+
+function failPreviewCopy(content: string): string {
+  const parsed = parseSystemFailSpeech(content.replace(/^(?:You: |[^\n:]+: )/, ''))
+    ?? parseSystemFailSpeech(content)
+  if (parsed?.kind === 'DELEGATE_FAIL' || (parsed?.kind === 'announcement' && isBareFailSpeech(parsed.summary))) {
+    return stillWaitingCopy(teammateFromFailMessage(parsed.message || parsed.summary))
+  }
+  return FAIL_COPY.preview
+}
+
 function firstFailedTool<T extends { name: string; result?: string }>(
   calls?: T[] | null,
 ): T | undefined {
@@ -374,13 +405,20 @@ function firstFailedTool<T extends { name: string; result?: string }>(
 }
 
 /** Visible teammate line for a detected fail. Empty when content is not fail speech. */
+function displayTeammateName(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
 export function failVisibleCopy(
   content?: string | null,
-  opts?: { toolName?: string },
+  opts?: { toolName?: string; teammate?: string },
 ): string {
   const parsed = parseSystemFailSpeech(content)
   if (!parsed || !isFailKind(parsed.kind)) return ''
-  if (parsed.kind === 'DELEGATE_FAIL') return FAIL_COPY.delegate
+  if (parsed.kind === 'DELEGATE_FAIL') {
+    const name = opts?.teammate || teammateFromFailMessage(parsed.message)
+    return name ? askedTeammateCopy(displayTeammateName(name)) : FAIL_COPY.delegate
+  }
   if (isShellDenied(parsed.message, opts?.toolName)) return FAIL_COPY.shell
   return FAIL_COPY.tool
 }

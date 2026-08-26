@@ -1920,20 +1920,17 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text()).toContain("I couldn't run that.")
+    expect(fail.text()).toBe("I couldn't do that.")
     expect(fail.text()).not.toContain('TOOL_FAIL')
     expect(fail.text()).not.toContain('wait_for_threads')
+    expect(fail.text()).not.toContain('Details')
     expect(fail.attributes('title')).toContain('TOOL_FAIL')
     expect(fail.attributes('title')).toContain('json')
     expect(fail.attributes('aria-description')).toContain('json')
     expect(wrapper.find('.md-content').exists()).toBe(false)
-    expect(wrapper.text()).toContain("Couldn't run")
+    expect(wrapper.text()).not.toContain("Couldn't run")
     expect(wrapper.text()).not.toMatch(/· failed/)
     expect(wrapper.html()).not.toMatch(/text-huginn-green">· done/)
-
-    await fail.get('button').trigger('click')
-    expect(fail.get('[data-testid="system-fail-details"]').text()).toContain('TOOL_FAIL')
-    expect(fail.get('[data-testid="system-fail-details"]').text()).toContain('json')
   })
 
   it('DELEGATE_FAIL assistant text is not rendered as normal bubble prose', async () => {
@@ -1950,7 +1947,7 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.text()).toContain("That handoff didn't finish.")
+    expect(fail.text()).toBe("I asked Tesla and they haven't come back yet.")
     expect(fail.text()).not.toContain('DELEGATE_FAIL')
     expect(fail.attributes('title')).toContain('DELEGATE_FAIL')
     expect(fail.attributes('title')).toContain('tesla')
@@ -1972,8 +1969,9 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("I couldn't run that.")
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("I couldn't do that.")
     expect(fail.text()).not.toContain('TOOL_FAIL')
+    expect(fail.text()).not.toContain('Details')
     expect(fail.attributes('title')).toBe('TOOL_FAIL')
     expect(wrapper.find('.md-content').exists()).toBe(false)
   })
@@ -1993,7 +1991,7 @@ describe('ChatView — message display edge cases', () => {
 
     const fail = wrapper.find('[data-testid="system-fail-line"]')
     expect(fail.exists()).toBe(true)
-    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("That handoff didn't finish.")
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("They haven't come back yet.")
     expect(fail.text()).not.toContain('DELEGATE_FAIL')
     expect(fail.attributes('title')).toBe('DELEGATE_FAIL')
     expect(wrapper.find('.md-content').exists()).toBe(false)
@@ -2937,7 +2935,7 @@ describe('ChatView — model tool capability warning', () => {
     await nextTick()
 
     const chip = wrapper.get('[data-testid="system-fail-line"]')
-    expect(chip.text()).toContain("I couldn't run that.")
+    expect(chip.text()).toBe("I couldn't do that.")
     expect(chip.text()).not.toContain('TOOL_FAIL')
     expect(chip.attributes('title')).toContain('The "json" tool is not available.')
     expect(wrapper.find('.md-content').exists()).toBe(false)

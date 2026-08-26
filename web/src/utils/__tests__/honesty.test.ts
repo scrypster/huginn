@@ -156,7 +156,7 @@ describe('plaintextPreview display', () => {
   it('humanizes fail tokens instead of leaking TOOL_FAIL', () => {
     expect(plaintextPreview('TOOL_FAIL: The json tool is not available')).toBe(FAIL_COPY.preview)
     expect(plaintextPreview('TOOL_FAIL: The json tool is not available')).not.toContain('TOOL_FAIL')
-    expect(plaintextPreview('DELEGATE_FAIL: agent tesla is unavailable')).toBe(FAIL_COPY.preview)
+    expect(plaintextPreview('DELEGATE_FAIL: agent tesla is unavailable')).toBe('Still waiting on Tesla')
     expect(plaintextPreview('Steve: TOOL_FAIL: missing')).toBe(FAIL_COPY.preview)
   })
 
@@ -177,7 +177,10 @@ describe('fail display copy', () => {
   it('speaks in the agent voice and keeps the raw token on the diagnostic', () => {
     expect(failVisibleCopy('TOOL_FAIL: The "json" tool is not available.')).toBe(FAIL_COPY.tool)
     expect(failVisibleCopy('TOOL_FAIL')).toBe(FAIL_COPY.tool)
-    expect(failVisibleCopy('DELEGATE_FAIL: agent tesla is unavailable')).toBe(FAIL_COPY.delegate)
+    expect(failVisibleCopy('DELEGATE_FAIL: agent tesla is unavailable')).toBe(
+      'I asked Tesla and they haven\'t come back yet.',
+    )
+    expect(failVisibleCopy('DELEGATE_FAIL')).toBe(FAIL_COPY.delegate)
     expect(failVisibleCopy('TOOL_FAIL: permission denied', { toolName: 'bash' })).toBe(FAIL_COPY.shell)
     expect(failChipLabel()).toBe(FAIL_COPY.chip)
   })
