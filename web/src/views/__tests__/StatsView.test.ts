@@ -123,13 +123,29 @@ describe('StatsView', () => {
   it('shows prompt token count', async () => {
     const w = mountView()
     await flushPromises()
-    expect(w.text()).toContain('1,234')
+    expect(w.find('[data-testid="last-prompt-tokens"]').text()).toBe('1,234')
   })
 
   it('shows completion token count', async () => {
     const w = mountView()
     await flushPromises()
-    expect(w.text()).toContain('567')
+    expect(w.find('[data-testid="last-completion-tokens"]').text()).toBe('567')
+  })
+
+  it('shows em-dash when last-call usage is unknown', async () => {
+    mockApiStats.mockResolvedValueOnce({})
+    const w = mountView()
+    await flushPromises()
+    expect(w.find('[data-testid="last-prompt-tokens"]').text()).toBe('—')
+    expect(w.find('[data-testid="last-completion-tokens"]').text()).toBe('—')
+  })
+
+  it('shows em-dash when last-call usage is an explicit null', async () => {
+    mockApiStats.mockResolvedValueOnce({ last_prompt_tokens: null, last_completion_tokens: null })
+    const w = mountView()
+    await flushPromises()
+    expect(w.find('[data-testid="last-prompt-tokens"]').text()).toBe('—')
+    expect(w.find('[data-testid="last-completion-tokens"]').text()).toBe('—')
   })
 
   it('shows server health status', async () => {

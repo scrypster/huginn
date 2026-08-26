@@ -349,6 +349,18 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
 
   function markDirty() { dirty.value = true }
 
+  function onColorInputChange() {
+    if (original.value) {
+      try {
+        const orig = JSON.parse(original.value) as { color?: string }
+        if (orig.color === form.value.color) return
+      } catch {
+        // fall through and mark dirty
+      }
+    }
+    markDirty()
+  }
+
   const memoryModes: { value: MemoryMode; label: string; description: string; behaviors: string[] }[] = [
     {
       value: 'passive',
@@ -1085,6 +1097,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     detectProvider,
     selectModel,
     markDirty,
+    onColorInputChange,
     loadMuninnInfo,
     pollVaultHealth,
     startVaultHealthPolling,

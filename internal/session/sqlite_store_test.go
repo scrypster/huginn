@@ -176,6 +176,60 @@ func TestSQLiteSession_Append_UpdatesMessageCount(t *testing.T) {
 	if sess.Manifest.MessageCount != 3 {
 		t.Errorf("MessageCount: want 3, got %d", sess.Manifest.MessageCount)
 	}
+
+	listed, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("List: want 1 session, got %d", len(listed))
+	}
+	if listed[0].MessageCount != 3 {
+		t.Errorf("persisted message_count: want 3, got %d — stats would still report 0", listed[0].MessageCount)
+	}
+	if listed[0].LastMessageID == "" {
+		t.Error("persisted last_message_id is empty after Append")
+	}
+}
+
+func TestSQLiteSession_Append_PersistsMessageCountForList(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+	s := session.NewSQLiteSessionStore(db)
+
+	sess := s.New("stats honesty", "", "")
+	if err := s.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	listed, err := s.List()
+	if err != nil {
+		t.Fatalf("List before Append: %v", err)
+	}
+	if len(listed) != 1 || listed[0].MessageCount != 0 {
+		t.Fatalf("precondition: want message_count 0, got %+v", listed)
+	}
+
+	if err := s.Append(sess, session.SessionMessage{Role: "user", Content: "hi"}); err != nil {
+		t.Fatalf("Append user: %v", err)
+	}
+	if err := s.Append(sess, session.SessionMessage{Role: "assistant", Content: "hello"}); err != nil {
+		t.Fatalf("Append assistant: %v", err)
+	}
+
+	listed, err = s.List()
+	if err != nil {
+		t.Fatalf("List after Append: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("List: want 1 session, got %d", len(listed))
+	}
+	if listed[0].MessageCount != 2 {
+		t.Fatalf("List message_count = %d, want 2 (stats would report 0)", listed[0].MessageCount)
+	}
+	if listed[0].LastMessageID == "" {
+		t.Fatal("last_message_id empty after Append — sessions row was not updated")
+	}
 }
 
 func TestSQLiteSession_Append_PreservesFields(t *testing.T) {

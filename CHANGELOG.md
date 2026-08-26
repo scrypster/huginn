@@ -9,9 +9,10 @@ All notable changes to Huginn are documented here.
 - Chat tool chips say **failed** instead of green **done** when a tool is denied, missing, or the assistant text is `TOOL_FAIL` / `DELEGATE_FAIL`
 - `TOOL_FAIL` / `DELEGATE_FAIL` assistant text renders as a system error line, not teammate speech (bare hydrated tokens and `TOKEN: reason` both chip)
 - Channel sidebar previews stay plaintext so `snake_case` and `TOOL_FAIL` keep their underscores
-- New-agent form no longer opens as "Unsaved changes" or offers Delete
+- New-agent form no longer opens as "Unsaved changes" (color picker first-paint `@change`) and hides Delete
 - Parked Memory (empty vaults / disconnected) no longer badges agent cards or the channel header
 - Version badge collapses `vv0.4.0-try-all` to `v0.4.0-try-all` (About, profile popover, and Stats SERVER — no extra `v` prefix)
+- Settings → Stats no longer reports 0 messages / 0 tokens when transcripts exist: `Append` persists `message_count` / `last_message_id` / `updated_at` with the message, existing sessions are backfilled from `messages`, token usage is stamped on the assistant row and written to `cost_history` when known, and Last LLM Call shows "—" instead of a fake 0
 
 ## [0.4.0] - 2026-06-10
 

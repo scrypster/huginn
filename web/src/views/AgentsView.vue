@@ -147,7 +147,7 @@
                   class="w-6 h-6 rounded-md transition-all duration-150 hover:scale-110 active:scale-95"
                   :class="form.color === c ? 'ring-2 ring-offset-2 ring-offset-huginn-bg scale-110' : ''"
                   :style="{ background: c }" />
-                <input type="color" v-model="form.color" @change="markDirty"
+                <input type="color" v-model="form.color" @change="onColorInputChange"
                   class="w-6 h-6 rounded-md cursor-pointer bg-huginn-surface border border-huginn-border overflow-hidden" title="Custom color" />
               </div>
             </div>
@@ -1412,6 +1412,7 @@ const {
   createNew,
   isNewAgent,
   advertiseMemory,
+  onColorInputChange,
 } = useAgentsViewState(toRef(props, 'agentName'), router)
 </script>
 
