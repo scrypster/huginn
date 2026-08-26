@@ -234,3 +234,58 @@ describe('classifyHarnessDisplay', () => {
     })
   })
 })
+
+import { stripResidualSpeech, isToolInvocationObject, isResultShapedObject } from '../honesty'
+
+describe('stripResidualSpeech', () => {
+  // 2026-08-26 live 14b CoS agentOutput after delegate + wait already ran.
+  const live = '<wait for Reggie to finish>\nOnce Reggie has finished:\nThen calculate:\n7 times 8 is 56.{\n  "pong_response": "PONG",\n  "multiplication_result": "56"\n}'
+
+  it('leaves only human prose after tools ran', () => {
+    expect(stripResidualSpeech(live, { afterTools: true })).toBe('7 times 8 is 56.')
+  })
+
+  it('strips invented recall_thread_result JSON without touching prose', () => {
+    const s = 'Reggie said PONG. 7 times 8 is 56.\n{"name":"recall_thread_result","arguments":{"thread_id":"<thread_id>"}}'
+    expect(stripResidualSpeech(s, { afterTools: true })).toBe('Reggie said PONG. 7 times 8 is 56.')
+  })
+
+  it('keeps a real go fence', () => {
+    const s = 'Here is the helper:\n```go\nfunc add(a, b int) int { return a + b }\n```\n<wait for Reggie to finish>\nThat compiles.'
+    expect(stripResidualSpeech(s, { afterTools: true })).toBe(
+      'Here is the helper:\n```go\nfunc add(a, b int) int { return a + b }\n```\nThat compiles.',
+    )
+  })
+
+  it('never shows harness tool names or fail tokens as speech', () => {
+    const s = 'wait_for_threads\nTOOL_FAIL: nope\n<wait_for_threads>\nReggie said PONG.\nrecall_thread_result\nbash'
+    expect(stripResidualSpeech(s)).toBe('Reggie said PONG.')
+  })
+
+  it('keeps in-sentence tool JSON and lone result objects when not afterTools / no prose', () => {
+    const sentence = 'Sure, run {"name": "bash", "arguments": {"command": "hostname"}}'
+    expect(stripResidualSpeech(sentence)).toBe(sentence)
+    expect(stripResidualSpeech('{"pong_response":"PONG"}', { afterTools: true })).toBe('{"pong_response":"PONG"}')
+  })
+
+  it('keeps teammate prose and standalone Then-lines', () => {
+    for (const s of [
+      'Reggie said PONG. 7 times 8 is 56.',
+      "I'll wait for your go-ahead before deploying.",
+      'Once the migration has finished, the table will have 3 columns.',
+      'Then run the tests:\n```sh\ngo test ./...\n```\nAfter that, we ship.',
+      'Use this config: {"server": {"port": 8080}} and restart.',
+    ]) {
+      expect(stripResidualSpeech(s, { afterTools: true })).toBe(s)
+    }
+  })
+
+  it('classifies objects', () => {
+    expect(isToolInvocationObject({ name: 'recall_thread_result', arguments: { thread_id: 'x' } })).toBe(true)
+    expect(isToolInvocationObject({ function_name: 'bash' })).toBe(true)
+    expect(isToolInvocationObject({ pong_response: 'PONG' })).toBe(false)
+    expect(isResultShapedObject({ pong_response: 'PONG', multiplication_result: '56' })).toBe(true)
+    expect(isResultShapedObject({ server: { port: 8080 } })).toBe(false)
+    expect(isResultShapedObject({})).toBe(false)
+  })
+})

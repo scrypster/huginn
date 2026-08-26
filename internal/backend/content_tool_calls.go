@@ -461,6 +461,11 @@ func VisibleAssistantContent(content string) string {
 	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
 		content = stripHarnessVisibleTokens(leftover)
 	}
+	// Residual playbook speech (wait tags, glue lines, re-typed tool JSON)
+	// is never teammate prose regardless of what ran this turn.
+	if residual := StripResidualSpeech(content); residual != content {
+		content = stripHarnessVisibleTokens(residual)
+	}
 	return content
 }
 
@@ -489,7 +494,19 @@ func RevealContentToolCalls(resp *ChatResponse) {
 // harness JSON, and leftover TOOL_FAIL / DELEGATE_FAIL tokens so they never
 // appear as the visible answer.
 func VisibleAssistantContentAfterDeny(content string) string {
-	return stripHarnessVisibleTokens(stripEmbeddedHarnessToolJSON(VisibleAssistantContent(content)))
+	return VisibleAssistantContentAfterTools(content)
+}
+
+// VisibleAssistantContentAfterTools is the display filter for a turn in
+// which tools already ran (or were denied). On top of VisibleAssistantContent
+// it also drops result-shaped JSON the model echoed next to its prose
+// ({"pong_response":"PONG","multiplication_result":"56"}), so the speech
+// channel reads like a teammate: "Reggie said PONG. 7 times 8 is 56."
+func VisibleAssistantContentAfterTools(content string) string {
+	visible := VisibleAssistantContent(content)
+	visible = stripEmbeddedHarnessToolJSON(visible)
+	visible = StripResidualSpeechAfterTools(visible)
+	return stripHarnessVisibleTokens(visible)
 }
 
 // stripHarnessVisibleTokens removes leftover fail tokens and lines that are
@@ -598,7 +615,9 @@ func removeToolJSONObjects(s string) string {
 			}
 		}
 	}
-	return strings.TrimSpace(b.String())
+	// Do not trim here: this runs per unfenced segment and trimming would
+	// eat the newlines that separate prose from an adjacent code fence.
+	return b.String()
 }
 
 func stripLeadingContentToolCalls(content string) (leftover string, stripped bool) {

@@ -182,3 +182,150 @@ export function classifyHarnessDisplay(msg: {
   // Lone fail token: keep the 137 red system-fail chip in the assistant bubble.
   return { threadSummary: false, systemLine: false, hideFailSpeech: false }
 }
+
+// ── Residual speech ─────────────────────────────────────────────────────
+// After a small local model's tool calls have run, its speech channel often
+// still carries the playbook: "<wait for Reggie to finish>", "Once Reggie
+// has finished:", a re-typed tool object, and the tool result as JSON glued
+// to the answer. Same idea as backend.StripResidualSpeech in Go: remove it
+// from what the user reads, execute nothing, leave fenced code alone.
+
+const WAIT_TAG_RE = /<\s*wait(?:ing)?(?:[\s_:-][^<>]*)?\s*>/gi
+const WAIT_TOKEN_LINE_RE = /^\s*(?:\[|\()?\s*wait(?:ing)?[-_ ]for[-_ ][\w@.-]+(?:[-_ ]to[-_ ]finish)?\s*(?:\]|\))?\s*[:.]?\s*$/i
+const GLUE_LINE_RE = /^\s*(?:once|after|when|as soon as)\s+[^.:,]{1,80}?\s+(?:has|have|is|are)?\s*(?:finished|done|complete|completed|replied|responded|answered|returned)\s*[:,]?\s*$/i
+const GLUE_CONTINUATION_RE = /^\s*(?:then|next|finally|afterwards|after that)\b[^.]{0,80}:\s*$/i
+const HARNESS_TOOL_NAME_LINE = new Set(['wait_for_threads', 'delegate_to_agent', 'recall_thread_result', 'list_team_status', 'bash'])
+
+export interface ResidualSpeechOptions {
+  /** Tools already ran this turn: also drop unfenced tool-call JSON (any name) and echoed result objects. */
+  afterTools?: boolean
+}
+
+/**
+ * Remove wait tags, playbook glue lines, harness tool-name lines and fail
+ * tokens from assistant speech. With `afterTools`, unfenced tool-invocation
+ * JSON (granted or invented — never executed) and flat result-shaped JSON
+ * next to prose are dropped too. Fenced blocks are preserved verbatim.
+ */
+export function stripResidualSpeech(content: string | undefined | null, opts: ResidualSpeechOptions = {}): string {
+  if (!content) return ''
+  const parts = content.split('```')
+  let changed = false
+  for (let i = 0; i < parts.length; i += 2) {
+    const out = stripResidualUnfenced(parts[i]!, !!opts.afterTools)
+    if (out !== parts[i]) {
+      parts[i] = out
+      changed = true
+    }
+  }
+  return changed ? parts.join('```').trim() : content
+}
+
+function stripResidualUnfenced(s: string, afterTools: boolean): string {
+  if (!s) return s
+  if (afterTools) s = removeResidualJSONObjects(s)
+  const kept: string[] = []
+  let inGlueChain = false
+  for (let line of s.split('\n')) {
+    const hadText = line.trim() !== ''
+    line = line.replace(WAIT_TAG_RE, '')
+    const trim = line.trim()
+    if (trim === '' && hadText) { inGlueChain = true; continue }
+    if (trim === '') { kept.push(line); continue }
+    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim)) { inGlueChain = true; continue }
+    if (inGlueChain && GLUE_CONTINUATION_RE.test(trim)) continue
+    if (HARNESS_TOOL_NAME_LINE.has(trim) || SYSTEM_FAIL_RE.test(trim)) { inGlueChain = false; continue }
+    inGlueChain = false
+    kept.push(line)
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n')
+}
+
+function removeResidualJSONObjects(s: string): string {
+  let out = ''
+  let prose = ''
+  const results: Array<{ start: number; end: number }> = []
+  let i = 0
+  while (i < s.length) {
+    if (s[i] !== '{') { out += s[i]; prose += s[i]; i++; continue }
+    const read = readJSONObjectAt(s, i)
+    if (!read) { out += s[i]; prose += s[i]; i++; continue }
+    const raw = s.slice(i, read.end)
+    if (isToolInvocationObject(read.value)) {
+      i = skipOneSeparator(s, read.end)
+      continue
+    }
+    if (isResultShapedObject(read.value)) {
+      results.push({ start: out.length, end: out.length + raw.length })
+      out += raw
+      i = read.end
+      continue
+    }
+    out += raw
+    prose += raw
+    i = read.end
+  }
+  if (!results.length || prose.trim() === '') return out
+  for (let k = results.length - 1; k >= 0; k--) {
+    const sp = results[k]!
+    out = out.slice(0, sp.start) + out.slice(skipOneSeparator(out, sp.end))
+  }
+  return out
+}
+
+function skipOneSeparator(s: string, i: number): number {
+  if (i < s.length && (s[i] === '\n' || s[i] === ' ' || s[i] === '\t' || s[i] === '\r')) {
+    if (s[i] === '\r' && s[i + 1] === '\n') return i + 2
+    return i + 1
+  }
+  return i
+}
+
+function readJSONObjectAt(s: string, start: number): { value: unknown; end: number } | null {
+  let depth = 0, inStr = false, escape = false
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]
+    if (inStr) {
+      if (escape) { escape = false; continue }
+      if (c === '\\') { escape = true; continue }
+      if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') { inStr = true; continue }
+    if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) {
+        try { return { value: JSON.parse(s.slice(start, i + 1)), end: i + 1 } } catch { return null }
+      }
+    }
+  }
+  return null
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+/** name / function_name with optional object-or-JSON-string arguments. Mirrors backend.toolCallFromRaw. */
+export function isToolInvocationObject(v: unknown): boolean {
+  if (!isPlainObject(v)) return false
+  const name = typeof v.name === 'string' ? v.name : typeof v.function_name === 'string' ? v.function_name : ''
+  if (!name.trim()) return false
+  if (!('arguments' in v) || v.arguments == null) return true
+  const args = v.arguments
+  if (isPlainObject(args)) return true
+  if (typeof args === 'string') {
+    if (!args.trim()) return true
+    try { return isPlainObject(JSON.parse(args)) } catch { return false }
+  }
+  return false
+}
+
+/** Flat object of scalars with no tool name — the shape of an echoed tool result. */
+export function isResultShapedObject(v: unknown): boolean {
+  if (!isPlainObject(v)) return false
+  const keys = Object.keys(v)
+  if (!keys.length || 'name' in v || 'function_name' in v) return false
+  return keys.every(k => { const x = v[k]; return x === null || typeof x !== 'object' })
+}

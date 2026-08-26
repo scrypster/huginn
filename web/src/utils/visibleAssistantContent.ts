@@ -1,12 +1,20 @@
+import { stripResidualSpeech, type ResidualSpeechOptions } from './honesty'
+
 /**
  * Strip a leading tool-call JSON object from assistant text so local-model
- * harness leakage (`{"name":"bash",...}PONG`) never renders in the bubble.
+ * harness leakage (`{"name":"bash",...}PONG`) never renders in the bubble,
+ * then drop residual playbook speech (wait tags, glue lines; with
+ * `afterTools`, leftover tool / result JSON too).
  *
- * Does not execute anything. Fenced samples and JSON that appears after
- * leading prose stay visible.
+ * Does not execute anything. Fenced samples stay visible; JSON after leading
+ * prose stays unless `afterTools` is set.
  */
-export function visibleAssistantContent(content: string): string {
+export function visibleAssistantContent(content: string, opts: ResidualSpeechOptions = {}): string {
   if (!content) return content
+  return stripResidualSpeech(stripLeadingToolCalls(content), opts)
+}
+
+function stripLeadingToolCalls(content: string): string {
   const trimmed = content.trimStart()
   if (!trimmed.startsWith('{')) return content
   let rest = trimmed

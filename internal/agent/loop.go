@@ -413,6 +413,9 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	// delegate_to_agent and inject a single wait_for_threads barrier so the
 	// model gets the specialists' results and can answer from them.
 	var delegated, waitedForThreads, autoWaited bool
+	// toolsRan flips once any tool (including the synthetic auto-wait) has
+	// executed; later assistant content then gets the after-tools filter.
+	var toolsRan bool
 	var contentBeforeAutoWait string
 	var denied atomic.Bool
 	origDenied := cfg.OnPermissionDenied
@@ -471,10 +474,12 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// execute in order; unknown names stay inert.
 		backend.PromoteGrantedContentToolCalls(chatResult, cfg.ToolSchemas)
 		backend.RevealContentToolCalls(chatResult)
-		if denied.Load() {
+		if denied.Load() || toolsRan {
 			// After a deny the model often dumps another tool JSON into
-			// content (not always leading). That must not be user-visible.
-			chatResult.Content = backend.VisibleAssistantContentAfterDeny(chatResult.Content)
+			// content (not always leading). After tools ran, small models
+			// also echo wait placeholders, playbook glue, and the tool
+			// result as JSON next to the answer. None of that is speech.
+			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content)
 		}
 
 		// Append assistant response to history
@@ -515,6 +520,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 				// all active threads in the session) and give the model a
 				// final turn to answer from the specialists' summaries.
 				autoWaited = true
+				toolsRan = true
 				contentBeforeAutoWait = result.FinalContent
 				wc := backend.ToolCall{
 					ID: "auto_wait_1",
@@ -554,6 +560,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 
 		// Execute tool calls — independent ones in parallel, serial ones after
 		dispatched := cfg.dispatchTools(ctx, chatResult.ToolCalls)
+		toolsRan = true
 		for _, dr := range dispatched {
 			switch dr.tc.Function.Name {
 			case "delegate_to_agent":

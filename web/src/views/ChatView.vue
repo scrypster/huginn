@@ -1916,10 +1916,12 @@ function isForActiveSession(msg: WSMessage): boolean {
   return sid === props.sessionId
 }
 
-function visibleAssistantText(msg: { role?: string; content?: string }): string {
+function visibleAssistantText(msg: { role?: string; content?: string; toolCalls?: unknown[] }): string {
   const content = msg.content ?? ''
   if (msg.role !== 'assistant') return content
-  return visibleAssistantContent(content)
+  // Once tools ran on this message, leftover tool / result JSON is residue,
+  // not speech; the chips carry the facts.
+  return visibleAssistantContent(content, { afterTools: !!msg.toolCalls?.length })
 }
 
 function isMemoryToolName(name: string): boolean {
