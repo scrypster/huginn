@@ -45,6 +45,9 @@ export function useEditor(options: {
 }) {
   const editor = ref<Editor | null>(null)
   let suggestionOpen = false
+  // After Escape, TipTap 3.20 rematches the same @ on the next transaction.
+  // Refuse that range until the cursor leaves it.
+  let dismissedFrom: number | null = null
 
   function createMentionExtension() {
     // Extend Mention with a tiptap-markdown serializer so @Name renders as
@@ -68,8 +71,18 @@ export function useEditor(options: {
             .filter(a => String(a.name).toLowerCase().startsWith(query.toLowerCase()))
             .slice(0, 6),
 
+        allow: ({ range, state }: { range: { from: number; to: number }; state: { selection: { from: number } } }) => {
+          if (dismissedFrom == null) return true
+          const pos = state.selection.from
+          if (pos < range.from || pos > range.to) {
+            dismissedFrom = null
+            return true
+          }
+          return range.from !== dismissedFrom
+        },
+
         render: () => {
-          let component: VueRenderer
+          let component: VueRenderer | undefined
           let popup: TippyInstance | null = null
 
           return {
@@ -93,24 +106,30 @@ export function useEditor(options: {
               })
             },
             onUpdate(props: SuggestionProps) {
-              component.updateProps(props)
+              component?.updateProps(props)
               if (!props.clientRect || !popup) return
               popup.setProps({
                 getReferenceClientRect: props.clientRect as () => DOMRect,
               })
             },
+            // Do not handle Escape here. TipTap 3.20 calls this first; a true
+            // return skips onExit + dispatchExit, which is what popup.hide() did.
             onKeyDown(props: SuggestionKeyDownProps) {
-              if (props.event.key === 'Escape') {
-                popup?.hide()
-                return true
-              }
-              return (component.ref as MentionListRef | null)
+              return (component?.ref as MentionListRef | null)
                 ?.onKeyDown(props) ?? false
             },
-            onExit() {
+            onExit(props: SuggestionProps) {
+              const pos = props.editor.state.selection.from
+              if (pos >= props.range.from && pos <= props.range.to) {
+                dismissedFrom = props.range.from
+              } else {
+                dismissedFrom = null
+              }
               suggestionOpen = false
               popup?.destroy()
-              component.destroy()
+              popup = null
+              component?.destroy()
+              component = undefined
             },
           }
         },
