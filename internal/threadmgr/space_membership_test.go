@@ -2,6 +2,7 @@ package threadmgr
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,12 @@ func TestCreate_SpaceIDGuard_NonMemberDenied(t *testing.T) {
 	}
 	if !errors.Is(err, ErrAgentNotSpaceMember) {
 		t.Errorf("expected ErrAgentNotSpaceMember, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "DELEGATE_FAIL") {
+		t.Errorf("expected DELEGATE_FAIL in error so the agent can see it, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "eve") {
+		t.Errorf("expected denied agent name in error, got: %v", err)
 	}
 }
 

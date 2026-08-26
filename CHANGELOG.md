@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- `delegate_to_agent` targeting someone not in the space roster now fails visibly (DELEGATE_FAIL) instead of spawning (Tess-only DM cannot spawn Steve; channel roster members still delegate; standalone session-mode is unchanged)
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
