@@ -1558,14 +1558,14 @@ function getSourceMessages(): ChatMessage[] {
 // Owner-space routing: /#/space/:id has no route sessionId, so isForActiveSession
 // is true for every event. Write timeline rows to the space that owns
 // msg.session_id (via getSessionSpaceId), not the room currently on screen.
-function getOwnerMessages(sessionId?: string): ChatMessage[] {
+function getOwnerMessages(sessionId?: string): ChatMessage[] | null {
   if (props.sessionId) {
-    if (sessionId && sessionId !== props.sessionId) return []
+    if (sessionId && sessionId !== props.sessionId) return null
     return getMessages(props.sessionId)
   }
-  if (!props.spaceId || !sessionId) return []
+  if (!props.spaceId || !sessionId) return null
   const ownerSpaceId = getSessionSpaceId(sessionId)
-  if (!ownerSpaceId) return []
+  if (!ownerSpaceId) return null
   return getSpaceTimelineState(ownerSpaceId).messages as ChatMessage[]
 }
 
@@ -2275,7 +2275,7 @@ registerWS(ws, 'warning', (msg: WSMessage) => {
     }
     if (!props.spaceId) return
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     msgs.push({
       id: `warn-${Date.now()}`,
       session_id: msg.session_id as string,
@@ -2391,7 +2391,7 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     // Only add if there isn't already a follow-up streaming bubble
     const alreadyExists = msgs.some(m => (m as any).followUpStreaming)
     if (!alreadyExists) {
@@ -2426,7 +2426,7 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
     const token = p?.token as string | undefined
     if (!token) return
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     // Find the existing follow-up streaming bubble or create one
     const existing = [...msgs].reverse().find(m => (m as any).followUpStreaming)
     if (existing) {
@@ -2463,7 +2463,7 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     const content = p?.content as string | undefined
     if (!content) return
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
@@ -2502,7 +2502,7 @@ registerWS(ws, 'follow_up_cancelled', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     // Remove the thinking bubble if it exists
     const idx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (idx >= 0) msgs.splice(idx, 1)
@@ -2545,7 +2545,7 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     for (const m of msgs) {
       const dt = m.delegatedThreads
       if (dt) {
@@ -2608,7 +2608,7 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
       ? p.agent_id
       : (typeof p.agent === 'string' ? p.agent : 'Delegate')
     const msgs = getOwnerMessages(msg.session_id)
-    if (!msgs.length) return
+    if (!msgs) return
     if (isOwnerView(msg.session_id)) showAutoApproveNotice(agentId)
     const eventId = `preview-timeout-${threadId}`
     if (msgs.some(m => m.id === eventId)) return

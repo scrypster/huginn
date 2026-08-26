@@ -2206,7 +2206,7 @@ describe('ChatView — space mode', () => {
   })
 
   it('still paints follow-up and permission on the owner space when that space is open', async () => {
-    seedSpace(SPACE_A, SESS_A)
+    const stateA = seedSpace(SPACE_A, SESS_A)
     mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
 
     const mockWs = createMockWs()
@@ -2225,7 +2225,7 @@ describe('ChatView — space mode', () => {
     })
     await nextTick()
 
-    expect(wrapper.html()).toContain('Owner-space follow-up')
+    expect(stateA.messages.some((m: any) => m.content === 'Owner-space follow-up')).toBe(true)
     expect(wrapper.html()).toContain('Permission required')
   })
 })
