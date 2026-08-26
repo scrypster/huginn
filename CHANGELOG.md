@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Switching DMs no longer paints a quiet room as busy: the responding banner, preparing-context line, and update-active-work strip stay on the space that owns the in-flight run
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

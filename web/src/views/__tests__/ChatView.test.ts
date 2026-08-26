@@ -2077,4 +2077,101 @@ describe('ChatView — space mode', () => {
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
   })
+
+  const SPACE_A = 'space-tess'
+  const SPACE_B = 'space-steve'
+
+  function spaceStub(id: string, name: string) {
+    return { id, name, kind: 'dm', leadAgent: name, memberAgents: [] }
+  }
+
+  async function mountTwoPartySpace(spaceId: string, ws: ReturnType<typeof createMockWs>) {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S' },
+    ])
+    mockActiveSpace.value = spaceStub(spaceId, spaceId === SPACE_A ? 'Tess' : 'Steve')
+    mockSpaceState.activeSessionId = `sess-${spaceId}`
+    mockSpaceState.sessionToSpaceMap.set(`sess-${spaceId}`, spaceId)
+    const wrapper = mountChatView({ sessionId: undefined, spaceId }, ws)
+    await flushPromises()
+    return wrapper
+  }
+
+  async function openSpace(wrapper: ReturnType<typeof mountChatView>, spaceId: string) {
+    mockActiveSpace.value = spaceStub(spaceId, spaceId === SPACE_A ? 'Tess' : 'Steve')
+    await wrapper.setProps({ spaceId })
+    await flushPromises()
+  }
+
+  it('keeps responding chrome on the space that owns the run when switching DMs', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('When you send now:')
+
+    await openSpace(wrapper, SPACE_B)
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Steve is responding')
+    expect(wrapper.html()).not.toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).not.toContain('When you send now:')
+
+    await openSpace(wrapper, SPACE_A)
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).toContain('When you send now:')
+  })
+
+  it('starts a new run in a quiet space instead of queueing against the other space\'s turn', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    await openSpace(wrapper, SPACE_B)
+    await chatEditor.vm.$emit('send', 'Hey Steve')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Steve is responding')
+    expect(wrapper.html()).not.toContain('queued')
+
+    await openSpace(wrapper, SPACE_A)
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('queued')
+  })
+
+  it('clears a background space run when its done arrives while another DM is open', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    const tessRunId = mockWs.sentMessages.find((m: any) => m.type === 'chat')?.run_id
+    expect(tessRunId).toBeTruthy()
+
+    await openSpace(wrapper, SPACE_B)
+    mockWs.simulateMessage({ type: 'done', run_id: tessRunId, session_id: `sess-${SPACE_A}` })
+    await flushPromises()
+
+    await openSpace(wrapper, SPACE_A)
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('When you send now:')
+  })
 })
