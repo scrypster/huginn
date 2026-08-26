@@ -36,6 +36,9 @@ var (
 	echoLineRE = regexp.MustCompile(`^["'` + "`" + `(\[]*(?:[0-9]+|[A-Z]+)(?:["'` + "`" + `.,;:!?)\]]*(?:[0-9]+|[A-Z]+))*["'` + "`" + `.,;:!?)\]]*$`)
 	// "Then calculate:" — only stripped when it directly continues a glue chain
 	glueContinuationRE = regexp.MustCompile(`(?i)^\s*(?:then|next|finally|afterwards|after that)\b[^.]{0,80}:\s*$`)
+	// Generic LLM filler phrases that appear after tools have run
+	// Matches lines like "How can I assist you further?", "Not currently delegating any tasks.", etc.
+	fillerLineRE = regexp.MustCompile(`(?i)^(?:how can I|is there anything|how else|not currently delegating|nothing is currently delegated)\b.*[?.]?\s*$`)
 )
 
 // StripResidualSpeech removes wait tags and playbook glue lines from
@@ -102,7 +105,7 @@ func stripResidualUnfenced(s string, afterTools bool) string {
 		case trim == "":
 			kept = append(kept, line)
 			continue
-		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim):
+		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim):
 			inGlueChain = true
 			continue
 		case inGlueChain && glueContinuationRE.MatchString(trim):

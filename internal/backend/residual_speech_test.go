@@ -110,3 +110,39 @@ func TestStripResidualSpeech_KeepsTeammateProse(t *testing.T) {
 		}
 	}
 }
+
+func TestStripResidualSpeechAfterTools_RemovesFillerLines(t *testing.T) {
+	for _, tc := range []struct {
+		input, want string
+	}{
+		{
+			"Reggie replied PONG.\nHow can I assist you further?",
+			"Reggie replied PONG.",
+		},
+		{
+			"Here is the result:\nNot currently delegating any tasks.",
+			"Here is the result:",
+		},
+		{
+			"I'll calculate: 7 times 8 is 56.\nIs there anything else I can help with?",
+			"I'll calculate: 7 times 8 is 56.",
+		},
+		{
+			"How can I assist you further?",
+			"",
+		},
+		{
+			"Not currently delegating any tasks.",
+			"",
+		},
+		{
+			"Hello, how can I help today?", // kept — not a trailing filler phrase
+			"Hello, how can I help today?",
+		},
+	} {
+		got := StripResidualSpeechAfterTools(tc.input)
+		if got != tc.want {
+			t.Errorf("StripResidualSpeechAfterTools(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

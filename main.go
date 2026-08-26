@@ -2981,9 +2981,6 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				if sessionID == "" {
 					return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
 				}
-				if len(threadIDs) == 0 {
-					threadIDs = tm.ActiveThreadIDs(sessionID)
-				}
 				return tm.WaitForThreads(ctx, sessionID, threadIDs, timeout), nil
 			},
 		}

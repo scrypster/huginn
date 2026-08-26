@@ -159,9 +159,6 @@ func attachDelegation(
 			if sid == "" {
 				return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
 			}
-			if len(threadIDs) == 0 {
-				threadIDs = tm.ActiveThreadIDs(sid)
-			}
 			return tm.WaitForThreads(ctx, sid, threadIDs, timeout), nil
 		},
 	})
