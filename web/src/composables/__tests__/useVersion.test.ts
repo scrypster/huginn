@@ -40,6 +40,15 @@ describe('useVersion', () => {
     expect(version.value).toBe('v1.2.3-test')
   })
 
+  it('versionLabel collapses a doubled leading v (vv0.4.0-try-all)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      ok({ status: 'ok', version: 'vv0.4.0-try-all', satellite_connected: false }),
+    )
+    const { versionLabel, loadVersion } = await freshVersion()
+    await loadVersion()
+    expect(versionLabel.value).toBe('v0.4.0-try-all')
+  })
+
   it('loadVersion is idempotent: a second call does not refetch', async () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       ok({ status: 'ok', version: 'v1.2.3' }),

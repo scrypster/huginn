@@ -40,14 +40,14 @@
         Heartbeat
       </span>
 
-      <!-- Memory -->
+      <!-- Memory — hidden when the Memory product is parked (no usable vaults) -->
       <span
-        v-if="agent.vault_name"
+        v-if="advertiseMemory && agent.vault_name"
         class="text-[10px] px-1.5 py-0.5 rounded-full"
         style="background:rgba(88,166,255,0.1);color:#58a6ff"
       >🧠 Memory</span>
       <span
-        v-else
+        v-else-if="advertiseMemory"
         class="text-[10px] px-1.5 py-0.5 rounded-full"
         style="background:rgba(255,255,255,0.06);color:#8b949e"
       >No memory</span>
@@ -58,6 +58,8 @@
 <script setup lang="ts">
 import type { AgentSummary } from '../composables/useAgents'
 
-defineProps<{ agent: AgentSummary }>()
+withDefaults(defineProps<{ agent: AgentSummary; advertiseMemory?: boolean }>(), {
+  advertiseMemory: true,
+})
 defineEmits<{ (e: 'click'): void; (e: 'edit'): void }>()
 </script>

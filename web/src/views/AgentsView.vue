@@ -32,6 +32,7 @@
             v-for="agent in agents"
             :key="agent.name"
             :agent="agent"
+            :advertise-memory="advertiseMemory"
             @click="openDM(agent)"
             @edit="router.push('/agents/' + agent.name)"
           />
@@ -289,7 +290,8 @@
 
           <!-- Bottom actions -->
           <div class="px-5 py-4 border-t border-huginn-border space-y-2 flex-shrink-0">
-            <button @click="confirmDelete"
+            <button v-if="!isNewAgent" @click="confirmDelete"
+              data-testid="delete-agent-btn"
               class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-huginn-muted border border-huginn-border hover:border-huginn-red/40 hover:text-huginn-red transition-all duration-150">
               <svg class="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
               Delete agent
@@ -1408,6 +1410,8 @@ const {
   confirmDelete,
   deleteAgent,
   createNew,
+  isNewAgent,
+  advertiseMemory,
 } = useAgentsViewState(toRef(props, 'agentName'), router)
 </script>
 

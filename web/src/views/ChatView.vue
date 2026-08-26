@@ -527,8 +527,22 @@
                   :created-at="msg.createdAt"
                   :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
-                <!-- Message text -->
-                <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                <!-- Message text — system-fail prefixes are not teammate speech -->
+                <div
+                  v-if="parseSystemFailSpeech(msg.content)"
+                  data-testid="system-fail-line"
+                  class="inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
+                         border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
+                >
+                  <svg class="w-3.5 h-3.5 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <span>
+                    <span class="font-semibold">{{ parseSystemFailSpeech(msg.content)!.kind }}</span>
+                    · {{ parseSystemFailSpeech(msg.content)!.message }}
+                  </span>
+                </div>
+                <div v-else-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
@@ -715,7 +729,9 @@
                         ? `🧠 Memory: ${summarizeMemoryToolCalls(msg.toolCalls)}`
                         : `${msg.toolCalls.length} tool call${msg.toolCalls.length === 1 ? '' : 's'}` }}
                     </span>
-                    <span class="text-[11px] text-huginn-green">· done</span>
+                    <span :class="messageToolChipFailed(msg.content, msg.toolCalls) ? 'text-[11px] text-huginn-red' : 'text-[11px] text-huginn-green'">
+                      · {{ messageToolChipFailed(msg.content, msg.toolCalls) ? 'failed' : 'done' }}
+                    </span>
                     <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                       :class="expandedMsgCalls.has(msg.id) ? 'rotate-180' : ''"
                       viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -1100,6 +1116,7 @@ import { useUnreadTracking } from '../composables/useUnreadTracking'
 import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
+import { messageToolChipFailed, parseSystemFailSpeech } from '../utils/honesty'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 

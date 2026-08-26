@@ -53,6 +53,14 @@ describe('AgentCard', () => {
     expect(wrapper.text()).not.toContain('No memory')
   })
 
+  it('hides Memory badges when advertiseMemory is false', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ vault_name: 'my-vault' }), advertiseMemory: false },
+    })
+    expect(wrapper.text()).not.toContain('Memory')
+    expect(wrapper.text()).not.toContain('No memory')
+  })
+
   it('shows "No memory" when vault_name is absent', () => {
     const wrapper = mount(AgentCard, { props: { agent: makeAgent() } })
     expect(wrapper.text()).toContain('No memory')

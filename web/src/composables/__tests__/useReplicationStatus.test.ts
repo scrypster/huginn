@@ -21,6 +21,13 @@ describe('useReplicationStatus', () => {
     vi.useRealTimers()
   })
 
+  function mockRepl(repl: Record<string, unknown>, vaults: string[] = ['vault-1']) {
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).includes('/muninn/vaults')) return { vaults }
+      return repl
+    })
+  }
+
   it('chipText is empty string initially (before first poll)', () => {
     const spaceId = ref<string | undefined>(undefined)
     const { chipText } = useReplicationStatus(spaceId)
@@ -28,7 +35,7 @@ describe('useReplicationStatus', () => {
   })
 
   it('chipText is empty when not connected', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({ pending: 0, failed: 0, dead: 0, connected: false })
+    mockRepl({ pending: 0, failed: 0, dead: 0, connected: false })
     const spaceId = ref<string | undefined>('space-1')
     const { chipText } = useReplicationStatus(spaceId)
     // Advance to run the immediate poll
@@ -37,8 +44,17 @@ describe('useReplicationStatus', () => {
     expect(chipText.value).toBe('')
   })
 
+  it('chipText stays quiet when vaults are empty even if replication is connected', async () => {
+    mockRepl({ pending: 0, failed: 0, dead: 0, connected: true }, [])
+    const spaceId = ref<string | undefined>('space-1')
+    const { chipText } = useReplicationStatus(spaceId)
+    await vi.advanceTimersByTimeAsync(1)
+    await nextTick()
+    expect(chipText.value).toBe('')
+  })
+
   it('chipText shows syncing when pending > 0', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({ pending: 3, failed: 0, dead: 0, connected: true })
+    mockRepl({ pending: 3, failed: 0, dead: 0, connected: true })
     const spaceId = ref<string | undefined>('space-1')
     const { chipText } = useReplicationStatus(spaceId)
     await vi.advanceTimersByTimeAsync(1)
@@ -47,7 +63,7 @@ describe('useReplicationStatus', () => {
   })
 
   it('chipText shows synced when pending=0, failed=0, dead=0, connected=true', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({ pending: 0, failed: 0, dead: 0, connected: true })
+    mockRepl({ pending: 0, failed: 0, dead: 0, connected: true })
     const spaceId = ref<string | undefined>('space-1')
     const { chipText } = useReplicationStatus(spaceId)
     await vi.advanceTimersByTimeAsync(1)
@@ -56,7 +72,7 @@ describe('useReplicationStatus', () => {
   })
 
   it('chipText shows issues when failed > 0', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({ pending: 0, failed: 2, dead: 0, connected: true })
+    mockRepl({ pending: 0, failed: 2, dead: 0, connected: true })
     const spaceId = ref<string | undefined>('space-1')
     const { chipText } = useReplicationStatus(spaceId)
     await vi.advanceTimersByTimeAsync(1)
@@ -74,7 +90,10 @@ describe('useReplicationStatus', () => {
   })
 
   it('clears chip when spaceId changes to undefined', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({ pending: 0, failed: 0, dead: 0, connected: true })
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).includes('/muninn/vaults')) return { vaults: ['vault-1'] }
+      return { pending: 0, failed: 0, dead: 0, connected: true }
+    })
     const spaceId = ref<string | undefined>('space-1')
     const { chipText } = useReplicationStatus(spaceId)
     await vi.advanceTimersByTimeAsync(1)

@@ -90,3 +90,22 @@ func TestServerModeToolRegistry_ConfigFiltersApplied(t *testing.T) {
 		t.Errorf("unblocked read_file should return 1 schema, got %d", len(named))
 	}
 }
+
+// TestServerModeToolRegistry_DenyWinsOnAllowDenyConflict documents the rule
+// shown in Settings: a tool listed in both allowed and disallowed is blocked.
+func TestServerModeToolRegistry_DenyWinsOnAllowDenyConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg := tools.NewRegistry()
+	tools.RegisterBuiltins(reg, tmpDir, 10*time.Second)
+	reg.TagTools(tools.BuiltinToolNames(), "builtin")
+
+	reg.SetAllowed([]string{"read_file", "write_file", "bash"})
+	reg.SetBlocked([]string{"bash", "web_search"})
+
+	if reg.IsEnabled("bash") {
+		t.Error("bash is on both allow and deny lists; deny must win")
+	}
+	if !reg.IsEnabled("read_file") {
+		t.Error("read_file is allowed and not denied; should stay enabled")
+	}
+}

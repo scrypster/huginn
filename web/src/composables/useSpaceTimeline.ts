@@ -1,5 +1,6 @@
 import { reactive, toRefs } from 'vue'
 import { api, type SpaceMessage } from './useApi'
+import { plaintextPreview } from '../utils/honesty'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 
 export type { SpaceMessage }
@@ -394,8 +395,8 @@ export function getSpaceLastMessage(spaceId: string): { text: string; relTime: s
     (m.role === 'user' || m.role === 'assistant') && !!m.content
   )
   if (!last) return null
-  const raw = last.content.replace(/[#*`_[\]()>]/g, '').trim()
-  const text = raw.length > 48 ? raw.slice(0, 48) + '…' : raw
+  const raw = plaintextPreview(last.content)
+  const text = raw
   const prefix = last.role === 'user' ? 'You: ' : (last.agent ? `${last.agent}: ` : '')
   return { text: prefix + text, relTime: relativeTime(last.ts) }
 }

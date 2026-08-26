@@ -207,8 +207,19 @@
                 </span>
                 <span class="text-[11px] text-huginn-muted/50">{{ formatTime(item.msg.created_at) }}</span>
               </div>
-              <!-- Message content -->
-              <div v-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
+              <!-- Message content — system-fail prefixes are not teammate speech -->
+              <div
+                v-if="parseSystemFailSpeech(item.msg.content)"
+                data-testid="system-fail-line"
+                class="inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
+                       border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
+              >
+                <span>
+                  <span class="font-semibold">{{ parseSystemFailSpeech(item.msg.content)!.kind }}</span>
+                  · {{ parseSystemFailSpeech(item.msg.content)!.message }}
+                </span>
+              </div>
+              <div v-else-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
                 v-html="renderMarkdown(item.msg.content)" />
               <!-- Streaming cursor -->
               <span v-if="(item.msg as any).streaming" class="inline-block w-1.5 h-3.5 bg-huginn-muted/60 rounded-sm animate-pulse ml-0.5 align-middle" />
@@ -220,7 +231,9 @@
                     <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                   </svg>
                   <span class="text-xs text-huginn-text">{{ item.msg.toolCalls!.length }} tool call{{ item.msg.toolCalls!.length === 1 ? '' : 's' }}</span>
-                  <span class="text-[11px] text-huginn-green">· done</span>
+                  <span :class="messageToolChipFailed(item.msg.content, item.msg.toolCalls) ? 'text-[11px] text-huginn-red' : 'text-[11px] text-huginn-green'">
+                    · {{ messageToolChipFailed(item.msg.content, item.msg.toolCalls) ? 'failed' : 'done' }}
+                  </span>
                   <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                     :class="expandedMsgCalls.has(item.msg.id) ? 'rotate-180' : ''"
                     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -390,6 +403,7 @@
 import { computed, ref, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { messageToolChipFailed, parseSystemFailSpeech } from '../utils/honesty'
 import type { ThreadMessage, ThreadArtifact } from '../composables/useThreadDetail'
 import ArtifactCard from './ArtifactCard.vue'
 import ObservationDeck from './ObservationDeck.vue'

@@ -21,6 +21,7 @@ import {
   useSpaceTimeline,
   clearSpaceTimeline,
   getSessionSpaceId,
+  getSpaceLastMessage,
 } from '../useSpaceTimeline'
 
 // ── Mock WS factory ───────────────────────────────────────────────────
@@ -678,6 +679,25 @@ describe('getSessionSpaceId', () => {
 
   it('returns null when the session is not in any timeline', () => {
     expect(getSessionSpaceId('unknown-session')).toBeNull()
+  })
+
+  it('sidebar preview keeps TOOL_FAIL and snake_case underscores', () => {
+    const tl = useSpaceTimeline(SPACE_ID)
+    tl.getState().messages.push({
+      id: 'm-fail',
+      session_id: SESSION_ID,
+      seq: 1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      agent: 'Steve',
+      content: 'TOOL_FAIL: The json_tool is not available',
+    } as any)
+
+    const preview = getSpaceLastMessage(SPACE_ID)
+    expect(preview).not.toBeNull()
+    expect(preview!.text).toContain('TOOL_FAIL')
+    expect(preview!.text).toContain('json_tool')
+    expect(preview!.text).not.toContain('TOOLFAIL')
   })
 
   it('returns the correct space when multiple spaces are tracked', () => {

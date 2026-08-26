@@ -954,6 +954,9 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     router.push('/agents/new')
   }
 
+  const isNewAgent = computed(() => agentName.value === 'new')
+  const advertiseMemory = computed(() => muninnConnected.value && allVaultNames.value.length > 0)
+
   watch(agentName, (name) => {
     showDeleteConfirm.value = false
     if (name && name !== 'new') {
@@ -981,8 +984,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           heartbeat_enabled: false,
           heartbeat_cron: '',
         }
-        original.value = ''
-        dirty.value = true
+        original.value = JSON.stringify(form.value)
+        dirty.value = false
       }
     }
   }, { immediate: true })
@@ -1125,6 +1128,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     confirmDelete,
     deleteAgent,
     createNew,
+    isNewAgent,
+    advertiseMemory,
     onVisibilityChange,
     onWindowFocus,
     onKeydown,

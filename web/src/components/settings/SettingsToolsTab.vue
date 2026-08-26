@@ -4,10 +4,16 @@
       <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Tool Access</h3>
       <SettingsToggleRow
         :model-value="!!form.tools_enabled"
-        label="Tools enabled"
-        hint="Allow huginn to use tools (file read/write, bash, etc.)"
+        label="Tools enabled (TUI / CLI)"
+        :hint="TOOLS_ENABLED_SERVE_HINT"
         @update:model-value="setBoolean('tools_enabled', $event)"
       />
+      <p
+        data-testid="tools-enabled-serve-note"
+        class="text-xs text-huginn-muted leading-relaxed"
+      >
+        {{ TOOLS_ENABLED_SERVE_HINT }}
+      </p>
     </section>
 
     <div class="border-t border-huginn-border" />
@@ -26,7 +32,7 @@
 
     <section class="space-y-4">
       <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Disallowed Tools</h3>
-      <p class="text-xs text-huginn-muted">Blacklist — tools that are always blocked.</p>
+      <p class="text-xs text-huginn-muted">Blacklist — tools that are always blocked. {{ DENY_WINS_COPY }}</p>
       <textarea
         :value="disallowedToolsText"
         placeholder="bash&#10;web_search"
@@ -34,6 +40,20 @@
         class="w-full bg-huginn-surface border border-huginn-border rounded-xl px-4 py-3 text-sm text-huginn-text font-mono outline-none focus:border-huginn-blue/50 transition-colors resize-y"
         @input="updateDisallowed(($event.target as HTMLTextAreaElement).value)"
       />
+      <div
+        v-if="conflictNames.length"
+        data-testid="tool-list-conflict"
+        class="flex items-start gap-2 px-3 py-2 rounded-lg border border-huginn-amber/40 bg-huginn-amber/10 text-xs text-huginn-amber"
+      >
+        <svg class="w-3.5 h-3.5 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <p>
+          {{ conflictNames.join(', ') }}
+          {{ conflictNames.length === 1 ? 'is' : 'are' }} listed in both allow and deny.
+          {{ DENY_WINS_COPY }}
+        </p>
+      </div>
     </section>
 
     <section class="space-y-4">
@@ -64,8 +84,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import SettingsFieldRow from './SettingsFieldRow.vue'
 import SettingsToggleRow from './SettingsToggleRow.vue'
+import { conflictingTools, DENY_WINS_COPY, TOOLS_ENABLED_SERVE_HINT } from '../../utils/honesty'
 
 const props = defineProps<{
   form: Record<string, unknown>
@@ -81,6 +103,12 @@ const emit = defineEmits<{
   (e: 'update:disallowedToolsText', value: string): void
   (e: 'update:showBraveKey', value: boolean): void
 }>()
+
+const conflictNames = computed(() => {
+  const allowed = props.allowedToolsText.split('\n').map(s => s.trim()).filter(Boolean)
+  const denied = props.disallowedToolsText.split('\n').map(s => s.trim()).filter(Boolean)
+  return conflictingTools(allowed, denied)
+})
 
 function setBoolean(key: string, value: boolean) {
   props.form[key] = value

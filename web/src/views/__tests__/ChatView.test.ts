@@ -1721,6 +1721,48 @@ describe('ChatView — message display edge cases', () => {
     expect(streamingMsg?.content).toBe('hello world')
   })
 
+  it('TOOL_FAIL assistant text renders as a system error line, not bubble prose', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'TOOL_FAIL: The "json" tool is not available. Please use a different method to format the response.',
+        toolCalls: [
+          { id: 'tc1', name: 'json', args: {}, result: 'error: tool "json" is not available', done: true },
+        ],
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text()).toContain('TOOL_FAIL')
+    expect(fail.text()).toContain('json')
+    expect(wrapper.html()).not.toContain('md-content')
+    expect(wrapper.html()).toContain('failed')
+    expect(wrapper.html()).not.toMatch(/text-huginn-green">· done/)
+  })
+
+  it('DELEGATE_FAIL assistant text is not rendered as normal bubble prose', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'DELEGATE_FAIL: agent tesla is unavailable',
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text()).toContain('DELEGATE_FAIL')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
   it('completed tool-use message renders the tool call chip', async () => {
     mockMessages['test-session-id'] = [
       {
