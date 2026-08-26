@@ -22,6 +22,7 @@ All notable changes to Huginn are documented here.
 - Harness announcement lines (`Delegated to @…`, auto-approved, completed delegated work, `TOOL_FAIL` / `DELEGATE_FAIL`) render as system/delegation rows instead of teammate speech; A2A tools are omitted from the “N tool calls” chip
 - Chat composer stays editable while an agent is responding so a second message can be queued without clearing the in-flight bubble
 - Space-mode unreads now match the Slack surface: the in-chat jump pill keys off the space timeline, opening one space no longer clears unseen for unvisited spaces, and sidebar DM previews prefetch a last-message snippet without stripping TOOL_FAIL underscores
+- Stats and Settings routes keep the Channels/DMs sidebar visible instead of unmounting the context panel
 
 ## [0.4.0] - 2026-06-10
 

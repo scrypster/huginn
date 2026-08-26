@@ -165,9 +165,13 @@ vi.mock('../../composables/useApi', () => ({
   getToken: vi.fn().mockReturnValue('test-token'),
 }))
 
+const { mockRoute } = vi.hoisted(() => ({
+  mockRoute: { path: '/chat', params: {} as Record<string, string>, query: {} },
+}))
+
 vi.mock('vue-router', () => ({
   RouterView: { template: '<div class="router-view-stub" />' },
-  useRoute:  () => ({ path: '/chat', params: {}, query: {} }),
+  useRoute:  () => mockRoute,
   useRouter: () => ({
     push:    vi.fn(),
     replace: vi.fn(),
@@ -208,6 +212,8 @@ function dispatchKey(key: string, opts: Partial<KeyboardEventInit> = {}) {
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  mockRoute.path = '/chat'
+  mockRoute.params = {}
   mockSessions.value = []
   mockChannels.value = []
   mockDms.value = []
@@ -408,6 +414,28 @@ describe('App', () => {
       const html = w.html()
       expect(html).toContain('Channels')
       expect(html).toContain('Direct Messages')
+    })
+
+    it('keeps Channels/DMs on /stats and /settings, and agent-list on /agents', async () => {
+      mockRoute.path = '/stats'
+      const wStats = mountApp()
+      await flushPromises()
+      expect(wStats.html()).toContain('Channels')
+      expect(wStats.html()).toContain('Direct Messages')
+      expect(wStats.find('[data-testid="agent-list"]').exists()).toBe(false)
+
+      mockRoute.path = '/settings'
+      const wSettings = mountApp()
+      await flushPromises()
+      expect(wSettings.html()).toContain('Channels')
+      expect(wSettings.html()).toContain('Direct Messages')
+      expect(wSettings.find('[data-testid="agent-list"]').exists()).toBe(false)
+
+      mockRoute.path = '/agents'
+      const wAgents = mountApp()
+      await flushPromises()
+      expect(wAgents.find('[data-testid="agent-list"]').exists()).toBe(true)
+      expect(wAgents.html()).not.toContain('Direct Messages')
     })
 
     it('shows clear-all trash button only when sessions exist', async () => {

@@ -237,8 +237,8 @@
 
         <!-- Panel header -->
         <div class="flex items-center gap-2 px-3 h-11 border-b border-huginn-border flex-shrink-0">
-          <!-- Chat: search bar -->
-          <template v-if="activeSection === 'chat'">
+          <!-- Chat / Stats / Settings: space-list search bar -->
+          <template v-if="showSpaceList">
             <svg class="w-3 h-3 text-huginn-muted/40 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
@@ -295,8 +295,8 @@
           </template>
         </div>
 
-        <!-- ── Chat panel: Channels + DMs + Sessions ── -->
-        <div v-if="activeSection === 'chat'" class="flex-1 overflow-y-auto">
+        <!-- ── Chat / Stats / Settings panel: Channels + DMs ── -->
+        <div v-if="showSpaceList" class="flex-1 overflow-y-auto">
 
           <!-- Spaces loading spinner -->
           <div v-if="spacesLoading && channels.length === 0 && dms.length === 0"
@@ -952,7 +952,8 @@ const activeSection    = computed(() => {
   return seg
 })
 const activeSessionId  = computed(() => route.params.sessionId as string || '')
-const showPanel        = computed(() => ['chat', 'agents', 'automation', 'skills'].includes(activeSection.value))
+const showSpaceList    = computed(() => ['chat', 'stats', 'settings'].includes(activeSection.value))
+const showPanel        = computed(() => showSpaceList.value || ['agents', 'automation', 'skills'].includes(activeSection.value))
 const panelTitle       = computed(() => {
   if (activeSection.value === 'chat') return 'Sessions'
   if (activeSection.value === 'automation') return 'Automation'
