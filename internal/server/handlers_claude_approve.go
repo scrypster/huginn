@@ -3,7 +3,10 @@ package server
 import (
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
+
+	"github.com/scrypster/huginn/internal/agents"
 )
 
 // handleClaudeApprove answers a PreToolUse hook from a Claude Code agent.
@@ -17,6 +20,21 @@ import (
 // ClaudeHookTimeoutSecs-10 = 20s) that this response has to beat. Everything
 // here is in-memory config lookups, so there is nothing to bound.
 func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
+	// This route is intentionally unauthenticated (see its registration in
+	// server.go) because the hook client never sends a token. That safety
+	// margin must not depend on web_ui.bind staying 127.0.0.1 — that's a
+	// user-editable value in a different file, set by someone who has no idea
+	// this endpoint exists. So check the actual peer address ourselves, before
+	// touching the body, and fail closed on anything we can't positively
+	// confirm is loopback.
+	if !isLoopbackAddr(r.RemoteAddr) {
+		slog.Warn("claudecode: approval request from non-loopback address",
+			"remote_addr", r.RemoteAddr)
+		respondApprove(w, "deny",
+			"Huginn: approval requests are only accepted from localhost")
+		return
+	}
+
 	var req struct {
 		ToolName  string          `json:"tool_name"`
 		ToolUseID string          `json:"tool_use_id"`
@@ -29,7 +47,7 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentName, ok := s.agentForClaudeSession(req.SessionID)
+	agent, ok := s.agentForClaudeSession(req.SessionID)
 	if !ok {
 		slog.Warn("claudecode: approval request for an unbound session",
 			"session_id", req.SessionID, "tool", req.ToolName)
@@ -38,12 +56,16 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// v1: any tool that reached the hook was NOT pre-authorised, so it needs a
-	// human. Surfacing it in the approval UI is wired in a follow-up; until
-	// then an un-preauthorised tool is denied with a legible reason rather than
-	// silently allowed.
+	if toolAllowed(agent.LocalTools, req.ToolName) {
+		slog.Info("claudecode: tool call allowed",
+			"agent", agent.Name, "tool", req.ToolName, "tool_use_id", req.ToolUseID)
+		respondApprove(w, "allow",
+			"Huginn: "+req.ToolName+" is in "+agent.Name+"'s allowed tools")
+		return
+	}
+
 	slog.Info("claudecode: tool call requires approval",
-		"agent", agentName, "tool", req.ToolName, "tool_use_id", req.ToolUseID)
+		"agent", agent.Name, "tool", req.ToolName, "tool_use_id", req.ToolUseID)
 	respondApprove(w, "deny",
 		"Huginn: "+req.ToolName+" is not in this agent's allowed tools")
 }
@@ -57,19 +79,48 @@ func respondApprove(w http.ResponseWriter, decision, reason string) {
 	})
 }
 
+// isLoopbackAddr reports whether addr (an http.Request.RemoteAddr, e.g.
+// "127.0.0.1:1234" or "[::1]:1234") names a loopback IP. Anything that
+// doesn't parse cleanly to a loopback address returns false — this is a
+// fail-closed check, never assume local on a malformed or missing address.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+// toolAllowed reports whether tool is granted to an agent by its LocalTools
+// allowlist. Empty/nil = default-deny; ["*"] = all tools; otherwise the tool
+// name must appear in the list verbatim. Mirrors the semantics documented on
+// agents.AgentDef.LocalTools.
+func toolAllowed(localTools []string, tool string) bool {
+	for _, t := range localTools {
+		if t == "*" || t == tool {
+			return true
+		}
+	}
+	return false
+}
+
 // agentForClaudeSession maps a Claude Code session id to the agent bound to it.
-func (s *Server) agentForClaudeSession(sessionID string) (string, bool) {
+func (s *Server) agentForClaudeSession(sessionID string) (agents.AgentDef, bool) {
 	if sessionID == "" || s.agentLoader == nil {
-		return "", false
+		return agents.AgentDef{}, false
 	}
 	cfg, err := s.agentLoader()
 	if err != nil || cfg == nil {
-		return "", false
+		return agents.AgentDef{}, false
 	}
 	for _, a := range cfg.Agents {
 		if a.ClaudeSessionID != "" && a.ClaudeSessionID == sessionID {
-			return a.Name, true
+			return a, true
 		}
 	}
-	return "", false
+	return agents.AgentDef{}, false
 }
