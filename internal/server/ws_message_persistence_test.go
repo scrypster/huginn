@@ -668,15 +668,15 @@ func TestWSChat_PersistsTextAndToolCallsTogether(t *testing.T) {
 	}
 }
 
-// gateBackend blocks inside ChatCompletion until release is closed, so the
-// test can Append mid-turn announcements after the inbound user row is
-// accepted but before the assistant reply is persisted.
-type gateBackend struct {
+// midTurnAppendBackend blocks inside ChatCompletion until release is closed,
+// so the test can Append mid-turn announcements after the inbound user row
+// is accepted but before the assistant reply is persisted.
+type midTurnAppendBackend struct {
 	started chan struct{}
 	release chan struct{}
 }
 
-func (g *gateBackend) ChatCompletion(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+func (g *midTurnAppendBackend) ChatCompletion(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
 	close(g.started)
 	select {
 	case <-g.release:
@@ -688,9 +688,9 @@ func (g *gateBackend) ChatCompletion(ctx context.Context, req backend.ChatReques
 	}
 	return &backend.ChatResponse{Content: "hostname is testhost", DoneReason: "stop"}, nil
 }
-func (g *gateBackend) Health(_ context.Context) error   { return nil }
-func (g *gateBackend) Shutdown(_ context.Context) error { return nil }
-func (g *gateBackend) ContextWindow() int               { return 4096 }
+func (g *midTurnAppendBackend) Health(_ context.Context) error   { return nil }
+func (g *midTurnAppendBackend) Shutdown(_ context.Context) error { return nil }
+func (g *midTurnAppendBackend) ContextWindow() int               { return 4096 }
 
 // TestWSChat_InboundUserPersistedBeforeMidTurnAppend proves persist-at-accept:
 // a mid-turn lifecycle Append cannot appear before the user prompt on session
@@ -698,7 +698,7 @@ func (g *gateBackend) ContextWindow() int               { return 4096 }
 func TestWSChat_InboundUserPersistedBeforeMidTurnAppend(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	b := &gateBackend{started: started, release: release}
+	b := &midTurnAppendBackend{started: started, release: release}
 
 	models := modelconfig.DefaultModels()
 	orch, err := agent.NewOrchestrator(b, models, nil, nil, nil, nil)
