@@ -393,6 +393,15 @@
               </div>
             </div>
 
+            <!-- Harness announcement — system/delegation row, not teammate voice -->
+            <div v-else-if="msg.systemLine"
+              class="flex items-center justify-center gap-2 px-3 my-2"
+              data-testid="system-line">
+              <div class="flex-1 h-px bg-huginn-border/40" />
+              <span class="text-[11px] text-huginn-muted/70 text-center max-w-[80%]">{{ msg.content }}</span>
+              <div class="flex-1 h-px bg-huginn-border/40" />
+            </div>
+
             <!-- User message (right-aligned bubble) -->
             <div v-else-if="msg.role === 'user'" class="group flex flex-col items-end" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
               <div class="md-content max-w-[75%] px-4 py-3 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words"
@@ -528,11 +537,11 @@
                   :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
                 />
                 <!-- Message text -->
-                <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                <div v-if="msg.content && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
-                <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
+                <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2">
                   <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50">
                     <div class="flex gap-0.5 flex-shrink-0">
                       <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:0ms" />
@@ -543,7 +552,7 @@
                       <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                     </svg>
                     <span class="text-xs text-huginn-text">
-                      {{ activeMemoryChipText || `${activeToolCalls.length} tool call${activeToolCalls.length === 1 ? '' : 's'}` }}
+                      {{ activeMemoryChipText || `${visibleToolCalls(activeToolCalls).length} tool call${visibleToolCalls(activeToolCalls).length === 1 ? '' : 's'}` }}
                     </span>
                     <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
                   </div>
@@ -703,7 +712,7 @@
                 <!-- Tool call chip (completed, attached to this message).
                      Visible as soon as no tool calls are actively running, so the
                      chip persists below the content even while text is still streaming. -->
-                <div v-if="msg.toolCalls?.length && (!msg.streaming || !activeToolCalls.length)" class="mt-2">
+                <div v-if="msg.toolCalls?.length && (!msg.streaming || !visibleToolCalls(activeToolCalls).length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
                     class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100">
@@ -967,7 +976,6 @@
       <div class="px-4 pb-4 flex-shrink-0">
         <ChatEditor
           ref="chatEditorRef"
-          :disabled="streaming"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
           @send="handleEditorSend"
         />
@@ -1102,6 +1110,7 @@ import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
+import { visibleToolCalls } from '../utils/honesty'
 
 interface Agent {
   name: string
@@ -1127,6 +1136,7 @@ const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 const router  = useRouter()
 const wsRef   = inject<Ref<HuginnWS | null>>('ws')!
 const markSpaceSeen = inject<(spaceId: string) => void>('markSpaceSeen')
+const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 
 // ── Space timeline mode ────────────────────────────────────────────────────────
 // currentSpaceTimeline holds the active space timeline instance.
@@ -1154,11 +1164,12 @@ watch(() => props.spaceId, async (newId) => {
   // Clear stale unseen-badge entries for this space after hydration so
   // sessionToSpaceMap is populated and getSessionSpaceId returns correct results.
   markSpaceSeen?.(newId)
-  // Hydrate thread badges for each session visible in this space.
-  const spMsgs = tl.getState().messages ?? []
-  const sessionIds = [...new Set(spMsgs.map(m => m.session_id).filter(Boolean))]
-  for (const sid of sessionIds) {
+  // Load REST threads + reply badges for the active session and every
+  // session_id on the timeline so ThreadPanel / strips work in space mode.
+  for (const sid of collectSpaceSessionIds(tl)) {
+    await loadThreads(sid)
     await hydrateThreadBadges(sid)
+    applyLiveThreadSummaries(sid)
   }
   await scrollToBottom()
 
@@ -1385,7 +1396,6 @@ watch(() => swarmState.value?.sessionId, (id) => {
 const agentProfile      = ref<Agent | null>(null) // agent shown in read-only profile modal
 
 // ── Thread panel state ────────────────────────────────────────────────
-const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 const threadPanelOpen   = ref(false)
 const threadPanelPinned = ref(false) // true = don't auto-close when threads finish
 
@@ -1419,12 +1429,13 @@ async function openThreadDetailById(threadId: string) {
     return
   }
   // Thread not in live state — fetch from API to get parentMessageId
-  if (!props.sessionId) {
+  const lookupSessionId = resolvedThreadSessionId.value
+  if (!lookupSessionId) {
     threadPanelOpen.value = true
     return
   }
   try {
-    const fetched = await api.threads.get(props.sessionId, threadId)
+    const fetched = await api.threads.get(lookupSessionId, threadId)
     if (fetched?.parentMessageId) {
       threadPanelOpen.value = false
       openThreadLiveId.value = threadId
@@ -1482,6 +1493,34 @@ function openAgentAccess(agentName: string) {
 // refresh. Calls GET /api/v1/containers/{id}/threads which returns root messages
 // that have at least one reply (thread_reply_count > 0), then attaches
 // delegatedThreads to the matching message in the UI.
+function collectSpaceSessionIds(tl: { getState: () => { activeSessionId: string | null; messages: Array<{ session_id?: string }> } }): string[] {
+  const state = tl.getState()
+  const ids = new Set<string>()
+  if (state.activeSessionId) ids.add(state.activeSessionId)
+  for (const m of state.messages ?? []) {
+    if (m.session_id) ids.add(m.session_id)
+  }
+  return [...ids]
+}
+
+function applyLiveThreadSummaries(sessionId: string) {
+  if (!sessionId) return
+  const threads = getSessionThreads(sessionId)
+  if (!threads.length) return
+  const msgs = getSourceMessages()
+  for (const t of threads) {
+    const summary = t.Summary?.Summary
+    if (!summary) continue
+    for (const m of msgs) {
+      const entry = m.delegatedThreads?.find(d => d.threadId === t.ID)
+      if (entry && !entry.inlineSummary) {
+        entry.inlineSummary = summary
+        if (!isRunning(t)) entry.done = true
+      }
+    }
+  }
+}
+
 const hydratingBadgesFor = new Set<string>()
 async function hydrateThreadBadges(sessionId: string) {
   if (!sessionId || hydratingBadgesFor.has(sessionId)) return
@@ -1649,12 +1688,26 @@ function exportSession() {
   URL.revokeObjectURL(url)
 }
 
+// Session-mode uses props.sessionId. Space-mode DMs/channels have an empty
+// sessionId prop — resolve to the timeline's active session (and every other
+// session_id on the timeline) so the same thread helpers work.
+const resolvedThreadSessionId = computed(() => {
+  if (props.sessionId) return props.sessionId
+  return currentSpaceTimeline.value?.getState().activeSessionId ?? ''
+})
+
+const spaceThreadSessionIds = computed(() => {
+  if (props.sessionId) return [props.sessionId]
+  if (!currentSpaceTimeline.value) return []
+  return collectSpaceSessionIds(currentSpaceTimeline.value)
+})
+
 const sessionThreads = computed(() =>
-  props.sessionId ? getSessionThreads(props.sessionId) : []
+  spaceThreadSessionIds.value.flatMap(id => getSessionThreads(id))
 )
 
 const activeThreadCount = computed(() =>
-  props.sessionId ? getActiveThreadCount(props.sessionId) : 0
+  spaceThreadSessionIds.value.reduce((n, id) => n + getActiveThreadCount(id), 0)
 )
 
 const blockedThreadCount = computed(() =>
@@ -1663,8 +1716,16 @@ const blockedThreadCount = computed(() =>
 
 // Pending delegation previews for this session (shown as approval banners).
 const sessionPreviews = computed(() =>
-  props.sessionId ? getSessionPreviews(props.sessionId) : []
+  spaceThreadSessionIds.value.flatMap(id => getSessionPreviews(id))
 )
+
+watch(resolvedThreadSessionId, (sid, prev) => {
+  if (!props.spaceId || !sid || sid === prev) return
+  loadThreads(sid).then(() => {
+    hydrateThreadBadges(sid)
+    applyLiveThreadSummaries(sid)
+  })
+})
 
 const agentColorMap = computed(() => {
   const m: Record<string, string> = {}
@@ -1688,7 +1749,7 @@ watch(activeThreadCount, (count) => {
     threadPanelOpen.value = true
   } else if (!threadPanelPinned.value && sessionThreads.value.length > 0) {
     setTimeout(() => {
-      if (getActiveThreadCount(props.sessionId ?? '') === 0 && !threadPanelPinned.value) {
+      if (activeThreadCount.value === 0 && !threadPanelPinned.value) {
         threadPanelOpen.value = false
       }
     }, 4000)
@@ -1984,15 +2045,16 @@ function handleRetry(content: string) {
 
 function cancelThread(threadId: string) {
   const ws = wsRef.value
-  if (!ws || !props.sessionId) return
-  ws.send({ type: 'thread_cancel', payload: { thread_id: threadId }, session_id: props.sessionId })
+  const sessionId = getThreadById(threadId)?.SessionID || resolvedThreadSessionId.value
+  if (!ws || !sessionId) return
+  ws.send({ type: 'thread_cancel', payload: { thread_id: threadId }, session_id: sessionId })
 }
 
 function injectThread(threadId: string, content: string) {
   const ws = wsRef.value
   if (!ws) return
   const threadSessionId = getThreadById(threadId)?.SessionID
-  const sessionId = threadSessionId || props.sessionId
+  const sessionId = threadSessionId || resolvedThreadSessionId.value
   if (!sessionId) return
   ws.send({ type: 'thread_inject', payload: { thread_id: threadId, content }, session_id: sessionId })
 }
@@ -2663,7 +2725,7 @@ registerWS(ws, 'thread_permission_denied', (msg: WSMessage) => {
   })
 
   // Wire thread events via useThreads composable
-  const cleanupThreadWS = wireThreadWS(ws, () => props.sessionId ?? '')
+  const cleanupThreadWS = wireThreadWS(ws, () => resolvedThreadSessionId.value)
   if (typeof cleanupThreadWS === 'function') {
     wsCleanupFns.push(cleanupThreadWS)
   }
@@ -2713,6 +2775,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
     await fetchMessages(props.sessionId)
     sessionSwitching.value = false
     hydrateThreadBadges(props.sessionId)
+    applyLiveThreadSummaries(props.sessionId)
     // Mark session as seen on switch (starts unread count from here)
     markCurrentSessionSeen()
     await scrollToBottom()

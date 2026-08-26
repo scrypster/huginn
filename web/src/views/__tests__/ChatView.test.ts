@@ -187,6 +187,7 @@ function mountChatView(
         ChatEditor: {
           name: 'ChatEditor',
           template: '<div class="chat-editor-stub" />',
+          props: ['disabled', 'placeholder'],
           emits: ['send'],
           // Expose a focus() method so the component's onMounted hook doesn't error
           setup() {
@@ -747,6 +748,10 @@ describe('ChatView', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+    expect(chatEditor.props('disabled')).toBeFalsy()
+    const msgs = mockGetMessages('test-session-id')
+    expect(msgs.some((m: any) => m.streaming)).toBe(true)
+    expect(msgs.find((m: any) => m.id === 'h-1')?.content).toBe('in progress...')
   })
 
   it('shows pre-stream thinking indicator immediately after send', async () => {
@@ -1203,6 +1208,57 @@ describe('ChatView', () => {
     expect(blockedChip.exists()).toBe(true)
     expect(blockedChip.text()).toContain('1')
     expect(blockedChip.text()).toContain('blocked')
+  })
+
+  it('harness announcement lines render as system rows, not teammate voice', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'ann-1',
+        role: 'assistant',
+        content: 'Delegation to @Steve was auto-approved after 30s.',
+        agent: 'Steve',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'ann-2',
+        role: 'assistant',
+        content: 'Delegated to @Steve: look up the hostname',
+        agent: 'Steve',
+        createdAt: new Date().toISOString(),
+      },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    const lines = wrapper.findAll('[data-testid="system-line"]')
+    expect(lines.length).toBe(2)
+    expect(lines[0]!.text()).toContain('auto-approved after 30s')
+    expect(lines[1]!.text()).toContain('Delegated to @Steve')
+    expect(wrapper.html()).not.toContain('AgentMessageHeader')
+  })
+
+  it('omits A2A tools from the completed tool-call chip', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'Delegating hostname lookup',
+        agent: 'Tess',
+        createdAt: new Date().toISOString(),
+        toolCalls: [
+          { id: 't1', name: 'delegate_to_agent', args: { agent: 'Steve' }, result: '{}', done: true },
+          { id: 't2', name: 'wait_for_threads', args: {}, result: 'TOOL_FAIL', done: true },
+          { id: 't3', name: 'read_file', args: { path: 'x' }, result: 'ok', done: true },
+        ],
+      },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.html()).toContain('1 tool call')
+    expect(wrapper.html()).not.toContain('3 tool calls')
   })
 
   it('delegation_preview_timeout appends auto-approved timeline message', async () => {
@@ -2076,5 +2132,75 @@ describe('ChatView — space mode', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+  })
+
+  it('space hydrate with a session that has a REST thread loads sessionThreads so ThreadPanel can open', async () => {
+    const SESSION = 'space-sess-tess'
+    const restThread = {
+      ID: 'thr-steve',
+      SessionID: SESSION,
+      AgentID: 'Steve',
+      Task: 'hostname',
+      Status: 'done',
+      Summary: { Summary: 'TOOL_FAIL', Status: 'error' },
+    }
+    mockSpaceHydrate.mockImplementation(async () => {
+      mockSpaceState.activeSessionId = SESSION
+      mockSpaceState.messages.push({
+        id: 'm-tess',
+        session_id: SESSION,
+        seq: 1,
+        ts: '2026-08-26T00:00:00Z',
+        role: 'assistant',
+        content: 'TOOL_FAIL',
+        agent: 'Tess',
+      })
+    })
+    mockGetSessionThreads.mockImplementation((id: string) => (id === SESSION ? [restThread] : []))
+    mockGetActiveThreadCount.mockImplementation((id: string) => (id === SESSION ? 0 : 0))
+
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+
+    expect(mockLoadThreads).toHaveBeenCalledWith(SESSION)
+    const panel = wrapper.findComponent({ name: 'ThreadPanel' })
+    expect(panel.exists()).toBe(true)
+    expect(panel.props('threads')).toEqual([restThread])
+  })
+
+  it('ChatEditor stays enabled while streaming and a queued send keeps the in-flight bubble', async () => {
+    mockSpaceState.activeSessionId = 'existing-session-xyz'
+    mockSpaceState.sessionToSpaceMap.set('existing-session-xyz', SPACE_ID)
+    mockSpaceState.messages.push({
+      id: 'h-1',
+      session_id: 'existing-session-xyz',
+      seq: 1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'in flight…',
+      agent: 'Tess',
+    })
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'First')
+    await flushPromises()
+
+    expect(chatEditor.props('disabled')).toBeFalsy()
+
+    const inflightBefore = mockSpaceState.messages.filter((m: any) => String(m.id).startsWith('stream-') || m.role === 'assistant')
+    const assistantBefore = [...mockSpaceState.messages].reverse().find((m: any) => m.role === 'assistant')
+    expect(assistantBefore).toBeDefined()
+
+    await chatEditor.vm.$emit('send', 'Second while streaming')
+    await flushPromises()
+
+    expect(chatEditor.props('disabled')).toBeFalsy()
+    expect(mockSpaceState.messages).toEqual(expect.arrayContaining(inflightBefore))
+    const chatSends = mockWs.sentMessages.filter((m: any) => m.type === 'chat')
+    expect(chatSends.length).toBeGreaterThanOrEqual(2)
   })
 })

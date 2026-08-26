@@ -1,6 +1,7 @@
 import { computed, type Ref } from 'vue'
 import type { SpaceMessage } from './useSpaceTimeline'
 import type { ChatMessage } from './useSessions'
+import { classifyHarnessDisplay, visibleToolCalls } from '../utils/honesty'
 
 // ── Pure utility functions ──────────────────────────────────────────────
 
@@ -56,7 +57,7 @@ export function adaptSpaceMessages(msgs: SpaceMessage[]): ChatMessage[] {
     // Thread summary completion cards in main timeline.
     threadSummary: (m as any).threadSummary,
     threadSummaryThreadId: (m as any).threadSummaryThreadId,
-  })) as ChatMessage[]
+  })).map(applyHarnessClassification) as ChatMessage[]
 }
 
 // ── Enriched message type ──────────────────────────────────────────────
@@ -64,6 +65,19 @@ export function adaptSpaceMessages(msgs: SpaceMessage[]): ChatMessage[] {
 export type EnrichedMessage = ChatMessage & {
   showHeader: boolean
   dateLabel?: string
+  systemLine?: boolean
+  hideFailSpeech?: boolean
+}
+
+function applyHarnessClassification<T extends ChatMessage>(msg: T): T & { systemLine?: boolean; hideFailSpeech?: boolean } {
+  const display = classifyHarnessDisplay(msg)
+  return {
+    ...msg,
+    threadSummary: display.threadSummary || msg.threadSummary,
+    systemLine: display.systemLine || undefined,
+    hideFailSpeech: display.hideFailSpeech || undefined,
+    toolCalls: msg.toolCalls ? visibleToolCalls(msg.toolCalls) : msg.toolCalls,
+  }
 }
 
 /**
@@ -74,7 +88,7 @@ export type EnrichedMessage = ChatMessage & {
 export function enrichMessages(msgs: ChatMessage[]): EnrichedMessage[] {
   const result: EnrichedMessage[] = []
   for (let i = 0; i < msgs.length; i++) {
-    const msg = msgs[i]!
+    const msg = applyHarnessClassification(msgs[i]!)
     const prev = result[i - 1]
 
     // Date divider: show when this message is on a different day from the previous
@@ -93,8 +107,8 @@ export function enrichMessages(msgs: ChatMessage[]): EnrichedMessage[] {
     let showHeader = true
     if (prev && !dateLabel) {
       const sameRole = msg.role === prev.role
-      const prevIsThreadSummary = !!(prev as any).threadSummary
-      const currIsThreadSummary = !!(msg as any).threadSummary
+      const prevIsThreadSummary = !!(prev as any).threadSummary || !!(prev as any).systemLine
+      const currIsThreadSummary = !!(msg as any).threadSummary || !!(msg as any).systemLine
       const currIsFollowUp = !!(msg as any).isFollowUp
       // Time gap check: if > 60s between messages, treat as new thought (show header).
       // This naturally separates Tom's @mention response from Tom's follow-up synthesis,

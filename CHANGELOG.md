@@ -4,6 +4,13 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Added
+- Space-routed DMs/channels now load REST threads after timeline hydrate (active session and every `session_id` on the timeline) so ThreadPanel, previews, and A2A strips use the same helpers as session mode
+
+### Fixed
+- Harness announcement lines (`Delegated to @…`, auto-approved, completed delegated work, `TOOL_FAIL` / `DELEGATE_FAIL`) render as system/delegation rows instead of teammate speech; A2A tools are omitted from the “N tool calls” chip
+- Chat composer stays editable while an agent is responding so a second message can be queued without clearing the in-flight bubble
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
