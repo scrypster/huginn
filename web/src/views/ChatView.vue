@@ -969,6 +969,7 @@
           ref="chatEditorRef"
           :disabled="streaming"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
+          :member-names="mentionMemberNames"
           @send="handleEditorSend"
         />
       </div>
@@ -1079,6 +1080,7 @@ import type { Ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSpaceTimeline } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
+import { spaceRosterNames } from '../components/ChatEditor/mentionSuggestions'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
 import ThreadDetail from '../components/ThreadDetail.vue'
@@ -1181,6 +1183,7 @@ watch(() => props.spaceId, async (newId) => {
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
   getLastSeenMessageId, setLastSeenMessageId } = useSessions()
 const { activeSpace } = useSpaces()
+const mentionMemberNames = computed(() => spaceRosterNames(activeSpace.value))
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
 // When the pre-hydration WS event queue overflows (> 500 events dropped while
