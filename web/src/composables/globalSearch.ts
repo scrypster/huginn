@@ -18,6 +18,8 @@ export interface GlobalSearchHit {
 export interface SearchableSession {
   id: string
   space_id?: string
+  title?: string
+  created_at?: string
 }
 
 export interface SearchableSessionMessage {

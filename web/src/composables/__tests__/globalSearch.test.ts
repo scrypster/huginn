@@ -35,21 +35,24 @@ describe('buildGlobalSearchResults', () => {
   const formatSessionLabel = (s: { id: string }) => `Session ${s.id}`
 
   it('finds session-cache messages the same way as the original Cmd+K search', () => {
+    const formatWithTitle = vi.fn((s: { id: string; title?: string }) => s.title || s.id)
     const results = buildGlobalSearchResults({
       query: 'budget',
-      sessions: [{ id: 'sess-1' }],
+      sessions: [{ id: 'sess-1', title: 'Planning' } as { id: string; title?: string; space_id?: string }],
       getMessages: () => [
         { id: 'm1', role: 'user', content: 'Please review the budget numbers', agent: '' },
         { id: 'm2', role: 'tool_call', content: 'budget tool', agent: '' },
       ],
-      formatSessionLabel,
+      formatSessionLabel: formatWithTitle,
     })
 
     expect(results).toHaveLength(1)
     expect(results[0].sessionId).toBe('sess-1')
+    expect(results[0].sessionLabel).toBe('Planning')
     expect(results[0].msgId).toBe('m1')
     expect(results[0].spaceId).toBeUndefined()
     expect(searchResultPath(results[0])).toBe('/chat/sess-1')
+    expect(formatWithTitle).toHaveBeenCalledWith(expect.objectContaining({ id: 'sess-1', title: 'Planning' }))
   })
 
   it('finds channel/DM text from space message groups when the session cache is empty', () => {
