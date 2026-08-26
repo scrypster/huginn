@@ -39,7 +39,7 @@ vi.mock('../../composables/useSessions', () => {
 
 const mockGetSessionThreads = vi.fn().mockReturnValue([])
 const mockGetActiveThreadCount = vi.fn().mockReturnValue(0)
-const mockLoadThreads = vi.fn()
+const mockLoadThreads = vi.fn(() => Promise.resolve())
 const mockWireWS = vi.fn()
 const mockGetSessionPreviews = vi.fn().mockReturnValue([])
 const mockClearSessionPreviews = vi.fn()
@@ -251,6 +251,7 @@ function mountChatView(
 describe('ChatView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLoadThreads.mockImplementation(() => Promise.resolve())
     mockMessages['test-session-id'] = []
     mockSessions.value = [{ id: 'test-session-id', title: 'Test Session' }]
     mockActiveSpace.value = null
@@ -2229,6 +2230,7 @@ describe('ChatView — space mode', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLoadThreads.mockImplementation(() => Promise.resolve())
     // Reset space state to a clean slate for each test
     spaceStateById.clear()
     mockSpaceState = makeSpaceState()

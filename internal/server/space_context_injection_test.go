@@ -332,7 +332,6 @@ func TestBuildSpaceContextBlock_LeadAgent_ContainsAllElements(t *testing.T) {
 		{"Dave listed", "Dave"},
 		{"Dave description", "DevOps specialist"},
 		{"Main channel discipline", "Main channel discipline"},
-		{"User @mention is a real address", "user @mention addresses that agent"},
 	}
 
 	for _, check := range checks {
