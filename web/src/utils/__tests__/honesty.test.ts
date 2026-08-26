@@ -329,6 +329,32 @@ describe('stripResidualSpeech', () => {
     }
   })
 
+  // 2026-08-26 huginn-dev161 S5 speech turn after delegate + wait had run: a
+  // // comment inside the tool JSON and echoed result fragments after the answer.
+  const liveV2 = 'After Reggie responds with PONG:\n\n{\n  "name": "recall_thread_result",\n  "arguments": {\n    "thread_id": "thread-12345"  // Replace with the actual thread ID\n  }\n}\n\n7 times 8 is 56."PONG"\n56PONG\n56'
+
+  it('leaves only teammate prose for the dev161 S5 leak', () => {
+    expect(stripResidualSpeech(liveV2, { afterTools: true })).toBe('7 times 8 is 56.')
+  })
+
+  it('treats "After X responds…:" / "When X replies:" as wait-glue', () => {
+    for (const glue of ['After Reggie responds with PONG:', 'When Reggie replies:', 'Once Reggie comes back with the result:', 'After Reggie responds,']) {
+      expect(stripResidualSpeech(`${glue}\n7 times 8 is 56.`)).toBe('7 times 8 is 56.')
+    }
+    expect(stripResidualSpeech('After lunch I\'ll pick this up.', { afterTools: true })).toBe('After lunch I\'ll pick this up.')
+  })
+
+  it('drops echo fragments only when they already appeared; a fresh answer line stays', () => {
+    expect(stripResidualSpeech('Reggie said PONG. 7 times 8 is 56.\n56PONG\n56', { afterTools: true })).toBe('Reggie said PONG. 7 times 8 is 56.')
+    expect(stripResidualSpeech('7 times 8 is:\n56', { afterTools: true })).toBe('7 times 8 is:\n56')
+    expect(stripResidualSpeech('Reggie said "PONG" back.', { afterTools: true })).toBe('Reggie said "PONG" back.')
+  })
+
+  it('strips commented tool JSON but keeps a go fence with // comments', () => {
+    const s = 'Here:\n```go\n// add returns a+b\nfunc add(a, b int) int { return a + b }\n```\nAfter Reggie responds with PONG:\n{"name": "bash", "arguments": {"command": "ls" // list\n}}\nThat compiles.'
+    expect(stripResidualSpeech(s, { afterTools: true })).toBe('Here:\n```go\n// add returns a+b\nfunc add(a, b int) int { return a + b }\n```\nThat compiles.')
+  })
+
   it('classifies objects', () => {
     expect(isToolInvocationObject({ name: 'recall_thread_result', arguments: { thread_id: 'x' } })).toBe(true)
     expect(isToolInvocationObject({ function_name: 'bash' })).toBe(true)

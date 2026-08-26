@@ -416,6 +416,12 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	// toolsRan flips once any tool (including the synthetic auto-wait) has
 	// executed; later assistant content then gets the after-tools filter.
 	var toolsRan bool
+	// specialistResult flips once a wait_for_threads (model-called or the
+	// synthetic auto-wait) came back with a finished thread. The next model
+	// turn is then speech only and terminal: no promotion, tool calls
+	// dropped, residual stripped, run stops. Small leads otherwise re-run
+	// the playbook (recall / delegate again) against a task that is done.
+	var specialistResult bool
 	var contentBeforeAutoWait string
 	var denied atomic.Bool
 	origDenied := cfg.OnPermissionDenied
@@ -440,13 +446,37 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		if tokenGate != nil {
 			onToken = tokenGate.OnToken
 		}
-		chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
+		speechOnly := specialistResult
+		turnCtx := ctx
+		var cutter *speechTurnCutter
+		if speechOnly {
+			// Speech-only turn: tokens are buffered, not streamed — the
+			// residual filter needs the whole message, and the token gate
+			// only holds a leading JSON prefix. If the model opens with
+			// tool JSON it has nothing to say: cut decoding for this
+			// request only (the model stays loaded; just the stream ends).
+			var cancel context.CancelFunc
+			turnCtx, cancel = context.WithCancel(ctx)
+			defer cancel()
+			cutter = newSpeechTurnCutter(cancel)
+			onToken = cutter.OnToken
+		}
+		chatResult, err := cfg.Backend.ChatCompletion(turnCtx, backend.ChatRequest{
 			Model:    cfg.ModelName,
 			Messages: messages,
 			Tools:    cfg.ToolSchemas,
 			OnToken:  onToken,
 			OnEvent:  cfg.OnEvent,
 		})
+		if cutter != nil && cutter.Cut() {
+			// Our own cut, not the caller's cancellation.
+			if chatResult == nil {
+				chatResult = &backend.ChatResponse{DoneReason: "stop"}
+			}
+			chatResult.Content = cutter.Raw()
+			chatResult.ToolCalls = nil
+			err = nil
+		}
 		if err != nil {
 			result.StopReason = "error"
 			return result, fmt.Errorf("turn %d: %w", turn+1, err)
@@ -468,6 +498,35 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// follow-ups like {"name":"wait_for_threads"} with no arguments.
 		// Promote on every turn so the loop keeps running instead of
 		// treating that JSON as the final answer.
+		if speechOnly {
+			if n := len(chatResult.ToolCalls); n > 0 {
+				names := make([]string, 0, n)
+				for _, tc := range chatResult.ToolCalls {
+					names = append(names, tc.Function.Name)
+				}
+				slog.Warn("agent loop: dropped tool calls after specialist result (speech-only turn)",
+					"tools", names, "turn", turn+1)
+				chatResult.ToolCalls = nil
+			}
+			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content)
+			if chatResult.Content == "" {
+				// Nothing sayable came back: keep the last real prose so the
+				// run does not end on a blank line.
+				chatResult.Content = result.FinalContent
+				if chatResult.Content == "" {
+					chatResult.Content = contentBeforeAutoWait
+				}
+			}
+			if cfg.OnToken != nil && chatResult.Content != "" && !cutter.Cut() {
+				// Emit the sayable remainder once (the turn was buffered).
+				cfg.OnToken(chatResult.Content)
+			}
+			messages = append(messages, backend.Message{Role: "assistant", Content: chatResult.Content})
+			result.FinalContent = chatResult.Content
+			result.StopReason = "stop"
+			result.Messages = messages
+			return result, nil
+		}
 		backend.PromoteContentToolCalls(chatResult)
 		// qwen2.5-coder also writes a "playbook": fenced tool JSON mixed with
 		// glue prose. Promote embedded invocations of granted tools so they
@@ -534,6 +593,9 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 					ToolCalls: []backend.ToolCall{wc},
 				})
 				for _, dr := range cfg.dispatchTools(ctx, []backend.ToolCall{wc}) {
+					if waitReturnedSpecialistResult(dr.content) {
+						specialistResult = true
+					}
 					messages = append(messages, backend.Message{
 						Role:       "tool",
 						ToolName:   dr.tc.Function.Name,
@@ -569,6 +631,9 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 				}
 			case "wait_for_threads":
 				waitedForThreads = true
+				if waitReturnedSpecialistResult(dr.content) {
+					specialistResult = true
+				}
 			}
 			messages = append(messages, backend.Message{
 				Role:       "tool",
@@ -590,6 +655,64 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	result.StopReason = "max_turns"
 	result.Messages = messages
 	return result, nil
+}
+
+// waitReturnedSpecialistResult reports whether a wait_for_threads tool result
+// carries at least one finished thread (threadmgr renders "## Finished
+// threads (n)"). A timeout with only "Still running" threads, an error, or
+// "No matching threads" does not count — the lead may keep waiting.
+func waitReturnedSpecialistResult(content string) bool {
+	if strings.HasPrefix(content, "error:") {
+		return false
+	}
+	return strings.Contains(content, "## Finished threads")
+}
+
+// speechTurnCutter buffers the raw token stream of a speech-only turn. If
+// the first non-blank character is '{' the model is re-typing a tool object
+// instead of speaking; cancel the request so no more tokens are decoded.
+// Nothing is forwarded live — the loop emits the stripped remainder once.
+type speechTurnCutter struct {
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	raw     strings.Builder
+	decided bool
+	cut     bool
+}
+
+func newSpeechTurnCutter(cancel context.CancelFunc) *speechTurnCutter {
+	return &speechTurnCutter{cancel: cancel}
+}
+
+func (c *speechTurnCutter) OnToken(tok string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cut {
+		return
+	}
+	c.raw.WriteString(tok)
+	if c.decided {
+		return
+	}
+	if lead := strings.TrimLeft(c.raw.String(), " \t\r\n"); lead != "" {
+		c.decided = true
+		if lead[0] == '{' {
+			c.cut = true
+			c.cancel()
+		}
+	}
+}
+
+func (c *speechTurnCutter) Cut() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cut
+}
+
+func (c *speechTurnCutter) Raw() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.raw.String()
 }
 
 // canAutoWait reports whether a synthetic wait_for_threads barrier can run:
