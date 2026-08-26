@@ -22,6 +22,18 @@ var (
 	waitTokenLineRE = regexp.MustCompile(`(?i)^\s*(?:\[|\()?\s*wait(?:ing)?[-_ ]for[-_ ][\w@.-]+(?:[-_ ]to[-_ ]finish)?\s*(?:\]|\))?\s*[:.]?\s*$`)
 	// "Once Reggie has finished:", "After the thread is done,", "When Reggie replies:"
 	glueLineRE = regexp.MustCompile(`(?i)^\s*(?:once|after|when|as soon as)\s+[^.:,]{1,80}?\s+(?:has|have|is|are)?\s*(?:finished|done|complete|completed|replied|responded|answered|returned)\s*[:,]?\s*$`)
+	// "After Reggie responds with PONG:", "When Reggie replies:", "Once Reggie
+	// comes back with the result:", "After Reggie responds," — a temporal
+	// conjunction, a wait verb, and a colon/comma ending with no sentence in
+	// between. "Once the migration has finished, the table …" has prose
+	// after the comma and stays.
+	waitGlueLineRE = regexp.MustCompile(`(?i)^\s*(?:once|after|when|as soon as)\s+[^.:]{0,60}?\b(?:responds?|replies|replied|replying|finish(?:es|ed)?|complet(?:es|ed)?|returns?|returned|answers?|answered|reports?|reported|comes? back|gets? back|is (?:done|back|finished|ready))\b[^.:]{0,60}?\s*[:,]\s*$`)
+	// A JSON string glued onto sentence-final punctuation: 56."PONG"
+	gluedStringRE = regexp.MustCompile(`([.!?])"[^"\n]{1,60}"\s*$`)
+	// Runs of digits or capitals — the fragments an echo line is made of.
+	echoFragmentRE = regexp.MustCompile(`[0-9]+|[A-Z]+`)
+	// An echo line: no spaces, no lowercase, only fragments and punctuation.
+	echoLineRE = regexp.MustCompile(`^["'` + "`" + `(\[]*(?:[0-9]+|[A-Z]+)(?:["'` + "`" + `.,;:!?)\]]*(?:[0-9]+|[A-Z]+))*["'` + "`" + `.,;:!?)\]]*$`)
 	// "Then calculate:" — only stripped when it directly continues a glue chain
 	glueContinuationRE = regexp.MustCompile(`(?i)^\s*(?:then|next|finally|afterwards|after that)\b[^.]{0,80}:\s*$`)
 )
@@ -90,16 +102,79 @@ func stripResidualUnfenced(s string, afterTools bool) string {
 		case trim == "":
 			kept = append(kept, line)
 			continue
-		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim):
+		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim):
 			inGlueChain = true
 			continue
 		case inGlueChain && glueContinuationRE.MatchString(trim):
 			continue
 		}
 		inGlueChain = false
+		if afterTools {
+			line = gluedStringRE.ReplaceAllString(line, "$1")
+		}
 		kept = append(kept, line)
 	}
+	if afterTools {
+		kept = dropTrailingEchoLines(kept, s)
+	}
 	return collapseBlankRuns(strings.Join(kept, "\n"))
+}
+
+// dropTrailingEchoLines removes trailing lines such as `56PONG` / `56` /
+// `"PONG"` — result fragments a small model re-emits after its answer. A
+// line only counts as an echo when it has no spaces or lowercase and every
+// digit/capital run in it already appeared earlier in the original segment
+// (including in glue or JSON that was stripped). A fresh number on its own
+// line is an answer and stays; a message that would become empty is left.
+func dropTrailingEchoLines(kept []string, original string) []string {
+	end := len(kept)
+	removed := false
+	for end > 0 {
+		trim := strings.TrimSpace(kept[end-1])
+		if trim == "" {
+			end--
+			continue
+		}
+		if !removed {
+			// Nothing dropped yet: keep the segment's trailing whitespace
+			// (it is the newline before an adjacent code fence).
+			end = len(kept)
+		}
+		if !echoLineRE.MatchString(trim) {
+			break
+		}
+		idx := strings.LastIndex(original, trim)
+		if idx < 0 {
+			break
+		}
+		before := original[:idx]
+		echo := true
+		for _, frag := range echoFragmentRE.FindAllString(trim, -1) {
+			if !strings.Contains(before, frag) {
+				echo = false
+				break
+			}
+		}
+		if !echo {
+			break
+		}
+		// Drop this line and any blank lines already skipped above it.
+		for end > 0 && strings.TrimSpace(kept[end-1]) != trim {
+			end--
+		}
+		end--
+		removed = true
+	}
+	if !removed {
+		return kept
+	}
+	// Never blank the whole message.
+	for i := 0; i < end; i++ {
+		if strings.TrimSpace(kept[i]) != "" {
+			return kept[:end]
+		}
+	}
+	return kept
 }
 
 // removeResidualJSONObjects drops unfenced JSON objects that are tool
@@ -119,7 +194,7 @@ func removeResidualJSONObjects(s string) string {
 			continue
 		}
 		rest := s[i:]
-		obj, after, ok := readJSONObject(rest)
+		obj, after, ok := readJSONObjectLenient(rest)
 		if !ok {
 			b.WriteByte(s[i])
 			prose.WriteByte(s[i])
@@ -203,4 +278,63 @@ func collapseBlankRuns(s string) string {
 		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
 	}
 	return s
+}
+
+// readJSONObjectLenient is readJSONObject that also accepts an object whose
+// only defect is // line comments outside strings ("thread-12345" // Replace
+// with the actual thread ID). Used only for stripping: promotion keeps the
+// strict parser so a commented placeholder never executes.
+func readJSONObjectLenient(s string) (obj, after string, ok bool) {
+	if obj, after, ok = readJSONObject(s); ok {
+		return obj, after, true
+	}
+	end, found := jsonObjectEnd(s)
+	if !found {
+		return "", "", false
+	}
+	raw := stripJSONLineComments(s[:end])
+	if !json.Valid([]byte(raw)) {
+		return "", "", false
+	}
+	trim := strings.TrimSpace(raw)
+	if trim == "" || trim[0] != '{' {
+		return "", "", false
+	}
+	return trim, s[end:], true
+}
+
+// stripJSONLineComments removes // comments that sit outside string literals.
+func stripJSONLineComments(s string) string {
+	var b strings.Builder
+	inStr, escape := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			b.WriteByte(c)
+			if escape {
+				escape = false
+			} else if c == '\\' {
+				escape = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			b.WriteByte(c)
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			if i < len(s) {
+				b.WriteByte('\n')
+			}
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }

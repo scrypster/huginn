@@ -205,6 +205,13 @@ const WAIT_TAG_RE = /<\s*wait(?:ing)?(?:[\s_:-][^<>]*)?\s*>/gi
 const WAIT_TOKEN_LINE_RE = /^\s*(?:\[|\()?\s*wait(?:ing)?[-_ ]for[-_ ][\w@.-]+(?:[-_ ]to[-_ ]finish)?\s*(?:\]|\))?\s*[:.]?\s*$/i
 const GLUE_LINE_RE = /^\s*(?:once|after|when|as soon as)\s+[^.:,]{1,80}?\s+(?:has|have|is|are)?\s*(?:finished|done|complete|completed|replied|responded|answered|returned)\s*[:,]?\s*$/i
 const GLUE_CONTINUATION_RE = /^\s*(?:then|next|finally|afterwards|after that)\b[^.]{0,80}:\s*$/i
+// "After Reggie responds with PONG:", "When Reggie replies:", "After Reggie responds," — mirrors backend.waitGlueLineRE.
+const WAIT_GLUE_LINE_RE = /^\s*(?:once|after|when|as soon as)\s+[^.:]{0,60}?\b(?:responds?|replies|replied|replying|finish(?:es|ed)?|complet(?:es|ed)?|returns?|returned|answers?|answered|reports?|reported|comes? back|gets? back|is (?:done|back|finished|ready))\b[^.:]{0,60}?\s*[:,]\s*$/i
+// A JSON string glued onto sentence-final punctuation: 56."PONG"
+const GLUED_STRING_RE = /([.!?])"[^"\n]{1,60}"\s*$/
+const ECHO_FRAGMENT_RE = /[0-9]+|[A-Z]+/g
+// An echo line (`56PONG`, `56`, `"PONG"`): no spaces, no lowercase, fragments and punctuation only.
+const ECHO_LINE_RE = /^["'`(\[]*(?:[0-9]+|[A-Z]+)(?:["'`.,;:!?)\]]*(?:[0-9]+|[A-Z]+))*["'`.,;:!?)\]]*$/
 const HARNESS_TOOL_NAME_LINE = new Set(['wait_for_threads', 'delegate_to_agent', 'recall_thread_result', 'list_team_status', 'bash'])
 
 export interface ResidualSpeechOptions {
@@ -243,13 +250,42 @@ function stripResidualUnfenced(s: string, afterTools: boolean): string {
     const trim = line.trim()
     if (trim === '' && hadText) { inGlueChain = true; continue }
     if (trim === '') { kept.push(line); continue }
-    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim)) { inGlueChain = true; continue }
+    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim) || WAIT_GLUE_LINE_RE.test(trim)) { inGlueChain = true; continue }
     if (inGlueChain && GLUE_CONTINUATION_RE.test(trim)) continue
     if (HARNESS_TOOL_NAME_LINE.has(trim) || SYSTEM_FAIL_RE.test(trim)) { inGlueChain = false; continue }
     inGlueChain = false
+    if (afterTools) line = line.replace(GLUED_STRING_RE, '$1')
     kept.push(line)
   }
-  return kept.join('\n').replace(/\n{3,}/g, '\n\n')
+  const lines = afterTools ? dropTrailingEchoLines(kept, s) : kept
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n')
+}
+
+/**
+ * Drop trailing echo lines (`56PONG`, `56`, `"PONG"`) whose every digit /
+ * capital run already appeared earlier in the original segment. A fresh
+ * number on its own line is an answer and stays; never blanks the message.
+ * Mirrors backend.dropTrailingEchoLines.
+ */
+function dropTrailingEchoLines(kept: string[], original: string): string[] {
+  let end = kept.length
+  let removed = false
+  while (end > 0) {
+    const trim = kept[end - 1]!.trim()
+    if (trim === '') { end--; continue }
+    if (!removed) end = kept.length
+    if (!ECHO_LINE_RE.test(trim)) break
+    const idx = original.lastIndexOf(trim)
+    if (idx < 0) break
+    const before = original.slice(0, idx)
+    const frags = trim.match(ECHO_FRAGMENT_RE) ?? []
+    if (!frags.every(f => before.includes(f))) break
+    while (end > 0 && kept[end - 1]!.trim() !== trim) end--
+    end--
+    removed = true
+  }
+  if (!removed) return kept
+  return kept.slice(0, end).some(l => l.trim() !== '') ? kept.slice(0, end) : kept
 }
 
 function removeResidualJSONObjects(s: string): string {
@@ -307,11 +343,38 @@ function readJSONObjectAt(s: string, start: number): { value: unknown; end: numb
     else if (c === '}') {
       depth--
       if (depth === 0) {
-        try { return { value: JSON.parse(s.slice(start, i + 1)), end: i + 1 } } catch { return null }
+        const raw = s.slice(start, i + 1)
+        try { return { value: JSON.parse(raw), end: i + 1 } } catch { /* retry without // comments */ }
+        // `"thread-12345"  // Replace with the actual thread ID` — stripping only, never executed.
+        try { return { value: JSON.parse(stripJSONLineComments(raw)), end: i + 1 } } catch { return null }
       }
     }
   }
   return null
+}
+
+/** Remove // comments that sit outside string literals. Mirrors backend.stripJSONLineComments. */
+function stripJSONLineComments(s: string): string {
+  let out = ''
+  let inStr = false, escape = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!
+    if (inStr) {
+      out += c
+      if (escape) escape = false
+      else if (c === '\\') escape = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') { inStr = true; out += c; continue }
+    if (c === '/' && s[i + 1] === '/') {
+      while (i < s.length && s[i] !== '\n') i++
+      if (i < s.length) out += '\n'
+      continue
+    }
+    out += c
+  }
+  return out
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
