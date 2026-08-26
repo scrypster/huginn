@@ -677,7 +677,10 @@ func TestAgentBackendTurnTimeoutIsBoundedAndDistinguishable(t *testing.T) {
 }
 
 // A queued caller must be able to abandon the wait; a sync.Mutex would pin it
-// behind an unrelated turn on this shared, cached backend.
+// behind an unrelated turn holding this session's slot in the package-level
+// semaphore. (Backends are rebuilt per turn since 98cf9e6 — the SLOT is what is
+// shared between turns, not the instance, which is exactly why session_sem.go
+// is package-level.)
 func TestAgentBackendQueuedCallerCanBeCancelled(t *testing.T) {
 	cfg := agentBackendCfg(t)
 	bin, _ := writeFakeCLI(t, fakeCLI{hang: "30"})
@@ -752,9 +755,10 @@ func TestDefaultGatedToolsProduceAHookForEveryMutatingTool(t *testing.T) {
 }
 
 // A scan error stops the reader. If the child is still writing, the pipe fills
-// and Wait blocks until the turn deadline, holding the semaphore and stalling
-// every session on this cached backend. TimeoutSecs is short so a regression
-// fails fast rather than hanging the suite.
+// and Wait blocks until the turn deadline, holding this session's semaphore
+// slot and stalling every later turn on the same session id. (Backends are
+// rebuilt per turn; the shared thing is the slot, not the instance.)
+// TimeoutSecs is short so a regression fails fast rather than hanging the suite.
 func TestAgentBackendOverlongLineDoesNotWedgeTheTurn(t *testing.T) {
 	prev := agentScanMaxBytes
 	agentScanMaxBytes = 4096

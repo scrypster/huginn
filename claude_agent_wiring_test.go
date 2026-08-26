@@ -373,3 +373,46 @@ func TestClaudeCodeUnavailableNamesTheLimitation(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeBindingProblemsWarnsAboutToolNameSpelling: tool matching is exact,
+// everywhere — Huginn's toolAllowed and Claude Code's own hook matcher both use
+// string equality. So "bash" (the Huginn LocalTools spelling) or " Bash" (a
+// stray YAML space) matches nothing: an allowlist entry grants nothing and a
+// gated entry gates nothing, silently. One log line beats a total denial nobody
+// can diagnose.
+func TestClaudeBindingProblemsWarnsAboutToolNameSpelling(t *testing.T) {
+	cfg := &agentslib.AgentsConfig{Agents: []agentslib.AgentDef{{
+		Name:               "Codey",
+		Provider:           "claude-code",
+		ClaudeSessionID:    "b1f3c9d2-6e4a-4a11-9e0a-2f7d4c1a9b3e",
+		ClaudeAllowedTools: []string{"Read", "bash", " Bash"},
+		ClaudeGatedTools:   []string{"Write", "SomeFutureTool"},
+	}}}
+
+	problems := strings.Join(claudeBindingProblems(cfg), "\n")
+
+	if strings.Contains(problems, `"Read"`) || strings.Contains(problems, `"Write"`) {
+		t.Errorf("a correctly-spelled tool was flagged:\n%s", problems)
+	}
+	if !strings.Contains(problems, `"bash"`) || !strings.Contains(problems, `should be "Bash"`) {
+		t.Errorf("lowercase \"bash\" not flagged; it matches nothing and denies everything:\n%s", problems)
+	}
+	if !strings.Contains(problems, "whitespace") {
+		t.Errorf("\" Bash\" not flagged for its leading space:\n%s", problems)
+	}
+	// Unknown names WARN but must never hard-fail: Claude Code's tool set grows.
+	if !strings.Contains(problems, "SomeFutureTool") {
+		t.Errorf("an unrecognised tool name produced no warning at all:\n%s", problems)
+	}
+	if !strings.Contains(problems, "WARNING, not a failure") {
+		t.Errorf("the unknown-name message must say it is not a failure:\n%s", problems)
+	}
+
+	// A native agent must never be touched by any of this.
+	native := &agentslib.AgentsConfig{Agents: []agentslib.AgentDef{{
+		Name: "Tom", Provider: "anthropic", LocalTools: []string{"bash", "*"},
+	}}}
+	if got := claudeBindingProblems(native); len(got) != 0 {
+		t.Errorf("flagged a non-claude-code agent's LocalTools: %v", got)
+	}
+}

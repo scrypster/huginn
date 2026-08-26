@@ -9,10 +9,27 @@ import "encoding/json"
 // form verified against the CLI, and per-tool entries need no assumption about
 // regex support.
 //
-// Tools NOT listed here are pre-authorised via --allowedTools and never invoke
-// the hook. That is what makes fail-closed safe: if Huginn is unreachable, only
-// the tools that always required a human are blocked, and the agent degrades to
-// its pre-authorised capability instead of stopping dead.
+// THE TWO LISTS OVERLAP BY DESIGN — do not "optimise away" a hook entry for a
+// tool that is also in --allowedTools.
+//
+// A PreToolUse hook fires before any permission-mode check, regardless of
+// whether the tool is allowlisted. So a tool in BOTH lists runs the hook AND is
+// allowed: that is the documented audit-trail pattern ("let this run
+// unattended, but record every call"), and deleting the apparently redundant
+// hook entry deletes the audit trail. The default wiring overlaps heavily —
+// AllowedTools is ag.ClaudeAllowedTools and GatedTools defaults to
+// Bash/Write/Edit/NotebookEdit/WebFetch/Task — so this is the normal case, not
+// an exotic one.
+//
+// Stated plainly, because it is easy to assume otherwise: --allowedTools and
+// this hook produce THE SAME effective permission set. The approval endpoint
+// allows exactly the tools in ClaudeAllowedTools, which is also what is passed
+// to --allowedTools. The hook's contribution is a log entry and a
+// human-readable deny reason, not additional restriction.
+//
+// A tool in NEITHER list is neither pre-authorised nor gated, and never invokes
+// the hook. That is what keeps fail-closed tolerable: if Huginn is unreachable,
+// the agent degrades to its pre-authorised capability instead of stopping dead.
 //
 // ClaudeHookTimeoutSecs bounds how long Claude Code waits for our approval
 // hook. It is set EXPLICITLY rather than relying on the CLI's default,

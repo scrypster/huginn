@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3980,8 +3981,63 @@ func validateClaudeBinding(name, sessionID string) error {
 	return nil
 }
 
+// knownClaudeTools are Claude Code's own CLI tool names, used ONLY to warn
+// about a misspelling in claude_allowed_tools / claude_gated_tools.
+//
+// It is deliberately NOT an allowlist and never rejects: the CLI's tool set
+// grows, and hard-failing on an unrecognised name would break a config the day
+// Claude Code ships a new tool. Matching is exact everywhere it matters
+// (toolAllowed in handlers_claude_approve.go, and Claude Code's own matcher),
+// so "bash" — the Huginn LocalTools spelling, which is precisely the confusion
+// the rest of this feature works to prevent — or " Bash" from a stray YAML
+// space matches nothing: an allowlist entry grants nothing, and a gated entry
+// gates nothing. Silent either way, hence the warning.
+var knownClaudeTools = map[string]bool{
+	"Read": true, "Write": true, "Edit": true, "Bash": true, "Glob": true,
+	"Grep": true, "WebFetch": true, "Task": true, "NotebookEdit": true,
+}
+
+// claudeToolNameProblem describes what is wrong with one configured tool name,
+// or returns "" when it looks fine.
+func claudeToolNameProblem(agentName, field, tool string) string {
+	who := agentName
+	if strings.TrimSpace(who) == "" {
+		who = "an unnamed agent"
+	}
+	if trimmed := strings.TrimSpace(tool); trimmed != tool {
+		return fmt.Sprintf("claude-code agent %q has %s entry %q with surrounding whitespace: matching is exact, so this entry matches no tool at all", who, field, tool)
+	}
+	if tool == "" {
+		return fmt.Sprintf("claude-code agent %q has an empty %s entry, which matches no tool", who, field)
+	}
+	if knownClaudeTools[tool] {
+		return ""
+	}
+	// Mis-casing is the common case and worth naming precisely.
+	for known := range knownClaudeTools {
+		if strings.EqualFold(known, tool) {
+			return fmt.Sprintf("claude-code agent %q has %s entry %q, which should be %q: Claude Code tool names are case-sensitive and this entry matches nothing (%q is Huginn's LocalTools spelling, a different namespace)", who, field, tool, known, tool)
+		}
+	}
+	return fmt.Sprintf("claude-code agent %q has %s entry %q, which is not a Claude Code tool name Huginn recognises (%s). This is a WARNING, not a failure — the CLI's tool set grows and an unrecognised name is passed through — but if this is a typo it silently matches nothing", who, field, tool, strings.Join(sortedClaudeToolNames(), ", "))
+}
+
+func sortedClaudeToolNames() []string {
+	names := make([]string, 0, len(knownClaudeTools))
+	for n := range knownClaudeTools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // claudeBindingProblems reports every unusable claude-code binding in a config,
 // so startup can log them all at once instead of one per discovery.
+//
+// It also reports tool-name problems. Those are warnings rather than hard
+// failures (see knownClaudeTools), but they belong here because their symptom
+// is identical to a broken binding: the agent looks configured and silently
+// does nothing.
 func claudeBindingProblems(cfg *agentslib.AgentsConfig) []string {
 	if cfg == nil {
 		return nil
@@ -3993,6 +4049,16 @@ func claudeBindingProblems(cfg *agentslib.AgentsConfig) []string {
 		}
 		if err := validateClaudeBinding(def.Name, def.ClaudeSessionID); err != nil {
 			out = append(out, err.Error())
+		}
+		for _, tool := range def.ClaudeAllowedTools {
+			if p := claudeToolNameProblem(def.Name, "claude_allowed_tools", tool); p != "" {
+				out = append(out, p)
+			}
+		}
+		for _, tool := range def.ClaudeGatedTools {
+			if p := claudeToolNameProblem(def.Name, "claude_gated_tools", tool); p != "" {
+				out = append(out, p)
+			}
 		}
 	}
 	return out
