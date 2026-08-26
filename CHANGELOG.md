@@ -26,6 +26,7 @@ All notable changes to Huginn are documented here.
 - Chat sidebar no longer flashes “No channels yet” / “No agents configured” while spaces are still loading
 - Channel header "N agents / Manage agents" chip now opens the agent roster modal (add, remove, set lead) instead of only the read-only member panel; DMs stay read-only and the panel chevron still toggles the rail
 - Desktop notifications now fire for space-mode agent replies when the Huginn tab is in the background
+- Composer `@` picker lists only agents in the active space roster (channel = lead + members, DM = that agent); leftover `@Name` of a non-member is dropped with a "not in this channel" hint instead of silently hitting the lead
 
 ## [0.4.0] - 2026-06-10
 

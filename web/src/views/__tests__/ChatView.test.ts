@@ -203,8 +203,8 @@ function mountChatView(
         ChatEditor: {
           name: 'ChatEditor',
           template: '<div class="chat-editor-stub" />',
-          props: ['disabled', 'placeholder'],
-          emits: ['send'],
+          props: ['disabled', 'placeholder', 'memberNames'],
+          emits: ['send', 'unknown-mention'],
           // Expose a focus() method so the component's onMounted hook doesn't error
           setup() {
             return { focus: vi.fn() }
@@ -958,6 +958,31 @@ describe('ChatView', () => {
     expect(avatarText).toContain('L')
     expect(avatarText).toContain('H')
     expect(avatarText).toContain('R')
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(chatEditor.props('memberNames')).toEqual(['Lead', 'Helper', 'Reviewer'])
+  })
+
+  it('passes only the DM agent as ChatEditor memberNames', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'gpt-4', color: '#58A6FF', icon: 'S', is_default: true },
+      { name: 'Tess', model: 'claude-3', color: '#3FB950', icon: 'T', is_default: false },
+    ])
+    mockActiveSpace.value = {
+      id: 'dm-steve',
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+    }
+
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(chatEditor.props('memberNames')).toEqual(['Steve'])
   })
 
   it('Manage agents chip: mounts AgentRosterModal on a channel space', async () => {

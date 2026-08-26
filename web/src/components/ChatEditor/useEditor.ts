@@ -12,6 +12,7 @@ import tippy from 'tippy.js'
 import type { Instance as TippyInstance } from 'tippy.js'
 import type { SuggestionProps, SuggestionKeyDownProps } from '@tiptap/suggestion'
 import MentionList from './MentionList.vue'
+import { filterMentionSuggestions } from './mentionSuggestions'
 
 const lowlight = createLowlight(common)
 
@@ -42,6 +43,9 @@ export function useEditor(options: {
   // the wrapping component (e.g. when the active DM changes) updates the
   // placeholder without re-creating the editor.
   placeholderRef?: Ref<string | undefined>
+  // Active-space roster. When set, @ suggestions list only those members.
+  // Undefined = standalone session (every agent).
+  memberNames?: Ref<string[] | undefined>
 }) {
   const editor = ref<Editor | null>(null)
   let suggestionOpen = false
@@ -66,9 +70,7 @@ export function useEditor(options: {
       HTMLAttributes: { class: 'mention' },
       suggestion: {
         items: ({ query }: { query: string }) =>
-          options.agents.value
-            .filter(a => String(a.name).toLowerCase().startsWith(query.toLowerCase()))
-            .slice(0, 6),
+          filterMentionSuggestions(options.agents.value, query, options.memberNames?.value),
 
         allow: ({ range, state }: { range: { from: number; to: number }; state: { selection: { from: number } } }) => {
           if (dismissedFrom == null) return true
