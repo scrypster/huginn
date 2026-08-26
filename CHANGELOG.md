@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Local Access “Allow all” now asks for confirmation before enabling God Mode (`local_tools: ["*"]`, including shell)
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
