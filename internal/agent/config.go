@@ -82,6 +82,19 @@ func (o *Orchestrator) SetBackendCache(bc *backend.BackendCache) {
 	o.backendCache = bc
 }
 
+// SetAgentBackendOverride installs a resolver that gets first refusal on every
+// agent backend lookup. It returns (backend, true, nil) to claim an agent,
+// (nil, false, nil) to decline, or an error to fail the lookup outright.
+//
+// Nil (the default) is a complete no-op: resolution behaves exactly as it did
+// before this hook existed. Every native agent takes that path, so nothing
+// here may change its behaviour.
+func (o *Orchestrator) SetAgentBackendOverride(fn func(*agents.Agent) (backend.Backend, bool, error)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.agentBackendOverride = fn
+}
+
 // UpdateFallbackAPIKey updates the raw API key reference used when agents
 // specify a provider but no per-agent key. Also invalidates all cached
 // backend instances so stale backends built with the old (possibly empty)
@@ -113,12 +126,27 @@ func (o *Orchestrator) UpdateModels(_, _, reasoner string) {
 
 // backendFor resolves the backend for the given agent.
 // Falls back to o.backend when no BackendCache is configured or agent is nil.
-// Thread-safe: snapshots o.backendCache and o.backend under o.mu.
+// Thread-safe: snapshots o.backendCache, o.backend and the override under o.mu.
 func (o *Orchestrator) backendFor(ag *agents.Agent) (backend.Backend, error) {
 	o.mu.RLock()
 	bc := o.backendCache
 	fb := o.backend
+	override := o.agentBackendOverride
 	o.mu.RUnlock()
+
+	// The override gets first refusal, but only for a real agent: it exists to
+	// resolve backends that need per-agent state, and there is none to inspect
+	// when ag is nil. Declining falls through to the cache untouched.
+	if override != nil && ag != nil {
+		b, claimed, err := override(ag)
+		if err != nil {
+			return nil, err
+		}
+		if claimed {
+			return b, nil
+		}
+	}
+
 	if bc == nil {
 		return fb, nil
 	}

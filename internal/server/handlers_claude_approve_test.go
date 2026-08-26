@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -29,6 +31,9 @@ func postApprove(t *testing.T, s *Server, body string) (int, string, string) {
 }
 
 func TestApproveDeniesUnknownSession(t *testing.T) {
+	// agentLoader is nil here, which now reaches the production loader, so
+	// point it at an empty private home rather than the developer's real one.
+	isolateAgentsHome(t)
 	s := &Server{}
 	code, decision, reason := postApprove(t, s,
 		`{"tool_name":"Write","session_id":"nobody","tool_use_id":"t1"}`)
@@ -216,5 +221,86 @@ func TestApproveDeniesDespiteLocalToolsWildcard(t *testing.T) {
 		`{"tool_name":"Bash","session_id":"sess-1","tool_use_id":"t1"}`)
 	if decision != "deny" {
 		t.Errorf(`decision = %q, want deny — LocalTools:["*"] must not leak into Claude Code tool approval`, decision)
+	}
+}
+
+// isolateAgentsHome points agents.LoadAgents at a private directory for the
+// duration of the test, so the production loader can be exercised without
+// reading — or creating anything in — the developer's real ~/.huginn.
+// Returns the agents directory to write agent files into.
+func isolateAgentsHome(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	t.Setenv("HUGINN_HOME", base)
+	dir := filepath.Join(base, ".huginn", "agents")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir agents dir: %v", err)
+	}
+	return dir
+}
+
+// TestApproveResolvesTheAgentThroughTheProductionLoader pins the WIRED case.
+//
+// agentLoader is a test seam: nothing in production ever sets it, so it is
+// always nil there. The handler used to treat nil as "no agents exist" and
+// deny every approval — and the suite could not see it, because every test
+// injected a loader and the ones that did not were asserting denials that a
+// nil loader produces for free. So this test deliberately leaves agentLoader
+// nil, exactly as production does, and asserts the loader being PRESENT is
+// what makes approval work.
+func TestApproveResolvesTheAgentThroughTheProductionLoader(t *testing.T) {
+	dir := isolateAgentsHome(t)
+	const sessionID = "11111111-2222-3333-4444-555555555555"
+	agentFile := filepath.Join(dir, "Codey.json")
+	body := `{"name":"Codey","provider":"claude-code",` +
+		`"claude_session_id":"` + sessionID + `",` +
+		`"claude_allowed_tools":["Read"]}`
+	if err := os.WriteFile(agentFile, []byte(body), 0o600); err != nil {
+		t.Fatalf("write agent file: %v", err)
+	}
+
+	s := &Server{} // agentLoader deliberately nil — this IS production.
+
+	_, decision, reason := postApprove(t, s,
+		`{"tool_name":"Read","session_id":"`+sessionID+`","tool_use_id":"t1"}`)
+	if decision != "allow" {
+		t.Fatalf("decision = %q (%s), want allow — the handler never found the agent on disk", decision, reason)
+	}
+	// The allow reason names the agent, which is only possible if the agent
+	// was actually loaded rather than the request being waved through.
+	if !strings.Contains(reason, "Codey") {
+		t.Errorf("reason = %q, want it to name the agent the decision came from", reason)
+	}
+
+	// Same wiring, same agent, a tool that is NOT allowlisted: still denied.
+	// Proves the fallback loader did not turn into a blanket allow.
+	_, decision, reason = postApprove(t, s,
+		`{"tool_name":"Bash","session_id":"`+sessionID+`","tool_use_id":"t2"}`)
+	if decision != "deny" {
+		t.Errorf("decision = %q, want deny for a tool outside claude_allowed_tools", decision)
+	}
+	if strings.Contains(reason, "No Huginn agent is bound") {
+		t.Errorf("denied for the wrong reason (%q): the agent was found, the TOOL was not allowed", reason)
+	}
+}
+
+// TestApproveDeniesUnknownSessionWithAgentsOnDisk is the negative half of the
+// test above: with the production loader wired and real agents present, a
+// session bound to none of them is still denied.
+func TestApproveDeniesUnknownSessionWithAgentsOnDisk(t *testing.T) {
+	dir := isolateAgentsHome(t)
+	body := `{"name":"Codey","provider":"claude-code","claude_session_id":"SOME-OTHER-SESSION","claude_allowed_tools":["Read"]}`
+	if err := os.WriteFile(filepath.Join(dir, "Codey.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write agent file: %v", err)
+	}
+
+	s := &Server{}
+	_, decision, reason := postApprove(t, s,
+		`{"tool_name":"Read","session_id":"unbound-session","tool_use_id":"t1"}`)
+	if decision != "deny" {
+		t.Fatalf("decision = %q, want deny for a session no agent claims", decision)
+	}
+	if !strings.Contains(reason, "No Huginn agent is bound") {
+		t.Errorf("reason = %q, want it to name the unbound session", reason)
 	}
 }

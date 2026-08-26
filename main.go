@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -3197,11 +3198,30 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				SystemPrompt: claudecode.AssembleSystemPrompt(ag.SystemPrompt, agentSkillTexts(ag), notepadText()),
 				AllowedTools: ag.ClaudeAllowedTools,
 				GatedTools:   gatedToolsFor(ag),
-				HookCommand:  huginnExe + " claude-approve",
+				HookCommand:  claudeHookCommand(huginnExe, goruntime.GOOS),
 				FirstTurn:    !claudeSessionExists(ag.ClaudeSessionID),
 				TimeoutSecs:  claudecode.DefaultAgentTurnTimeoutSecs,
 			})
 		}
+		// claudeCodeResolver is the ONE place that decides whether an agent is
+		// backed by Claude Code. Both the orchestrator's primary chat path and
+		// the completion notifier's follow-up call go through it; two copies of
+		// this decision would drift, and the two paths would disagree about
+		// which process is driving the agent's session.
+		//
+		// Declining (false) means "not a Claude Code agent" and leaves the
+		// caller to resolve it exactly as before.
+		claudeCodeResolver := func(ag *agentslib.Agent) (backend.Backend, bool, error) {
+			if ag == nil || ag.Provider != "claude-code" {
+				return nil, false, nil
+			}
+			return claudeCodeBackend(ag), true, nil
+		}
+		// The primary chat path resolves backends inside the orchestrator, which
+		// only ever saw the BackendCache — and that cache is keyed by
+		// (provider, endpoint, key, model), a tuple that cannot express "this
+		// agent's Claude session id and cwd". Hence the override hook.
+		orch.SetAgentBackendOverride(claudeCodeResolver)
 
 		// Wire completion notifier: when a sub-agent finishes, the primary agent
 		// posts a brief natural-language summary in the main chat.
@@ -3215,8 +3235,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				if ag == nil {
 					return serveCache.For("", "", "", "")
 				}
-				if ag.Provider == "claude-code" {
-					return claudeCodeBackend(ag), nil
+				if b, claimed, err := claudeCodeResolver(ag); claimed || err != nil {
+					return b, err
 				}
 				return serveCache.For(ag.Provider, ag.Endpoint, ag.APIKey, ag.GetModelID())
 			},
@@ -3712,6 +3732,28 @@ func gatedToolsFor(ag *agentslib.Agent) []string {
 		return append([]string(nil), ag.ClaudeGatedTools...)
 	}
 	return append([]string(nil), claudecode.DefaultGatedTools...)
+}
+
+// claudeHookCommand renders the PreToolUse hook command line for a Huginn
+// binary at exe.
+//
+// Claude Code runs hooks through a shell, so an unquoted path containing a
+// space is split into two words and the hook simply never runs. That fails
+// closed — a hook that cannot execute is treated as a block — but it breaks
+// every gated tool for anyone whose install path has a space in it, which on
+// macOS is ordinary, not exotic.
+//
+// goos is a parameter rather than a direct runtime.GOOS read so both quoting
+// styles can be tested on one machine.
+func claudeHookCommand(exe, goos string) string {
+	if goos == "windows" {
+		// cmd.exe has no escape for a quote inside a quoted string; a Windows
+		// path cannot contain one either, so double-quoting is sufficient.
+		return `"` + exe + `" claude-approve`
+	}
+	// POSIX single quotes protect everything except a single quote itself,
+	// which is closed, escaped, and reopened.
+	return "'" + strings.ReplaceAll(exe, "'", `'\''`) + "' claude-approve"
 }
 
 // claudeSessionIDsOf collects the Claude Code session ids bound to agents, for

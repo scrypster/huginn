@@ -85,10 +85,18 @@ type Orchestrator struct {
 	relayHub         relay.Hub // nil = InProcessHub (default behavior)
 	compactor        *compact.Compactor
 	backendCache     *backend.BackendCache
-	muninnCfgPath    string                // set by SetMuninnConfigPath; path to ~/.config/huginn/muninn.json
-	workspaceRoot    string                // set by SetGitRoot; used to load .huginn.md project instructions
-	huginnHome       string                // set by SetHuginnHome; used to locate agent memory files
-	skillsReg        *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
+	// agentBackendOverride, when set, gets first refusal on resolving an
+	// agent's backend. It exists because some providers need the AGENT, not
+	// just the (provider, endpoint, key, model) tuple BackendCache is keyed
+	// by — a Claude Code agent is bound to a specific CLI session id and cwd,
+	// which that tuple cannot express. Returning false means "not mine",
+	// and resolution falls through to the cache exactly as before.
+	// Guarded by o.mu like backendCache; see backendFor.
+	agentBackendOverride func(*agents.Agent) (backend.Backend, bool, error)
+	muninnCfgPath        string                // set by SetMuninnConfigPath; path to ~/.config/huginn/muninn.json
+	workspaceRoot        string                // set by SetGitRoot; used to load .huginn.md project instructions
+	huginnHome           string                // set by SetHuginnHome; used to locate agent memory files
+	skillsReg            *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
 
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string

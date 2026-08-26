@@ -83,12 +83,12 @@ type AgentBackendConfig struct {
 type AgentBackend struct {
 	cfg AgentBackendConfig
 
-	// sem is a one-slot semaphore serialising turns: two concurrent writers
-	// would corrupt the transcript, which is the session's only source of
-	// truth. It is a channel rather than a sync.Mutex so a queued caller can
-	// abandon the wait when ITS OWN context is cancelled; a mutex is not
-	// context-aware and would pin that caller behind an unrelated turn.
-	sem chan struct{}
+	// semKey names this backend's slot in the PACKAGE-LEVEL session semaphore
+	// (session_sem.go). The slot must outlive the instance: the backend is
+	// rebuilt per turn, so a per-instance semaphore would let two concurrent
+	// turns run two `claude` processes against the same session id and corrupt
+	// the transcript, which is that session's only source of truth.
+	semKey string
 
 	mu sync.Mutex // guards the fields below; held only for field access
 	// sessionExists records whether the Claude Code session has been created.
@@ -102,8 +102,8 @@ var _ backend.Backend = (*AgentBackend)(nil)
 // NewAgentBackend returns a backend bound to one Claude Code session.
 func NewAgentBackend(cfg AgentBackendConfig) *AgentBackend {
 	return &AgentBackend{
-		cfg: cfg,
-		sem: make(chan struct{}, 1),
+		cfg:    cfg,
+		semKey: semKeyFor(cfg.SessionID),
 		// FirstTurn seeds the state; from here on the backend tracks it
 		// itself, because the same instance serves every later turn.
 		sessionExists: !cfg.FirstTurn,
@@ -129,18 +129,19 @@ func (b *AgentBackend) ChatCompletion(ctx context.Context, req backend.ChatReque
 	// Acquire the session before doing anything expensive, and give up if the
 	// caller goes away while we are queued.
 	//
-	// NOTE FOR TASK 8: the whole turn — including every onEvent callback below
-	// — runs while holding this slot. The `claude-approve` callback MUST NOT
-	// route back into this backend (or into anything that itself waits on this
+	// The whole turn — including every onEvent callback below — runs while
+	// holding this slot. The `claude-approve` approval path MUST NOT route
+	// back into this backend (or into anything that itself waits on this
 	// agent's turn), or the approval deadlocks, and Claude Code's 30s
 	// PreToolUse hook timeout then FAILS OPEN and runs the tool unapproved.
-	// See ClaudeHookTimeoutSecs in hooks.go.
-	select {
-	case b.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, fmt.Errorf("claudecode agent: gave up waiting for the session: %w", ctx.Err())
+	// See ClaudeHookTimeoutSecs in hooks.go. It does not: the hook is a
+	// separate `huginn claude-approve` process talking HTTP to the server,
+	// and that handler touches no backend state.
+	release, err := acquireSession(ctx, b.semKey)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode agent: gave up waiting for the session: %w", err)
 	}
-	defer func() { <-b.sem }()
+	defer release()
 
 	timeout := time.Duration(b.cfg.TimeoutSecs) * time.Second
 	if timeout <= 0 {

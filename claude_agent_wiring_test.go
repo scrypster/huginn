@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agentslib "github.com/scrypster/huginn/internal/agents"
@@ -102,6 +103,47 @@ func TestClaudeSessionExistsUnder(t *testing.T) {
 	}
 	if claudeSessionExistsUnder(filepath.Join(root, "missing"), id) {
 		t.Error("a missing root must not report the session as existing")
+	}
+}
+
+// TestClaudeHookCommandQuotesThePath: Claude Code runs the hook through a
+// shell, so an unquoted path with a space is split into two words and the hook
+// never runs — every gated tool silently stops working (fails closed, but
+// broken). "/Applications/My Apps/huginn" is an ordinary macOS path.
+func TestClaudeHookCommandQuotesThePath(t *testing.T) {
+	const spaced = "/Users/ada lovelace/bin/huginn"
+
+	posix := claudeHookCommand(spaced, "darwin")
+	if !strings.HasSuffix(posix, " claude-approve") {
+		t.Fatalf("hook command lost its subcommand: %q", posix)
+	}
+	// The shell must see ONE word for the binary. Strip the subcommand, then
+	// the surviving token has to be quoted as a unit.
+	quoted := strings.TrimSuffix(posix, " claude-approve")
+	if quoted != "'"+spaced+"'" {
+		t.Errorf("posix hook command = %q, want the path single-quoted as one word", posix)
+	}
+	if strings.HasPrefix(posix, "/Users/ada ") {
+		t.Error("path left unquoted: the shell would run /Users/ada with 'lovelace/bin/huginn' as an argument")
+	}
+
+	// An apostrophe in a path is legal on macOS and Linux and must not break
+	// out of the quoting.
+	tricky := claudeHookCommand("/Users/o'brien/huginn", "linux")
+	if tricky != `'/Users/o'\''brien/huginn' claude-approve` {
+		t.Errorf("single quote not escaped: %q", tricky)
+	}
+
+	win := claudeHookCommand(`C:\Program Files\Huginn\huginn.exe`, "windows")
+	if win != `"C:\Program Files\Huginn\huginn.exe" claude-approve` {
+		t.Errorf("windows hook command = %q, want the path double-quoted", win)
+	}
+
+	// A path with no space must still be quoted rather than special-cased:
+	// one rule is easier to keep correct than two.
+	plain := claudeHookCommand("/usr/local/bin/huginn", "darwin")
+	if plain != "'/usr/local/bin/huginn' claude-approve" {
+		t.Errorf("plain hook command = %q", plain)
 	}
 }
 
