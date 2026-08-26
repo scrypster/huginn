@@ -11,7 +11,12 @@ import (
 	"github.com/scrypster/huginn/internal/claudecode"
 )
 
-// claudeApproveTimeout bounds how long the hook waits for Huginn.
+// claudeApproveTimeout bounds how long the http.Client in runClaudeApprove
+// waits for Huginn. It does NOT cover the rest of the process: main()'s
+// preamble (config.Load(), etc.) runs before runClaudeApprove and outside
+// this budget. That preamble only touches local disk, so its practical risk
+// is low, but it means the real wall-clock time Claude Code sees before we
+// print a decision is slightly more than this constant.
 //
 // It MUST stay comfortably below claudecode.ClaudeHookTimeoutSecs. Verified
 // against the real CLI: when Claude Code's hook timeout fires it KILLS the hook
@@ -20,6 +25,13 @@ import (
 // boundary.
 const claudeApproveTimeout = (claudecode.ClaudeHookTimeoutSecs - 10) * time.Second
 
+// Compile-time guard: claudeApproveTimeout must stay strictly positive and
+// leave real headroom under the hook timeout. A zero Timeout means "no
+// timeout" to http.Client, which would silently reintroduce the fail-open
+// race this margin exists to prevent. If this line stops compiling, you
+// lowered ClaudeHookTimeoutSecs too far — raise it, do not delete this.
+const _ = uint(claudecode.ClaudeHookTimeoutSecs - 15)
+
 // runClaudeApprove is the PreToolUse hook body. Claude Code writes the tool
 // call to stdin and reads a decision from stdout.
 //
@@ -27,6 +39,11 @@ const claudeApproveTimeout = (claudecode.ClaudeHookTimeoutSecs - 10) * time.Seco
 // hook is itself interpreted as a block, but with no reason the user can read.
 // Every failure path here emits an explicit deny naming the tool.
 func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time.Duration) int {
+	// The read error is intentionally discarded: whatever was read (possibly
+	// nothing, possibly a truncated partial read) still goes to json.Unmarshal
+	// below, and a read error reliably yields an unparseable/incomplete
+	// payload there, which already denies. No path here can turn a read
+	// failure into an allow.
 	raw, _ := io.ReadAll(in)
 
 	var hook struct {
