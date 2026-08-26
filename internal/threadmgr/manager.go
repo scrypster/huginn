@@ -140,6 +140,15 @@ type ThreadManager struct {
 	// graphDir, when non-empty, is the directory where session dependency graphs
 	// are serialised to JSON for crash recovery. Set via SetGraphDir.
 	graphDir string
+
+	// spawnedMu guards spawnedIDs.
+	spawnedMu sync.Mutex
+	// spawnedIDs tracks thread IDs spawned per session since the last time
+	// they were consumed by an empty-args wait_for_threads call. A fast
+	// specialist can reach StatusDone before wait_for_threads runs, which
+	// makes it invisible to ActiveThreadIDs (non-terminal only); recording
+	// the ID here lets an empty-args wait still find it by ID.
+	spawnedIDs map[string][]string // sessionID -> threadIDs
 }
 
 // New returns a ready-to-use ThreadManager with default limits.
@@ -151,6 +160,7 @@ func New() *ThreadManager {
 		auditLog:             make([]AuditEntry, 0, maxAuditEntries),
 		threadBus:            NewThreadBus(DefaultThreadBusCapacity),
 		proposalRegistry:     NewProposalRegistry(),
+		spawnedIDs:           make(map[string][]string),
 	}
 }
 
@@ -913,6 +923,28 @@ type WaitReport struct {
 	TimedOut  bool // true when the deadline expired with threads still pending
 }
 
+// MergeUniqueThreadIDs appends ids from extra to base, skipping duplicates
+// already present in base. Used by wait_for_threads to combine
+// ActiveThreadIDs with recently spawned IDs that may already be terminal.
+func MergeUniqueThreadIDs(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base))
+	for _, id := range base {
+		seen[id] = struct{}{}
+	}
+	merged := base
+	for _, id := range extra {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		merged = append(merged, id)
+	}
+	return merged
+}
+
 // WaitForThreads blocks until every thread in threadIDs reaches a terminal
 // status (done, cancelled, error), the timeout expires, or ctx is cancelled.
 // Threads not found or belonging to a different session are ignored.
@@ -982,6 +1014,25 @@ func (tm *ThreadManager) WasCollected(threadID string) bool {
 	defer tm.mu.RUnlock()
 	t, ok := tm.threads[threadID]
 	return ok && !t.CollectedAt.IsZero()
+}
+
+// RecordSpawned remembers threadID as spawned for sessionID so a subsequent
+// empty-args wait_for_threads call can find it even if it has already
+// reached a terminal status by the time wait runs. Cleared by TakeSpawnedIDs.
+func (tm *ThreadManager) RecordSpawned(sessionID, threadID string) {
+	tm.spawnedMu.Lock()
+	defer tm.spawnedMu.Unlock()
+	tm.spawnedIDs[sessionID] = append(tm.spawnedIDs[sessionID], threadID)
+}
+
+// TakeSpawnedIDs returns and clears the thread IDs recorded via RecordSpawned
+// for sessionID.
+func (tm *ThreadManager) TakeSpawnedIDs(sessionID string) []string {
+	tm.spawnedMu.Lock()
+	defer tm.spawnedMu.Unlock()
+	ids := tm.spawnedIDs[sessionID]
+	delete(tm.spawnedIDs, sessionID)
+	return ids
 }
 
 // ActiveThreadIDs returns the IDs of all non-terminal threads in the session,

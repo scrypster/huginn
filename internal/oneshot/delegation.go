@@ -114,6 +114,7 @@ func attachDelegation(
 					tm.EvaluateDAG(spawnCtx, sid, sessStore, sess, agentReg, b, noopBroadcast, ca)
 				}
 				tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, noopBroadcast, ca, dagFn)
+				tm.RecordSpawned(sid, t.ID)
 				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true}
 			}
 			return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false}
@@ -160,7 +161,7 @@ func attachDelegation(
 				return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
 			}
 			if len(threadIDs) == 0 {
-				threadIDs = tm.ActiveThreadIDs(sid)
+				threadIDs = threadmgr.MergeUniqueThreadIDs(tm.ActiveThreadIDs(sid), tm.TakeSpawnedIDs(sid))
 			}
 			return tm.WaitForThreads(ctx, sid, threadIDs, timeout), nil
 		},

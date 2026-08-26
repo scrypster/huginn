@@ -321,6 +321,7 @@ type chiefOfStaffBackend struct {
 	winstonCall       int
 	requests          []backend.ChatRequest
 	waitAsContentJSON bool
+	forceEmptyWaitIDs bool
 }
 
 func (f *chiefOfStaffBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
@@ -364,8 +365,10 @@ func (f *chiefOfStaffBackend) ChatCompletion(_ context.Context, req backend.Chat
 			}, nil
 		}
 		args := map[string]any{"timeout_seconds": float64(10)}
-		if id := threadIDFromHistory(req.Messages); id != "" {
-			args["thread_ids"] = []any{id}
+		if !f.forceEmptyWaitIDs {
+			if id := threadIDFromHistory(req.Messages); id != "" {
+				args["thread_ids"] = []any{id}
+			}
 		}
 		return &backend.ChatResponse{
 			DoneReason: "tool_calls",
@@ -573,6 +576,73 @@ system_prompt: You are Reggie. Reply with exactly PONG.
 		if tc.Name == "wait_for_threads" && !strings.Contains(tc.Result, "PONG") {
 			t.Errorf("wait_for_threads result = %q, want PONG from Reggie", tc.Result)
 		}
+	}
+}
+
+// TestRun_ChiefOfStaff_EmptyWaitFindsFastSpecialist verifies that
+// wait_for_threads called with no thread_ids still returns the specialist's
+// result even when the specialist (Reggie) reaches StatusDone before wait
+// runs, which drops it out of ActiveThreadIDs (non-terminal only). Without
+// the fix, Winston would get "No matching threads" back and invent PONG
+// itself instead of relaying Reggie's real answer.
+func TestRun_ChiefOfStaff_EmptyWaitFindsFastSpecialist(t *testing.T) {
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff. Delegate and wait.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	b := &chiefOfStaffBackend{forceEmptyWaitIDs: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := Run(ctx, Config{
+		Prompt:          "Ask Reggie to reply with exactly PONG. Wait for him and report only his word.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		MaxTurns:        8,
+		Backend:         b,
+		SessionStore:    session.NewStore(t.TempDir()),
+		LoadRegistry: func() (*agents.AgentRegistry, error) {
+			cfg, err := agents.LoadAgentsFromBase(base)
+			if err != nil {
+				return nil, err
+			}
+			return agents.BuildRegistry(cfg, modelconfig.DefaultModels()), nil
+		},
+		Tools:  tools.NewRegistry(),
+		Models: modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var waitResult string
+	for _, tc := range res.ToolsCalled {
+		if tc.Name == "wait_for_threads" {
+			waitResult = tc.Result
+		}
+	}
+	if waitResult == "" {
+		t.Fatal("wait_for_threads was not called")
+	}
+	if !strings.Contains(waitResult, "## Finished threads") {
+		t.Fatalf("wait_for_threads result = %q, want a finished-threads report", waitResult)
+	}
+	if !strings.Contains(waitResult, "PONG") {
+		t.Fatalf("wait_for_threads result = %q, want PONG from Reggie", waitResult)
+	}
+	if !strings.Contains(res.AgentOutput, "PONG") {
+		t.Fatalf("agentOutput = %q, want PONG relayed from Reggie", res.AgentOutput)
 	}
 }
 

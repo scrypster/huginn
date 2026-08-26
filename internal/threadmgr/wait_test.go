@@ -228,6 +228,51 @@ func TestWaitForThreads_MarksCollected(t *testing.T) {
 	}
 }
 
+// TestWaitForThreads_SpawnedIDsSurviveFastCompletion verifies that a thread
+// which finishes (StatusDone) before wait_for_threads is ever called is still
+// found by an empty-args wait, because RecordSpawned/TakeSpawnedIDs preserve
+// its ID even though ActiveThreadIDs (non-terminal only) has already dropped it.
+func TestWaitForThreads_SpawnedIDsSurviveFastCompletion(t *testing.T) {
+	tm := New()
+	th, _ := tm.Create(CreateParams{SessionID: "s1", AgentID: "Sam", Task: "fast"})
+	tm.RecordSpawned("s1", th.ID)
+	tm.Complete(th.ID, FinishSummary{Summary: "done fast", Status: "completed"})
+
+	if active := tm.ActiveThreadIDs("s1"); len(active) != 0 {
+		t.Fatalf("expected no active threads after completion, got %v", active)
+	}
+
+	threadIDs := MergeUniqueThreadIDs(tm.ActiveThreadIDs("s1"), tm.TakeSpawnedIDs("s1"))
+	if len(threadIDs) != 1 || threadIDs[0] != th.ID {
+		t.Fatalf("expected merged IDs to contain %q, got %v", th.ID, threadIDs)
+	}
+
+	report := tm.WaitForThreads(context.Background(), "s1", threadIDs, time.Second)
+	if len(report.Completed) != 1 || report.Completed[0].ID != th.ID {
+		t.Fatalf("expected the fast thread to be reported completed, got %+v", report)
+	}
+
+	// TakeSpawnedIDs clears the bookkeeping so a later empty wait doesn't
+	// keep re-surfacing stale, already-collected threads forever.
+	if remaining := tm.TakeSpawnedIDs("s1"); len(remaining) != 0 {
+		t.Fatalf("expected TakeSpawnedIDs to clear after consumption, got %v", remaining)
+	}
+}
+
+// TestMergeUniqueThreadIDs verifies dedup between ActiveThreadIDs and spawned IDs.
+func TestMergeUniqueThreadIDs(t *testing.T) {
+	got := MergeUniqueThreadIDs([]string{"a", "b"}, []string{"b", "c"})
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
 // TestCompletionNotify_StampsThreadID verifies Notify stamps ThreadID onto the
 // summary so FollowUpFn implementations can identify the thread.
 func TestCompletionNotify_StampsThreadID(t *testing.T) {

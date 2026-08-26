@@ -2936,6 +2936,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					}
 					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
 					logger.Info("delegate_to_agent: SpawnThread returned", "thread_id", tid)
+					tm.RecordSpawned(sessionID, t.ID)
 					return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true, Warnings: warnings}
 				}
 				logger.Info("delegate_to_agent: thread not ready, queued", "thread_id", t.ID)
@@ -2982,7 +2983,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
 				}
 				if len(threadIDs) == 0 {
-					threadIDs = tm.ActiveThreadIDs(sessionID)
+					threadIDs = threadmgr.MergeUniqueThreadIDs(tm.ActiveThreadIDs(sessionID), tm.TakeSpawnedIDs(sessionID))
 				}
 				return tm.WaitForThreads(ctx, sessionID, threadIDs, timeout), nil
 			},
