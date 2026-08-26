@@ -1161,6 +1161,7 @@ watch(() => props.spaceId, async (newId) => {
     await hydrateThreadBadges(sid)
   }
   await scrollToBottom()
+  markCurrentSessionSeen()
 
   // Set up IntersectionObserver on the top sentinel for infinite scroll.
   await nextTick()
@@ -1591,9 +1592,10 @@ const {
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (chatSearchInputEl satisfies unknown)
 
+const spaceIdRef = computed(() => props.spaceId)
 const {
   atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
-} = useUnreadTracking(sessionIdRef, messages as any, messagesEl)
+} = useUnreadTracking(sessionIdRef, messages as any, messagesEl, spaceIdRef)
 
 const selectedAgent = computed(() =>
   agentsList.value.find(a => a.name === selectedAgentName.value) ?? null
