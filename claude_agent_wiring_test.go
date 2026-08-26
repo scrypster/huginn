@@ -161,7 +161,7 @@ func TestClaudeProjectDirNameMatchesRealDirectories(t *testing.T) {
 func TestClaudeHookCommandQuotesThePath(t *testing.T) {
 	const spaced = "/Users/ada lovelace/bin/huginn"
 
-	posix := claudeHookCommand(spaced, "darwin")
+	posix := claudeHookCommand(spaced, "darwin", "")
 	if !strings.HasSuffix(posix, " claude-approve") {
 		t.Fatalf("hook command lost its subcommand: %q", posix)
 	}
@@ -177,19 +177,19 @@ func TestClaudeHookCommandQuotesThePath(t *testing.T) {
 
 	// An apostrophe in a path is legal on macOS and Linux and must not break
 	// out of the quoting.
-	tricky := claudeHookCommand("/Users/o'brien/huginn", "linux")
+	tricky := claudeHookCommand("/Users/o'brien/huginn", "linux", "")
 	if tricky != `'/Users/o'\''brien/huginn' claude-approve` {
 		t.Errorf("single quote not escaped: %q", tricky)
 	}
 
-	win := claudeHookCommand(`C:\Program Files\Huginn\huginn.exe`, "windows")
+	win := claudeHookCommand(`C:\Program Files\Huginn\huginn.exe`, "windows", "")
 	if win != `"C:\Program Files\Huginn\huginn.exe" claude-approve` {
 		t.Errorf("windows hook command = %q, want the path double-quoted", win)
 	}
 
 	// A path with no space must still be quoted rather than special-cased:
 	// one rule is easier to keep correct than two.
-	plain := claudeHookCommand("/usr/local/bin/huginn", "darwin")
+	plain := claudeHookCommand("/usr/local/bin/huginn", "darwin", "")
 	if plain != "'/usr/local/bin/huginn' claude-approve" {
 		t.Errorf("plain hook command = %q", plain)
 	}
@@ -296,5 +296,43 @@ func TestClaudeBindingProblemsOnlyFlagsClaudeCodeAgents(t *testing.T) {
 	}
 	if claudeBindingProblems(nil) != nil {
 		t.Error("nil config must report no problems")
+	}
+}
+
+// TestClaudeHookCommandCarriesTheBoundEndpoint pins Finding 2 at the build
+// site. The hook process must be TOLD where Huginn is, because it runs in a
+// separate process that would otherwise re-derive the port from config — and
+// config says 0 whenever the user asked for dynamic allocation.
+func TestClaudeHookCommandCarriesTheBoundEndpoint(t *testing.T) {
+	// A dynamically-allocated port: nothing in config could have produced this.
+	ep := claudeApproveEndpointFor("127.0.0.1:53412")
+	if ep != "http://127.0.0.1:53412/api/v1/claude/approve" {
+		t.Fatalf("claudeApproveEndpointFor = %q", ep)
+	}
+	if got := claudeApproveEndpointFor(""); got != "" {
+		t.Errorf("claudeApproveEndpointFor(\"\") = %q, want \"\" so the caller refuses instead of guessing a port", got)
+	}
+
+	posix := claudeHookCommand("/usr/local/bin/huginn", "darwin", ep)
+	if posix != "'/usr/local/bin/huginn' claude-approve --endpoint 'http://127.0.0.1:53412/api/v1/claude/approve'" {
+		t.Errorf("posix hook command = %q, want the real bound endpoint baked in", posix)
+	}
+	if strings.Contains(posix, ":0/") {
+		t.Error("hook command points at port 0: every gated tool would be denied 'Huginn unreachable'")
+	}
+
+	win := claudeHookCommand(`C:\Huginn\huginn.exe`, "windows", ep)
+	if !strings.Contains(win, `--endpoint "`+ep+`"`) {
+		t.Errorf("windows hook command = %q, want the endpoint quoted", win)
+	}
+
+	// The endpoint the hook is handed must be the one it actually parses back.
+	cmd := claudeHookCommand("/usr/local/bin/huginn", "darwin", ep)
+	fields := strings.Split(cmd, "--endpoint ")
+	if len(fields) != 2 {
+		t.Fatalf("hook command has no --endpoint: %q", cmd)
+	}
+	if got := endpointFromArgs([]string{"--endpoint", strings.Trim(fields[1], "'")}); got != ep {
+		t.Errorf("round-trip endpoint = %q, want %q", got, ep)
 	}
 }

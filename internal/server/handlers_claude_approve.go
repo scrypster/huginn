@@ -35,12 +35,19 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// tool_input is deliberately absent. The hook no longer sends it and this
+	// struct no longer names it: it was decoded and discarded here, while the
+	// route's withMaxBody(1 MiB) cap turned a large Write/Edit/Bash payload
+	// into a decode failure and therefore a DENY — a permission decision that
+	// depended on payload size. Unknown fields are ignored by encoding/json,
+	// so an older hook binary still sending it decodes fine (it just has to
+	// fit the cap). If richer policy ever needs the input, forward a bounded
+	// excerpt and raise the cap deliberately.
 	var req struct {
-		ToolName  string          `json:"tool_name"`
-		ToolUseID string          `json:"tool_use_id"`
-		SessionID string          `json:"session_id"`
-		CWD       string          `json:"cwd"`
-		ToolInput json.RawMessage `json:"tool_input"`
+		ToolName  string `json:"tool_name"`
+		ToolUseID string `json:"tool_use_id"`
+		SessionID string `json:"session_id"`
+		CWD       string `json:"cwd"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondApprove(w, "deny", "Huginn could not parse the approval request")
@@ -113,6 +120,16 @@ func toolAllowed(claudeAllowedTools []string, tool string) bool {
 }
 
 // agentForClaudeSession maps a Claude Code session id to the agent bound to it.
+//
+// VERIFIED — the session id is stable across --resume, so this literal match
+// holds for turn 2 and every turn after it. Per Claude Code's documentation,
+// `--resume <uuid>` does NOT fork by default: the transcript file and the
+// session id are unchanged, and the PreToolUse hook payload carries the
+// ORIGINAL uuid. Forking is opt-in via --fork-session, which Huginn never
+// passes (BuildArgs in internal/claudecode/delegate.go emits only
+// --session-id on turn 1 and --resume thereafter). This was review Finding 6;
+// it is closed. Do not re-open it, and do not "defensively" start matching on
+// anything other than the bound id — that would widen the gate.
 func (s *Server) agentForClaudeSession(sessionID string) (agents.AgentDef, bool) {
 	if sessionID == "" {
 		return agents.AgentDef{}, false

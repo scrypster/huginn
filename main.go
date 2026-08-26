@@ -75,6 +75,22 @@ import (
 var version = "dev"
 
 func main() {
+	// SECURITY-CRITICAL ORDERING — `claude-approve` is dispatched FIRST.
+	//
+	// It is the PreToolUse hook for unattended Claude Code agents. Claude Code
+	// treats any exit code that is neither 0 nor 2 as a NON-BLOCKING error and
+	// RUNS THE TOOL ANYWAY (see the contract at the top of cmd_claude_approve.go).
+	// So this route must not pass through anything that can os.Exit non-zero:
+	// not flag.Parse, not config.Load (a hand-edited ~/.huginn/config.json used
+	// to fatalf here, exit 1, and let a gated Bash through), not the logger.
+	//
+	// The generated hook command always invokes us as
+	// `<huginn> claude-approve --endpoint <url>`, so os.Args[1] is the
+	// subcommand. Everything this path needs comes from argv and stdin.
+	if len(os.Args) > 1 && os.Args[1] == "claude-approve" {
+		os.Exit(claudeApproveMain(os.Args[2:], os.Stdin, os.Stdout))
+	}
+
 	// --- Flags ---
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	headlessFlag := flag.Bool("headless", false, "run in headless mode (no TUI)")
@@ -202,9 +218,12 @@ func main() {
 			}
 			return
 		case "claude-approve":
-			os.Exit(runClaudeApprove(os.Stdin, os.Stdout,
-				fmt.Sprintf("http://127.0.0.1:%d/api/v1/claude/approve", cfg.WebUI.Port),
-				claudeApproveTimeout))
+			// Only reachable when the subcommand was NOT os.Args[1] (e.g.
+			// `huginn --log-level=debug claude-approve`), which the hook
+			// itself never does. The real route is at the top of main();
+			// this one has already survived config.Load, so it is a
+			// convenience, not the security path.
+			os.Exit(claudeApproveMain(flag.Args()[1:], os.Stdin, os.Stdout))
 		case "upgrade":
 			if err := cmdUpgrade(flag.Args()[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
@@ -2798,13 +2817,19 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// of the agent's prompt, skills, notepad and tool grants, and
 	// AssembleSystemPrompt is documented to be reassembled every turn so an
 	// edit takes effect on the next message instead of needing a new session.
+	//
+	// NO PATH FALLBACK. This used to fall back to the bare name "huginn" on
+	// the belief that an unexecutable hook is treated as a block. It is not:
+	// the shell exits 127, and Claude Code treats every exit code other than 0
+	// and 2 as a non-blocking error that RUNS THE TOOL. The `claude` process
+	// inherits the server daemon's environment, not the user's login shell, so
+	// "huginn" very often is not on its PATH — that fallback was a security
+	// gate that silently did not gate. Fail loudly instead: log at startup and
+	// refuse to build any claude-code backend at all (see claudeCodeResolver).
 	huginnExe, exeErr := os.Executable()
-	if exeErr != nil || huginnExe == "" {
-		// Fall back to the bare name and let PATH resolve it. A hook that
-		// cannot be executed exits non-zero, which Claude Code treats as a
-		// block — the failure mode is a denied tool, not an ungated one.
-		huginnExe = "huginn"
-		logger.Warn("claudecode: cannot resolve own executable; approval hook falls back to PATH", "err", exeErr)
+	if exeErr != nil || strings.TrimSpace(huginnExe) == "" {
+		huginnExe = ""
+		logger.Error("claudecode: cannot resolve own executable; claude-code agents are DISABLED because their approval hook cannot be named — a hook that cannot run lets gated tools through", "err", exeErr)
 	}
 	// agentSkillTexts renders the agent's assigned skills as prompt text,
 	// through the same per-agent resolution the native agent path uses, so a
@@ -2863,9 +2888,14 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			SystemPrompt: claudecode.AssembleSystemPrompt(ag.SystemPrompt, agentSkillTexts(ag), notepadText()),
 			AllowedTools: ag.ClaudeAllowedTools,
 			GatedTools:   gatedToolsFor(ag),
-			HookCommand:  claudeHookCommand(huginnExe, goruntime.GOOS),
-			FirstTurn:    !claudeSessionExists(ag.ClaudeCWD, ag.ClaudeSessionID),
-			TimeoutSecs:  claudecode.DefaultAgentTurnTimeoutSecs,
+			// srv.Addr() — the REAL bound address — not cfg.WebUI.Port, which
+			// is 0 whenever the user asked for dynamic allocation. Read here,
+			// per turn, rather than captured: the closure runs long after
+			// srv.Start(), so the address is always populated by now, and the
+			// resolver below refuses outright if it somehow is not.
+			HookCommand: claudeHookCommand(huginnExe, goruntime.GOOS, claudeApproveEndpointFor(srv.Addr())),
+			FirstTurn:   !claudeSessionExists(ag.ClaudeCWD, ag.ClaudeSessionID),
+			TimeoutSecs: claudecode.DefaultAgentTurnTimeoutSecs,
 		})
 	}
 	// claudeCodeResolver is the ONE place that decides whether an agent is
@@ -2886,6 +2916,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		if err := validateClaudeBinding(ag.Name, ag.ClaudeSessionID); err != nil {
 			logger.Error("claudecode: unusable agent binding", "agent", ag.Name, "err", err)
 			return nil, true, err
+		}
+		// Refuse rather than run ungated. Both of these mean the PreToolUse
+		// hook cannot be named or cannot reach us, and a hook that fails to
+		// execute does NOT block the tool — it lets it run. An error here is
+		// loud and reaches the user; a missing gate is silent.
+		if huginnExe == "" {
+			return nil, true, fmt.Errorf("claude-code agent %q cannot run: Huginn cannot resolve its own executable path, so the PreToolUse approval hook cannot be named and gated tools would run unapproved", ag.Name)
+		}
+		if claudeApproveEndpointFor(srv.Addr()) == "" {
+			return nil, true, fmt.Errorf("claude-code agent %q cannot run: the Huginn server has no bound address yet, so the PreToolUse approval hook has nowhere to ask and gated tools would be denied", ag.Name)
 		}
 		return claudeCodeBackend(ag), true, nil
 	}
@@ -3774,26 +3814,57 @@ func gatedToolsFor(ag *agentslib.Agent) []string {
 	return append([]string(nil), claudecode.DefaultGatedTools...)
 }
 
+// claudeApproveEndpointFor renders the approval URL for a server bound at addr
+// (the value of server.Server.Addr(), e.g. "127.0.0.1:53412").
+//
+// The address is the server's ACTUAL bound address, never cfg.WebUI.Port.
+// web_ui.port is documented as "0 = dynamic allocation" and Server.Start
+// honours it, so re-deriving the port from config produced
+// "http://127.0.0.1:0/…" — every gated tool denied "Huginn unreachable",
+// forever, while the server sat healthy on an ephemeral port. Four other sites
+// in this file paper over that with `if port == 0 { port = 8477 }` while
+// config.Default() says 8421; a fifth guess would just be a fifth wrong answer.
+// An empty addr yields "" so the caller can refuse loudly instead of guessing.
+func claudeApproveEndpointFor(addr string) string {
+	if strings.TrimSpace(addr) == "" {
+		return ""
+	}
+	return "http://" + addr + claudeApprovePath
+}
+
 // claudeHookCommand renders the PreToolUse hook command line for a Huginn
-// binary at exe.
+// binary at exe, pointed at endpoint.
 //
 // Claude Code runs hooks through a shell, so an unquoted path containing a
-// space is split into two words and the hook simply never runs. That fails
-// closed — a hook that cannot execute is treated as a block — but it breaks
-// every gated tool for anyone whose install path has a space in it, which on
-// macOS is ordinary, not exotic.
+// space is split into two words and the hook simply never runs. THAT FAILS
+// OPEN, not closed: a hook that cannot execute exits 127, and any exit code
+// other than 0 or 2 is a non-blocking error that lets the tool run. Quoting is
+// therefore load-bearing, not cosmetic.
+//
+// The endpoint is baked in rather than re-derived from config by the hook
+// process: it is the server's real bound address, it removes the hook's
+// dependency on a readable config file, and it survives the user editing
+// web_ui.port while the server runs on the old one.
 //
 // goos is a parameter rather than a direct runtime.GOOS read so both quoting
 // styles can be tested on one machine.
-func claudeHookCommand(exe, goos string) string {
+func claudeHookCommand(exe, goos, endpoint string) string {
 	if goos == "windows" {
 		// cmd.exe has no escape for a quote inside a quoted string; a Windows
 		// path cannot contain one either, so double-quoting is sufficient.
-		return `"` + exe + `" claude-approve`
+		cmd := `"` + exe + `" claude-approve`
+		if endpoint != "" {
+			cmd += ` --endpoint "` + endpoint + `"`
+		}
+		return cmd
 	}
 	// POSIX single quotes protect everything except a single quote itself,
 	// which is closed, escaped, and reopened.
-	return "'" + strings.ReplaceAll(exe, "'", `'\''`) + "' claude-approve"
+	cmd := "'" + strings.ReplaceAll(exe, "'", `'\''`) + "' claude-approve"
+	if endpoint != "" {
+		cmd += " --endpoint '" + strings.ReplaceAll(endpoint, "'", `'\''`) + "'"
+	}
+	return cmd
 }
 
 // isClaudeUUID reports whether s is the 8-4-4-4-12 hex form Claude Code's

@@ -81,6 +81,14 @@ func BuildArgs(cfg DelegateConfig, req DelegateRequest, sessionID string) []stri
 		turns = cfg.MaxTurns
 	}
 
+	// VERIFIED — the session id survives the switch to --resume, and the
+	// PreToolUse hook payload keeps carrying the ORIGINAL uuid, which is what
+	// the approval endpoint matches on (see agentForClaudeSession in
+	// internal/server/handlers_claude_approve.go). Per Claude Code's
+	// documentation --resume does not fork by default; forking is opt-in via
+	// --fork-session, which is deliberately never emitted here. Adding it
+	// would mint a new session id from turn 2 onward and every gated tool
+	// call would be denied as "unbound session". This was review Finding 6.
 	sessionFlag := "--session-id"
 	if req.Resume {
 		sessionFlag = "--resume"
