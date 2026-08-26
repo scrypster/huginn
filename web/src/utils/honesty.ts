@@ -209,10 +209,22 @@ const GLUE_CONTINUATION_RE = /^\s*(?:then|next|finally|afterwards|after that)\b[
 const WAIT_GLUE_LINE_RE = /^\s*(?:once|after|when|as soon as)\s+[^.:]{0,60}?\b(?:responds?|replies|replied|replying|finish(?:es|ed)?|complet(?:es|ed)?|returns?|returned|answers?|answered|reports?|reported|comes? back|gets? back|is (?:done|back|finished|ready))\b[^.:]{0,60}?\s*[:,]\s*$/i
 // A JSON string glued onto sentence-final punctuation: 56."PONG"
 const GLUED_STRING_RE = /([.!?])"[^"\n]{1,60}"\s*$/
+// A separator line glued onto sentence-final punctuation: 56.---
+const GLUED_SEPARATOR_RE = /([.!?])\s*-{3,}\s*$/
 const ECHO_FRAGMENT_RE = /[0-9]+|[A-Z]+/g
 // An echo line (`56PONG`, `56`, `"PONG"`): no spaces, no lowercase, fragments and punctuation only.
 const ECHO_LINE_RE = /^["'`(\[]*(?:[0-9]+|[A-Z]+)(?:["'`.,;:!?)\]]*(?:[0-9]+|[A-Z]+))*["'`.,;:!?)\]]*$/
 const HARNESS_TOOL_NAME_LINE = new Set(['wait_for_threads', 'delegate_to_agent', 'recall_thread_result', 'list_team_status', 'bash'])
+// Bracket stage directions: lines that are ONLY [text]
+const BRACKET_STAGE_DIRECTION_RE = /^\s*\[[^\]]*\]\s*$/
+// Playbook format instruction lines
+const PLAYBOOK_FORMAT_RE = /^\s*use\s+(?:the\s+)?(?:following\s+)?format\s*:\s*$/i
+// Template placeholder lines: "Reggie says: <reggie-reply>" style
+const TEMPLATE_PLACEHOLDER_RE = /^[A-Za-z][^:]*:\s*<[^>]+>\s*$/
+// Standalone separator lines
+const SEPARATOR_LINE_RE = /^\s*---+\s*$/
+// Playbook introductions: "After ... response, use the following format:"
+const PLAYBOOK_INTRO_RE = /^\s*(?:after|once|when)\s+.*\b(?:response|result|reply)\b.*,\s*use\s+(?:the\s+)?(?:following\s+)?format\s*:\s*$/i
 
 export interface ResidualSpeechOptions {
   /** Tools already ran this turn: also drop unfenced tool-call JSON (any name) and echoed result objects. */
@@ -229,18 +241,39 @@ export function stripResidualSpeech(content: string | undefined | null, opts: Re
   if (!content) return ''
   const parts = content.split('```')
   let changed = false
-  for (let i = 0; i < parts.length; i += 2) {
-    const out = stripResidualUnfenced(parts[i]!, !!opts.afterTools)
+  for (let i = 0; i < parts.length; i++) {
+    const isFenced = i % 2 === 1
+    const out = stripResidualUnfenced(parts[i]!, !!opts.afterTools, isFenced)
     if (out !== parts[i]) {
       parts[i] = out
       changed = true
     }
+    // Drop fenced blocks that became empty/whitespace-only when afterTools=true,
+    // since they were only residual speech (comments, glue, tool JSON).
+    if (opts.afterTools && i % 2 === 1 && !out.trim()) {
+      changed = true
+      parts[i] = ''
+    }
   }
-  return changed ? parts.join('```').trim() : content
+  if (!changed) return content
+  // Rebuild, skipping empty fences.
+  let result = ''
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      result += parts[i]
+    } else if (parts[i]) {
+      result += '```' + parts[i] + '```'
+    }
+  }
+  return result.trim()
 }
 
-function stripResidualUnfenced(s: string, afterTools: boolean): string {
+function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean): string {
   if (!s) return s
+  // Language-tagged fences (```json, ```go, etc.) are always kept unchanged.
+  if (isFenced && fenceHasLanguageTag(s)) {
+    return s
+  }
   if (afterTools) s = removeResidualJSONObjects(s)
   const kept: string[] = []
   let inGlueChain = false
@@ -251,14 +284,139 @@ function stripResidualUnfenced(s: string, afterTools: boolean): string {
     if (trim === '' && hadText) { inGlueChain = true; continue }
     if (trim === '') { kept.push(line); continue }
     if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim) || WAIT_GLUE_LINE_RE.test(trim)) { inGlueChain = true; continue }
+    if (PLAYBOOK_FORMAT_RE.test(trim) || PLAYBOOK_INTRO_RE.test(trim) || TEMPLATE_PLACEHOLDER_RE.test(trim) || SEPARATOR_LINE_RE.test(trim)) { inGlueChain = true; continue }
     if (inGlueChain && GLUE_CONTINUATION_RE.test(trim)) continue
+    if ((BRACKET_STAGE_DIRECTION_RE.test(trim) && afterTools)) { continue }
     if (HARNESS_TOOL_NAME_LINE.has(trim) || SYSTEM_FAIL_RE.test(trim)) { inGlueChain = false; continue }
     inGlueChain = false
-    if (afterTools) line = line.replace(GLUED_STRING_RE, '$1')
+    if (afterTools) {
+      line = line.replace(GLUED_STRING_RE, '$1')
+      line = line.replace(GLUED_SEPARATOR_RE, '$1')
+    }
     kept.push(line)
   }
-  const lines = afterTools ? dropTrailingEchoLines(kept, s) : kept
+  let lines = afterTools ? dropTrailingEchoLines(kept, s) : kept
+  if (afterTools) lines = stripSameLineEchoFragments(lines, s)
+  if (afterTools) lines = deduplicateSentencesInLastLine(lines, s)
   return lines.join('\n').replace(/\n{3,}/g, '\n\n')
+}
+
+/**
+ * Remove sentences from the last line that already appeared in the rest of the output.
+ * Splits on sentence-final punctuation and removes duplicates. Also removes earlier lines
+ * that are duplicates of the final content. Mirrors backend.deduplicateSentencesInLastLine.
+ */
+function deduplicateSentencesInLastLine(kept: string[], original: string): string[] {
+  if (!kept.length) return kept
+  let lastIdx = kept.length - 1
+  while (lastIdx >= 0 && !kept[lastIdx]!.trim()) lastIdx--
+  if (lastIdx < 0 || lastIdx === 0) return kept
+
+  const line = kept[lastIdx]!
+  const trim = line.trim()
+
+  // Split by sentence-final punctuation to identify individual sentences.
+  const sentences: string[] = []
+  let currentSentence = ''
+  for (let i = 0; i < trim.length; i++) {
+    currentSentence += trim[i]
+    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
+      sentences.push(currentSentence.trim())
+      currentSentence = ''
+    }
+  }
+  if (currentSentence) {
+    sentences.push(currentSentence.trim())
+  }
+
+  if (sentences.length <= 1) return kept
+
+  // Build text of all sentences before the last line.
+  const priorText = kept.slice(0, lastIdx).join('\n')
+  const keptSentences: string[] = []
+  for (const sent of sentences) {
+    if (!sent || priorText.includes(sent)) continue
+    keptSentences.push(sent)
+  }
+
+  if (keptSentences.length === sentences.length) {
+    return kept
+  }
+  // Deduplicate the line by keeping non-duplicate sentences
+  const indent = line.length - line.trimLeft().length
+  if (keptSentences.length > 0) {
+    kept[lastIdx] = line.slice(0, indent) + keptSentences.join(' ')
+  } else {
+    // All sentences are duplicates; keep just the first one
+    kept[lastIdx] = line.slice(0, indent) + sentences[0]
+  }
+  return kept
+}
+
+/**
+ * Strip echo fragments glued to the end of the last line when they appeared
+ * earlier in the segment (e.g., "7 times 8 is 56.PONG, 56" -> "7 times 8 is 56."
+ * when PONG and 56 appeared earlier). Mirrors backend.stripSameLineEchoFragments.
+ */
+function stripSameLineEchoFragments(kept: string[], original: string): string[] {
+  if (!kept.length) return kept
+  // Find the last non-blank line.
+  let lastIdx = kept.length - 1
+  while (lastIdx >= 0 && !kept[lastIdx]!.trim()) lastIdx--
+  if (lastIdx < 0) return kept
+
+  const line = kept[lastIdx]!
+  let trim = line.trim()
+  let matched = false
+
+  // Look for sentence-final punctuation followed by fragments that appeared earlier.
+  while (true) {
+    const idx = findEndOfSentence(trim)
+    if (idx <= 0 || idx >= trim.length) break
+
+    const remainder = trim.slice(idx)
+    const frags = remainder.match(ECHO_FRAGMENT_RE) ?? []
+    if (!frags.length) break
+
+    // Check if all fragments appeared before the sentence end.
+    const sentenceEnd = trim.slice(0, idx)
+    const foundAt = original.indexOf(sentenceEnd)
+    let beforeAnswer = original
+    if (foundAt >= 0) {
+      beforeAnswer = original.slice(0, foundAt + sentenceEnd.length)
+    }
+    const allEarlier = frags.every(f => beforeAnswer.includes(f))
+    if (!allEarlier) break
+
+    // Strip the remainder.
+    trim = sentenceEnd
+    matched = true
+  }
+
+  if (!matched) return kept
+  // Reconstruct with preserved leading whitespace.
+  const indent = line.length - line.trimLeft().length
+  kept[lastIdx] = line.slice(0, indent) + trim
+  return kept
+}
+
+/** Find index after the last occurrence of sentence-final punctuation. */
+function findEndOfSentence(s: string): number {
+  let idx = -1
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '.' || s[i] === '!' || s[i] === '?') {
+      idx = i + 1
+    }
+  }
+  return idx
+}
+
+/** Check if fence content starts with a language tag. */
+function fenceHasLanguageTag(s: string): boolean {
+  const lines = s.split('\n')
+  if (!lines.length) return false
+  const tag = lines[0]!.trim()
+  return tag !== '' && !/\s/.test(tag)
 }
 
 /**
@@ -346,11 +504,19 @@ function readJSONObjectAt(s: string, start: number): { value: unknown; end: numb
         const raw = s.slice(start, i + 1)
         try { return { value: JSON.parse(raw), end: i + 1 } } catch { /* retry without // comments */ }
         // `"thread-12345"  // Replace with the actual thread ID` — stripping only, never executed.
-        try { return { value: JSON.parse(stripJSONLineComments(raw)), end: i + 1 } } catch { return null }
+        let stripped = stripJSONLineComments(raw)
+        try { return { value: JSON.parse(stripped), end: i + 1 } } catch { /* retry with placeholders */ }
+        // `<thread_id>` placeholders — replace with quoted strings for parsing.
+        try { return { value: JSON.parse(replacePlaceholders(stripped)), end: i + 1 } } catch { return null }
       }
     }
   }
   return null
+}
+
+/** Replace <...> placeholders with quoted strings to make JSON with placeholders valid. */
+function replacePlaceholders(s: string): string {
+  return s.replace(/<[^>]+>/g, '"<placeholder>"')
 }
 
 /** Remove // comments that sit outside string literals. Mirrors backend.stripJSONLineComments. */

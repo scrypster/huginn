@@ -921,6 +921,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			// context so downstream code (e.g. threadmgr) can trace the lineage.
 			ctxSetup: func(c context.Context) context.Context {
 				c = SetSessionID(c, sessionID)
+				c = threadmgr.SetCallingAgent(c, ag.Name)
 				if GetDelegationContext(c) == nil {
 					dc := workforce.NewDelegationContext(sessionID, ag.Name, o.maxDelegationDepth())
 					c = WithDelegationContext(c, &dc)

@@ -270,3 +270,14 @@ func TestCompletionNotify_StampsThreadID(t *testing.T) {
 		t.Fatal("FollowUpFn never ran")
 	}
 }
+
+func TestWaitForThreads_PlaceholderIDsFallBackToUncollected(t *testing.T) {
+	tm := New()
+	specialist, _ := tm.Create(CreateParams{SessionID: "s1", AgentID: "Reggie", Task: "fast"})
+	tm.Complete(specialist.ID, FinishSummary{Summary: "PONG", Status: "completed"})
+
+	report := tm.WaitForThreads(context.Background(), "s1", []string{"<thread_id_retrieved_from_delegation>"}, 5*time.Second)
+	if len(report.Completed) != 1 || report.Completed[0].ID != specialist.ID {
+		t.Fatalf("placeholder wait should fall back to uncollected, got completed=%d pending=%d", len(report.Completed), len(report.Pending))
+	}
+}
