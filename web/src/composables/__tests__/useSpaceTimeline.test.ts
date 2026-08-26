@@ -25,6 +25,7 @@ import {
   plaintextPreview,
   prefetchSpaceSidebar,
   spaceSessionsIndexed,
+  listCachedSpaceMessages,
 } from '../useSpaceTimeline'
 import { api } from '../useApi'
 
@@ -772,5 +773,28 @@ describe('getSpaceLastMessage', () => {
     })
     const snippet = getSpaceLastMessage(SPACE_ID)
     expect(snippet?.text).toBe('Steve: hello from Steve')
+  })
+})
+
+describe('listCachedSpaceMessages', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns only spaces that have cached messages', () => {
+    useSpaceTimeline(SPACE_ID).getState().messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: '', role: 'user', content: 'hi', agent: '',
+    })
+    useSpaceTimeline(SPACE_B).getState()
+
+    const listed = listCachedSpaceMessages()
+    expect(listed).toHaveLength(1)
+    expect(listed[0].spaceId).toBe(SPACE_ID)
+    expect(listed[0].messages).toHaveLength(1)
   })
 })

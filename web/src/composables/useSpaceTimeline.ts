@@ -500,3 +500,13 @@ export function getSessionSpaceId(sessionId: string): string | null {
 export function spaceSessionsIndexed(spaceIds: string[]): boolean {
   return spaceIds.length > 0 && spaceIds.every(id => sidebarPrefetched.has(id))
 }
+
+// listCachedSpaceMessages returns messages already hydrated into space timelines.
+// Used by Cmd+K global search so channel/DM text is findable without a new backend.
+export function listCachedSpaceMessages(): Array<{ spaceId: string; messages: SpaceMessage[] }> {
+  const out: Array<{ spaceId: string; messages: SpaceMessage[] }> = []
+  for (const [spaceId, st] of stateMap.entries()) {
+    if (st.messages.length) out.push({ spaceId, messages: st.messages })
+  }
+  return out
+}

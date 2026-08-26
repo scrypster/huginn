@@ -909,7 +909,15 @@ import { wireThreadDetailWS } from './composables/useThreadDetail'
 import { useCloud } from './composables/useCloud'
 import { useVersion } from './composables/useVersion'
 import { useSpaces, wireSpaceWS } from './composables/useSpaces'
-import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId, prefetchSpaceSidebar, spaceSessionsIndexed } from './composables/useSpaceTimeline'
+import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId, prefetchSpaceSidebar, spaceSessionsIndexed, listCachedSpaceMessages } from './composables/useSpaceTimeline'
+import {
+  buildGlobalSearchResults,
+  formatSpaceSearchLabel,
+  mergeSpaceMessageGroups,
+  searchResultPath,
+  type GlobalSearchHit,
+  type SpaceMessageGroup,
+} from './composables/globalSearch'
 import { pruneOrphanedUnseenIds } from './composables/unseenSessions'
 import { wireSwarmWS } from './composables/useSwarmStatus'
 import SpaceCreateModal from './components/SpaceCreateModal.vue'
@@ -1393,54 +1401,66 @@ const globalSearchOpen = ref(false)
 const globalSearchQuery = ref('')
 const globalSearchInputEl = ref<HTMLInputElement | null>(null)
 
-interface SearchResult {
-  sessionId: string
-  sessionLabel: string
-  msgId: string
-  agent: string
-  snippet: string
+const fetchedSpaceSearchGroups = ref<SpaceMessageGroup[]>([])
+let _spaceSearchController: AbortController | null = null
+
+function spaceSearchGroups(): SpaceMessageGroup[] {
+  const cached: SpaceMessageGroup[] = listCachedSpaceMessages().map(({ spaceId, messages }) => {
+    const space = spaces.value.find(s => s.id === spaceId)
+    return {
+      spaceId,
+      spaceLabel: space ? formatSpaceSearchLabel(space) : spaceId,
+      messages,
+    }
+  })
+  return mergeSpaceMessageGroups(cached, fetchedSpaceSearchGroups.value)
 }
 
-const globalSearchResults = computed((): SearchResult[] => {
-  const q = globalSearchQuery.value.trim().toLowerCase()
-  if (!q || q.length < 2) return []
-  const results: SearchResult[] = []
-  for (const session of sessions.value) {
-    const msgs = getMessages(session.id)
-    for (const msg of msgs) {
-      if (!msg.content || (msg.role !== 'user' && msg.role !== 'assistant')) continue
-      const lower = msg.content.toLowerCase()
-      const idx = lower.indexOf(q)
-      if (idx === -1) continue
-      const start = Math.max(0, idx - 40)
-      const end = Math.min(msg.content.length, idx + q.length + 80)
-      const raw = (start > 0 ? '…' : '') + msg.content.slice(start, end) + (end < msg.content.length ? '…' : '')
-      // Bold the match
-      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const snippet = raw.replace(new RegExp(`(${escaped})`, 'gi'), '<strong class="text-huginn-blue">$1</strong>')
-      results.push({
-        sessionId: session.id,
-        sessionLabel: formatSessionLabel(session),
-        msgId: msg.id,
-        agent: msg.agent ?? '',
-        snippet,
-      })
-      if (results.length >= 30) break
-    }
-    if (results.length >= 30) break
-  }
-  return results
+const globalSearchResults = computed((): GlobalSearchHit[] => {
+  return buildGlobalSearchResults({
+    query: globalSearchQuery.value,
+    sessions: sessions.value.map(s => ({
+      id: s.id,
+      space_id: (s as { space_id?: string }).space_id,
+    })),
+    getMessages,
+    formatSessionLabel,
+    spaceMessageGroups: spaceSearchGroups(),
+    resolveSpaceId: getSessionSpaceId,
+  })
 })
+
+async function prefetchSpaceSearchMessages() {
+  _spaceSearchController?.abort()
+  const controller = new AbortController()
+  _spaceSearchController = controller
+  const groups = await Promise.all(spaces.value.map(async (space): Promise<SpaceMessageGroup> => {
+    try {
+      const result = await api.spaces.messages(space.id, undefined, 100, { signal: controller.signal })
+      return {
+        spaceId: space.id,
+        spaceLabel: formatSpaceSearchLabel(space),
+        messages: result.messages,
+      }
+    } catch {
+      return { spaceId: space.id, spaceLabel: formatSpaceSearchLabel(space), messages: [] }
+    }
+  }))
+  if (!controller.signal.aborted) {
+    fetchedSpaceSearchGroups.value = groups
+  }
+}
 
 function openGlobalSearch() {
   globalSearchOpen.value = true
   globalSearchQuery.value = ''
+  void prefetchSpaceSearchMessages()
   nextTick(() => globalSearchInputEl.value?.focus())
 }
 
-function navigateToSearchResult(result: SearchResult) {
+function navigateToSearchResult(result: GlobalSearchHit) {
   globalSearchOpen.value = false
-  router.push(`/chat/${result.sessionId}`)
+  router.push(searchResultPath(result))
 }
 
 function handleGlobalAppKeydown(e: KeyboardEvent) {
@@ -1478,6 +1498,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
   wsRef.value?.destroy()
+  _spaceSearchController?.abort()
   document.removeEventListener('click', onDocClick, true)
   document.removeEventListener('keydown', handleGlobalAppKeydown)
 })

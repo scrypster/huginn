@@ -169,12 +169,13 @@ vi.mock('../../composables/useApi', () => ({
 const { mockRoute } = vi.hoisted(() => ({
   mockRoute: { path: '/chat', params: {} as Record<string, string>, query: {} },
 }))
+const mockRouterPush = vi.fn()
 
 vi.mock('vue-router', () => ({
   RouterView: { template: '<div class="router-view-stub" />' },
   useRoute:  () => mockRoute,
   useRouter: () => ({
-    push:    vi.fn(),
+    push:    mockRouterPush,
     replace: vi.fn(),
   }),
 }))
@@ -182,6 +183,7 @@ vi.mock('vue-router', () => ({
 // ── Component import (after all mocks) ───────────────────────────────────────
 
 import App from '../../App.vue'
+import { clearSpaceTimeline, useSpaceTimeline } from '../../composables/useSpaceTimeline'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -216,12 +218,14 @@ beforeEach(async () => {
   mockRoute.path = '/chat'
   mockRoute.params = {}
   mockSessions.value = []
+  mockSpaces.value = []
   mockChannels.value = []
   mockDms.value = []
   mockSpaces.value = []
   mockSpacesLoading.value = false
   mockActiveSpaceId.value = null
   mockPendingCount.value = 0
+  mockGetMessages.mockReturnValue([])
   localStorage.clear()
   const { clearSpaceTimeline } = await import('../../composables/useSpaceTimeline')
   clearSpaceTimeline('space-a')
@@ -631,6 +635,78 @@ describe('App', () => {
       // appError should be set; check for retry button
       const html = w.html()
       expect(html).toContain('Retry connection')
+    })
+  })
+
+  // ── Cmd+K global search ───────────────────────────────────────────────────
+
+  describe('Cmd+K global search', () => {
+    const SPACE_ID = 'space-eng'
+
+    afterEach(() => {
+      clearSpaceTimeline(SPACE_ID)
+    })
+
+    async function openSearchAndType(w: ReturnType<typeof mountApp>, query: string) {
+      dispatchKey('k', { metaKey: true })
+      await nextTick()
+      const input = w.find('[data-testid="global-search-input"]')
+      expect(input.exists()).toBe(true)
+      await input.setValue(query)
+      await nextTick()
+    }
+
+    it('navigates a space-backed message hit to /space/:spaceId (not /chat/:sessionId)', async () => {
+      const tl = useSpaceTimeline(SPACE_ID)
+      tl.getState().messages.push({
+        id: 'msg-space-1',
+        session_id: 'sess-channel',
+        seq: 1,
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'please deploy the hotfix',
+        agent: '',
+      })
+
+      const w = mountApp()
+      await flushPromises()
+      // Spaces must be set after mount: App.vue's immediate spaces watcher
+      // hits a TDZ if the list is already populated during setup.
+      mockSpaces.value = [
+        { id: SPACE_ID, name: 'engineering', kind: 'channel', leadAgent: 'atlas', memberAgents: [], icon: '', color: '#58a6ff', unseenCount: 0 },
+      ]
+      await nextTick()
+      await openSearchAndType(w, 'hotfix')
+
+      const result = w.find('[data-testid="global-search-result"]')
+      expect(result.exists()).toBe(true)
+      await result.trigger('click')
+      await nextTick()
+
+      expect(mockRouterPush).toHaveBeenCalledWith(`/space/${SPACE_ID}`)
+      expect(mockRouterPush).not.toHaveBeenCalledWith('/chat/sess-channel')
+    })
+
+    it('keeps session-only hits on /chat/:sessionId', async () => {
+      mockSessions.value = [
+        { id: 'sess-legacy', title: 'Scratch', agent_id: 'default', state: 'idle', created_at: '', updated_at: '' },
+      ]
+      mockFormatSessionLabel.mockImplementation((s: any) => s.title || s.id)
+      mockGetMessages.mockImplementation((id: string) => {
+        if (id !== 'sess-legacy') return []
+        return [{ id: 'msg-legacy', role: 'user', content: 'scratch pad notes', agent: '' }]
+      })
+
+      const w = mountApp()
+      await flushPromises()
+      await openSearchAndType(w, 'scratch')
+
+      const result = w.find('[data-testid="global-search-result"]')
+      expect(result.exists()).toBe(true)
+      await result.trigger('click')
+      await nextTick()
+
+      expect(mockRouterPush).toHaveBeenCalledWith('/chat/sess-legacy')
     })
   })
 })
