@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Stats and Settings routes keep the Channels/DMs sidebar visible instead of unmounting the context panel
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
