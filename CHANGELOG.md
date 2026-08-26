@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Chat sidebar no longer flashes “No channels yet” / “No agents configured” while spaces are still loading
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

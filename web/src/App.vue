@@ -339,7 +339,7 @@
               </div>
 
               <template v-if="channelSectionOpen || sidebarSearch">
-                <div v-if="filteredChannels.length === 0" class="px-4 pb-1">
+                <div v-if="filteredChannels.length === 0 && !spacesLoading" class="px-4 pb-1">
                   <p class="text-[11px] text-huginn-muted/35 italic pl-4">{{ sidebarSearch ? 'No matches' : 'No channels yet' }}</p>
                 </div>
                 <button
@@ -438,7 +438,7 @@
               </button>
 
               <template v-if="dmSectionOpen || sidebarSearch">
-                <div v-if="filteredDMs.length === 0" class="px-4 pb-1">
+                <div v-if="filteredDMs.length === 0 && !spacesLoading" class="px-4 pb-1">
                   <p class="text-[11px] text-huginn-muted/35 italic pl-4">{{ sidebarSearch ? 'No matches' : 'No agents configured' }}</p>
                 </div>
                 <button

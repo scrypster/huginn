@@ -33,7 +33,9 @@ const ACTIVE_SPACE_KEY = 'huginn_active_space_id'
 // Module-level shared state
 const spaces = ref<Space[]>([])
 const activeSpaceId = ref<string | null>(localStorage.getItem(ACTIVE_SPACE_KEY))
-const loading = ref(false)
+// Start true so the chat sidebar does not flash empty-state copy before the
+// first fetchSpaces() (initApp only calls it after token/WS/sessions).
+const loading = ref(true)
 const error = ref<string | null>(null)
 const spaceSessionsMap = ref<Record<string, unknown[]>>({})
 
