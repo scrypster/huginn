@@ -160,7 +160,7 @@
 
           <!-- Agents chip (space context) -->
           <button v-if="activeSpace"
-            @click="toggleMemberPanel()"
+            @click="activeSpace.kind === 'channel' ? (rosterOpen = true) : toggleMemberPanel()"
             class="flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs transition-all duration-150 hover:bg-huginn-surface active:scale-95"
             style="border:1px solid rgba(255,255,255,0.08)"
             title="Manage agents"

@@ -937,6 +937,55 @@ describe('ChatView', () => {
     expect(avatarText).toContain('R')
   })
 
+  it('Manage agents chip: mounts AgentRosterModal on a channel space', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Lead', model: 'gpt-4', color: '#58A6FF', icon: 'L', is_default: true },
+      { name: 'Helper', model: 'claude-3', color: '#3FB950', icon: 'H', is_default: false },
+    ])
+    mockActiveSpace.value = {
+      id: 'space-1',
+      name: 'Test Space',
+      kind: 'channel',
+      leadAgent: 'Lead',
+      memberAgents: ['Lead', 'Helper'],
+    }
+
+    const wrapper = mountChatView()
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(false)
+
+    const manageBtn = wrapper.find('button[title="Manage agents"]')
+    expect(manageBtn.exists()).toBe(true)
+    await manageBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(true)
+  })
+
+  it('Manage agents chip: does not mount AgentRosterModal on a DM space', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'atlas', model: 'gpt-4', color: '#58A6FF', icon: 'A', is_default: true },
+    ])
+    mockActiveSpace.value = {
+      id: 'dm-1',
+      name: 'atlas',
+      kind: 'dm',
+      leadAgent: 'atlas',
+      memberAgents: ['atlas'],
+    }
+
+    const wrapper = mountChatView()
+    await flushPromises()
+
+    const manageBtn = wrapper.find('button[title="Manage agents"]')
+    expect(manageBtn.exists()).toBe(true)
+    await manageBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(false)
+  })
+
   it('space agent preview: shows +N overflow when more than 3 agents', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []

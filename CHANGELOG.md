@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Channel header "N agents / Manage agents" chip now opens the agent roster modal (add, remove, set lead) instead of only the read-only member panel; DMs stay read-only and the panel chevron still toggles the rail
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
