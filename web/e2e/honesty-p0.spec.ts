@@ -111,6 +111,12 @@ test.describe('P0 honesty', () => {
     await expect(versionRow).not.toContainText('vv0.4.0')
     await page.screenshot({ path: `${ARTIFACTS}/honesty_version_badge.png` })
 
+    await page.goto('/#/stats')
+    const statsVersion = page.getByTestId('stats-server-version')
+    await expect(statsVersion).toHaveText('v0.4.0-try-all')
+    await expect(statsVersion).not.toContainText('vv')
+    await page.screenshot({ path: `${ARTIFACTS}/honesty_stats_server_version.png`, fullPage: true })
+
     await page.goto('/#/agents/new')
     await expect(page.getByText('Unsaved changes')).toHaveCount(0)
     await expect(page.getByTestId('delete-agent-btn')).toHaveCount(0)

@@ -55,7 +55,7 @@
             <div class="flex items-center gap-2">
               <button @click.stop="openUsageModal(skill)" class="text-xs font-semibold text-huginn-text hover:text-huginn-blue transition-colors text-left">{{ skill.name }}</button>
               <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">
-                v{{ skill.version }}
+                {{ formatVersionLabel('v' + (skill.version || '')) }}
               </span>
               <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border"
                 :class="skill.source === 'registry' ? 'text-huginn-blue border-huginn-blue/30' : 'text-huginn-muted'">
@@ -459,7 +459,7 @@
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2">
                           <span class="text-xs font-medium text-huginn-text group-hover:text-huginn-blue transition-colors">{{ skill.display_name || skill.name }}</span>
-                          <span class="text-[10px] text-huginn-muted">v{{ skill.version }}</span>
+                          <span class="text-[10px] text-huginn-muted">{{ formatVersionLabel('v' + (skill.version || '')) }}</span>
                         </div>
                         <p class="text-[11px] text-huginn-muted mt-0.5 leading-relaxed">{{ skill.description }}</p>
                         <div v-if="(skill.tags ?? []).length" class="flex flex-wrap gap-1 mt-1.5">
@@ -495,7 +495,7 @@
                     <div class="flex items-center gap-2 mb-2 flex-wrap">
                       <span class="text-[10px] px-2 py-0.5 rounded border font-medium"
                         :class="authorBadgeClass(selectedSkillItem.author)">{{ selectedSkillItem.author }}</span>
-                      <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">v{{ selectedSkillItem.version }}</span>
+                      <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">{{ formatVersionLabel('v' + (selectedSkillItem.version || '')) }}</span>
                       <span v-if="selectedSkillItem.category" class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">{{ selectedSkillItem.category }}</span>
                     </div>
                     <h1 class="text-xl font-bold text-huginn-text leading-tight">{{ selectedSkillItem.display_name || selectedSkillItem.name }}</h1>
@@ -828,6 +828,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { type InstalledSkill, type RegistrySkill, type RegistryCollection, useInstalledSkills, useRegistrySkills, createSkill } from '../composables/useSkills'
 import { api } from '../composables/useApi'
+import { formatVersionLabel } from '../utils/honesty'
 
 const props = defineProps<{ tab?: string }>()
 const router = useRouter()

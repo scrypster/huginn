@@ -11,7 +11,7 @@ All notable changes to Huginn are documented here.
 - Channel sidebar previews stay plaintext so `snake_case` and `TOOL_FAIL` keep their underscores
 - New-agent form no longer opens as "Unsaved changes" or offers Delete
 - Parked Memory (empty vaults / disconnected) no longer badges agent cards or the channel header
-- Version badge collapses `vv0.4.0-try-all` to `v0.4.0-try-all`
+- Version badge collapses `vv0.4.0-try-all` to `v0.4.0-try-all` (About, profile popover, and Stats SERVER — no extra `v` prefix)
 
 ## [0.4.0] - 2026-06-10
 
