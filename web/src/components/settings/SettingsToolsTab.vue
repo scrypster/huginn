@@ -5,7 +5,6 @@
       <SettingsToggleRow
         :model-value="!!form.tools_enabled"
         label="Tools enabled (TUI / CLI)"
-        :hint="TOOLS_ENABLED_SERVE_HINT"
         @update:model-value="setBoolean('tools_enabled', $event)"
       />
       <p
