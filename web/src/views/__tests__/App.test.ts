@@ -46,6 +46,7 @@ vi.mock('../../composables/useNotifications', () => ({
 const mockSpaces      = ref<any[]>([])
 const mockChannels    = ref<any[]>([])
 const mockDms         = ref<any[]>([])
+const mockSpacesLoading = ref(false)
 const mockActiveSpaceId = ref<string | null>(null)
 const mockFetchSpaces = vi.fn().mockResolvedValue(undefined)
 const mockSetActiveSpace = vi.fn()
@@ -62,7 +63,7 @@ vi.mock('../../composables/useSpaces', () => ({
     channels: mockChannels,
     dms: mockDms,
     activeSpaceId: mockActiveSpaceId,
-    loading: ref(false),
+    loading: mockSpacesLoading,
     error: ref(null),
     fetchSpaces: mockFetchSpaces,
     setActiveSpace: mockSetActiveSpace,
@@ -218,6 +219,7 @@ beforeEach(async () => {
   mockChannels.value = []
   mockDms.value = []
   mockSpaces.value = []
+  mockSpacesLoading.value = false
   mockActiveSpaceId.value = null
   mockPendingCount.value = 0
   localStorage.clear()
@@ -393,6 +395,23 @@ describe('App', () => {
       const w = mountApp()
       await flushPromises()
       expect(w.html()).toContain('9+')
+    })
+  })
+
+  // ── Spaces loading empty states ───────────────────────────────────────────
+
+  describe('spaces loading empty states', () => {
+    it('does not show italic empty copy while spacesLoading is true and lists are empty', async () => {
+      mockSpacesLoading.value = true
+      mockChannels.value = []
+      mockDms.value = []
+
+      const w = mountApp()
+      await flushPromises()
+
+      const html = w.html()
+      expect(html).not.toContain('No channels yet')
+      expect(html).not.toContain('No agents configured')
     })
   })
 
