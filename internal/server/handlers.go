@@ -784,7 +784,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			}
 			if buf.Len() > 0 {
 				if appendErr := s.store.Append(sess, session.SessionMessage{
-					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
+					ID: session.NewID(), Role: "assistant", Content: backend.VisibleAssistantContent(buf.String()), Agent: agentName, Ts: time.Now().UTC(),
 				}); appendErr != nil {
 					slog.Error("handleSendMessage: failed to persist assistant message", "session_id", id, "err", appendErr)
 				}

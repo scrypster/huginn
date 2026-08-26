@@ -55,6 +55,18 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]any) ToolResult 
 		return ToolResult{IsError: true, Error: "bash: 'command' argument required"}
 	}
 
+	// bash --norc --noprofile -c still expands ~ when HOME is set, but the
+	// agent session remaps HOME to an empty temp dir. Models write `ls ~`
+	// meaning the user's home; without expanding here that listing is
+	// silently empty (or looks like a missing directory). Expand ~ / $HOME
+	// in the command string the way a shell does. If we cannot, fail loud
+	// instead of returning empty-success.
+	expanded, expErr := expandHomeInCommand(command)
+	if expErr != nil {
+		return ToolResult{IsError: true, Error: expErr.Error()}
+	}
+	command = expanded
+
 	timeout := t.Timeout
 	if timeout == 0 {
 		timeout = 120 * time.Second

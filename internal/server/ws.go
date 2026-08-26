@@ -1397,6 +1397,12 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		emit(WSMessage{Type: "token", Content: token})
 	}
 	onEvent := func(ev backend.StreamEvent) {
+		// StreamDone is an internal backend signal. parseSSE emits it at the
+		// end of each ChatCompletion; forwarding it as a client "done"
+		// (no run_id) closes the space-timeline stream-row early.
+		if ev.Type == backend.StreamDone {
+			return
+		}
 		emit(streamEventToWS(ev, sessionID))
 		// Capture tool results so they're persisted with the assistant message.
 		if ev.Type == backend.StreamToolResult && ev.Payload != nil {
@@ -1514,7 +1520,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			assistantMsg := session.SessionMessage{
 				ID:        assistantMsgID,
 				Role:      "assistant",
-				Content:   assistantBuf.String(),
+				Content:   backend.VisibleAssistantContent(assistantBuf.String()),
 				Agent:     agentName,
 				Ts:        time.Now().UTC(),
 				ToolCalls: collectedToolCalls,

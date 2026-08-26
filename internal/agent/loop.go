@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
@@ -407,15 +408,31 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	result := &LoopResult{}
 
 	var consecutiveParseFailures int
+	var denied atomic.Bool
+	origDenied := cfg.OnPermissionDenied
+	cfg.OnPermissionDenied = func(name string) {
+		denied.Store(true)
+		if origDenied != nil {
+			origDenied(name)
+		}
+	}
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
 
+		// Gate OnToken so backends/mocks that stream raw JSON-in-content never
+		// paint harness JSON. parseSSE already Finish-es leftover prose; do
+		// not Finish again after ChatCompletion.
+		tokenGate := backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
+		onToken := cfg.OnToken
+		if tokenGate != nil {
+			onToken = tokenGate.OnToken
+		}
 		chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
 			Model:    cfg.ModelName,
 			Messages: messages,
 			Tools:    cfg.ToolSchemas,
-			OnToken:  cfg.OnToken,
+			OnToken:  onToken,
 			OnEvent:  cfg.OnEvent,
 		})
 		if err != nil {
@@ -432,6 +449,17 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			result.StopReason = "error"
 			result.Messages = messages
 			return result, fmt.Errorf("turn %d: backend returned nil response without error", turn+1)
+		}
+
+		// Local Qwen/Ollama models sometimes put a lone function-call JSON
+		// object in content instead of structured tool_calls. Promote it so
+		// the loop executes the grant instead of treating it as a final answer.
+		backend.PromoteContentToolCalls(chatResult)
+		backend.RevealContentToolCalls(chatResult)
+		if denied.Load() {
+			// After a deny the model often dumps another tool JSON into
+			// content (not always leading). That must not be user-visible.
+			chatResult.Content = backend.VisibleAssistantContentAfterDeny(chatResult.Content)
 		}
 
 		// Append assistant response to history

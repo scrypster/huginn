@@ -360,6 +360,8 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 	tcFragments := map[int]*ToolCall{}
 	// accumulate raw argument JSON fragments per tool call index
 	argsBuilders := map[int]*strings.Builder{}
+	// Hold back JSON-in-content tool prefixes so they never paint in the bubble.
+	tokenGate := NewContentToolCallTokenGate(req.OnToken, req.OnEvent)
 
 	sawDone := false
 
@@ -402,16 +404,19 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 		}
 		choice := chunk.Choices[0]
 
-		// Text token
+		// Text token — accumulate raw content for promotion, but only emit
+		// user-visible remainder (tool-call JSON prefixes are held back).
 		if choice.Delta.Content != "" {
 			result.Content += choice.Delta.Content
-			// Emit StreamEvent if OnEvent is set
-			if req.OnEvent != nil {
-				req.OnEvent(StreamEvent{Type: StreamText, Content: choice.Delta.Content})
-			}
-			// Call OnToken for backward compat (always, regardless of OnEvent)
-			if req.OnToken != nil {
-				req.OnToken(choice.Delta.Content)
+			if tokenGate != nil {
+				tokenGate.Push(choice.Delta.Content)
+			} else {
+				if req.OnEvent != nil {
+					req.OnEvent(StreamEvent{Type: StreamText, Content: choice.Delta.Content})
+				}
+				if req.OnToken != nil {
+					req.OnToken(choice.Delta.Content)
+				}
 			}
 		}
 
@@ -443,11 +448,6 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 		}
 	}
 
-	// Emit StreamDone event after stream completes
-	if req.OnEvent != nil {
-		req.OnEvent(StreamEvent{Type: StreamDone})
-	}
-
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading SSE stream: %w", err)
 	}
@@ -477,6 +477,17 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 			}
 		}
 		result.ToolCalls = append(result.ToolCalls, *tc)
+	}
+
+	// qwen2.5-coder:14b (Ollama) often returns finish_reason=stop with a
+	// function-call JSON object in content and no structured tool_calls.
+	PromoteContentToolCalls(result)
+	// Mixed JSON+prose (and native tool_calls plus a JSON echo) must not
+	// keep the invocation object in user-visible Content.
+	RevealContentToolCalls(result)
+	tokenGate.Finish(result.Content)
+	if req.OnEvent != nil {
+		req.OnEvent(StreamEvent{Type: StreamDone})
 	}
 
 	return result, nil

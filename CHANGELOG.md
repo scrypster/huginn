@@ -4,6 +4,10 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **bash `~` / `$HOME`** — the bash tool now expands `~` and `$HOME` in the command string the way a shell does (process home, not the session temp HOME). `ls ~` lists the real home (or a test fake home). If home cannot be resolved, the tool returns a loud expansion error instead of empty-success.
+- **Permission-deny leftover JSON** — after a tool is denied, leftover harness JSON such as `{"name":"gh_issue_create",...}` is stripped from VisibleAssistantContent and oneshot `agentOutput` so it never appears in the visible answer.
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
