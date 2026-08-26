@@ -1519,6 +1519,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 				Ts:        time.Now().UTC(),
 				ToolCalls: collectedToolCalls,
 			}
+			s.applyKnownUsage(&assistantMsg, sessionID, persistModelName(sess, ag))
 			if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
 				logger.Error("ws chat: failed to persist assistant message", "session_id", sessionID, "err", appendErr)
 			}

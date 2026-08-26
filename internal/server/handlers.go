@@ -20,6 +20,7 @@ import (
 	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
@@ -772,8 +773,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// Persist user + assistant messages and emit space_activity.
 	if s.store != nil {
 		if sess, loadErr := s.store.Load(id); loadErr == nil {
+			ag := s.resolveAgent(id)
 			agentName := ""
-			if ag := s.resolveAgent(id); ag != nil {
+			if ag != nil {
 				agentName = ag.Name
 			}
 			now := time.Now().UTC()
@@ -783,9 +785,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
 			}
 			if buf.Len() > 0 {
-				if appendErr := s.store.Append(sess, session.SessionMessage{
+				assistantMsg := session.SessionMessage{
 					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
-				}); appendErr != nil {
+				}
+				s.applyKnownUsage(&assistantMsg, id, persistModelName(sess, ag))
+				if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
 					slog.Error("handleSendMessage: failed to persist assistant message", "session_id", id, "err", appendErr)
 				}
 			}
@@ -976,11 +980,58 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	prompt, completion := s.orch.LastUsage()
+	var prompt, completion any
+	if s.orch != nil {
+		p, c := s.orch.LastUsage()
+		if p > 0 || c > 0 {
+			prompt, completion = p, c
+		}
+	}
 	jsonOK(w, map[string]any{
 		"last_prompt_tokens":     prompt,
 		"last_completion_tokens": completion,
 	})
+}
+
+func persistModelName(sess *session.Session, ag *agents.Agent) string {
+	if ag != nil {
+		if id := ag.GetModelID(); id != "" {
+			return id
+		}
+	}
+	if sess != nil {
+		return sess.Manifest.Model
+	}
+	return ""
+}
+
+// applyKnownUsage stamps LastUsage onto the assistant message and records it
+// for cost_history when the backend reported tokens. A 0/0 usage is treated
+// as unknown — a lying zero is worse than a gap.
+func (s *Server) applyKnownUsage(msg *session.SessionMessage, sessionID, model string) {
+	if s.orch == nil || msg == nil {
+		return
+	}
+	prompt, completion := s.orch.LastUsage()
+	if prompt == 0 && completion == 0 {
+		return
+	}
+	msg.PromptTok = prompt
+	msg.CompTok = completion
+	if model != "" {
+		msg.ModelName = model
+	}
+	if s.ca != nil {
+		s.ca.Record(sessionID, prompt, completion, model)
+		return
+	}
+	if s.statsPersister != nil {
+		s.statsPersister.EnqueueCost(stats.CostEvent{
+			SessionID:        sessionID,
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+		})
+	}
 }
 
 // handleGetLogLevel returns the current log level.

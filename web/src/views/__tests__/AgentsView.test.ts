@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
 // We need to stub useAgents so we can control the agents list.
@@ -117,6 +118,20 @@ describe('AgentsView', () => {
     await wrapper.find('[data-testid="agent-card"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/space/space-123')
+  })
+
+  it('/agents/new has no delete button and no unsaved bar on mount', async () => {
+    await router.push('/agents/new')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'new' },
+    })
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('[data-testid="delete-agent-btn"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Unsaved changes')
   })
 
   it('openDM falls back to /agents/:name if DM fetch fails', async () => {

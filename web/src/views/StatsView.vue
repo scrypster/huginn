@@ -55,11 +55,11 @@
           <div class="grid grid-cols-2 gap-3">
             <div class="rounded-xl border border-huginn-border bg-huginn-surface/50 px-4 py-4">
               <p class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest mb-1">Prompt Tokens</p>
-              <p class="text-2xl font-semibold text-huginn-text">{{ (statsData.last_prompt_tokens ?? 0).toLocaleString() }}</p>
+              <p data-testid="last-prompt-tokens" class="text-2xl font-semibold text-huginn-text">{{ formatTokens(statsData.last_prompt_tokens) }}</p>
             </div>
             <div class="rounded-xl border border-huginn-border bg-huginn-surface/50 px-4 py-4">
               <p class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest mb-1">Completion Tokens</p>
-              <p class="text-2xl font-semibold text-huginn-text">{{ (statsData.last_completion_tokens ?? 0).toLocaleString() }}</p>
+              <p data-testid="last-completion-tokens" class="text-2xl font-semibold text-huginn-text">{{ formatTokens(statsData.last_completion_tokens) }}</p>
             </div>
           </div>
         </section>
@@ -176,7 +176,7 @@ interface RankedItem {
   count: number
 }
 
-const statsData = ref<Record<string, number>>({})
+const statsData = ref<Record<string, number | null>>({})
 const costData = ref<{ session_total_usd: number } | null>(null)
 const healthData = ref<{ status: string; version: string; satellite_connected: boolean; backend_status: string } | null>(null)
 const sessionsData = ref<SessionManifest[]>([])
@@ -200,6 +200,11 @@ const formattedCost = computed(() => {
   if (!val) return '—'
   return `$${val.toFixed(4)}`
 })
+
+function formatTokens(n: number | null | undefined): string {
+  if (typeof n !== 'number') return '—'
+  return n.toLocaleString()
+}
 
 function groupBy(field: keyof SessionManifest): RankedItem[] {
   const counts: Record<string, number> = {}
@@ -235,7 +240,7 @@ async function fetchAll() {
   try {
     const since24h = Math.floor(Date.now() / 1000) - 86400
     const [s, c, h, sess, hist] = await Promise.all([
-      api.stats().catch(() => ({} as Record<string, number>)),
+      api.stats().catch(() => ({} as Record<string, number | null>)),
       api.cost().catch(() => null),
       api.health().catch(() => null),
       api.sessions.list().catch(() => [] as Array<Record<string, unknown>>),

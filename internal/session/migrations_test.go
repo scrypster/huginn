@@ -11,8 +11,8 @@ import (
 
 func TestMigrationsRegistered(t *testing.T) {
 	migs := session.Migrations()
-	if len(migs) != 9 {
-		t.Fatalf("expected 9 migrations, got %d", len(migs))
+	if len(migs) != 10 {
+		t.Fatalf("expected 10 migrations, got %d", len(migs))
 	}
 }
 
@@ -25,7 +25,14 @@ func TestMemoryReplicationQueueTableCreated(t *testing.T) {
 
 	// Create minimal stub tables that migrations depend on
 	stubs := []string{
-		`CREATE TABLE sessions (id TEXT PRIMARY KEY, space_id TEXT, title TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			space_id TEXT,
+			title TEXT NOT NULL DEFAULT '',
+			message_count INTEGER NOT NULL DEFAULT 0,
+			last_message_id TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE messages (
 			id TEXT NOT NULL PRIMARY KEY,
 			container_type TEXT NOT NULL DEFAULT 'session',
@@ -271,5 +278,87 @@ func TestConnectionsRefreshErrorMigration_AddsColumns(t *testing.T) {
 	}
 	if lastErr != "token expired" {
 		t.Fatalf("last_refresh_error = %q, want %q", lastErr, "token expired")
+	}
+}
+
+func TestMessageCountBackfill_RecoversFrozenSessions(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT '',
+			message_count INTEGER NOT NULL DEFAULT 0,
+			last_message_id TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE messages (
+			id TEXT NOT NULL PRIMARY KEY,
+			container_type TEXT NOT NULL,
+			container_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			ts TEXT NOT NULL DEFAULT ''
+		);
+	`); err != nil {
+		t.Fatalf("create tables: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO sessions (id, title, created_at, updated_at, message_count, last_message_id)
+		VALUES ('sess-1', 'frozen', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, '')
+	`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO messages (id, container_type, container_id, seq, ts) VALUES
+			('m1', 'session', 'sess-1', 1, '2026-01-01T00:01:00Z'),
+			('m2', 'session', 'sess-1', 2, '2026-01-01T00:02:00Z'),
+			('t1', 'thread', 'thr-1', 1, '2026-01-01T00:03:00Z')
+	`); err != nil {
+		t.Fatalf("seed messages: %v", err)
+	}
+
+	var migrationFound bool
+	for _, m := range session.Migrations() {
+		if m.Name != "sessions_message_count_backfill_v1" {
+			continue
+		}
+		migrationFound = true
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := m.Up(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("backfill: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		break
+	}
+	if !migrationFound {
+		t.Fatal("sessions_message_count_backfill_v1 migration not registered")
+	}
+
+	var count int
+	var lastID, updatedAt string
+	if err := db.QueryRow(`
+		SELECT message_count, last_message_id, updated_at FROM sessions WHERE id = 'sess-1'
+	`).Scan(&count, &lastID, &updatedAt); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("message_count = %d, want 2 (thread rows must not count)", count)
+	}
+	if lastID != "m2" {
+		t.Fatalf("last_message_id = %q, want m2", lastID)
+	}
+	if updatedAt != "2026-01-01T00:02:00Z" {
+		t.Fatalf("updated_at = %q, want last session message ts", updatedAt)
 	}
 }

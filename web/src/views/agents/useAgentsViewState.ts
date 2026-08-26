@@ -349,6 +349,18 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
 
   function markDirty() { dirty.value = true }
 
+  function onColorInputChange() {
+    if (original.value) {
+      try {
+        const orig = JSON.parse(original.value) as { color?: string }
+        if (orig.color === form.value.color) return
+      } catch {
+        // fall through and mark dirty
+      }
+    }
+    markDirty()
+  }
+
   const memoryModes: { value: MemoryMode; label: string; description: string; behaviors: string[] }[] = [
     {
       value: 'passive',
@@ -954,6 +966,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     router.push('/agents/new')
   }
 
+  const isNewAgent = computed(() => agentName.value === 'new')
+
   watch(agentName, (name) => {
     showDeleteConfirm.value = false
     if (name && name !== 'new') {
@@ -981,8 +995,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           heartbeat_enabled: false,
           heartbeat_cron: '',
         }
-        original.value = ''
-        dirty.value = true
+        original.value = JSON.stringify(form.value)
+        dirty.value = false
       }
     }
   }, { immediate: true })
@@ -1082,6 +1096,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     detectProvider,
     selectModel,
     markDirty,
+    onColorInputChange,
     loadMuninnInfo,
     pollVaultHealth,
     startVaultHealthPolling,
@@ -1125,6 +1140,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     confirmDelete,
     deleteAgent,
     createNew,
+    isNewAgent,
     onVisibilityChange,
     onWindowFocus,
     onKeydown,

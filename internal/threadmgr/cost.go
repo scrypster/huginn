@@ -74,7 +74,7 @@ func (ca *CostAccumulator) Record(threadID string, promptTokens, completionToken
 	sink := ca.sink
 	ca.mu.Unlock()
 
-	if sink != nil && cost > 0 {
+	if sink != nil && (promptTokens > 0 || completionTokens > 0) {
 		sink(threadID, cost, promptTokens, completionTokens)
 	}
 }

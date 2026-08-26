@@ -1783,8 +1783,10 @@ components:
       properties:
         last_prompt_tokens:
           type: integer
+          nullable: true
         last_completion_tokens:
           type: integer
+          nullable: true
       additionalProperties: true
     CostResponse:
       type: object

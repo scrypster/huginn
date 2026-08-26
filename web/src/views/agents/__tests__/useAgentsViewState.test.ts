@@ -94,6 +94,24 @@ beforeEach(() => {
 })
 
 describe('useAgentsViewState', () => {
+  it('new agent form is not dirty and hides as existing', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+    expect(state.dirty.value).toBe(false)
+    expect(state.isNewAgent.value).toBe(true)
+  })
+
+  it('color input change matching the default does not mark dirty', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+    expect(state.dirty.value).toBe(false)
+    state.onColorInputChange()
+    expect(state.dirty.value).toBe(false)
+    state.form.value.color = '#111111'
+    state.onColorInputChange()
+    expect(state.dirty.value).toBe(true)
+  })
+
   it('openDM routes to DM space when lookup succeeds', async () => {
     mockApiFetch.mockResolvedValueOnce({ id: 'space-123' })
     const { state } = mountHarness()

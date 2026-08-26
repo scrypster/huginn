@@ -4,6 +4,10 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Settings → Stats no longer reports 0 messages / 0 tokens when transcripts exist: `Append` persists `message_count` / `last_message_id` / `updated_at` with the message, existing sessions are backfilled from `messages`, token usage is stamped on the assistant row and written to `cost_history` when known, and Last LLM Call shows "—" instead of a fake 0
+- New-agent form no longer opens as "Unsaved changes" (color picker first-paint `@change`) and hides Delete
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

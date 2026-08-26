@@ -90,6 +90,27 @@ func TestCostAccumulator_Total_ReturnsSessionTotal(t *testing.T) {
 	}
 }
 
+func TestCostAccumulator_ZeroCostKnownUsageFiresSink(t *testing.T) {
+	ca := NewCostAccumulator(0)
+	var promptTok, completionTok int
+	var calls int
+	ca.SetCostSink(func(_ string, costUSD float64, prompt, completion int) {
+		calls++
+		if costUSD != 0 {
+			t.Errorf("costUSD = %f, want 0 for unpriced model", costUSD)
+		}
+		promptTok = prompt
+		completionTok = completion
+	})
+	ca.Record("sess-1", 42, 9, "llama3:8b")
+	if calls != 1 {
+		t.Fatalf("sink calls = %d, want 1 when tokens are known even if cost is $0", calls)
+	}
+	if promptTok != 42 || completionTok != 9 {
+		t.Fatalf("sink tokens = %d/%d, want 42/9", promptTok, completionTok)
+	}
+}
+
 func TestCostAccumulator_ZeroBudgetNeverBlocks(t *testing.T) {
 	ca := NewCostAccumulator(0) // 0 = unlimited
 	ca.Record("t-1", 999_999_999, 999_999_999, "claude-opus-4")
