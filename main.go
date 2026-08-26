@@ -41,6 +41,7 @@ import (
 	modelslib "github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notepad"
 	"github.com/scrypster/huginn/internal/notification"
+	"github.com/scrypster/huginn/internal/oneshot"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/pricing"
 	"github.com/scrypster/huginn/internal/proactivity"
@@ -273,37 +274,32 @@ func main() {
 			Command: *commandFlag,
 			JSON:    *jsonFlag,
 		}
-		// When --print is also set, wire the agent runner so the headless pipeline
-		// runs the prompt and includes the output in the result (fixes mutual exclusion bug).
+		// When --print is also set, run the agentic tool loop (oneshot / RunLoop)
+		// so leftover harness JSON after a deny is stripped from agentOutput.
 		if *printFlag != "" {
 			hcfg.Prompt = *printFlag
 			hcfg.Agent = *agentFlag
-			endpoint := cfg.Backend.Endpoint
-			if *endpointFlag != "" {
-				endpoint = *endpointFlag
-			}
-			if endpoint == "" {
-				endpoint = "http://localhost:11434"
-			}
-			hlBackend := backend.NewExternalBackend(endpoint)
-			hlModels := modelconfig.DefaultModels()
-			hlOrch, orchErr := agent.NewOrchestrator(hlBackend, hlModels, nil, nil, nil, nil)
-			if orchErr != nil {
-				fatalf("headless: orchestrator init: %v", orchErr)
+			hlBackend, hlModels, hlErr := selectBackend(context.Background(), cfg, *endpointFlag, *modelFlag)
+			if hlErr != nil {
+				fatalf("backend: %v", hlErr)
 			}
 			hcfg.AgentRun = func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
-				var buf strings.Builder
-				var toolsCalled []string
-				chatErr := hlOrch.Chat(ctx, prompt, func(token string) {
-					buf.WriteString(token)
-				}, func(ev backend.StreamEvent) {
-					if ev.Type == backend.StreamToolCall {
-						if name, ok := ev.Payload["tool"].(string); ok && name != "" {
-							toolsCalled = append(toolsCalled, name)
-						}
-					}
-				})
-				return buf.String(), toolsCalled, 0, chatErr
+				res, runErr := oneshot.Run(ctx, newOneShotConfig(oneshotRunOpts{
+					prompt:          prompt,
+					agentName:       agentName,
+					model:           *modelFlag,
+					noTools:         *noToolsFlag,
+					skipPermissions: *dangerouslySkipPermissions,
+					maxTurns:        *maxTurnsFlag,
+					cwd:             cwd,
+					bashTimeoutSecs: cfg.BashTimeoutSecs,
+					backend:         hlBackend,
+					models:          hlModels,
+				}))
+				if runErr != nil {
+					return "", nil, 0, runErr
+				}
+				return res.AgentOutput, oneshotToolNames(res.ToolsCalled), 0, nil
 			}
 		}
 		result, err := headless.Run(hcfg)
@@ -326,70 +322,38 @@ func main() {
 		return
 	}
 
-	// 2c. --print / -p: non-interactive single-turn mode
-	if *printFlag != "" {
+	// 2c. --print / --agent MSG: one-shot agentic loop (no Bubble Tea).
+	// Token gate + VisibleAssistantContentAfterDeny hide leftover harness JSON.
+	printMsg := *printFlag
+	if printMsg == "" && *agentFlag != "" && len(flag.Args()) > 0 {
+		printMsg = strings.Join(flag.Args(), " ")
+	}
+	if printMsg != "" {
 		printBackend, printModels, err := selectBackend(context.Background(), cfg, *endpointFlag, *modelFlag)
 		if err != nil {
 			fatalf("backend: %v", err)
 		}
-		printOrch, err := agent.NewOrchestrator(printBackend, printModels, nil, nil, nil, nil)
-		if err != nil {
-			fatalf("failed to create orchestrator: %v", err)
+		oscfg := newOneShotConfig(oneshotRunOpts{
+			prompt:          printMsg,
+			agentName:       *agentFlag,
+			model:           *modelFlag,
+			noTools:         *noToolsFlag,
+			skipPermissions: *dangerouslySkipPermissions,
+			maxTurns:        *maxTurnsFlag,
+			cwd:             cwd,
+			bashTimeoutSecs: cfg.BashTimeoutSecs,
+			backend:         printBackend,
+			models:          printModels,
+		})
+		if !*jsonFlag {
+			oscfg.OnToken = func(token string) { fmt.Print(token) }
 		}
-		err = printOrch.Chat(context.Background(), *printFlag, func(token string) {
-			fmt.Print(token)
-		}, nil)
-		fmt.Println()
+		res, err := oneshot.Run(context.Background(), oscfg)
 		if err != nil {
 			fatalf("print: %v", err)
 		}
-		return
-	}
-
-	// 2d. --agent non-interactive: huginn --agent Chris "do this task"
-	if *agentFlag != "" && len(flag.Args()) > 0 {
-		agentsCfg, agentsErr := agentslib.LoadAgents()
-		if agentsErr != nil {
-			agentsCfg = agentslib.DefaultAgentsConfig()
-		}
-		agentModels := modelconfig.DefaultModels()
-		agentUsername := memory.ResolveUsername("")
-		agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, agentModels, agentUsername)
-
-		ag, ok := agentReg.ByName(*agentFlag)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown agent %q; available: %s\n",
-				*agentFlag, strings.Join(agentReg.Names(), ", "))
-			os.Exit(1)
-		}
-		if *modelFlag != "" {
-			ag.SwapModel(*modelFlag)
-		}
-		msg := strings.Join(flag.Args(), " ")
-		endpoint := cfg.Backend.Endpoint
-		if *endpointFlag != "" {
-			endpoint = *endpointFlag
-		}
-		if endpoint == "" {
-			endpoint = "http://localhost:11434"
-		}
-		b := backend.NewExternalBackend(endpoint)
-		systemPrompt := ag.SystemPrompt
-		if systemPrompt == "" {
-			systemPrompt = fmt.Sprintf("You are %s, an expert assistant.", ag.Name)
-		}
-		_, err = b.ChatCompletion(context.Background(), backend.ChatRequest{
-			Model: ag.GetModelID(),
-			Messages: []backend.Message{
-				{Role: "system", Content: systemPrompt},
-				{Role: "user", Content: msg},
-			},
-			OnToken: func(token string) { fmt.Print(token) },
-		})
-		fmt.Println()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent error: %v\n", err)
-			os.Exit(1)
+		if err := oneshot.WriteResult(os.Stdout, os.Stderr, res, *jsonFlag, !*jsonFlag); err != nil {
+			fatalf("print: %v", err)
 		}
 		return
 	}
