@@ -36,6 +36,9 @@ type fakeCLI struct {
 	// recorded. exec, not a plain sleep, so the sleeping process IS the one
 	// exec.CommandContext will signal on cancel.
 	hang string
+	// floodBytes emits one line of this many bytes and then writes forever, so
+	// a reader that stops draining leaves the child blocked on a full pipe.
+	floodBytes int
 }
 
 // writeFakeCLI writes a stand-in `claude` that records the exact argv of every
@@ -53,6 +56,10 @@ func writeFakeCLI(t *testing.T, f fakeCLI) (binary, argvFile string) {
 	fmt.Fprintf(&sb, "for a in \"$@\"; do printf '%%s\\n' \"$a\" >> %q; done\n", argvFile)
 	if f.hang != "" {
 		fmt.Fprintf(&sb, "exec sleep %s\n", f.hang)
+	}
+	if f.floodBytes > 0 {
+		fmt.Fprintf(&sb, "awk 'BEGIN{s=\"\";while(length(s)<%d)s=s \"x\";print s}'\n", f.floodBytes)
+		sb.WriteString("while :; do printf 'still writing to a pipe nobody is reading\\n'; done\n")
 	}
 	if f.stderr != "" {
 		fmt.Fprintf(&sb, "printf '%%s\\n' %q >&2\n", f.stderr)
@@ -182,70 +189,74 @@ func TestAgentBackendResumesImmediatelyWhenSessionAlreadyExists(t *testing.T) {
 	}
 }
 
-// If turn 1 never got far enough to create the session, turn 2 must still try
-// to create it — flipping to --resume there wedges the agent the other way.
-func TestAgentBackendKeepsCreatingWhenTheSessionWasNeverCreated(t *testing.T) {
+// The one case that must still CREATE: the CLI was never launched at all, so
+// the single --session-id chance was never spent.
+func TestAgentBackendKeepsCreatingWhenTheCLINeverLaunched(t *testing.T) {
 	cfg := agentBackendCfg(t)
-	bin, argvFile := writeFakeCLI(t, fakeCLI{stderr: "boom: could not start", exit: 1})
-	cfg.Binary = bin
+	cfg.Binary = filepath.Join(t.TempDir(), "definitely-not-here")
 	cfg.FirstTurn = true
 
 	b := NewAgentBackend(cfg)
-	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
-		Messages: []backend.Message{{Role: "user", Content: "one"}},
-	}); err == nil {
-		t.Fatal("want an error from the failing first turn")
-	}
-	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
-		Messages: []backend.Message{{Role: "user", Content: "two"}},
-	}); err == nil {
-		t.Fatal("want an error from the failing second turn")
-	}
-
-	runs := readArgvRuns(t, argvFile)
-	if len(runs) != 2 {
-		t.Fatalf("runs = %d, want 2", len(runs))
-	}
-	for i, r := range runs {
-		if strings.Contains(strings.Join(r, " "), "--resume") {
-			t.Errorf("turn %d resumed a session the CLI never reported creating: %v", i+1, r)
+	for _, msg := range []string{"one", "two"} {
+		if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+			Messages: []backend.Message{{Role: "user", Content: msg}},
+		}); err == nil {
+			t.Fatalf("turn %q: want an error when the binary does not exist", msg)
 		}
+	}
+	if j := strings.Join(b.lastArgs(), " "); strings.Contains(j, "--resume") {
+		t.Errorf("turn 2 resumed a session no launch ever had the chance to create: %v", b.lastArgs())
+	} else if !strings.Contains(j, "--session-id") {
+		t.Errorf("turn 2 should still be creating the session: %v", b.lastArgs())
 	}
 }
 
-// ...but a run that DID report a session id created it, even though it then
-// failed. The next turn must resume rather than collide with it.
-func TestAgentBackendResumesAfterAFailedTurnThatCreatedTheSession(t *testing.T) {
-	cfg := agentBackendCfg(t)
-	bin, argvFile := writeFakeCLI(t, fakeCLI{
-		stream: []string{`{"type":"system","subtype":"init","session_id":"11111111-2222-3333-4444-555555555555"}`},
-		stderr: "died mid-turn",
-		exit:   1,
-	})
-	cfg.Binary = bin
-	cfg.FirstTurn = true
+// Once the CLI has been LAUNCHED with --session-id, that chance is spent and
+// every later turn must resume — however the launch turned out. We cannot tell
+// from out here whether a CLI that died early wrote the session first, and only
+// the wrong --resume is recoverable; a wrong --session-id collides forever.
+func TestAgentBackendResumesAfterAnyLaunchHoweverItEnded(t *testing.T) {
+	cases := []struct {
+		name string
+		cli  fakeCLI
+	}{
+		{"clean exit but no session id anywhere in the stream", fakeCLI{stream: []string{
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`,
+			`{"type":"result","subtype":"success","result":"done"}`,
+		}}},
+		{"killed before it ever emitted its init line", fakeCLI{stderr: "killed", exit: 137}},
+		{"emitted an init line, then died", fakeCLI{
+			stream: []string{`{"type":"system","subtype":"init","session_id":"11111111-2222-3333-4444-555555555555"}`},
+			stderr: "died mid-turn",
+			exit:   1,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := agentBackendCfg(t)
+			bin, argvFile := writeFakeCLI(t, tc.cli)
+			cfg.Binary = bin
+			cfg.FirstTurn = true
 
-	b := NewAgentBackend(cfg)
-	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
-		Messages: []backend.Message{{Role: "user", Content: "one"}},
-	}); err == nil {
-		t.Fatal("want an error from the failing turn")
-	}
-	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
-		Messages: []backend.Message{{Role: "user", Content: "two"}},
-	}); err == nil {
-		t.Fatal("want an error from the second turn too")
-	}
+			b := NewAgentBackend(cfg)
+			for _, msg := range []string{"one", "two"} {
+				_, _ = b.ChatCompletion(context.Background(), backend.ChatRequest{
+					Messages: []backend.Message{{Role: "user", Content: msg}},
+				})
+			}
 
-	runs := readArgvRuns(t, argvFile)
-	if len(runs) != 2 {
-		t.Fatalf("runs = %d, want 2", len(runs))
-	}
-	if strings.Contains(strings.Join(runs[1], " "), "--session-id") {
-		t.Errorf("turn 2 tried to re-create a session the CLI had already reported: %v", runs[1])
-	}
-	if !strings.Contains(strings.Join(runs[1], " "), "--resume") {
-		t.Errorf("turn 2 should resume: %v", runs[1])
+			runs := readArgvRuns(t, argvFile)
+			if len(runs) != 2 {
+				t.Fatalf("runs = %d, want 2: %v", len(runs), runs)
+			}
+			two := strings.Join(runs[1], " ")
+			if strings.Contains(two, "--session-id") {
+				t.Errorf("turn 2 re-spent the one --session-id chance, which fails permanently: %v", runs[1])
+			}
+			if !strings.Contains(two, "--resume "+cfg.SessionID) {
+				t.Errorf("turn 2 should resume: %v", runs[1])
+			}
+		})
 	}
 }
 
@@ -631,14 +642,22 @@ func TestAgentBackendQueuedCallerCanBeCancelled(t *testing.T) {
 
 	b := NewAgentBackend(cfg)
 	hogCtx, stopHog := context.WithCancel(context.Background())
-	defer stopHog()
 	running := make(chan struct{})
+	hogDone := make(chan struct{})
 	go func() {
+		defer close(hogDone)
 		close(running)
 		_, _ = b.ChatCompletion(hogCtx, backend.ChatRequest{
 			Messages: []backend.Message{{Role: "user", Content: "long"}},
 		})
 	}()
+	// Join the hog before the test returns. A goroutine still inside
+	// ChatCompletion after its test finishes races the next test's setup —
+	// caught by -race against the agentScanMaxBytes seam.
+	t.Cleanup(func() {
+		stopHog()
+		<-hogDone
+	})
 	<-running
 	time.Sleep(150 * time.Millisecond) // let the hog take the slot
 
@@ -686,5 +705,82 @@ func TestDefaultGatedToolsProduceAHookForEveryMutatingTool(t *testing.T) {
 		if strings.Contains(settings, `"matcher":"`+never+`"`) {
 			t.Errorf("gated set contains Huginn tool name %q; Claude Code's namespace is Bash/Write/Read/WebFetch: %v", never, DefaultGatedTools)
 		}
+	}
+}
+
+// A scan error stops the reader. If the child is still writing, the pipe fills
+// and Wait blocks until the turn deadline, holding the semaphore and stalling
+// every session on this cached backend. TimeoutSecs is short so a regression
+// fails fast rather than hanging the suite.
+func TestAgentBackendOverlongLineDoesNotWedgeTheTurn(t *testing.T) {
+	prev := agentScanMaxBytes
+	agentScanMaxBytes = 4096
+	t.Cleanup(func() { agentScanMaxBytes = prev })
+
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{floodBytes: 16384})
+	cfg.Binary = bin
+	cfg.TimeoutSecs = 5
+
+	start := time.Now()
+	_, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want an error when a stream line exceeds the scanner limit")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("returned after %s: the turn waited on the deadline instead of killing the child, so the semaphore was held that whole time", elapsed)
+	}
+	// The scan failure must be reported as itself, not as a cancellation: the
+	// relay treats context.Canceled as a user cancel and persists it as such.
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want the scan failure, not a cancellation — our own cleanup cancel must not be mistaken for the caller's", err)
+	}
+	if !strings.Contains(err.Error(), "token too long") {
+		t.Errorf("error = %v, want it to name the scan failure", err)
+	}
+}
+
+// The semaphore must be free for the next turn after the wedge path unwinds.
+func TestAgentBackendRecoversForTheNextTurnAfterAScanError(t *testing.T) {
+	prev := agentScanMaxBytes
+	agentScanMaxBytes = 4096
+	t.Cleanup(func() { agentScanMaxBytes = prev })
+
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{floodBytes: 16384})
+	cfg.Binary = bin
+	cfg.TimeoutSecs = 5
+
+	b := NewAgentBackend(cfg)
+	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "one"}},
+	}); err == nil {
+		t.Fatal("want an error on the first turn")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = b.ChatCompletion(context.Background(), backend.ChatRequest{
+			Messages: []backend.Message{{Role: "user", Content: "two"}},
+		})
+	}()
+	// Registered after the agentScanMaxBytes restore, so LIFO cleanup joins the
+	// goroutine BEFORE the seam is put back. Bounded so a genuine wedge fails
+	// the test rather than hanging cleanup forever.
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+		}
+	})
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the next turn never got the semaphore — the wedged turn never released it")
 	}
 }

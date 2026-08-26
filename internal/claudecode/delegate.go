@@ -46,13 +46,6 @@ type DelegateResult struct {
 	IsError    bool
 	ErrorText  string
 
-	// ReportedSessionID is the session id the CLI itself echoed back, on any
-	// line that carries one. It is the only trustworthy evidence that a
-	// session actually EXISTS on disk: Delegate assigns SessionID up front and
-	// never learns whether the CLI got far enough to create it. AgentBackend
-	// keys its --session-id/--resume decision off this.
-	ReportedSessionID string
-
 	// InputTokens/OutputTokens are accumulated from assistant-line usage.
 	// Output is summed across the run; input is the LAST reported value, since
 	// each assistant message restates the whole context rather than a delta —
@@ -215,15 +208,14 @@ func Delegate(
 // result, total_cost_usd, duration_ms, num_turns, subtype ("success"),
 // session_id, type ("result"). Field names here match that output.
 type streamLine struct {
-	Type      string  `json:"type"`
-	Subtype   string  `json:"subtype"`
-	Result    string  `json:"result"`
-	IsError   bool    `json:"is_error"`
-	Cost      float64 `json:"total_cost_usd"`
-	Duration  int     `json:"duration_ms"`
-	NumTurns  int     `json:"num_turns"`
-	SessionID string  `json:"session_id"`
-	Message   struct {
+	Type     string  `json:"type"`
+	Subtype  string  `json:"subtype"`
+	Result   string  `json:"result"`
+	IsError  bool    `json:"is_error"`
+	Cost     float64 `json:"total_cost_usd"`
+	Duration int     `json:"duration_ms"`
+	NumTurns int     `json:"num_turns"`
+	Message  struct {
 		Content contentBlocks `json:"content"`
 		Usage   struct {
 			InputTokens  int `json:"input_tokens"`
@@ -242,11 +234,6 @@ func applyStreamLine(raw []byte, res *DelegateResult, onEvent func(StreamEvent))
 	// Both are deliberately ignored here — the default switch arm drops any
 	// line type this bridge does not consume, so new line types in future CLI
 	// versions cannot break a delegation.
-	// Recorded regardless of line type: the CLI emits session_id on its
-	// `system`/init line too, which is the earliest proof the session exists.
-	if sl.SessionID != "" {
-		res.ReportedSessionID = sl.SessionID
-	}
 	switch sl.Type {
 	case "assistant":
 		if u := sl.Message.Usage; u.InputTokens > 0 {

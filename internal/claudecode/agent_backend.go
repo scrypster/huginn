@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -35,6 +36,11 @@ const DefaultAgentTurnTimeoutSecs = 900
 // messages. Bounded on purpose — a chatty or looping CLI must not grow this
 // without limit.
 const agentStderrTailBytes = 8 << 10
+
+// agentScanMaxBytes caps a single stream-json line. A var, not a const, purely
+// so tests can shrink it and exercise the over-long-line path without writing
+// megabytes.
+var agentScanMaxBytes = 8 * 1024 * 1024
 
 // agentWaitDelay is how long cmd.Wait tolerates a process that has been
 // signalled but has not exited before it force-closes the pipes and returns.
@@ -170,10 +176,32 @@ func (b *AgentBackend) ChatCompletion(ctx context.Context, req backend.ChatReque
 		return nil, fmt.Errorf("claudecode agent: stdout pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		// The process never ran, so no session was created: leave
-		// sessionExists alone so the next turn still uses --session-id.
+		// The CLI never ran, so the one --session-id chance was not spent:
+		// leave the flag alone so the next turn still tries to create.
 		return nil, fmt.Errorf("claudecode agent: start %s: %w", b.cfg.Binary, err)
 	}
+
+	// FAILURE DIRECTION, CHOSEN DELIBERATELY — do not "simplify" this to key
+	// off the turn succeeding, or off a session id parsed from the stream.
+	//
+	// `--session-id X` is a ONE-SHOT: it can succeed at most once, on the very
+	// first launch. The moment the CLI is launched with it we have spent that
+	// chance, and we cannot tell from out here whether the session was written
+	// before the process died — a CLI killed before it emits its init line
+	// leaves no evidence either way. So every later turn assumes it exists.
+	//
+	// The two ways to be wrong are NOT symmetric:
+	//   - wrongly --resume  : fails once, loudly ("no conversation found"), and
+	//                         the agent can be pointed at a fresh session id.
+	//   - wrongly --session-id: fails PERMANENTLY, because the session really
+	//                         does exist and always will, so every future turn
+	//                         collides with it for the life of the process.
+	// Only the first is recoverable, so ambiguity resolves toward --resume.
+	//
+	// Accepted cost: if turn 1 dies at startup for an unrelated reason (bad
+	// model, bad flag), later turns report "no conversation found" instead of
+	// repeating the real cause. Turn 1 still reports it, with stderr attached.
+	b.markSessionExists()
 
 	var (
 		res   DelegateResult
@@ -203,32 +231,48 @@ func (b *AgentBackend) ChatCompletion(ctx context.Context, req backend.ChatReque
 	}
 
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	// bufio caps a token at max(max, cap(buf)), so the starting buffer must not
+	// exceed the limit we actually want to enforce.
+	startBuf := 64 * 1024
+	if agentScanMaxBytes < startBuf {
+		startBuf = agentScanMaxBytes
+	}
+	sc.Buffer(make([]byte, 0, startBuf), agentScanMaxBytes)
 	for sc.Scan() {
 		line := sc.Bytes()
 		applyStreamLine(line, &res, onEvent)
 		tools = appendExecutedTools(tools, line)
 	}
-	// A scan error (typically a line past the buffer cap) leaves the pipe
-	// unread, which would block Wait forever. Record it, then always Wait.
+	// A scan error (typically a line past the buffer cap) means NOTHING is
+	// draining stdout any more. A child still writing fills the pipe and
+	// blocks forever, so WaitDelay never arms and Wait would sit here until
+	// the turn deadline — holding the semaphore and, since backends are cached
+	// per agent, stalling every session on that agent. Kill the child first.
+	//
+	// This is the only path that reaches Wait with the reader stopped: there
+	// are no other returns between Start and Wait, and the deferred cancel
+	// covers every earlier exit and any panic from a caller's callback.
 	scanErr := sc.Err()
+	if scanErr != nil {
+		cancel()
+	}
 
 	waitErr := cmd.Wait()
-
-	// The CLI echoing a session id is the only trustworthy evidence that the
-	// session now exists on disk, and it holds even when the turn later
-	// failed. Recording it here — before any error return — is what stops a
-	// failed first turn from wedging the agent in either direction: no id
-	// means the next turn still creates the session, an id means it resumes.
-	b.markSessionExists(res.ReportedSessionID != "" || (waitErr == nil && scanErr == nil))
 
 	// Cancellation and timeout are distinguished deliberately: the relay keys
 	// idle-timeout handling off errors.Is(err, context.Canceled), which never
 	// matched while these surfaced as a bare "signal: killed".
+	//
+	// Order and predicates matter. ctx is the CALLER's context, untouched by
+	// the cancel() above, so it alone identifies a real user cancel. The
+	// deadline check tests specifically for DeadlineExceeded rather than
+	// runCtx.Err() != nil, because our own scanErr cancel() also poisons runCtx
+	// — with a bare nil-check a malformed line would be misreported to the
+	// relay as a user cancellation and persisted as such.
 	if ctx.Err() != nil {
 		return nil, b.wrap(stderr, fmt.Errorf("claudecode agent: turn cancelled: %w", ctx.Err()))
 	}
-	if runCtx.Err() != nil {
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, b.wrap(stderr, fmt.Errorf("claudecode agent: turn timed out after %s: %w", timeout, runCtx.Err()))
 	}
 	if scanErr != nil {
@@ -271,10 +315,10 @@ func (b *AgentBackend) wrap(stderr *tailBuffer, err error) error {
 	return fmt.Errorf("%w: stderr: %s", err, tail)
 }
 
-func (b *AgentBackend) markSessionExists(exists bool) {
-	if !exists {
-		return
-	}
+// markSessionExists records that the session's one --session-id chance has been
+// spent. Monotonic: nothing ever clears it, because a session that exists never
+// stops existing. See the decision comment at the call site.
+func (b *AgentBackend) markSessionExists() {
 	b.mu.Lock()
 	b.sessionExists = true
 	b.mu.Unlock()
