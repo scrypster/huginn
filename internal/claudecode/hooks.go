@@ -14,6 +14,15 @@ import "encoding/json"
 // the tools that always required a human are blocked, and the agent degrades to
 // its pre-authorised capability instead of stopping dead.
 //
+// ClaudeHookTimeoutSecs bounds how long Claude Code waits for our approval
+// hook. It is set EXPLICITLY rather than relying on the CLI's default,
+// because a hook that times out FAILS OPEN: verified against the real CLI,
+// a killed PreToolUse hook results in the tool being ALLOWED, with no entry
+// in permission_denials. Callers that run `huginn claude-approve` (see
+// cmd_claude_approve.go) must keep their own client timeout well below this
+// so the hook always gets to print an explicit deny first.
+const ClaudeHookTimeoutSecs = 30
+
 // Returns "" when nothing is gated, so the caller omits --settings entirely.
 func BuildHookSettings(gatedTools []string, hookCommand string) (string, error) {
 	if len(gatedTools) == 0 {
@@ -23,6 +32,7 @@ func BuildHookSettings(gatedTools []string, hookCommand string) (string, error) 
 	type hookCmd struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
 	}
 	type entry struct {
 		Matcher string    `json:"matcher"`
@@ -36,7 +46,7 @@ func BuildHookSettings(gatedTools []string, hookCommand string) (string, error) 
 		}
 		entries = append(entries, entry{
 			Matcher: tool,
-			Hooks:   []hookCmd{{Type: "command", Command: hookCommand}},
+			Hooks:   []hookCmd{{Type: "command", Command: hookCommand, Timeout: ClaudeHookTimeoutSecs}},
 		})
 	}
 	if len(entries) == 0 {

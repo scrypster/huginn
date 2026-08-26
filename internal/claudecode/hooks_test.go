@@ -17,6 +17,7 @@ func TestBuildHookSettingsOneEntryPerGatedTool(t *testing.T) {
 				Hooks   []struct {
 					Type    string `json:"type"`
 					Command string `json:"command"`
+					Timeout int    `json:"timeout"`
 				} `json:"hooks"`
 			} `json:"PreToolUse"`
 		} `json:"hooks"`
@@ -35,6 +36,14 @@ func TestBuildHookSettingsOneEntryPerGatedTool(t *testing.T) {
 		}
 		if e.Hooks[0].Command != "/usr/local/bin/huginn claude-approve" {
 			t.Errorf("command = %q", e.Hooks[0].Command)
+		}
+		// Verified against the real CLI: a PreToolUse hook that Claude Code
+		// kills for exceeding its timeout results in the tool being ALLOWED
+		// (fails OPEN), not blocked. Every emitted hook entry must therefore
+		// carry an explicit timeout so `huginn claude-approve` is guaranteed
+		// a window to print its own deny first. Do not drop this assertion.
+		if e.Hooks[0].Timeout != ClaudeHookTimeoutSecs {
+			t.Errorf("entry %q timeout = %d, want %d (explicit, so a killed hook can never silently fail open)", e.Matcher, e.Hooks[0].Timeout, ClaudeHookTimeoutSecs)
 		}
 	}
 	if !seen["Write"] || !seen["Bash"] {

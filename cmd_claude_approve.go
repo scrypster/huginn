@@ -7,14 +7,18 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/huginn/internal/claudecode"
 )
 
 // claudeApproveTimeout bounds how long the hook waits for Huginn.
 //
-// IMPLEMENTATION NOTE: verify Claude Code's own PreToolUse hook timeout and
-// keep this BELOW it. If Claude Code gives up first, our decision is lost
-// rather than denied, which silently defeats fail-closed.
-const claudeApproveTimeout = 60 * time.Second
+// It MUST stay comfortably below claudecode.ClaudeHookTimeoutSecs. Verified
+// against the real CLI: when Claude Code's hook timeout fires it KILLS the hook
+// and ALLOWS the tool — a timed-out hook fails OPEN. So our deny has to be
+// printed before that happens; racing it is not acceptable for a security
+// boundary.
+const claudeApproveTimeout = (claudecode.ClaudeHookTimeoutSecs - 10) * time.Second
 
 // runClaudeApprove is the PreToolUse hook body. Claude Code writes the tool
 // call to stdin and reads a decision from stdout.
