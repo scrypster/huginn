@@ -117,3 +117,25 @@ func TestSpaceMembers_LeadNotDuplicated(t *testing.T) {
 		t.Errorf("lead agent listed %d times, want at most 1", seen["lead"])
 	}
 }
+
+func TestRosterNames_DMIsLeadOnly(t *testing.T) {
+	dm := &spaces.Space{Kind: spaces.KindDM, LeadAgent: "Tess", Members: []string{"Steve"}}
+	got := spaces.RosterNames(dm)
+	if len(got) != 1 || got[0] != "Tess" {
+		t.Errorf("DM roster = %v, want [Tess]", got)
+	}
+}
+
+func TestRosterNames_ChannelIsLeadPlusMembers(t *testing.T) {
+	ch := &spaces.Space{Kind: spaces.KindChannel, LeadAgent: "Chris", Members: []string{"Steve", "Sam"}}
+	got := spaces.RosterNames(ch)
+	if len(got) != 3 || got[0] != "Chris" || got[1] != "Steve" || got[2] != "Sam" {
+		t.Errorf("channel roster = %v, want [Chris Steve Sam]", got)
+	}
+}
+
+func TestRosterNames_NilSpaceIsEmpty(t *testing.T) {
+	if got := spaces.RosterNames(nil); got != nil {
+		t.Errorf("nil space roster = %v, want nil", got)
+	}
+}

@@ -433,7 +433,8 @@ func TestCreateFromMentions_SpawnsThread(t *testing.T) {
 		broadcast,
 		ca,
 		tm,
-		"", // callerAgent: empty for this test
+		"",  // callerAgent: empty for this test
+		nil, // spaceMemberNames: standalone, all-agents
 	)
 
 	// Wait a bit for the spawned goroutine to complete.
@@ -477,7 +478,8 @@ func TestCreateFromMentions_UnknownAgent_NoThread(t *testing.T) {
 		broadcast,
 		ca,
 		tm,
-		"", // callerAgent: empty for this test
+		"",  // callerAgent: empty for this test
+		nil, // spaceMemberNames: standalone, all-agents
 	)
 
 	threads := tm.ListBySession(sess.ID)
@@ -513,7 +515,8 @@ func TestCreateFromMentions_ThreadLimitExceeded_Skips(t *testing.T) {
 		broadcast,
 		ca,
 		tm,
-		"", // callerAgent: empty for this test
+		"",  // callerAgent: empty for this test
+		nil, // spaceMemberNames: standalone, all-agents
 	)
 
 	// Coder thread should NOT have been created (limit exceeded).
