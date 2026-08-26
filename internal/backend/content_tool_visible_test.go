@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -139,6 +140,29 @@ func TestPromoteContentToolCalls_NameOnlyMixedProseStillNotExecuted(t *testing.T
 	RevealContentToolCalls(resp)
 	if resp.Content != "then he said PONG" {
 		t.Errorf("Reveal Content = %q, want leftover prose", resp.Content)
+	}
+}
+
+// CreateFromMentions can SpawnThread two agents that share one ChatResponse
+// pointer (fakeBackend). Reveal must not write Content when it is already
+// visible prose — that write raced a concurrent read in runOnce.
+func TestRevealContentToolCalls_SharedResponseNoWriteRace(t *testing.T) {
+	shared := &ChatResponse{Content: "Done", DoneReason: "stop"}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				PromoteContentToolCalls(shared)
+				RevealContentToolCalls(shared)
+				_ = shared.Content
+			}
+		}()
+	}
+	wg.Wait()
+	if shared.Content != "Done" {
+		t.Errorf("Content = %q, want Done", shared.Content)
 	}
 }
 

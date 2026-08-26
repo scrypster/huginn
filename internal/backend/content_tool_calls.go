@@ -467,11 +467,20 @@ func VisibleAssistantContent(content string) string {
 // RevealContentToolCalls replaces Content with its user-visible remainder so
 // harness JSON never lands in the transcript. Safe to call after
 // PromoteContentToolCalls (pure tool JSON is already empty).
+//
+// When the visible remainder equals Content, this is a no-op: it must not
+// write the field. SpawnThread / CreateFromMentions can share one
+// ChatResponse across goroutines (test backends return the same pointer),
+// and a write here races a concurrent read of Content.
 func RevealContentToolCalls(resp *ChatResponse) {
 	if resp == nil {
 		return
 	}
-	resp.Content = VisibleAssistantContent(resp.Content)
+	visible := VisibleAssistantContent(resp.Content)
+	if visible == resp.Content {
+		return
+	}
+	resp.Content = visible
 }
 
 // VisibleAssistantContentAfterDeny is the display filter used after a tool
