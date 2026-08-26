@@ -18,6 +18,22 @@ type DelegateRequest struct {
 	PermissionMode string
 	MaxTurns       int
 	AllowedTools   []string
+
+	// The fields below exist so the agent backend (agent_backend.go) can share
+	// this one argument builder instead of forking it. A one-shot delegation
+	// leaves them zero and gets exactly the argv it always got.
+
+	// Resume continues an existing session with `--resume <id>` instead of
+	// creating one with `--session-id <id>`. The two are mutually exclusive,
+	// which is why this is a flag here rather than an extra argument appended
+	// by the caller.
+	Resume bool
+	// AppendSystemPrompt is passed to --append-system-prompt.
+	AppendSystemPrompt string
+	// Settings is inline JSON for --settings; see BuildHookSettings.
+	Settings string
+	// MCPConfig is passed to --mcp-config.
+	MCPConfig string
 }
 
 // DelegateResult is the outcome of a delegated run.
@@ -58,9 +74,14 @@ func BuildArgs(cfg DelegateConfig, req DelegateRequest, sessionID string) []stri
 		turns = cfg.MaxTurns
 	}
 
+	sessionFlag := "--session-id"
+	if req.Resume {
+		sessionFlag = "--resume"
+	}
+
 	args := []string{
 		"-p", req.Prompt,
-		"--session-id", sessionID,
+		sessionFlag, sessionID,
 		"--output-format", "stream-json",
 		"--verbose",
 	}
@@ -81,6 +102,15 @@ func BuildArgs(cfg DelegateConfig, req DelegateRequest, sessionID string) []stri
 	if len(req.AllowedTools) > 0 {
 		args = append(args, "--allowedTools")
 		args = append(args, req.AllowedTools...)
+	}
+	if req.AppendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
+	}
+	if req.Settings != "" {
+		args = append(args, "--settings", req.Settings)
+	}
+	if req.MCPConfig != "" {
+		args = append(args, "--mcp-config", req.MCPConfig)
 	}
 	// Only ever set from explicit configuration, never inferred.
 	if cfg.SkipPermissions {
