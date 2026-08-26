@@ -1204,29 +1204,6 @@ function isKnownSession(id: string): boolean {
   return sessions.value.some(s => s.id === id)
 }
 
-// /chat/:sessionId is session-mode. Bookmarks like /#/chat/Steve are not session
-// IDs — they collide with the agent DM at /space/<ulid>. Resolve via spaces and
-// replace so we never fetch, send, or persist a session named after the agent.
-async function redirectUnknownSessionToAgentDM(sessionId: string): Promise<boolean> {
-  const needle = sessionId.toLowerCase()
-  const existing = dms.value.find(dm => dm.leadAgent.toLowerCase() === needle)
-  if (existing) {
-    await router.replace(`/space/${existing.id}`)
-    return true
-  }
-  const space = await openDM(sessionId)
-  if (space) {
-    await router.replace(`/space/${space.id}`)
-    return true
-  }
-  return false
-}
-
-watch(() => props.sessionId, async (id) => {
-  if (!id || props.spaceId || isKnownSession(id)) return
-  await redirectUnknownSessionToAgentDM(id)
-}, { immediate: true })
-
 // ── Hydration overflow toast ──────────────────────────────────────────────────
 // When the pre-hydration WS event queue overflows (> 500 events dropped while
 // loading session history), we show a brief amber toast for 8 seconds so the
@@ -1416,6 +1393,54 @@ const agentsList        = ref<Agent[]>([])
 const selectedAgentName = ref('')
 const agentDropdownOpen = ref(false)
 const rosterOpen        = ref(false)
+
+function agentDMNeedle(id: string): string {
+  return id.toLowerCase()
+}
+
+function findDMForAgent(name: string) {
+  const needle = agentDMNeedle(name)
+  return dms.value.find(dm => dm.leadAgent.toLowerCase() === needle)
+}
+
+function findAgentByName(name: string) {
+  const needle = agentDMNeedle(name)
+  return agentsList.value.find(a => a.name.toLowerCase() === needle)
+}
+
+// True when /chat/:sessionId is an agent name (Steve), not a real session id.
+// Used to block send/fetch so we never persist a session named after the agent.
+function isAgentDMAlias(id: string | undefined): boolean {
+  if (!id || isKnownSession(id)) return false
+  return !!findDMForAgent(id) || !!findAgentByName(id)
+}
+
+// Bookmarks like /#/chat/Steve are not session IDs — they collide with the
+// agent DM at /space/<ulid>. Resolve via dms, then openDM for a known agent.
+async function redirectUnknownSessionToAgentDM(sessionId: string): Promise<boolean> {
+  if (!sessionId || props.spaceId || isKnownSession(sessionId)) return false
+  const existing = findDMForAgent(sessionId)
+  if (existing?.id) {
+    await router.replace(`/space/${existing.id}`)
+    return true
+  }
+  if (!findAgentByName(sessionId)) return false
+  const space = await openDM(sessionId)
+  if (space?.id) {
+    await router.replace(`/space/${space.id}`)
+    return true
+  }
+  return false
+}
+
+watch(
+  [() => props.sessionId, agentsList, dms],
+  async ([id]) => {
+    if (!id || props.spaceId || isKnownSession(id)) return
+    await redirectUnknownSessionToAgentDM(id)
+  },
+  { immediate: true },
+)
 
 // ── Extracted composables (depend on agentsList / messagesEl / messages) ──
 const { renderWithMentions } = useMarkdownRenderer(agentsList)
@@ -1975,7 +2000,7 @@ async function handleEditorSend(markdown: string) {
   }
 
   // ── Session mode ────────────────────────────────────────────────────
-  if (!props.sessionId || !isKnownSession(props.sessionId)) return
+  if (!props.sessionId || isAgentDMAlias(props.sessionId)) return
 
   // Auto-select default agent on first send if none chosen yet
   if (!selectedAgentName.value && agentsList.value.length > 0) {
@@ -2750,7 +2775,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   fetchStatus()
   nextTick(() => chatEditorRef.value?.focus())
   // Load existing threads and message history for this session
-  if (props.sessionId && isKnownSession(props.sessionId)) {
+  if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     loadThreads(props.sessionId)
     // Only show skeleton if the session has no cached messages yet
     const alreadyCached = getMessages(props.sessionId).length > 0
@@ -2809,7 +2834,7 @@ onMounted(async () => {
   await loadAgents()
   syncSessionAgent()
   fetchStatus()
-  if (props.sessionId && isKnownSession(props.sessionId)) {
+  if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     await fetchMessages(props.sessionId)
     hydrateThreadBadges(props.sessionId)
     markCurrentSessionSeen()
