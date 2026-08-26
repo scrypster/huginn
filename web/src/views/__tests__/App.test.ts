@@ -349,6 +349,19 @@ describe('App', () => {
       expect(html).not.toContain('No channels yet')
       expect(html).not.toContain('No agents configured')
     })
+
+    it('shows italic empty copy after spaces load when lists are empty', async () => {
+      mockSpacesLoading.value = false
+      mockChannels.value = []
+      mockDms.value = []
+
+      const w = mountApp()
+      await flushPromises()
+
+      const html = w.html()
+      expect(html).toContain('No channels yet')
+      expect(html).toContain('No agents configured')
+    })
   })
 
   // ── Session list rendering ────────────────────────────────────────────────
