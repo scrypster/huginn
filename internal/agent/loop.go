@@ -408,6 +408,12 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	result := &LoopResult{}
 
 	var consecutiveParseFailures int
+	// Auto-wait: a lead that delegates and then stops without wait_for_threads
+	// abandons its spawned threads (and their results). Track one successful
+	// delegate_to_agent and inject a single wait_for_threads barrier so the
+	// model gets the specialists' results and can answer from them.
+	var delegated, waitedForThreads, autoWaited bool
+	var contentBeforeAutoWait string
 	var denied atomic.Bool
 	origDenied := cfg.OnPermissionDenied
 	cfg.OnPermissionDenied = func(name string) {
@@ -426,6 +432,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// after StreamDone forks leftover (`PONG` → `ONG`) into a new
 		// anonymous timeline row.
 		tokenGate := backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
+		tokenGate.SetGrantedTools(cfg.ToolSchemas)
 		onToken := cfg.OnToken
 		if tokenGate != nil {
 			onToken = tokenGate.OnToken
@@ -459,6 +466,10 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// Promote on every turn so the loop keeps running instead of
 		// treating that JSON as the final answer.
 		backend.PromoteContentToolCalls(chatResult)
+		// qwen2.5-coder also writes a "playbook": fenced tool JSON mixed with
+		// glue prose. Promote embedded invocations of granted tools so they
+		// execute in order; unknown names stay inert.
+		backend.PromoteGrantedContentToolCalls(chatResult, cfg.ToolSchemas)
 		backend.RevealContentToolCalls(chatResult)
 		if denied.Load() {
 			// After a deny the model often dumps another tool JSON into
@@ -498,6 +509,44 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 
 		// If no tool calls, the loop ends
 		if len(chatResult.ToolCalls) == 0 {
+			if delegated && !waitedForThreads && !autoWaited && cfg.canAutoWait() {
+				// The model stopped after delegating without collecting
+				// results. Run one synthetic wait_for_threads (empty args =
+				// all active threads in the session) and give the model a
+				// final turn to answer from the specialists' summaries.
+				autoWaited = true
+				contentBeforeAutoWait = result.FinalContent
+				wc := backend.ToolCall{
+					ID: "auto_wait_1",
+					Function: backend.ToolCallFunction{
+						Name:      "wait_for_threads",
+						Arguments: map[string]any{},
+					},
+				}
+				messages = append(messages, backend.Message{
+					Role:      "assistant",
+					ToolCalls: []backend.ToolCall{wc},
+				})
+				for _, dr := range cfg.dispatchTools(ctx, []backend.ToolCall{wc}) {
+					messages = append(messages, backend.Message{
+						Role:       "tool",
+						ToolName:   dr.tc.Function.Name,
+						ToolCallID: dr.tc.ID,
+						Content:    dr.content,
+					})
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					result.StopReason = "cancelled"
+					result.Messages = messages
+					return result, fmt.Errorf("run loop cancelled: %w", ctxErr)
+				}
+				continue
+			}
+			if autoWaited && result.FinalContent == "" {
+				// The post-wait turn produced nothing; keep the pre-wait prose
+				// rather than ending with an empty answer.
+				result.FinalContent = contentBeforeAutoWait
+			}
 			result.StopReason = "stop"
 			result.Messages = messages
 			return result, nil
@@ -506,6 +555,14 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// Execute tool calls — independent ones in parallel, serial ones after
 		dispatched := cfg.dispatchTools(ctx, chatResult.ToolCalls)
 		for _, dr := range dispatched {
+			switch dr.tc.Function.Name {
+			case "delegate_to_agent":
+				if !strings.HasPrefix(dr.content, "error:") {
+					delegated = true
+				}
+			case "wait_for_threads":
+				waitedForThreads = true
+			}
 			messages = append(messages, backend.Message{
 				Role:       "tool",
 				ToolName:   dr.tc.Function.Name,
@@ -526,6 +583,16 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	result.StopReason = "max_turns"
 	result.Messages = messages
 	return result, nil
+}
+
+// canAutoWait reports whether a synthetic wait_for_threads barrier can run:
+// the tool must be registered and permitted for this agent's toolbelt.
+func (cfg *RunLoopConfig) canAutoWait() bool {
+	if cfg.Tools == nil || !cfg.toolSchemaAllows("wait_for_threads") {
+		return false
+	}
+	_, ok := cfg.Tools.Get("wait_for_threads")
+	return ok
 }
 
 // toolSchemaAllows returns true if toolName appears in cfg.ToolSchemas.
