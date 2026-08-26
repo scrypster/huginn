@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Composer `@` mention picker now dismisses on Escape via TipTap suggestion `onExit`, instead of only hiding the popup
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
