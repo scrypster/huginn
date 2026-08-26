@@ -31,6 +31,13 @@
 - `backend.Message` is `{Role, Content, Parts, ToolCalls, ToolName, ToolCallID}`.
 - `backend.ToolCall` is `{ID, Function ToolCallFunction}`; `ToolCallFunction` is `{Name, Arguments map[string]any}`.
 - `internal/agent/loop.go:441` persists `chatResult.ToolCalls` into history; `:468` ends the loop when it is empty; `:475` dispatches it. One field, two jobs.
+- **A `PreToolUse` hook that TIMES OUT fails OPEN.** Verified against the real
+  CLI: a hook entry accepts an explicit `"timeout"` (seconds) and Claude Code
+  honours it, but when it fires the hook is killed and the tool runs anyway —
+  the write succeeded and `permission_denials` was empty. Our fail-closed
+  guarantee therefore rests on `claudeApproveTimeout` staying safely BELOW
+  `claudecode.ClaudeHookTimeoutSecs` (20s vs 30s), so `huginn claude-approve`
+  always prints an explicit `deny` first. Never tune either number alone.
 - `main.go:3126` is the agent backend resolver: `serveCache.For(ag.Provider, ag.Endpoint, ag.APIKey, ag.GetModelID())`.
 
 ---
