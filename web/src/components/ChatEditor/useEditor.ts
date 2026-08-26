@@ -45,8 +45,7 @@ export function useEditor(options: {
 }) {
   const editor = ref<Editor | null>(null)
   let suggestionOpen = false
-  // After Escape, TipTap 3.20 rematches the same @ on the next transaction.
-  // Refuse that range until the cursor leaves it.
+  // After Escape, refuse rematch until the cursor leaves that @.
   let dismissedFrom: number | null = null
 
   function createMentionExtension() {
@@ -112,19 +111,16 @@ export function useEditor(options: {
                 getReferenceClientRect: props.clientRect as () => DOMRect,
               })
             },
-            // Do not handle Escape here. TipTap 3.20 calls this first; a true
-            // return skips onExit + dispatchExit, which is what popup.hide() did.
+            // Escape: record the range, then return false so the plugin exits.
             onKeyDown(props: SuggestionKeyDownProps) {
+              if (props.event.key === 'Escape') {
+                dismissedFrom = props.range.from
+                return false
+              }
               return (component?.ref as MentionListRef | null)
                 ?.onKeyDown(props) ?? false
             },
-            onExit(props: SuggestionProps) {
-              const pos = props.editor.state.selection.from
-              if (pos >= props.range.from && pos <= props.range.to) {
-                dismissedFrom = props.range.from
-              } else {
-                dismissedFrom = null
-              }
+            onExit() {
               suggestionOpen = false
               popup?.destroy()
               popup = null
