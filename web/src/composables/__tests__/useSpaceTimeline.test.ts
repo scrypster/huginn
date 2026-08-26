@@ -26,6 +26,7 @@ import {
   prefetchSpaceSidebar,
   spaceSessionsIndexed,
   listCachedSpaceMessages,
+  getSpaceTimelineState,
 } from '../useSpaceTimeline'
 import { api } from '../useApi'
 
@@ -796,5 +797,29 @@ describe('listCachedSpaceMessages', () => {
     expect(listed).toHaveLength(1)
     expect(listed[0].spaceId).toBe(SPACE_ID)
     expect(listed[0].messages).toHaveLength(1)
+  })
+})
+
+describe('getSpaceTimelineState', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns the same cached state as useSpaceTimeline for that space', () => {
+    const tl = useSpaceTimeline(SPACE_ID)
+    tl.getState().sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    tl.getState().messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: '', role: 'user', content: 'hi', agent: '',
+    })
+
+    const viaLookup = getSpaceTimelineState(SPACE_ID)
+    expect(viaLookup).toBe(tl.getState())
+    expect(viaLookup.messages).toHaveLength(1)
+    expect(getSpaceTimelineState(SPACE_B)).not.toBe(viaLookup)
   })
 })

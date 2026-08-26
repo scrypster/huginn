@@ -104,17 +104,46 @@ const makeSpaceState = () => ({
 })
 
 let mockSpaceState = makeSpaceState()
+const spaceStateById = new Map<string, ReturnType<typeof makeSpaceState>>()
 const mockSpaceHydrate = vi.fn().mockResolvedValue(undefined)
-const mockSpaceTimeline = {
-  getState: () => mockSpaceState,
-  hydrate: mockSpaceHydrate,
-  loadMore: vi.fn().mockResolvedValue(null),
-  retryHydrate: vi.fn(),
+
+function getOrCreateSpaceState(spaceId: string) {
+  let st = spaceStateById.get(spaceId)
+  if (!st) {
+    const alreadyRegistered = [...spaceStateById.values()].includes(mockSpaceState)
+    st = alreadyRegistered ? makeSpaceState() : mockSpaceState
+    spaceStateById.set(spaceId, st)
+  }
+  return st
 }
-const mockUseSpaceTimeline = vi.fn(() => mockSpaceTimeline)
+
+const mockUseSpaceTimeline = vi.fn((spaceId?: unknown) => {
+  if (typeof spaceId === 'string') {
+    mockSpaceState = getOrCreateSpaceState(spaceId)
+  }
+  return {
+    getState: () => mockSpaceState,
+    hydrate: mockSpaceHydrate,
+    loadMore: vi.fn().mockResolvedValue(null),
+    retryHydrate: vi.fn(),
+  }
+})
+
+function mockGetSessionSpaceId(sessionId: string): string | null {
+  for (const [spaceId, st] of spaceStateById.entries()) {
+    if (st.sessionToSpaceMap.has(sessionId)) return spaceId
+  }
+  return null
+}
+
+function mockGetSpaceTimelineState(spaceId: string) {
+  return getOrCreateSpaceState(spaceId)
+}
 
 vi.mock('../../composables/useSpaceTimeline', () => ({
   useSpaceTimeline: (...args: unknown[]) => mockUseSpaceTimeline(...args),
+  getSessionSpaceId: (sessionId: string) => mockGetSessionSpaceId(sessionId),
+  getSpaceTimelineState: (spaceId: string) => mockGetSpaceTimelineState(spaceId),
   clearSpaceTimeline: vi.fn(),
   wireSpaceTimelineWS: vi.fn(),
 }))
@@ -227,6 +256,7 @@ describe('ChatView', () => {
     mockActiveSpace.value = null
     mockDms.value = []
     mockOpenDM.mockResolvedValue(null)
+    spaceStateById.clear()
     mockSpaceState = makeSpaceState()
     mockGetSessionThreads.mockReturnValue([])
     mockGetActiveThreadCount.mockReturnValue(0)
@@ -2200,6 +2230,7 @@ describe('ChatView — space mode', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     // Reset space state to a clean slate for each test
+    spaceStateById.clear()
     mockSpaceState = makeSpaceState()
     mockSpaceHydrate.mockResolvedValue(undefined)
     mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
@@ -2424,6 +2455,8 @@ describe('ChatView — space mode', () => {
 
   const SPACE_A = 'space-tess'
   const SPACE_B = 'space-steve'
+  const SESS_A = 'sess-tess'
+  const SESS_B = 'sess-steve'
 
   function spaceStub(id: string, name: string) {
     return { id, name, kind: 'dm', leadAgent: name, memberAgents: [] }
@@ -2517,6 +2550,117 @@ describe('ChatView — space mode', () => {
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
     expect(wrapper.html()).not.toContain('Tess is responding')
     expect(wrapper.html()).not.toContain('When you send now:')
+  })
+
+  function seedSpace(spaceId: string, sessionId: string) {
+    const st = mockGetSpaceTimelineState(spaceId)
+    st.activeSessionId = sessionId
+    st.sessionToSpaceMap.set(sessionId, spaceId)
+    return st
+  }
+
+  it('keeps another space\'s follow-up, completion card, permission, warning, and thread_help off the viewed DM', async () => {
+    const stateA = seedSpace(SPACE_A, SESS_A)
+    const stateB = seedSpace(SPACE_B, SESS_B)
+    mockActiveSpace.value = spaceStub(SPACE_B, 'Steve')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_B }, mockWs)
+    await flushPromises()
+
+    mockWs.simulateMessage({
+      type: 'follow_up_start',
+      session_id: SESS_A,
+      payload: { agent: 'Tess' },
+    })
+    mockWs.simulateMessage({
+      type: 'follow_up_token',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', token: 'partial ' },
+    })
+    mockWs.simulateMessage({
+      type: 'agent_follow_up',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', content: 'Tess follow-up for you' },
+    })
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: SESS_A,
+      payload: {
+        thread_id: 'thr-tess',
+        agent_id: 'Helper',
+        status: 'done',
+        summary: 'Tess delegate finished',
+      },
+    })
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      session_id: SESS_A,
+      payload: { id: 'perm-tess', tool: 'bash', command: 'rm -rf /tmp' },
+    })
+    mockWs.simulateMessage({
+      type: 'warning',
+      session_id: SESS_A,
+      content: 'Vault unavailable',
+    })
+    mockWs.simulateMessage({
+      type: 'thread_help',
+      session_id: SESS_A,
+      payload: { thread_id: 'thr-help', message: 'Need Tess credentials' },
+    })
+    mockWs.simulateMessage({
+      type: 'delegation_preview_timeout',
+      session_id: SESS_A,
+      payload: { thread_id: 'thr-timeout', agent_id: 'Helper', timeout_seconds: 30 },
+    })
+    await nextTick()
+
+    expect(stateB.messages).toHaveLength(0)
+    expect(wrapper.html()).not.toContain('Permission required')
+    expect(wrapper.html()).not.toContain('Tess follow-up for you')
+    expect(wrapper.html()).not.toContain('Tess delegate finished')
+    expect(wrapper.html()).not.toContain('Vault unavailable')
+    expect(wrapper.html()).not.toContain('Need Tess credentials')
+    expect(wrapper.html()).not.toContain('auto-approved')
+
+    expect(stateA.messages.some((m: any) => m.content === 'Tess follow-up for you')).toBe(true)
+    expect(stateA.messages.some((m: any) => m.threadSummaryThreadId === 'thr-tess')).toBe(true)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('Vault unavailable'))).toBe(true)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('auto-approved after 30s'))).toBe(true)
+
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
+    await wrapper.setProps({ spaceId: SPACE_A })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.html()).toContain('Permission required')
+    expect(wrapper.html()).toContain('Tess follow-up for you')
+    expect(wrapper.html()).toContain('Tess delegate finished')
+    expect(wrapper.html()).toContain('Vault unavailable')
+  })
+
+  it('still paints follow-up and permission on the owner space when that space is open', async () => {
+    seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+
+    mockWs.simulateMessage({
+      type: 'agent_follow_up',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', content: 'Owner-space follow-up' },
+    })
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      session_id: SESS_A,
+      payload: { id: 'perm-open', tool: 'bash', command: 'ls' },
+    })
+    await nextTick()
+
+    expect(wrapper.html()).toContain('Owner-space follow-up')
+    expect(wrapper.html()).toContain('Permission required')
   })
 })
 

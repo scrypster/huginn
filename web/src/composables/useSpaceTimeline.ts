@@ -510,3 +510,10 @@ export function listCachedSpaceMessages(): Array<{ spaceId: string; messages: Sp
   }
   return out
 }
+
+// getSpaceTimelineState returns the cached (or freshly created) timeline for a
+// space. ChatView uses this to write session-scoped WS events onto the owner
+// space's messages even when a different space is currently open.
+export function getSpaceTimelineState(spaceId: string): TimelineState {
+  return getState(spaceId)
+}

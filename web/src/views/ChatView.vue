@@ -1103,7 +1103,7 @@
 import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useSpaceTimeline } from '../composables/useSpaceTimeline'
+import { useSpaceTimeline, getSessionSpaceId, getSpaceTimelineState } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
 import { spaceRosterNames } from '../components/ChatEditor/mentionSuggestions'
 import { ThreadPanel } from '../components/ThreadPanel'
@@ -1331,6 +1331,17 @@ const {
 } = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
 const pendingPermission = ref<WSMessage | null>(null)
+const pendingPermissionBySpace = new Map<string, WSMessage>()
+
+// Permission prompts are per owner space. Switching Tess → Steve must not
+// keep Tess's modal on Steve; reopening Tess restores it.
+watch(() => props.spaceId, (newId, oldId) => {
+  if (oldId && oldId !== newId) {
+    if (pendingPermission.value) pendingPermissionBySpace.set(oldId, pendingPermission.value)
+    else pendingPermissionBySpace.delete(oldId)
+  }
+  pendingPermission.value = (newId && pendingPermissionBySpace.get(newId)) || null
+})
 const runtimeState      = ref('')
 // pendingToolResults buffers tool results that arrive before the assistant message exists
 // (e.g. prefetch tools like muninn_recall/muninn_where_left_off that fire before streaming starts).
@@ -1654,6 +1665,26 @@ function getSourceMessages(): ChatMessage[] {
     return (currentSpaceTimeline.value?.getState().messages ?? []) as ChatMessage[]
   }
   return props.sessionId ? getMessages(props.sessionId) : []
+}
+
+// Owner-space routing: /#/space/:id has no route sessionId, so isForActiveSession
+// is true for every event. Write timeline rows to the space that owns
+// msg.session_id (via getSessionSpaceId), not the room currently on screen.
+function getOwnerMessages(sessionId?: string): ChatMessage[] {
+  if (props.sessionId) {
+    if (sessionId && sessionId !== props.sessionId) return []
+    return getMessages(props.sessionId)
+  }
+  if (!props.spaceId || !sessionId) return []
+  const ownerSpaceId = getSessionSpaceId(sessionId)
+  if (!ownerSpaceId) return []
+  return getSpaceTimelineState(ownerSpaceId).messages as ChatMessage[]
+}
+
+function isOwnerView(sessionId?: string): boolean {
+  if (props.sessionId) return !sessionId || sessionId === props.sessionId
+  if (!props.spaceId || !sessionId) return false
+  return getSessionSpaceId(sessionId) === props.spaceId
 }
 
 const messages = computed(() => {
@@ -2234,6 +2265,7 @@ function approvePermission(approved: boolean) {
     payload: { id: (pendingPermission.value.payload as Record<string, string>)?.id, approved },
   })
   pendingPermission.value = null
+  if (props.spaceId) pendingPermissionBySpace.delete(props.spaceId)
 }
 
 async function fetchStatus() {
@@ -2340,7 +2372,17 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'permission_request', (msg: WSMessage) => {
-    if (!isForActiveSession(msg)) return
+    if (props.sessionId) {
+      if (!isForActiveSession(msg)) return
+      pendingPermission.value = msg
+      scrollToBottom()
+      return
+    }
+    if (!props.spaceId || !msg.session_id) return
+    const ownerSpaceId = getSessionSpaceId(msg.session_id)
+    if (!ownerSpaceId) return
+    pendingPermissionBySpace.set(ownerSpaceId, msg)
+    if (ownerSpaceId !== props.spaceId) return
     pendingPermission.value = msg
     scrollToBottom()
   })
@@ -2433,11 +2475,11 @@ registerWS(ws, 'error', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'warning', (msg: WSMessage) => {
-    if (!isForActiveSession(msg)) return
-    // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
-    // Surface it inline so the user knows memory tools are disabled rather
-    // than silently missing tool calls.
     if (props.sessionId) {
+      if (!isForActiveSession(msg)) return
+      // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
+      // Surface it inline so the user knows memory tools are disabled rather
+      // than silently missing tool calls.
       const msgs = getMessages(props.sessionId)
       const warningForQueuedRun = !!msg.run_id && msg.run_id !== currentRunId.value
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
@@ -2447,22 +2489,22 @@ registerWS(ws, 'warning', (msg: WSMessage) => {
         const id = `warn-${Date.now()}`
         msgs.push({ id, role: 'assistant', content: msg.content ?? '', createdAt: new Date().toISOString(), toolCalls: [] })
       }
-    } else if (props.spaceId && currentSpaceTimeline.value) {
-      const st = currentSpaceTimeline.value.getState()
-      const sessionId = st.activeSessionId
-      if (sessionId) {
-        st.messages.push({
-          id: `warn-${Date.now()}`,
-          session_id: sessionId,
-          seq: -1,
-          ts: new Date().toISOString(),
-          role: 'assistant',
-          content: msg.content ?? '',
-          agent: '',
-        })
-      }
+      scrollToBottom()
+      return
     }
-    scrollToBottom()
+    if (!props.spaceId) return
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
+    msgs.push({
+      id: `warn-${Date.now()}`,
+      session_id: msg.session_id as string,
+      seq: -1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: msg.content ?? '',
+      agent: '',
+    } as ChatMessage)
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
 registerWS(ws, 'primary_agent_changed', (msg: WSMessage) => {
@@ -2502,6 +2544,7 @@ registerWS(ws, 'thread_started', (msg: WSMessage) => {
 registerWS(ws, 'thread_help', (_msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && _msg.session_id !== props.sessionId) return
+    if (props.spaceId && !isOwnerView(_msg.session_id)) return
     const p = (_msg.payload as Record<string, unknown> | undefined) ?? {}
     const threadId = typeof p.thread_id === 'string' ? p.thread_id : ''
     const helpMessage = typeof p.message === 'string' ? p.message : ''
@@ -2567,7 +2610,8 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
     // Only add if there isn't already a follow-up streaming bubble
     const alreadyExists = msgs.some(m => (m as any).followUpStreaming)
     if (!alreadyExists) {
@@ -2588,7 +2632,7 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
         fupStreamMsg.ts = new Date().toISOString()
       }
       msgs.push(fupStreamMsg)
-      scrollToBottom()
+      if (isOwnerView(msg.session_id)) scrollToBottom()
     }
   })
 
@@ -2601,7 +2645,8 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
     const agentName = p?.agent as string | undefined
     const token = p?.token as string | undefined
     if (!token) return
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
     // Find the existing follow-up streaming bubble or create one
     const existing = [...msgs].reverse().find(m => (m as any).followUpStreaming)
     if (existing) {
@@ -2623,7 +2668,7 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
       }
       msgs.push(fupFallback)
     }
-    scrollToBottom()
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
 // agent_follow_up: final persisted follow-up reply from the lead agent.
@@ -2637,7 +2682,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     const agentName = p?.agent as string | undefined
     const content = p?.content as string | undefined
     if (!content) return
-    const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
@@ -2659,8 +2705,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
       fupMsg.ts = new Date().toISOString()
     }
     msgs.push(fupMsg)
-    scrollToBottom()
-    if (props.sessionId || props.spaceId) {
+    if (isOwnerView(msg.session_id)) scrollToBottom()
+    if (props.sessionId || isOwnerView(msg.session_id)) {
       const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName ?? 'Agent',
@@ -2676,7 +2722,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
 registerWS(ws, 'follow_up_cancelled', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && msg.session_id !== props.sessionId) return
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
     // Remove the thinking bubble if it exists
     const idx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (idx >= 0) msgs.splice(idx, 1)
@@ -2706,8 +2753,9 @@ registerWS(ws, 'thread_inject_error', (_msg: WSMessage) => {
   // in side panels for delegated outcomes.
 registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
-    // In session mode, verify session_id matches. In space mode, accept any
-    // thread_done for sessions in this space (the WS subscription handles scoping).
+    // In session mode, verify session_id matches. In space mode, write the
+    // completion card onto the owner space (getSessionSpaceId), not the
+    // currently viewed room — the WS subscription is not per-space.
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const threadId = p?.thread_id as string | undefined
@@ -2717,7 +2765,8 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
     for (const m of msgs) {
       const dt = m.delegatedThreads
       if (dt) {
@@ -2779,8 +2828,9 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
     const agentId = typeof p.agent_id === 'string'
       ? p.agent_id
       : (typeof p.agent === 'string' ? p.agent : 'Delegate')
-    showAutoApproveNotice(agentId)
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs.length) return
+    if (isOwnerView(msg.session_id)) showAutoApproveNotice(agentId)
     const eventId = `preview-timeout-${threadId}`
     if (msgs.some(m => m.id === eventId)) return
     const timeoutLabel = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 30
@@ -2795,7 +2845,7 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
         ts: new Date().toISOString(),
       } : {}),
     })
-    scrollToBottom()
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
   // thread_reply_updated: parent message reply count changed in persistence.
