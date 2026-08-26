@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Assistant or user `@Name` of someone not in the space no longer extra-spawns a thread via CreateFromMentions (Tess DM `@Steve` stays Tess-only; channel roster members still spawn; standalone session-mode is unchanged)
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

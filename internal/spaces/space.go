@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,32 @@ const (
 	KindDM      = "dm"
 	KindChannel = "channel"
 )
+
+// RosterNames is the mention/addressee roster for a space — the same set
+// used to decide who may be @addressed or extra-spawned.
+// DMs are 1:1 (the DM agent only). Channels are lead + members.
+// A nil or empty result means no roster (standalone / lookup failed).
+func RosterNames(sp *Space) []string {
+	if sp == nil {
+		return nil
+	}
+	if sp.Kind == KindDM {
+		if sp.LeadAgent == "" {
+			return nil
+		}
+		return []string{sp.LeadAgent}
+	}
+	out := make([]string, 0, len(sp.Members)+1)
+	if sp.LeadAgent != "" {
+		out = append(out, sp.LeadAgent)
+	}
+	for _, m := range sp.Members {
+		if !strings.EqualFold(m, sp.LeadAgent) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
 
 // Space represents a DM or Channel conversation space.
 type Space struct {

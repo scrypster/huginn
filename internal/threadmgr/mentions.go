@@ -184,6 +184,32 @@ func parseMentionsInternal(msg string, agentNames []string) ([]DelegationRequest
 	return requests, unknown
 }
 
+// restrictMentionNames intersects registry names with a space roster.
+// When spaceMemberNames is empty (standalone session-mode / no roster),
+// registry names are returned unchanged so any known agent can still spawn.
+func restrictMentionNames(registryNames, spaceMemberNames []string) []string {
+	if len(spaceMemberNames) == 0 {
+		return registryNames
+	}
+	allowed := make(map[string]struct{}, len(spaceMemberNames))
+	for _, n := range spaceMemberNames {
+		if n == "" {
+			continue
+		}
+		allowed[strings.ToLower(n)] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return registryNames
+	}
+	out := make([]string, 0, len(registryNames))
+	for _, n := range registryNames {
+		if _, ok := allowed[strings.ToLower(n)]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // CreateFromMentions parses @AgentName mentions in userMsg, creates a thread for
 // each matching agent, and spawns them if ready. Used for low-tier primary agents
 // that cannot call delegate_to_agent as a tool.
@@ -191,6 +217,9 @@ func parseMentionsInternal(msg string, agentNames []string) ([]DelegationRequest
 // so thread replies are linked back and visible in the thread panel.
 // callerAgent, when non-empty, is the name of the agent that produced userMsg.
 // Mentions of the caller agent are skipped (self-delegation guard).
+// spaceMemberNames, when non-empty, is the space roster (lead + members; DM = that
+// one agent). Only those names may extra-spawn. An empty roster keeps the
+// standalone all-agents behavior.
 func CreateFromMentions(
 	ctx context.Context,
 	sessionID string,
@@ -204,13 +233,16 @@ func CreateFromMentions(
 	ca *CostAccumulator,
 	tm *ThreadManager,
 	callerAgent string,
+	spaceMemberNames []string,
 ) {
-	// Collect canonical names from the registry.
+	// Collect canonical names from the registry, then restrict to the space
+	// roster when one is present so a Tess-only DM cannot extra-spawn @Steve.
 	all := reg.All()
 	names := make([]string, 0, len(all))
 	for _, ag := range all {
 		names = append(names, ag.Name)
 	}
+	names = restrictMentionNames(names, spaceMemberNames)
 
 	var spaceID string
 	if sess != nil {
