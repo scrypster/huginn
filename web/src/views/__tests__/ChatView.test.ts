@@ -59,10 +59,14 @@ vi.mock('../../composables/useThreads', () => ({
 }))
 
 const mockActiveSpace = ref<any>(null)
+const mockDms = ref<any[]>([])
+const mockOpenDM = vi.fn().mockResolvedValue(null)
 
 vi.mock('../../composables/useSpaces', () => ({
   useSpaces: () => ({
     activeSpace: mockActiveSpace,
+    dms: mockDms,
+    openDM: mockOpenDM,
   }),
 }))
 
@@ -115,9 +119,12 @@ vi.mock('../../composables/useSpaceTimeline', () => ({
   wireSpaceTimelineWS: vi.fn(),
 }))
 
+const mockRouterPush = vi.fn()
+const mockRouterReplace = vi.fn()
+
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: {}, query: {} }),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
 }))
 
 // Stub heavy child components
@@ -208,6 +215,8 @@ describe('ChatView', () => {
     mockMessages['test-session-id'] = []
     mockSessions.value = [{ id: 'test-session-id', title: 'Test Session' }]
     mockActiveSpace.value = null
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
     mockSpaceState = makeSpaceState()
     mockGetSessionThreads.mockReturnValue([])
     mockGetActiveThreadCount.mockReturnValue(0)
@@ -2158,5 +2167,65 @@ describe('ChatView — space mode', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+  })
+
+  it('does not flash empty-state copy while the space timeline hydrates', async () => {
+    mockSpaceState.loadingInitial = true
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+    expect(wrapper.html()).not.toContain('Send your first message')
+  })
+})
+
+describe('ChatView — /chat/:agentName alias', () => {
+  const STEVE_SPACE_ID = '01huginn-steve-dm'
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSessions.value = []
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
+    mockSpaceState = makeSpaceState()
+    mockActiveSpace.value = null
+  })
+
+  it('redirects /chat/Steve to the Steve DM space', async () => {
+    mockDms.value = [{
+      id: STEVE_SPACE_ID,
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+      icon: '',
+      color: '#58a6ff',
+      unseenCount: 0,
+    }]
+
+    mountChatView({ sessionId: 'Steve' })
+    await flushPromises()
+
+    expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
+    expect(mockOpenDM).not.toHaveBeenCalled()
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+  })
+
+  it('resolves /chat/Steve via openDM when the DM is not already listed', async () => {
+    mockOpenDM.mockResolvedValue({
+      id: STEVE_SPACE_ID,
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+      icon: '',
+      color: '#58a6ff',
+      unseenCount: 0,
+    })
+
+    mountChatView({ sessionId: 'Steve' })
+    await flushPromises()
+
+    expect(mockOpenDM).toHaveBeenCalledWith('Steve')
+    expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
   })
 })

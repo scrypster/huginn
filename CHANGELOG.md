@@ -13,6 +13,7 @@ All notable changes to Huginn are documented here.
 - Parked Memory (empty vaults / disconnected) no longer badges agent cards or the channel header
 - Version badge collapses `vv0.4.0-try-all` to `v0.4.0-try-all` (About, profile popover, and Stats SERVER — no extra `v` prefix)
 - Settings → Stats no longer reports 0 messages / 0 tokens when transcripts exist: `Append` persists `message_count` / `last_message_id` / `updated_at` with the message, existing sessions are backfilled from `messages`, token usage is stamped on the assistant row and written to `cost_history` when known, and Last LLM Call shows "—" instead of a fake 0
+- `/chat/:name` for an agent name (e.g. `/#/chat/Steve`) now redirects to that agent's DM space instead of treating the name as a new empty session
 
 ## [0.4.0] - 2026-06-10
 
