@@ -52,6 +52,8 @@
         style="background:rgba(255,255,255,0.06);color:#8b949e"
       >No memory</span>
     </div>
+
+    <ModelToolWarning v-if="unreliableForTools" />
   </div>
 </template>
 
@@ -59,11 +61,23 @@
 import { computed } from 'vue'
 import type { AgentSummary } from '../composables/useAgents'
 import { agentDisplayDescription } from '../utils/agentDescription'
+import { modelUnreliableForTools } from '../views/agents/modelToolCapabilities'
+import ModelToolWarning from './ModelToolWarning.vue'
 
-const props = withDefaults(defineProps<{ agent: AgentSummary; advertiseMemory?: boolean }>(), {
+const props = withDefaults(defineProps<{
+  agent: AgentSummary
+  advertiseMemory?: boolean
+  supportsTools?: boolean
+}>(), {
   advertiseMemory: true,
 })
 defineEmits<{ (e: 'click'): void; (e: 'edit'): void }>()
 
 const displayDescription = computed(() => agentDisplayDescription(props.agent))
+const unreliableForTools = computed(() =>
+  modelUnreliableForTools({
+    name: props.agent.model,
+    supportsTools: props.supportsTools ?? (props.agent as { supportsTools?: boolean }).supportsTools,
+  }),
+)
 </script>

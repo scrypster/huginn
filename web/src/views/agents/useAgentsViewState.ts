@@ -350,6 +350,12 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     })
   })
 
+  function listedSupportsTools(name: string | undefined): boolean | undefined {
+    if (!name) return undefined
+    return availableModels.value.find(m => m.name === name)?.supportsTools
+  }
+
+
   function selectModel(name: string, source?: string) {
     form.value.model = name
     // Stamp provider from the picker source so saving stores e.g. "vertex"
@@ -1129,6 +1135,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     filteredModelGroups,
     selectedModelUnreliableTools,
     showLocalAccessToolWarning,
+    listedSupportsTools,
     MODEL_TOOL_WARNING,
     memoryModes,
     availableSkills,

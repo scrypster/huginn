@@ -4,8 +4,9 @@ import { nextTick } from 'vue'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import { MODEL_TOOL_WARNING } from '../agents/modelToolCapabilities'
 
-const { mockModelsAvailable } = vi.hoisted(() => ({
+const { mockModelsAvailable, mockAgentsGet } = vi.hoisted(() => ({
   mockModelsAvailable: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
+  mockAgentsGet: vi.fn().mockResolvedValue({}),
 }))
 
 // We need to stub useAgents so we can control the agents list.
@@ -61,14 +62,7 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
       },
       agents: {
         ...orig.api.agents,
-        get: vi.fn().mockResolvedValue({
-          name: 'Alpha',
-          model: 'gpt-4',
-          system_prompt: '',
-          toolbelt: [],
-          skills: [],
-          local_tools: [],
-        }),
+        get: (...args: unknown[]) => mockAgentsGet(...args),
         capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
         validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
       },
@@ -102,6 +96,14 @@ describe('AgentsView', () => {
     mockOpenSpaceDM.mockReset()
     mockOpenSpaceDM.mockResolvedValue({ id: 'space-123', kind: 'dm', leadAgent: 'Alpha' })
     mockModelsAvailable.mockReset().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] })
+    mockAgentsGet.mockReset().mockResolvedValue({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: [],
+    })
   })
 
   it('shows empty state when agents list is empty and not loading', async () => {
@@ -262,5 +264,50 @@ describe('AgentsView', () => {
     await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[data-testid="model-picker-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  it('shows the tools warning on a 7b agent card but not a 14b card', async () => {
+    ;((_useAgents() as any).agents as any).value = [
+      { name: 'Steve', color: '#ff0', icon: 'S', model: 'qwen2.5-coder:7b' },
+      { name: 'Chris', color: '#0ff', icon: 'C', model: 'qwen2.5-coder:14b' },
+    ]
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: undefined },
+    })
+    await flushPromises()
+    const cards = wrapper.findAll('[data-testid="agent-card"]')
+    expect(cards).toHaveLength(2)
+    expect(cards[0]!.text()).toContain(MODEL_TOOL_WARNING)
+    expect(cards[1]!.text()).not.toContain(MODEL_TOOL_WARNING)
+  })
+
+  it('keeps the tools warning in the editor for a saved 7b agent', async () => {
+    mockAgentsGet.mockResolvedValue({
+      name: 'Steve',
+      model: 'qwen2.5-coder:7b',
+      color: '#58a6ff',
+      icon: 'S',
+      system_prompt: '',
+      local_tools: ['*'],
+    })
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router], stubs: { Teleport: true, Transition: false } },
+      props: { agentName: 'Steve' },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  it('shows the tools warning on a card when supportsTools is false', async () => {
+    ;((_useAgents() as any).agents as any).value = [
+      { name: 'Custom', color: '#ff0', icon: 'C', model: 'custom-coder', supportsTools: false },
+    ]
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: undefined },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
   })
 })

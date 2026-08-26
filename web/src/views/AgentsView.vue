@@ -33,6 +33,7 @@
             :key="agent.name"
             :agent="agent"
             :advertise-memory="advertiseMemory"
+            :supports-tools="listedSupportsTools(agent.model)"
             @click="openDM(agent)"
             @edit="router.push('/agents/' + agent.name)"
           />
@@ -136,11 +137,7 @@
                   <svg class="w-2.5 h-2.5 text-huginn-muted/50 group-hover:text-huginn-muted transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
               </button>
-              <p v-if="selectedModelUnreliableTools"
-                data-testid="model-tools-warning"
-                class="text-[10px] text-huginn-amber/90 leading-snug px-3">
-                {{ MODEL_TOOL_WARNING }}
-              </p>
+              <ModelToolWarning v-if="selectedModelUnreliableTools" class="px-3" />
             </div>
           </div>
 
@@ -1359,6 +1356,7 @@
 import { toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import AgentCard from '../components/AgentCard.vue'
+import ModelToolWarning from '../components/ModelToolWarning.vue'
 import { useAgentsViewState } from './agents/useAgentsViewState'
 
 const props = defineProps<{ agentName?: string }>()
@@ -1403,6 +1401,7 @@ const {
   filteredModelGroups,
   selectedModelUnreliableTools,
   showLocalAccessToolWarning,
+  listedSupportsTools,
   MODEL_TOOL_WARNING,
   memoryModes,
   availableSkills,

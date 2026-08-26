@@ -2867,3 +2867,60 @@ describe('ChatView — /chat/:agentName alias', () => {
     expect(banner.text()).not.toContain('Steve is responding')
   })
 })
+
+describe('ChatView — model tool capability warning', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockMessages['test-session-id'] = []
+    mockSessions.value = [{ id: 'test-session-id', title: 'DM Steve', agent: 'Steve' }]
+    mockActiveSpace.value = null
+    mockGetSessionThreads.mockReturnValue([])
+    mockGetActiveThreadCount.mockReturnValue(0)
+    mockGetSessionPreviews.mockReturnValue([])
+  })
+
+  it('shows the tools warning in header and composer for a 7b displayAgent', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-testid="chat-model-tools-warning"]').text()).toContain(
+      'This model is unlikely to use tools or delegate',
+    )
+    expect(wrapper.get('[data-testid="composer-model-tools-warning"]').text()).toContain(
+      'This model is unlikely to use tools or delegate',
+    )
+  })
+
+  it('hides the tools warning for a 14b displayAgent with tools', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Chris', model: 'qwen2.5-coder:14b', color: '#3FB950', icon: 'C', is_default: true },
+    ])
+    mockSessions.value = [{ id: 'test-session-id', title: 'DM Chris', agent: 'Chris' }]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="chat-model-tools-warning"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-model-tools-warning"]').exists()).toBe(false)
+  })
+
+  it('renders raw TOOL_FAIL assistant text as a system chip', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    mockMessages['test-session-id'] = [
+      { id: 'a1', role: 'assistant', content: 'TOOL_FAIL: The "json" tool is not available.', agent: 'Steve' },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    const chip = wrapper.get('[data-testid="system-fail-line"]')
+    expect(chip.text()).toContain('The "json" tool is not available.')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+})
