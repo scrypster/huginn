@@ -55,6 +55,10 @@ Every turn, Huginn assembles the `claude` CLI invocation with two tool lists:
 
 Scoping matters here: a tool the agent is pre-authorised for never calls Huginn at all, so if Huginn is down, only the gated tools are affected — the agent degrades to its pre-authorised capability rather than stopping dead.
 
+**Say this plainly: there is no human in the loop.** `handleClaudeApprove` does not surface a pending request anywhere, notify anyone, or wait for a person to click anything — it only checks the tool name against `claude_allowed_tools` and returns `allow` or `deny` immediately. So the two lists' actual semantics are: `claude_allowed_tools` is what the agent is permitted to do; `claude_gated_tools` is what triggers a hook round-trip and gets logged. **A tool that is in `claude_gated_tools` but not in `claude_allowed_tools` is denied every single time.** There is no prompt, no queue, no notification, and no way to approve it in the moment — it simply never runs.
+
+The one way a gated tool actually executes is to put it in **both** lists. Then the hook still fires on every call — so you get a log entry recording that it ran — but the outcome is always `allow`, because it's in `claude_allowed_tools`. This is the supported pattern for "let this run unattended, but I want an audit trail": put the tool in both `claude_allowed_tools` and `claude_gated_tools`, not just the first.
+
 **Approval fails closed.** If `huginn claude-approve` can't reach the Huginn server, gets a non-200 response, or can't parse the response, it prints an explicit `deny` and names the tool: *"Huginn unreachable — Bash requires approval."* Claude Code surfaces that reason to you verbatim and does not run the tool. There is no approval cache — every gated call is a fresh round-trip, because caching a security decision turns a boundary into a race.
 
 **A hook that times out is not the same as a hook that denies — and this is the part that makes the whole guarantee load-bearing.** Verified empirically against the real CLI: when Claude Code's own hook timeout fires, it kills the `huginn claude-approve` process and **runs the tool anyway** — the write went through, and `permission_denials` in the result came back empty. A `PreToolUse` hook fails *open* on timeout, not closed. Huginn's fail-closed guarantee therefore depends entirely on `huginn claude-approve`'s own client timeout (20 seconds) printing an explicit `deny` before Claude Code's hook timeout (30 seconds) gives up waiting and lets the tool through. These two numbers can never be tuned independently — there is a compile-time guard in the code (next to `claudeApproveTimeout` in `cmd_claude_approve.go`) that fails the build if the margin between them collapses. It is not decorative; it is the thing standing between "Huginn is unreachable" and "the tool ran without approval."
@@ -80,6 +84,10 @@ The tool calls Claude Code makes during a turn are recorded into Huginn's sessio
 ---
 
 ## Limitations
+
+**No interactive approval — a gated call is refused, not queued for a decision.** A tool in `claude_gated_tools` but not in `claude_allowed_tools` is denied automatically, every time, with no prompt, no notification, and nothing to click. Nothing in Huginn currently surfaces a pending Claude Code approval request to a person. If you want a gated tool to actually run, it has to also be in `claude_allowed_tools` — see "How approval works" above.
+
+**Per-turn cost and token counts are dropped, and this is a Huginn gap, not a CLI one.** The `claude` CLI itself reports `CostUSD`, `NumTurns`, and `DurationMS` for every turn. Huginn's shared `backend.ChatResponse` type has no field to carry any of the three, so the numbers reach a debug log and nowhere else — not the chat UI, not history, not any spend report. The data exists at the source; the wall is on Huginn's side, and it's the first thing to widen if per-agent spend tracking is ever needed.
 
 **No toolbelt access.** As noted above, GitHub/Slack/Jira/etc. connections configured on the agent's `toolbelt` field are inert for a `claude-code` provider agent until the MCP-server bridge subsystem exists.
 
