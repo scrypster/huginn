@@ -3647,8 +3647,14 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// folded into the source above: that is only consulted when the bridge is
 	// enabled, and a bad binding is just as broken with the bridge switched off.
 	if claudeAgents, claudeErr := agentslib.LoadAgents(); claudeErr == nil {
-		for _, problem := range claudeBindingProblems(claudeAgents) {
+		claudeProblems, claudeWarnings := claudeBindingProblems(claudeAgents)
+		for _, problem := range claudeProblems {
 			logger.Error("claudecode: " + problem)
+		}
+		// WARN, not Error: a mis-cased tool name is recoverable and the message
+		// says so. Logging it at Error trains people to ignore Error.
+		for _, warning := range claudeWarnings {
+			logger.Warn("claudecode: " + warning)
 		}
 	}
 
@@ -4031,37 +4037,38 @@ func sortedClaudeToolNames() []string {
 	return names
 }
 
-// claudeBindingProblems reports every unusable claude-code binding in a config,
-// so startup can log them all at once instead of one per discovery.
+// claudeBindingProblems reports what is wrong with the claude-code agents in a
+// config, so startup can log it all at once instead of one line per discovery.
 //
-// It also reports tool-name problems. Those are warnings rather than hard
-// failures (see knownClaudeTools), but they belong here because their symptom
-// is identical to a broken binding: the agent looks configured and silently
-// does nothing.
-func claudeBindingProblems(cfg *agentslib.AgentsConfig) []string {
+// TWO RETURN VALUES, AND THE SPLIT IS THE POINT. problems are bindings that
+// cannot work at all — no session id, a session id that is not a UUID — and
+// are logged at ERROR. warnings are tool-name spellings that silently match
+// nothing; they are logged at WARN because they are recoverable, because the
+// message itself calls them warnings, and because an Error line for a
+// mis-cased tool name teaches people to skim past Error lines that matter.
+func claudeBindingProblems(cfg *agentslib.AgentsConfig) (problems, warnings []string) {
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
-	var out []string
 	for _, def := range cfg.Agents {
 		if def.Provider != "claude-code" {
 			continue
 		}
 		if err := validateClaudeBinding(def.Name, def.ClaudeSessionID); err != nil {
-			out = append(out, err.Error())
+			problems = append(problems, err.Error())
 		}
 		for _, tool := range def.ClaudeAllowedTools {
 			if p := claudeToolNameProblem(def.Name, "claude_allowed_tools", tool); p != "" {
-				out = append(out, p)
+				warnings = append(warnings, p)
 			}
 		}
 		for _, tool := range def.ClaudeGatedTools {
 			if p := claudeToolNameProblem(def.Name, "claude_gated_tools", tool); p != "" {
-				out = append(out, p)
+				warnings = append(warnings, p)
 			}
 		}
 	}
-	return out
+	return problems, warnings
 }
 
 // claudeSessionIDsOf collects the Claude Code session ids bound to agents, for

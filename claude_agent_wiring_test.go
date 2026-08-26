@@ -279,9 +279,12 @@ func TestClaudeBindingProblemsOnlyFlagsClaudeCodeAgents(t *testing.T) {
 		{Name: "Malformed", Provider: "claude-code", ClaudeSessionID: "nope"}, // not a UUID
 		{Name: "Good", Provider: "claude-code", ClaudeSessionID: "11111111-2222-3333-4444-555555555555"},
 	}}
-	got := claudeBindingProblems(cfg)
+	got, warnings := claudeBindingProblems(cfg)
 	if len(got) != 2 {
 		t.Fatalf("claudeBindingProblems returned %d problems, want 2: %v", len(got), got)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("an unusable binding must be a problem, not a warning: %v", warnings)
 	}
 	joined := strings.Join(got, "\n")
 	for _, want := range []string{"Bad", "Malformed"} {
@@ -294,8 +297,8 @@ func TestClaudeBindingProblemsOnlyFlagsClaudeCodeAgents(t *testing.T) {
 			t.Errorf("%q reported but its binding is fine (or it is not a claude-code agent): %v", unwanted, got)
 		}
 	}
-	if claudeBindingProblems(nil) != nil {
-		t.Error("nil config must report no problems")
+	if p, w := claudeBindingProblems(nil); p != nil || w != nil {
+		t.Error("nil config must report no problems and no warnings")
 	}
 }
 
@@ -389,7 +392,15 @@ func TestClaudeBindingProblemsWarnsAboutToolNameSpelling(t *testing.T) {
 		ClaudeGatedTools:   []string{"Write", "SomeFutureTool"},
 	}}}
 
-	problems := strings.Join(claudeBindingProblems(cfg), "\n")
+	hard, warn := claudeBindingProblems(cfg)
+	problems := strings.Join(warn, "\n")
+
+	// A misspelled tool name is a WARNING, never a hard problem: it is
+	// recoverable, and logging it at Error alongside a genuinely unusable
+	// binding trains people to skim past Error.
+	if len(hard) != 0 {
+		t.Errorf("a tool-name spelling issue was reported as a hard problem: %v", hard)
+	}
 
 	if strings.Contains(problems, `"Read"`) || strings.Contains(problems, `"Write"`) {
 		t.Errorf("a correctly-spelled tool was flagged:\n%s", problems)
@@ -412,7 +423,7 @@ func TestClaudeBindingProblemsWarnsAboutToolNameSpelling(t *testing.T) {
 	native := &agentslib.AgentsConfig{Agents: []agentslib.AgentDef{{
 		Name: "Tom", Provider: "anthropic", LocalTools: []string{"bash", "*"},
 	}}}
-	if got := claudeBindingProblems(native); len(got) != 0 {
-		t.Errorf("flagged a non-claude-code agent's LocalTools: %v", got)
+	if p, w := claudeBindingProblems(native); len(p) != 0 || len(w) != 0 {
+		t.Errorf("flagged a non-claude-code agent's LocalTools: %v %v", p, w)
 	}
 }
