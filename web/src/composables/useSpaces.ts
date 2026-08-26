@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import { api } from './useApi'
+import { useBrowserNotifications } from './useBrowserNotifications'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 
 export interface Space {
@@ -98,6 +99,8 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
     }
   }
 
+  const { notify } = useBrowserNotifications()
+
   const onSpaceActivity = (msg: WSMessage): void => {
     const spaceId = msg.payload?.['space_id'] as string | undefined
     const count = msg.payload?.['unseen_count'] as number | undefined
@@ -107,7 +110,18 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
     if (spaceId === activeSpaceId.value && count > 0) return
     const space = spaces.value.find(s => s.id === spaceId)
     if (space) {
+      const prev = space.unseenCount
       space.unseenCount = count
+      // Inactive space whose unseen count went up — desktop notify (no-ops
+      // unless the tab is hidden). space_activity has no preview text.
+      if (spaceId !== activeSpaceId.value && count > prev) {
+        notify(
+          space.name || space.leadAgent,
+          'New message',
+          'space-activity-' + spaceId,
+          () => { window.location.hash = `#/space/${spaceId}` },
+        )
+      }
     }
   }
 

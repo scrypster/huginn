@@ -115,9 +115,20 @@ vi.mock('../../composables/useSpaceTimeline', () => ({
   wireSpaceTimelineWS: vi.fn(),
 }))
 
+const { mockRouterPush, mockNotify } = vi.hoisted(() => ({
+  mockRouterPush: vi.fn(),
+  mockNotify: vi.fn(),
+}))
+
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: {}, query: {} }),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: vi.fn() }),
+}))
+
+vi.mock('../../composables/useBrowserNotifications', () => ({
+  useBrowserNotifications: () => ({
+    notify: mockNotify,
+  }),
 }))
 
 // Stub heavy child components
@@ -2076,5 +2087,40 @@ describe('ChatView — space mode', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+  })
+
+  it('WS done handler: fires desktop notify with click-through to the space', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello space')
+    await flushPromises()
+
+    mockSpaceState.messages.push({
+      id: 'a-1',
+      session_id: NEW_SESSION_ID,
+      seq: 2,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'Space reply',
+      agent: 'atlas',
+    })
+
+    const chatMsg = mockWs.sentMessages.find((m: any) => m.type === 'chat')
+    expect(chatMsg).toBeDefined()
+    mockWs.simulateMessage({ type: 'done', run_id: chatMsg.run_id })
+    await nextTick()
+
+    expect(mockNotify).toHaveBeenCalledWith(
+      'atlas',
+      'Space reply',
+      `session-done-${SPACE_ID}`,
+      expect.any(Function),
+    )
+    const onClick = mockNotify.mock.calls.at(-1)?.[3] as (() => void) | undefined
+    onClick?.()
+    expect(mockRouterPush).toHaveBeenCalledWith(`/space/${SPACE_ID}`)
   })
 })

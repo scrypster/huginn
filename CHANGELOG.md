@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Desktop notifications now fire for space-mode agent replies when the Huginn tab is in the background
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
