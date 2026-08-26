@@ -570,6 +570,7 @@ func (tm *ThreadManager) runOnce(
 			// Same fallback as RunLoop: local Qwen/Ollama may emit a lone
 			// function-call JSON object in content instead of tool_calls.
 			backend.PromoteContentToolCalls(resp)
+			backend.PromoteGrantedContentToolCalls(resp, tools)
 			backend.RevealContentToolCalls(resp)
 			logger.Info("runOnce: ChatCompletion succeeded",
 				"thread_id", threadID, "turn", turn, "content_len", len(resp.Content),

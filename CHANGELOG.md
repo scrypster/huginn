@@ -11,6 +11,7 @@ All notable changes to Huginn are documented here.
 - User `@Name` in a channel or DM addresses that agent for the turn when they are on the space roster (stamped lead no longer swallows the mention). A leftover `@Name` of someone not in the roster still does not address them or extra-spawn a thread
 
 ### Fixed
+- Fenced or bare JSON invocations of granted tools mixed with prose (the qwen2.5-coder "playbook" shape) now promote and execute in order — glue prose stays visible, fences never paint in chat, unknown names stay inert, and a lead that delegates without `wait_for_threads` gets one automatic barrier so specialist results are not abandoned
 - Settings → Tools no longer presents `tools_enabled` as a master off switch for `huginn serve`; the copy matches serve (builtins still register; allow/deny still apply; deny wins on conflict)
 - Chat tool chips say **failed** instead of green **done** when a tool is denied, missing, or the assistant text is `TOOL_FAIL` / `DELEGATE_FAIL`
 - `TOOL_FAIL` / `DELEGATE_FAIL` assistant text renders as a system error line, not teammate speech (bare hydrated tokens and `TOKEN: reason` both chip)

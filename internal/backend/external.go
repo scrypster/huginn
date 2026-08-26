@@ -362,6 +362,7 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 	argsBuilders := map[int]*strings.Builder{}
 	// Hold back JSON-in-content tool prefixes so they never paint in the bubble.
 	tokenGate := NewContentToolCallTokenGate(req.OnToken, req.OnEvent)
+	tokenGate.SetGrantedTools(req.Tools)
 
 	sawDone := false
 
@@ -485,6 +486,9 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 	// qwen2.5-coder:14b (Ollama) often returns finish_reason=stop with a
 	// function-call JSON object in content and no structured tool_calls.
 	PromoteContentToolCalls(result)
+	// Playbook shape: fenced/bare tool JSON mixed with prose. Execute granted
+	// tools in order; the glue prose stays as visible Content.
+	PromoteGrantedContentToolCalls(result, req.Tools)
 	// Mixed JSON+prose (and native tool_calls plus a JSON echo) must not
 	// keep the invocation object in user-visible Content.
 	RevealContentToolCalls(result)

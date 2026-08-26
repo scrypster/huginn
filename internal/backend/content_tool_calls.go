@@ -781,6 +781,18 @@ type ContentToolCallTokenGate struct {
 	downstreamEvent func(StreamEvent)
 	raw             string
 	emitted         string
+	granted         map[string]bool
+}
+
+// SetGrantedTools enables mid-message stripping of fenced / bare JSON
+// invocations of tools granted this turn (the playbook shape
+// PromoteGrantedContentToolCalls executes). Nil-safe; without a granted set
+// only leading tool prefixes are held (original behavior).
+func (g *ContentToolCallTokenGate) SetGrantedTools(granted []Tool) {
+	if g == nil {
+		return
+	}
+	g.granted = grantedToolNameSet(granted)
 }
 
 // NewContentToolCallTokenGate wraps OnToken / OnEvent StreamText emitters.
@@ -830,6 +842,11 @@ func (g *ContentToolCallTokenGate) flush(final bool) {
 	}
 	if final {
 		vis = VisibleAssistantContent(g.raw)
+	}
+	if len(g.granted) > 0 {
+		// Drop complete granted tool fences/objects; a held tail (incomplete
+		// candidate) is simply truncated off vis until it resolves.
+		_, vis, _ = scanGrantedToolContent(vis, g.granted, !final)
 	}
 	if strings.HasPrefix(vis, g.emitted) {
 		g.emit(vis[len(g.emitted):])
