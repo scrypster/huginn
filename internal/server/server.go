@@ -554,6 +554,27 @@ func (s *Server) BroadcastToSession(sessionID, msgType string, payload map[strin
 	s.wsHub.broadcastToSession(sessionID, WSMessage{Type: msgType, Payload: payload})
 }
 
+// persistInboundUserMessage writes the accepted user prompt immediately so
+// mid-turn Appends (thread lifecycle announcements) cannot win seq before it.
+// Returns true if the row was persisted.
+func (s *Server) persistInboundUserMessage(sessionID, userMsgID, content string) bool {
+	if s.store == nil || sessionID == "" {
+		return false
+	}
+	sess, err := s.store.Load(sessionID)
+	if err != nil {
+		return false
+	}
+	if appendErr := s.store.Append(sess, session.SessionMessage{
+		ID: userMsgID, Role: "user", Content: content, Ts: time.Now().UTC(),
+	}); appendErr != nil {
+		slog.Error("failed to persist inbound user message", "session_id", sessionID, "err", appendErr)
+		return false
+	}
+	s.emitSpaceActivity(sess.SpaceID())
+	return true
+}
+
 func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload map[string]any) {
 	if s.store == nil {
 		return

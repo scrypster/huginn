@@ -513,7 +513,7 @@ func TestCreateFromMentions_SkipsSelfDelegation(t *testing.T) {
 	// Call CreateFromMentions with callerAgent="Tom".
 	// It should skip @Tom and only create a thread for @Sam.
 	CreateFromMentions(context.Background(), sess.ID, "@Tom and @Sam please help",
-		"", reg, store, sess, b, broadcastFn, ca, tm, "Tom")
+		"", reg, store, sess, b, broadcastFn, ca, tm, "Tom", nil)
 
 	// Give time for goroutines to complete.
 	deadline := time.Now().Add(2 * time.Second)
@@ -566,7 +566,7 @@ func TestCreateFromMentions_NoCallerAgent_DelegatesAll(t *testing.T) {
 	// Call CreateFromMentions with callerAgent="" (empty).
 	// Both @Tom and @Sam should get delegated to.
 	CreateFromMentions(context.Background(), sess.ID, "@Tom and @Sam please help",
-		"", reg, store, sess, b, broadcastFn, ca, tm, "")
+		"", reg, store, sess, b, broadcastFn, ca, tm, "", nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	var tomThread, samThread *Thread
@@ -645,6 +645,7 @@ func TestCreateFromMentions_MarkdownWrappedMentionsSpawnTwoThreads(t *testing.T)
 		NewCostAccumulator(0),
 		tm,
 		"Max",
+		nil,
 	)
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -769,6 +770,7 @@ func TestCreateFromMentions_UnknownAgentEmitsDelegationWarning(t *testing.T) {
 		NewCostAccumulator(0),
 		tm,
 		"Max",
+		nil,
 	)
 
 	// Wait for the (real) Stacy thread to finish so the goroutine isn't still
@@ -835,7 +837,7 @@ func TestCreateFromMentions_CaseInsensitiveSelfCheck(t *testing.T) {
 	// Even though @tom is mentioned, it should still be skipped because
 	// it's a case-insensitive match with the caller.
 	CreateFromMentions(context.Background(), sess.ID, "@tom please help",
-		"", reg, store, sess, b, broadcastFn, ca, tm, "tom")
+		"", reg, store, sess, b, broadcastFn, ca, tm, "tom", nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	var tomThread *Thread

@@ -4,14 +4,36 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Added
+- Space-routed DMs/channels now load REST threads after timeline hydrate (active session and every `session_id` on the timeline) so ThreadPanel, previews, and A2A strips use the same helpers as session mode
+
 ### Fixed
 - Settings → Tools no longer presents `tools_enabled` as a master off switch for `huginn serve`; the copy matches serve (builtins still register; allow/deny still apply; deny wins on conflict)
 - Chat tool chips say **failed** instead of green **done** when a tool is denied, missing, or the assistant text is `TOOL_FAIL` / `DELEGATE_FAIL`
 - `TOOL_FAIL` / `DELEGATE_FAIL` assistant text renders as a system error line, not teammate speech (bare hydrated tokens and `TOKEN: reason` both chip)
 - Channel sidebar previews stay plaintext so `snake_case` and `TOOL_FAIL` keep their underscores
-- New-agent form no longer opens as "Unsaved changes" or offers Delete
+- New-agent form no longer opens as "Unsaved changes" (color picker first-paint `@change`) and hides Delete
 - Parked Memory (empty vaults / disconnected) no longer badges agent cards or the channel header
 - Version badge collapses `vv0.4.0-try-all` to `v0.4.0-try-all` (About, profile popover, and Stats SERVER — no extra `v` prefix)
+- Settings → Stats no longer reports 0 messages / 0 tokens when transcripts exist: `Append` persists `message_count` / `last_message_id` / `updated_at` with the message, existing sessions are backfilled from `messages`, token usage is stamped on the assistant row and written to `cost_history` when known, and Last LLM Call shows "—" instead of a fake 0
+- `/chat/:name` for an agent name (e.g. `/#/chat/Steve`) now redirects to that agent's DM space instead of treating the name as a new empty session
+- Composer `@` mention picker now dismisses on Escape via TipTap suggestion `onExit`, instead of only hiding the popup
+- Local Access “Allow all” now asks for confirmation before enabling God Mode (`local_tools: ["*"]`, including shell)
+- Harness announcement lines (`Delegated to @…`, auto-approved, completed delegated work, `TOOL_FAIL` / `DELEGATE_FAIL`) render as system/delegation rows instead of teammate speech; A2A tools are omitted from the “N tool calls” chip
+- Chat composer stays editable while an agent is responding so a second message can be queued without clearing the in-flight bubble
+- Space-mode unreads now match the Slack surface: the in-chat jump pill keys off the space timeline, opening one space no longer clears unseen for unvisited spaces, and sidebar DM previews prefetch a last-message snippet without stripping TOOL_FAIL underscores
+- Stats and Settings routes keep the Channels/DMs sidebar visible instead of unmounting the context panel
+- Chat sidebar no longer flashes “No channels yet” / “No agents configured” while spaces are still loading
+- Channel header "N agents / Manage agents" chip now opens the agent roster modal (add, remove, set lead) instead of only the read-only member panel; DMs stay read-only and the panel chevron still toggles the rail
+- Desktop notifications now fire for space-mode agent replies when the Huginn tab is in the background
+- Composer `@` picker lists only agents in the active space roster (channel = lead + members, DM = that agent); leftover `@Name` of a non-member is dropped with a "not in this channel" hint instead of silently hitting the lead
+- Cmd+K global search now finds channel/DM (space) messages and opens `/#/space/:id` instead of leftover `/#/chat/:sessionId` chrome
+- Persist inbound user messages at accept so mid-turn harness announcements no longer appear before the prompt after reload
+- Mid-text `@Name` of someone not in the space no longer addresses them or extra-spawns a thread; leftover is dropped with the same "not in this channel" hint as a leading leftover. Spaces with a roster only address or extra-spawn roster names
+- Switching DMs no longer paints a quiet room as busy: the responding banner, preparing-context line, and update-active-work strip stay on the space that owns the in-flight run
+- Switching DMs no longer dumps another space's follow-up cards, thread completion cards, permission prompts, warnings, or thread-help toasts onto the room you opened — those events write to the owner space's timeline and only surface permission/toasts when that space is in view
+- Assistant or user `@Name` of someone not in the space no longer extra-spawns a thread via CreateFromMentions (Tess DM `@Steve` stays Tess-only; channel roster members still spawn; standalone session-mode is unchanged)
+- `delegate_to_agent` targeting someone not in the space roster now fails visibly (DELEGATE_FAIL) instead of spawning (Tess-only DM cannot spawn Steve; channel roster members still delegate; standalone session-mode is unchanged)
 
 ## [0.4.0] - 2026-06-10
 

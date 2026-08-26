@@ -162,6 +162,7 @@ func TestDelegation_E2E_SpawnedThreadsReceiveMuninnSchemas(t *testing.T) {
 		NewCostAccumulator(0),
 		tm,
 		"Lead",
+		nil,
 	)
 
 	// Wait until both spawned threads finish. Without this we'd race the

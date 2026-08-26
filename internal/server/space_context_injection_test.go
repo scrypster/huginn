@@ -479,8 +479,8 @@ func TestResolveAgentForMessage_ChannelAtMention(t *testing.T) {
 
 	sess := sessStore.New("test-mention", "/workspace", "model")
 	sess.Manifest.SpaceID = ch.ID
-	// Do NOT set sess.Manifest.Agent — in channels, routing should come from
-	// the space lead agent + @mention logic, not a hardcoded primary agent.
+	// Stamp the lead the way handleCreateSession does. @Sam must still win.
+	sess.Manifest.Agent = "Tom"
 	_ = sessStore.SaveManifest(sess)
 
 	srv.agentLoader = func() (*agents.AgentsConfig, error) {
@@ -528,13 +528,21 @@ func TestResolveAgentForMessage_ChannelAtMention_NonMember_FallsToLead(t *testin
 		}, nil
 	}
 
-	// @Dave is not a member — should fall back to Tom (lead agent).
+	// @Dave is a known agent but not a channel member — stay with lead Tom.
 	ag := srv.resolveAgentForMessage(sess.ID, "@Dave deploy to staging")
 	if ag == nil {
 		t.Fatal("expected agent, got nil")
 	}
 	if ag.Name != "Tom" {
 		t.Errorf("expected fallback to lead agent Tom for non-member mention, got %q", ag.Name)
+	}
+
+	ag = srv.resolveAgentForMessage(sess.ID, "please ask @Dave about hostname")
+	if ag == nil {
+		t.Fatal("expected agent for mid-text non-member, got nil")
+	}
+	if ag.Name != "Tom" {
+		t.Errorf("expected mid-text @Dave in a Tom/Sam channel to stay with Tom, got %q", ag.Name)
 	}
 }
 
@@ -581,12 +589,13 @@ func TestExtractLeadMention(t *testing.T) {
 		{"@Sam can you review?", "Sam"},
 		{"@Dave-ops deploy to staging", "Dave-ops"},
 		{"@Tom_lead what's the plan?", "Tom_lead"},
-		{"hello @Sam", ""},              // not at start
+		{"hello @Sam", "Sam"},            // first @ anywhere
 		{"@", ""},                        // bare @
 		{"@123invalid", ""},              // starts with digit
 		{"no mention here", ""},          // no @
 		{"", ""},                          // empty
 		{"  @Sam leading spaces", "Sam"}, // trimmed
+		{"alice@Bob", ""},                // email-style, not a mention
 	}
 
 	for _, tt := range tests {

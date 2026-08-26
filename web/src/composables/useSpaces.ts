@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import { api } from './useApi'
+import { useBrowserNotifications } from './useBrowserNotifications'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 
 export interface Space {
@@ -33,7 +34,9 @@ const ACTIVE_SPACE_KEY = 'huginn_active_space_id'
 // Module-level shared state
 const spaces = ref<Space[]>([])
 const activeSpaceId = ref<string | null>(localStorage.getItem(ACTIVE_SPACE_KEY))
-const loading = ref(false)
+// Start true so the chat sidebar does not flash empty-state copy before the
+// first fetchSpaces() (initApp only calls it after token/WS/sessions).
+const loading = ref(true)
 const error = ref<string | null>(null)
 const spaceSessionsMap = ref<Record<string, unknown[]>>({})
 
@@ -98,6 +101,8 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
     }
   }
 
+  const { notify } = useBrowserNotifications()
+
   const onSpaceActivity = (msg: WSMessage): void => {
     const spaceId = msg.payload?.['space_id'] as string | undefined
     const count = msg.payload?.['unseen_count'] as number | undefined
@@ -107,7 +112,18 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
     if (spaceId === activeSpaceId.value && count > 0) return
     const space = spaces.value.find(s => s.id === spaceId)
     if (space) {
+      const prev = space.unseenCount
       space.unseenCount = count
+      // Inactive space whose unseen count went up — desktop notify (no-ops
+      // unless the tab is hidden). space_activity has no preview text.
+      if (spaceId !== activeSpaceId.value && count > prev) {
+        notify(
+          space.name || space.leadAgent,
+          'New message',
+          'space-activity-' + spaceId,
+          () => { window.location.hash = `#/space/${spaceId}` },
+        )
+      }
     }
   }
 

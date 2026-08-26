@@ -417,8 +417,12 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 				allowed[strings.ToLower(m)] = struct{}{}
 			}
 			if _, ok := allowed[strings.ToLower(p.AgentID)]; !ok {
-				return nil, fmt.Errorf("%w: agent %q not in space %q",
-					ErrAgentNotSpaceMember, p.AgentID, p.SpaceID)
+				roster := strings.Join(members, ", ")
+				if roster == "" {
+					roster = "(empty)"
+				}
+				return nil, fmt.Errorf("DELEGATE_FAIL: %w: agent %q is not a member of this space (roster: %s)",
+					ErrAgentNotSpaceMember, p.AgentID, roster)
 			}
 		}
 	}

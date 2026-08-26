@@ -22,7 +22,13 @@ import {
   clearSpaceTimeline,
   getSessionSpaceId,
   getSpaceLastMessage,
+  plaintextPreview,
+  prefetchSpaceSidebar,
+  spaceSessionsIndexed,
+  listCachedSpaceMessages,
+  getSpaceTimelineState,
 } from '../useSpaceTimeline'
+import { api } from '../useApi'
 
 // ── Mock WS factory ───────────────────────────────────────────────────
 function createMockWs() {
@@ -706,5 +712,114 @@ describe('getSessionSpaceId', () => {
 
     expect(getSessionSpaceId(SESSION_ID)).toBe(SPACE_ID)
     expect(getSessionSpaceId(SESSION_B)).toBe(SPACE_B)
+  })
+
+  it('maps via prefetch index without visiting the timeline', async () => {
+    vi.mocked(api.spaces.sessions).mockResolvedValueOnce([
+      { id: SESSION_B, title: 'Steve', status: 'idle', created_at: '', updated_at: '', space_id: SPACE_B },
+    ])
+    vi.mocked(api.spaces.messages).mockResolvedValueOnce({
+      messages: [{
+        id: 'm-last', session_id: SESSION_B, seq: 1, ts: new Date().toISOString(),
+        role: 'assistant', content: 'TOOL_FAIL: missing key', agent: 'Steve',
+      }],
+      next_cursor: '',
+    })
+
+    await prefetchSpaceSidebar([SPACE_B])
+
+    expect(getSessionSpaceId(SESSION_B)).toBe(SPACE_B)
+    expect(spaceSessionsIndexed([SPACE_B])).toBe(true)
+    // Prefetch must not seed the visit cache — hydrate still has to load history.
+    expect(useSpaceTimeline(SPACE_B).getState().messages).toHaveLength(0)
+    const snippet = getSpaceLastMessage(SPACE_B)
+    expect(snippet).not.toBeNull()
+    expect(snippet!.text).toContain('TOOL_FAIL')
+    expect(snippet!.text).toContain('_')
+  })
+})
+
+describe('plaintextPreview', () => {
+  it('keeps TOOL_FAIL underscores', () => {
+    expect(plaintextPreview('check TOOL_FAIL in the log')).toBe('check TOOL_FAIL in the log')
+  })
+
+  it('strips markdown wrappers without eating underscores', () => {
+    expect(plaintextPreview('**bold** and `code` and # heading')).toBe('bold and code and heading')
+  })
+
+  it('truncates long snippets', () => {
+    const long = 'a'.repeat(60)
+    expect(plaintextPreview(long)).toBe('a'.repeat(48) + '…')
+  })
+})
+
+describe('getSpaceLastMessage', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+
+  it('returns null when the space has never been opened or prefetched', () => {
+    expect(getSpaceLastMessage(SPACE_ID)).toBeNull()
+  })
+
+  it('uses the live timeline when the space has been visited', () => {
+    const { state } = setupSpace()
+    state.messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: new Date().toISOString(),
+      role: 'assistant', content: 'hello from **Steve**', agent: 'Steve',
+    })
+    const snippet = getSpaceLastMessage(SPACE_ID)
+    expect(snippet?.text).toBe('Steve: hello from Steve')
+  })
+})
+
+describe('listCachedSpaceMessages', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns only spaces that have cached messages', () => {
+    useSpaceTimeline(SPACE_ID).getState().messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: '', role: 'user', content: 'hi', agent: '',
+    })
+    useSpaceTimeline(SPACE_B).getState()
+
+    const listed = listCachedSpaceMessages()
+    expect(listed).toHaveLength(1)
+    expect(listed[0].spaceId).toBe(SPACE_ID)
+    expect(listed[0].messages).toHaveLength(1)
+  })
+})
+
+describe('getSpaceTimelineState', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns the same cached state as useSpaceTimeline for that space', () => {
+    const tl = useSpaceTimeline(SPACE_ID)
+    tl.getState().sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    tl.getState().messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: '', role: 'user', content: 'hi', agent: '',
+    })
+
+    const viaLookup = getSpaceTimelineState(SPACE_ID)
+    expect(viaLookup).toBe(tl.getState())
+    expect(viaLookup.messages).toHaveLength(1)
+    expect(getSpaceTimelineState(SPACE_B)).not.toBe(viaLookup)
   })
 })

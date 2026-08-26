@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
 // We need to stub useAgents so we can control the agents list.
@@ -49,6 +50,14 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
       },
       agents: {
         ...orig.api.agents,
+        get: vi.fn().mockResolvedValue({
+          name: 'Alpha',
+          model: 'gpt-4',
+          system_prompt: '',
+          toolbelt: [],
+          skills: [],
+          local_tools: [],
+        }),
         capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
         validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
       },
@@ -119,6 +128,20 @@ describe('AgentsView', () => {
     expect(router.currentRoute.value.path).toBe('/space/space-123')
   })
 
+  it('/agents/new has no delete button and no unsaved bar on mount', async () => {
+    await router.push('/agents/new')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'new' },
+    })
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('[data-testid="delete-agent-btn"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Unsaved changes')
+  })
+
   it('openDM falls back to /agents/:name if DM fetch fails', async () => {
     // Override the mock so DM fetch fails while other calls (e.g. skills load) succeed.
     vi.mocked(apiFetch).mockImplementation(async (path: string) => {
@@ -136,5 +159,34 @@ describe('AgentsView', () => {
     await wrapper.find('[data-testid="agent-card"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/agents/Alpha')
+  })
+
+  it('local access Allow all warning click must confirm first', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const allowAll = wrapper.find('[data-testid="local-access-allow-all-btn"]')
+    expect(allowAll.exists()).toBe(true)
+    expect(allowAll.text()).toBe('Allow all')
+
+    await allowAll.trigger('click')
+    await flushPromises()
+
+    const confirmBanner = wrapper.find('[data-testid="local-access-allow-all-confirm"]')
+    expect(confirmBanner.exists()).toBe(true)
+    expect(confirmBanner.text()).toMatch(/God Mode/i)
+    expect(confirmBanner.text()).toMatch(/shell/i)
+    expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('Allow all')
+
+    await wrapper.find('[data-testid="local-access-allow-all-confirm-btn"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="local-access-allow-all-confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('✓ Allow all')
   })
 })

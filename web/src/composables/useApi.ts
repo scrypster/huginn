@@ -342,7 +342,7 @@ export const api = {
     status: () => apiFetch<{ state: string; session_id: string; machine_id: string }>('/api/v1/runtime/status'),
   },
 
-  stats: () => apiFetch<Record<string, number>>('/api/v1/stats'),
+  stats: () => apiFetch<Record<string, number | null>>('/api/v1/stats'),
 
   statsHistory: (since?: number) => {
     const q = since != null ? `?since=${since}` : ''

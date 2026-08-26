@@ -39,7 +39,7 @@ vi.mock('../../composables/useSessions', () => {
 
 const mockGetSessionThreads = vi.fn().mockReturnValue([])
 const mockGetActiveThreadCount = vi.fn().mockReturnValue(0)
-const mockLoadThreads = vi.fn()
+const mockLoadThreads = vi.fn(() => Promise.resolve())
 const mockWireWS = vi.fn()
 const mockGetSessionPreviews = vi.fn().mockReturnValue([])
 const mockClearSessionPreviews = vi.fn()
@@ -59,10 +59,14 @@ vi.mock('../../composables/useThreads', () => ({
 }))
 
 const mockActiveSpace = ref<any>(null)
+const mockDms = ref<any[]>([])
+const mockOpenDM = vi.fn().mockResolvedValue(null)
 
 vi.mock('../../composables/useSpaces', () => ({
   useSpaces: () => ({
     activeSpace: mockActiveSpace,
+    dms: mockDms,
+    openDM: mockOpenDM,
   }),
 }))
 
@@ -100,24 +104,65 @@ const makeSpaceState = () => ({
 })
 
 let mockSpaceState = makeSpaceState()
+const spaceStateById = new Map<string, ReturnType<typeof makeSpaceState>>()
 const mockSpaceHydrate = vi.fn().mockResolvedValue(undefined)
-const mockSpaceTimeline = {
-  getState: () => mockSpaceState,
-  hydrate: mockSpaceHydrate,
-  loadMore: vi.fn().mockResolvedValue(null),
-  retryHydrate: vi.fn(),
+
+function getOrCreateSpaceState(spaceId: string) {
+  let st = spaceStateById.get(spaceId)
+  if (!st) {
+    const alreadyRegistered = [...spaceStateById.values()].includes(mockSpaceState)
+    st = alreadyRegistered ? makeSpaceState() : mockSpaceState
+    spaceStateById.set(spaceId, st)
+  }
+  return st
 }
-const mockUseSpaceTimeline = vi.fn(() => mockSpaceTimeline)
+
+const mockUseSpaceTimeline = vi.fn((spaceId?: unknown) => {
+  if (typeof spaceId === 'string') {
+    mockSpaceState = getOrCreateSpaceState(spaceId)
+  }
+  return {
+    getState: () => mockSpaceState,
+    hydrate: mockSpaceHydrate,
+    loadMore: vi.fn().mockResolvedValue(null),
+    retryHydrate: vi.fn(),
+  }
+})
+
+function mockGetSessionSpaceId(sessionId: string): string | null {
+  for (const [spaceId, st] of spaceStateById.entries()) {
+    if (st.sessionToSpaceMap.has(sessionId)) return spaceId
+  }
+  return null
+}
+
+function mockGetSpaceTimelineState(spaceId: string) {
+  return getOrCreateSpaceState(spaceId)
+}
 
 vi.mock('../../composables/useSpaceTimeline', () => ({
   useSpaceTimeline: (...args: unknown[]) => mockUseSpaceTimeline(...args),
+  getSessionSpaceId: (sessionId: string) => mockGetSessionSpaceId(sessionId),
+  getSpaceTimelineState: (spaceId: string) => mockGetSpaceTimelineState(spaceId),
   clearSpaceTimeline: vi.fn(),
   wireSpaceTimelineWS: vi.fn(),
 }))
 
+const { mockRouterPush, mockRouterReplace, mockNotify } = vi.hoisted(() => ({
+  mockRouterPush: vi.fn(),
+  mockRouterReplace: vi.fn(),
+  mockNotify: vi.fn(),
+}))
+
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: {}, query: {} }),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
+}))
+
+vi.mock('../../composables/useBrowserNotifications', () => ({
+  useBrowserNotifications: () => ({
+    notify: mockNotify,
+  }),
 }))
 
 // Stub heavy child components
@@ -187,7 +232,8 @@ function mountChatView(
         ChatEditor: {
           name: 'ChatEditor',
           template: '<div class="chat-editor-stub" />',
-          emits: ['send'],
+          props: ['disabled', 'placeholder', 'memberNames'],
+          emits: ['send', 'unknown-mention'],
           // Expose a focus() method so the component's onMounted hook doesn't error
           setup() {
             return { focus: vi.fn() }
@@ -205,9 +251,13 @@ function mountChatView(
 describe('ChatView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLoadThreads.mockImplementation(() => Promise.resolve())
     mockMessages['test-session-id'] = []
     mockSessions.value = [{ id: 'test-session-id', title: 'Test Session' }]
     mockActiveSpace.value = null
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
+    spaceStateById.clear()
     mockSpaceState = makeSpaceState()
     mockGetSessionThreads.mockReturnValue([])
     mockGetActiveThreadCount.mockReturnValue(0)
@@ -747,6 +797,10 @@ describe('ChatView', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+    expect(chatEditor.props('disabled')).toBeFalsy()
+    const msgs = mockGetMessages('test-session-id')
+    expect(msgs.some((m: any) => m.streaming)).toBe(true)
+    expect(msgs.find((m: any) => m.id === 'h-1')?.content).toBe('in progress...')
   })
 
   it('shows pre-stream thinking indicator immediately after send', async () => {
@@ -935,6 +989,80 @@ describe('ChatView', () => {
     expect(avatarText).toContain('L')
     expect(avatarText).toContain('H')
     expect(avatarText).toContain('R')
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(chatEditor.props('memberNames')).toEqual(['Lead', 'Helper', 'Reviewer'])
+  })
+
+  it('passes only the DM agent as ChatEditor memberNames', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'gpt-4', color: '#58A6FF', icon: 'S', is_default: true },
+      { name: 'Tess', model: 'claude-3', color: '#3FB950', icon: 'T', is_default: false },
+    ])
+    mockActiveSpace.value = {
+      id: 'dm-steve',
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+    }
+
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(chatEditor.props('memberNames')).toEqual(['Steve'])
+  })
+
+  it('Manage agents chip: mounts AgentRosterModal on a channel space', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Lead', model: 'gpt-4', color: '#58A6FF', icon: 'L', is_default: true },
+      { name: 'Helper', model: 'claude-3', color: '#3FB950', icon: 'H', is_default: false },
+    ])
+    mockActiveSpace.value = {
+      id: 'space-1',
+      name: 'Test Space',
+      kind: 'channel',
+      leadAgent: 'Lead',
+      memberAgents: ['Lead', 'Helper'],
+    }
+
+    const wrapper = mountChatView()
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(false)
+
+    const manageBtn = wrapper.find('button[title="Manage agents"]')
+    expect(manageBtn.exists()).toBe(true)
+    await manageBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(true)
+  })
+
+  it('Manage agents chip: does not mount AgentRosterModal on a DM space', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'atlas', model: 'gpt-4', color: '#58A6FF', icon: 'A', is_default: true },
+    ])
+    mockActiveSpace.value = {
+      id: 'dm-1',
+      name: 'atlas',
+      kind: 'dm',
+      leadAgent: 'atlas',
+      memberAgents: ['atlas'],
+    }
+
+    const wrapper = mountChatView()
+    await flushPromises()
+
+    const manageBtn = wrapper.find('button[title="Manage agents"]')
+    expect(manageBtn.exists()).toBe(true)
+    await manageBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(false)
   })
 
   it('space agent preview: shows +N overflow when more than 3 agents', async () => {
@@ -1203,6 +1331,57 @@ describe('ChatView', () => {
     expect(blockedChip.exists()).toBe(true)
     expect(blockedChip.text()).toContain('1')
     expect(blockedChip.text()).toContain('blocked')
+  })
+
+  it('harness announcement lines render as system rows, not teammate voice', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'ann-1',
+        role: 'assistant',
+        content: 'Delegation to @Steve was auto-approved after 30s.',
+        agent: 'Steve',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'ann-2',
+        role: 'assistant',
+        content: 'Delegated to @Steve: look up the hostname',
+        agent: 'Steve',
+        createdAt: new Date().toISOString(),
+      },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    const lines = wrapper.findAll('[data-testid="system-line"]')
+    expect(lines.length).toBe(2)
+    expect(lines[0]!.text()).toContain('auto-approved after 30s')
+    expect(lines[1]!.text()).toContain('Delegated to @Steve')
+    expect(wrapper.html()).not.toContain('AgentMessageHeader')
+  })
+
+  it('omits A2A tools from the completed tool-call chip', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'Delegating hostname lookup',
+        agent: 'Tess',
+        createdAt: new Date().toISOString(),
+        toolCalls: [
+          { id: 't1', name: 'delegate_to_agent', args: { agent: 'Steve' }, result: '{}', done: true },
+          { id: 't2', name: 'wait_for_threads', args: {}, result: 'TOOL_FAIL', done: true },
+          { id: 't3', name: 'read_file', args: { path: 'x' }, result: 'ok', done: true },
+        ],
+      },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.html()).toContain('1 tool call')
+    expect(wrapper.html()).not.toContain('3 tool calls')
   })
 
   it('delegation_preview_timeout appends auto-approved timeline message', async () => {
@@ -2051,10 +2230,14 @@ describe('ChatView — space mode', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLoadThreads.mockImplementation(() => Promise.resolve())
     // Reset space state to a clean slate for each test
+    spaceStateById.clear()
     mockSpaceState = makeSpaceState()
     mockSpaceHydrate.mockResolvedValue(undefined)
     mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
   })
 
   it('first send: auto-creates session and registers it in sessionToSpaceMap', async () => {
@@ -2158,5 +2341,403 @@ describe('ChatView — space mode', () => {
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('all_active')
+  })
+
+  it('does not flash empty-state copy while the space timeline hydrates', async () => {
+    mockSpaceState.loadingInitial = true
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+    expect(wrapper.html()).not.toContain('Send your first message')
+  })
+
+  it('space hydrate with a session that has a REST thread loads sessionThreads so ThreadPanel can open', async () => {
+    const SESSION = 'space-sess-tess'
+    const restThread = {
+      ID: 'thr-steve',
+      SessionID: SESSION,
+      AgentID: 'Steve',
+      Task: 'hostname',
+      Status: 'done',
+      Summary: { Summary: 'TOOL_FAIL', Status: 'error' },
+    }
+    mockSpaceHydrate.mockImplementation(async () => {
+      mockSpaceState.activeSessionId = SESSION
+      mockSpaceState.messages.push({
+        id: 'm-tess',
+        session_id: SESSION,
+        seq: 1,
+        ts: '2026-08-26T00:00:00Z',
+        role: 'assistant',
+        content: 'TOOL_FAIL',
+        agent: 'Tess',
+      })
+    })
+    mockGetSessionThreads.mockImplementation((id: string) => (id === SESSION ? [restThread] : []))
+    mockGetActiveThreadCount.mockImplementation((id: string) => (id === SESSION ? 0 : 0))
+
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+
+    expect(mockLoadThreads).toHaveBeenCalledWith(SESSION)
+    const panel = wrapper.findComponent({ name: 'ThreadPanel' })
+    expect(panel.exists()).toBe(true)
+    expect(panel.props('threads')).toEqual([restThread])
+  })
+
+  it('ChatEditor stays enabled while streaming and a queued send keeps the in-flight bubble', async () => {
+    mockSpaceState.activeSessionId = 'existing-session-xyz'
+    mockSpaceState.sessionToSpaceMap.set('existing-session-xyz', SPACE_ID)
+    mockSpaceState.messages.push({
+      id: 'h-1',
+      session_id: 'existing-session-xyz',
+      seq: 1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'in flight…',
+      agent: 'Tess',
+    })
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'First')
+    await flushPromises()
+
+    expect(chatEditor.props('disabled')).toBeFalsy()
+
+    const inflightBefore = mockSpaceState.messages.filter((m: any) => String(m.id).startsWith('stream-') || m.role === 'assistant')
+    const assistantBefore = [...mockSpaceState.messages].reverse().find((m: any) => m.role === 'assistant')
+    expect(assistantBefore).toBeDefined()
+
+    await chatEditor.vm.$emit('send', 'Second while streaming')
+    await flushPromises()
+
+    expect(chatEditor.props('disabled')).toBeFalsy()
+    expect(mockSpaceState.messages).toEqual(expect.arrayContaining(inflightBefore))
+    const chatSends = mockWs.sentMessages.filter((m: any) => m.type === 'chat')
+    expect(chatSends.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('WS done handler: fires desktop notify with click-through to the space', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello space')
+    await flushPromises()
+
+    mockSpaceState.messages.push({
+      id: 'a-1',
+      session_id: NEW_SESSION_ID,
+      seq: 2,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'Space reply',
+      agent: 'atlas',
+    })
+
+    const chatMsg = mockWs.sentMessages.find((m: any) => m.type === 'chat')
+    expect(chatMsg).toBeDefined()
+    mockWs.simulateMessage({ type: 'done', run_id: chatMsg.run_id })
+    await nextTick()
+
+    expect(mockNotify).toHaveBeenCalledWith(
+      'atlas',
+      'Space reply',
+      `session-done-${SPACE_ID}`,
+      expect.any(Function),
+    )
+    const onClick = mockNotify.mock.calls.at(-1)?.[3] as (() => void) | undefined
+    onClick?.()
+    expect(mockRouterPush).toHaveBeenCalledWith(`/space/${SPACE_ID}`)
+  })
+
+  const SPACE_A = 'space-tess'
+  const SPACE_B = 'space-steve'
+  const SESS_A = 'sess-tess'
+  const SESS_B = 'sess-steve'
+
+  function spaceStub(id: string, name: string) {
+    return { id, name, kind: 'dm', leadAgent: name, memberAgents: [] }
+  }
+
+  async function mountTwoPartySpace(spaceId: string, ws: ReturnType<typeof createMockWs>) {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S' },
+    ])
+    mockActiveSpace.value = spaceStub(spaceId, spaceId === SPACE_A ? 'Tess' : 'Steve')
+    mockSpaceState.activeSessionId = `sess-${spaceId}`
+    mockSpaceState.sessionToSpaceMap.set(`sess-${spaceId}`, spaceId)
+    const wrapper = mountChatView({ sessionId: undefined, spaceId }, ws)
+    await flushPromises()
+    return wrapper
+  }
+
+  async function openSpace(wrapper: ReturnType<typeof mountChatView>, spaceId: string) {
+    mockActiveSpace.value = spaceStub(spaceId, spaceId === SPACE_A ? 'Tess' : 'Steve')
+    await wrapper.setProps({ spaceId })
+    await flushPromises()
+  }
+
+  it('keeps responding chrome on the space that owns the run when switching DMs', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('When you send now:')
+
+    await openSpace(wrapper, SPACE_B)
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Steve is responding')
+    expect(wrapper.html()).not.toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).not.toContain('When you send now:')
+
+    await openSpace(wrapper, SPACE_A)
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).toContain('When you send now:')
+  })
+
+  it('starts a new run in a quiet space instead of queueing against the other space\'s turn', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    await openSpace(wrapper, SPACE_B)
+    await chatEditor.vm.$emit('send', 'Hey Steve')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Steve is responding')
+    expect(wrapper.html()).not.toContain('queued')
+
+    await openSpace(wrapper, SPACE_A)
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('queued')
+  })
+
+  it('clears a background space run when its done arrives while another DM is open', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    const tessRunId = mockWs.sentMessages.find((m: any) => m.type === 'chat')?.run_id
+    expect(tessRunId).toBeTruthy()
+
+    await openSpace(wrapper, SPACE_B)
+    mockWs.simulateMessage({ type: 'done', run_id: tessRunId, session_id: `sess-${SPACE_A}` })
+    await flushPromises()
+
+    await openSpace(wrapper, SPACE_A)
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('When you send now:')
+  })
+
+  function seedSpace(spaceId: string, sessionId: string) {
+    const st = mockGetSpaceTimelineState(spaceId)
+    st.activeSessionId = sessionId
+    st.sessionToSpaceMap.set(sessionId, spaceId)
+    return st
+  }
+
+  it('keeps another space\'s follow-up, completion card, permission, warning, and thread_help off the viewed DM', async () => {
+    const stateA = seedSpace(SPACE_A, SESS_A)
+    const stateB = seedSpace(SPACE_B, SESS_B)
+    mockActiveSpace.value = spaceStub(SPACE_B, 'Steve')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_B }, mockWs)
+    await flushPromises()
+
+    mockWs.simulateMessage({
+      type: 'follow_up_start',
+      session_id: SESS_A,
+      payload: { agent: 'Tess' },
+    })
+    mockWs.simulateMessage({
+      type: 'follow_up_token',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', token: 'partial ' },
+    })
+    mockWs.simulateMessage({
+      type: 'agent_follow_up',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', content: 'Tess follow-up for you' },
+    })
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: SESS_A,
+      payload: {
+        thread_id: 'thr-tess',
+        agent_id: 'Helper',
+        status: 'done',
+        summary: 'Tess delegate finished',
+      },
+    })
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      session_id: SESS_A,
+      payload: { id: 'perm-tess', tool: 'bash', command: 'rm -rf /tmp' },
+    })
+    mockWs.simulateMessage({
+      type: 'warning',
+      session_id: SESS_A,
+      content: 'Vault unavailable',
+    })
+    mockWs.simulateMessage({
+      type: 'thread_help',
+      session_id: SESS_A,
+      payload: { thread_id: 'thr-help', message: 'Need Tess credentials' },
+    })
+    mockWs.simulateMessage({
+      type: 'delegation_preview_timeout',
+      session_id: SESS_A,
+      payload: { thread_id: 'thr-timeout', agent_id: 'Helper', timeout_seconds: 30 },
+    })
+    await nextTick()
+
+    expect(stateB.messages).toHaveLength(0)
+    expect(wrapper.html()).not.toContain('Permission required')
+    expect(wrapper.html()).not.toContain('Tess follow-up for you')
+    expect(wrapper.html()).not.toContain('Tess delegate finished')
+    expect(wrapper.html()).not.toContain('Vault unavailable')
+    expect(wrapper.html()).not.toContain('Need Tess credentials')
+    expect(wrapper.html()).not.toContain('auto-approved')
+
+    expect(stateA.messages.some((m: any) => m.content === 'Tess follow-up for you')).toBe(true)
+    expect(stateA.messages.some((m: any) => m.threadSummaryThreadId === 'thr-tess')).toBe(true)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('Vault unavailable'))).toBe(true)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('auto-approved after 30s'))).toBe(true)
+
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
+    await wrapper.setProps({ spaceId: SPACE_A })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.html()).toContain('Permission required')
+    expect(wrapper.html()).toContain('Tess follow-up for you')
+    expect(wrapper.html()).toContain('Tess delegate finished')
+    expect(wrapper.html()).toContain('Vault unavailable')
+  })
+
+  it('still paints follow-up and permission on the owner space when that space is open', async () => {
+    const stateA = seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+
+    mockWs.simulateMessage({
+      type: 'agent_follow_up',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', content: 'Owner-space follow-up' },
+    })
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      session_id: SESS_A,
+      payload: { id: 'perm-open', tool: 'bash', command: 'ls' },
+    })
+    await nextTick()
+
+    expect(stateA.messages.some((m: any) => m.content === 'Owner-space follow-up')).toBe(true)
+    expect(wrapper.html()).toContain('Permission required')
+  })
+})
+
+describe('ChatView — /chat/:agentName alias', () => {
+  const STEVE_SPACE_ID = '01huginn-steve-dm'
+  let wrapper: ReturnType<typeof mountChatView> | undefined
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSessions.value = []
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
+    mockApiAgentsList.mockResolvedValue([])
+    mockSpaceState = makeSpaceState()
+    mockActiveSpace.value = null
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+  })
+
+  it('redirects /chat/Steve to the Steve DM space', async () => {
+    mockDms.value = [{
+      id: STEVE_SPACE_ID,
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+      icon: '',
+      color: '#58a6ff',
+      unseenCount: 0,
+    }]
+
+    wrapper = mountChatView({ sessionId: 'Steve' })
+    await flushPromises()
+
+    expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
+    expect(mockOpenDM).not.toHaveBeenCalled()
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+  })
+
+  it('resolves /chat/Steve via openDM when the DM is not already listed', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'gpt-4', color: '#58a6ff', icon: 'S' },
+    ])
+    mockOpenDM.mockResolvedValue({
+      id: STEVE_SPACE_ID,
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+      icon: '',
+      color: '#58a6ff',
+      unseenCount: 0,
+    })
+
+    wrapper = mountChatView({ sessionId: 'Steve' })
+    await flushPromises()
+
+    expect(mockOpenDM).toHaveBeenCalledWith('Steve')
+    expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a regular session id as an agent DM', async () => {
+    mockSessions.value = []
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Coder', model: 'gpt-4', color: '#58a6ff', icon: 'C' },
+    ])
+
+    wrapper = mountChatView({ sessionId: 'test-chat-session' })
+    await flushPromises()
+
+    expect(mockRouterReplace).not.toHaveBeenCalled()
+    expect(mockOpenDM).not.toHaveBeenCalled()
   })
 })

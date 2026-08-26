@@ -4,6 +4,14 @@
     style="background:rgba(22,27,34,0.8)"
     :style="{ borderColor: focused ? 'rgba(88,166,255,0.4)' : 'rgba(48,54,61,1)' }"
   >
+    <div
+      v-if="unknownMentionHint"
+      class="px-3 pt-2 text-[11px]"
+      data-testid="unknown-mention-hint"
+      style="color:rgba(227,179,65,0.92)"
+    >
+      {{ unknownMentionHint }}
+    </div>
     <div ref="editorEl" class="editor-content" />
     <ChatToolbar v-if="editorInstance" :editor="editorInstance" @send="handleSend" />
   </div>
@@ -15,19 +23,25 @@ import { useEditor } from './useEditor'
 import ChatToolbar from './ChatToolbar.vue'
 import type { Editor } from '@tiptap/vue-3'
 import { api } from '../../composables/useApi'
+import { dropUnknownLeadMention } from './mentionSuggestions'
 
 const props = defineProps<{
   disabled?: boolean
   placeholder?: string
+  /** Active-space roster. Undefined = standalone (list every agent). */
+  memberNames?: string[]
 }>()
 
 const emit = defineEmits<{
   (e: 'send', content: string): void
+  (e: 'unknown-mention', name: string): void
 }>()
 
 const editorEl = ref<HTMLElement>()
 const focused = ref(false)
 const agents = ref<Array<Record<string, unknown>>>([])
+const unknownMentionHint = ref('')
+let unknownMentionTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(async () => {
   try { agents.value = await api.agents.list() } catch { /* ignore */ }
@@ -37,11 +51,13 @@ onMounted(async () => {
 // the value every render. Without this the placeholder set at editor init
 // gets baked in and never updates when activeSpace switches.
 const placeholderRef = computed(() => props.placeholder)
+const memberNamesRef = computed(() => props.memberNames)
 const { editor, init, getMarkdown, clear, focus, setText, isEmpty } = useEditor({
   agents,
   onSend: handleSend,
   placeholder: props.placeholder ?? 'Message huginn...',
   placeholderRef,
+  memberNames: memberNamesRef,
 })
 
 const editorInstance = computed(() => editor.value as Editor | null)
@@ -77,11 +93,23 @@ watch(() => props.placeholder, () => {
   ;(ed.view as any).dispatch(ed.state.tr)
 })
 
+function showUnknownMentionHint(name: string) {
+  unknownMentionHint.value = `${name} is not in this channel`
+  emit('unknown-mention', name)
+  if (unknownMentionTimer) clearTimeout(unknownMentionTimer)
+  unknownMentionTimer = setTimeout(() => {
+    unknownMentionHint.value = ''
+    unknownMentionTimer = null
+  }, 6000)
+}
+
 function handleSend() {
   if (isEmpty() || props.disabled) return
   const markdown = getMarkdown()
-  if (!markdown.trim()) return
-  emit('send', markdown)
+  const { content, dropped } = dropUnknownLeadMention(markdown, props.memberNames)
+  if (dropped) showUnknownMentionHint(dropped)
+  if (!content.trim()) return
+  emit('send', content)
   clear()
   focus()
 }

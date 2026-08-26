@@ -237,8 +237,8 @@
 
         <!-- Panel header -->
         <div class="flex items-center gap-2 px-3 h-11 border-b border-huginn-border flex-shrink-0">
-          <!-- Chat: search bar -->
-          <template v-if="activeSection === 'chat'">
+          <!-- Chat / Stats / Settings: space-list search bar -->
+          <template v-if="showSpaceList">
             <svg class="w-3 h-3 text-huginn-muted/40 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
@@ -295,8 +295,8 @@
           </template>
         </div>
 
-        <!-- ── Chat panel: Channels + DMs + Sessions ── -->
-        <div v-if="activeSection === 'chat'" class="flex-1 overflow-y-auto">
+        <!-- ── Chat / Stats / Settings panel: Channels + DMs ── -->
+        <div v-if="showSpaceList" class="flex-1 overflow-y-auto">
 
           <!-- Spaces loading spinner -->
           <div v-if="spacesLoading && channels.length === 0 && dms.length === 0"
@@ -339,7 +339,7 @@
               </div>
 
               <template v-if="channelSectionOpen || sidebarSearch">
-                <div v-if="filteredChannels.length === 0" class="px-4 pb-1">
+                <div v-if="filteredChannels.length === 0 && !spacesLoading" class="px-4 pb-1">
                   <p class="text-[11px] text-huginn-muted/35 italic pl-4">{{ sidebarSearch ? 'No matches' : 'No channels yet' }}</p>
                 </div>
                 <button
@@ -438,7 +438,7 @@
               </button>
 
               <template v-if="dmSectionOpen || sidebarSearch">
-                <div v-if="filteredDMs.length === 0" class="px-4 pb-1">
+                <div v-if="filteredDMs.length === 0 && !spacesLoading" class="px-4 pb-1">
                   <p class="text-[11px] text-huginn-muted/35 italic pl-4">{{ sidebarSearch ? 'No matches' : 'No agents configured' }}</p>
                 </div>
                 <button
@@ -909,7 +909,15 @@ import { wireThreadDetailWS } from './composables/useThreadDetail'
 import { useCloud } from './composables/useCloud'
 import { useVersion } from './composables/useVersion'
 import { useSpaces, wireSpaceWS } from './composables/useSpaces'
-import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId } from './composables/useSpaceTimeline'
+import { wireSpaceTimelineWS, getSpaceLastMessage, getSessionSpaceId, prefetchSpaceSidebar, spaceSessionsIndexed, listCachedSpaceMessages } from './composables/useSpaceTimeline'
+import {
+  buildGlobalSearchResults,
+  formatSpaceSearchLabel,
+  mergeSpaceMessageGroups,
+  searchResultPath,
+  type GlobalSearchHit,
+  type SpaceMessageGroup,
+} from './composables/globalSearch'
 import { pruneOrphanedUnseenIds } from './composables/unseenSessions'
 import { wireSwarmWS } from './composables/useSwarmStatus'
 import SpaceCreateModal from './components/SpaceCreateModal.vue'
@@ -952,7 +960,8 @@ const activeSection    = computed(() => {
   return seg
 })
 const activeSessionId  = computed(() => route.params.sessionId as string || '')
-const showPanel        = computed(() => ['chat', 'agents', 'automation', 'skills'].includes(activeSection.value))
+const showSpaceList    = computed(() => ['chat', 'stats', 'settings'].includes(activeSection.value))
+const showPanel        = computed(() => showSpaceList.value || ['agents', 'automation', 'skills'].includes(activeSection.value))
 const panelTitle       = computed(() => {
   if (activeSection.value === 'chat') return 'Sessions'
   if (activeSection.value === 'automation') return 'Automation'
@@ -1000,18 +1009,17 @@ function clearUnseen(id: string) {
   saveUnseenToStorage(unseenSessionIds.value)
 }
 
-// markSpaceSeen removes all unseen session IDs that belong to spaceId.
-// Also removes orphaned IDs — those with no space mapping and not in the
-// regular sessions list. These arise from sessions in deleted spaces that
-// can never be cleared any other way.
-// Called after hydration so sessionToSpaceMap is populated.
+// markSpaceSeen removes unseen session IDs that belong to spaceId.
+// Unmapped IDs are kept: they may belong to an unvisited space whose
+// sessions are not in the timeline cache yet. True orphans are pruned
+// only after api.spaces.sessions has indexed every listed space.
 function markSpaceSeen(spaceId: string) {
   const knownRegularIds = new Set(sessions.value.map(s => s.id))
   unseenSessionIds.value = unseenSessionIds.value.filter(id => {
-    if (knownRegularIds.has(id)) return true   // regular session — keep
+    if (knownRegularIds.has(id)) return true
     const mapped = getSessionSpaceId(id)
-    if (mapped === null) return false            // orphaned (deleted space) — remove
-    return mapped !== spaceId                    // belongs to different space — keep
+    if (mapped === null) return true             // uncached — not an orphan
+    return mapped !== spaceId
   })
   saveUnseenToStorage(unseenSessionIds.value)
 }
@@ -1271,26 +1279,21 @@ const {
 } = useSpaces()
 
 // When the user navigates to a space, clear unseen marks for sessions in that
-// space, and also prune any orphaned IDs (no mapping, not a regular session).
+// space only. Uncached IDs are kept — they may belong to an unvisited space.
 watch(activeSpaceId, (spaceId) => {
   if (!spaceId) return
-  const knownRegularIds = new Set(sessions.value.map(s => s.id))
-  unseenSessionIds.value = unseenSessionIds.value.filter(id => {
-    if (knownRegularIds.has(id)) return true
-    const mapped = getSessionSpaceId(id)
-    if (mapped === null) return false
-    return mapped !== spaceId
-  })
-  saveUnseenToStorage(unseenSessionIds.value)
+  markSpaceSeen(spaceId)
 })
 
-// Once spaces have loaded, prune stale/orphaned session IDs from the unseen list.
-// These are IDs from sessions that belonged to deleted spaces: getSessionSpaceId
-// returns null for them (no space mapping) and they're not regular sessions, so
-// markSpaceSeen never clears them, causing a perpetual badge count.
-const stopOrphanPrune = watch(spaces, (loaded) => {
+// Prefetch session→space maps and last-message snippets so unvisited DMs
+// (Steve/Tess) show a preview and so unseen IDs can be mapped without a visit.
+// Orphan prune waits until every listed space is indexed; otherwise unvisited
+// space sessions look unmapped and get dropped when opening a different space.
+watch(spaces, async (loaded) => {
   if (loaded.length === 0) return
-  stopOrphanPrune()
+  const ids = loaded.map(s => s.id)
+  await prefetchSpaceSidebar(ids)
+  if (!spaceSessionsIndexed(ids)) return
   const knownIds = new Set(sessions.value.map(s => s.id))
   unseenSessionIds.value = pruneOrphanedUnseenIds(
     unseenSessionIds.value,
@@ -1398,54 +1401,63 @@ const globalSearchOpen = ref(false)
 const globalSearchQuery = ref('')
 const globalSearchInputEl = ref<HTMLInputElement | null>(null)
 
-interface SearchResult {
-  sessionId: string
-  sessionLabel: string
-  msgId: string
-  agent: string
-  snippet: string
+const fetchedSpaceSearchGroups = ref<SpaceMessageGroup[]>([])
+let _spaceSearchController: AbortController | null = null
+
+function spaceSearchGroups(): SpaceMessageGroup[] {
+  const cached: SpaceMessageGroup[] = listCachedSpaceMessages().map(({ spaceId, messages }) => {
+    const space = spaces.value.find(s => s.id === spaceId)
+    return {
+      spaceId,
+      spaceLabel: space ? formatSpaceSearchLabel(space) : spaceId,
+      messages,
+    }
+  })
+  return mergeSpaceMessageGroups(cached, fetchedSpaceSearchGroups.value)
 }
 
-const globalSearchResults = computed((): SearchResult[] => {
-  const q = globalSearchQuery.value.trim().toLowerCase()
-  if (!q || q.length < 2) return []
-  const results: SearchResult[] = []
-  for (const session of sessions.value) {
-    const msgs = getMessages(session.id)
-    for (const msg of msgs) {
-      if (!msg.content || (msg.role !== 'user' && msg.role !== 'assistant')) continue
-      const lower = msg.content.toLowerCase()
-      const idx = lower.indexOf(q)
-      if (idx === -1) continue
-      const start = Math.max(0, idx - 40)
-      const end = Math.min(msg.content.length, idx + q.length + 80)
-      const raw = (start > 0 ? '…' : '') + msg.content.slice(start, end) + (end < msg.content.length ? '…' : '')
-      // Bold the match
-      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const snippet = raw.replace(new RegExp(`(${escaped})`, 'gi'), '<strong class="text-huginn-blue">$1</strong>')
-      results.push({
-        sessionId: session.id,
-        sessionLabel: formatSessionLabel(session),
-        msgId: msg.id,
-        agent: msg.agent ?? '',
-        snippet,
-      })
-      if (results.length >= 30) break
-    }
-    if (results.length >= 30) break
-  }
-  return results
+const globalSearchResults = computed((): GlobalSearchHit[] => {
+  return buildGlobalSearchResults({
+    query: globalSearchQuery.value,
+    sessions: sessions.value,
+    getMessages,
+    formatSessionLabel: (session) => formatSessionLabel(session as typeof sessions.value[number]),
+    spaceMessageGroups: spaceSearchGroups(),
+    resolveSpaceId: getSessionSpaceId,
+  })
 })
+
+async function prefetchSpaceSearchMessages() {
+  _spaceSearchController?.abort()
+  const controller = new AbortController()
+  _spaceSearchController = controller
+  const groups = await Promise.all(spaces.value.map(async (space): Promise<SpaceMessageGroup> => {
+    try {
+      const result = await api.spaces.messages(space.id, undefined, 100, { signal: controller.signal })
+      return {
+        spaceId: space.id,
+        spaceLabel: formatSpaceSearchLabel(space),
+        messages: result.messages,
+      }
+    } catch {
+      return { spaceId: space.id, spaceLabel: formatSpaceSearchLabel(space), messages: [] }
+    }
+  }))
+  if (!controller.signal.aborted) {
+    fetchedSpaceSearchGroups.value = groups
+  }
+}
 
 function openGlobalSearch() {
   globalSearchOpen.value = true
   globalSearchQuery.value = ''
+  void prefetchSpaceSearchMessages()
   nextTick(() => globalSearchInputEl.value?.focus())
 }
 
-function navigateToSearchResult(result: SearchResult) {
+function navigateToSearchResult(result: GlobalSearchHit) {
   globalSearchOpen.value = false
-  router.push(`/chat/${result.sessionId}`)
+  router.push(searchResultPath(result))
 }
 
 function handleGlobalAppKeydown(e: KeyboardEvent) {
@@ -1483,6 +1495,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
   wsRef.value?.destroy()
+  _spaceSearchController?.abort()
   document.removeEventListener('click', onDocClick, true)
   document.removeEventListener('keydown', handleGlobalAppKeydown)
 })

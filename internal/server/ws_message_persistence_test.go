@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
@@ -495,10 +497,15 @@ func TestWSChat_PersistsOnDisconnect(t *testing.T) {
 	cancel()
 	time.Sleep(100 * time.Millisecond)
 
-	// The backend is still blocked on its context, so nothing has been
-	// persisted yet — proving the run was not cancelled by the disconnect.
-	if early, _ := store.TailMessages(sess.ID, 10); len(early) != 0 {
-		t.Fatalf("run should still be in flight after client disconnect, but %d messages were persisted", len(early))
+	// The backend is still blocked, so the run survived the disconnect.
+	// The inbound user row is persisted at accept (so mid-turn Appends
+	// cannot steal seq); the assistant reply is not written until the run ends.
+	early, _ := store.TailMessages(sess.ID, 10)
+	if len(early) != 1 {
+		t.Fatalf("expected inbound user persisted at accept while run still in flight, got %d messages", len(early))
+	}
+	if early[0].Role != "user" || early[0].Content != "hello from disconnect test" {
+		t.Fatalf("expected persisted user prompt, got role=%q content=%q", early[0].Role, early[0].Content)
 	}
 
 	// Now stop the run via the explicit cancel pathway (what a chat_cancel
@@ -659,4 +666,230 @@ func TestWSChat_PersistsTextAndToolCallsTogether(t *testing.T) {
 	if assistantMsg.ToolCalls[0].Result != "file1.txt\nfile2.txt" {
 		t.Errorf("tool_calls[0].Result = %q, want 'file1.txt\\nfile2.txt'", assistantMsg.ToolCalls[0].Result)
 	}
+}
+
+// midTurnAppendBackend blocks inside ChatCompletion until release is closed,
+// so the test can Append mid-turn announcements after the inbound user row
+// is accepted but before the assistant reply is persisted.
+type midTurnAppendBackend struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *midTurnAppendBackend) ChatCompletion(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	close(g.started)
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if req.OnToken != nil {
+		req.OnToken("hostname is testhost")
+	}
+	return &backend.ChatResponse{Content: "hostname is testhost", DoneReason: "stop"}, nil
+}
+func (g *midTurnAppendBackend) Health(_ context.Context) error   { return nil }
+func (g *midTurnAppendBackend) Shutdown(_ context.Context) error { return nil }
+func (g *midTurnAppendBackend) ContextWindow() int               { return 4096 }
+
+// TestWSChat_InboundUserPersistedBeforeMidTurnAppend proves persist-at-accept:
+// a mid-turn lifecycle Append cannot appear before the user prompt on session
+// or space message reads (the reload-plays-backwards Slack transcript bug).
+func TestWSChat_InboundUserPersistedBeforeMidTurnAppend(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	b := &midTurnAppendBackend{started: started, release: release}
+
+	models := modelconfig.DefaultModels()
+	orch, err := agent.NewOrchestrator(b, models, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+
+	db := openSpaceDB(t)
+	sqliteStore := session.NewSQLiteSessionStore(db)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	hub := newWSHub()
+	go hub.run()
+	t.Cleanup(func() { hub.stop() })
+
+	cfg := *config.Default()
+	srv := New(cfg, orch, sqliteStore, testToken, t.TempDir(), nil, nil, nil)
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return agents.DefaultAgentsConfig(), nil
+	}
+	srv.wsHub = hub
+	srv.SetDB(db)
+	srv.SetSpaceStore(spaceStore)
+
+	ch, err := spaceStore.CreateChannel("Tess DM", "Tess", []string{"Steve"}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sess := sqliteStore.New("tess-dm", "/workspace", "test-model")
+	sess.Manifest.SpaceID = ch.ID
+	if err := sqliteStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	const userPrompt = "Run the hostname command…"
+	client := &wsClient{send: make(chan WSMessage, 64), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   userPrompt,
+	})
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for chat to start")
+	}
+
+	early, err := sqliteStore.TailMessages(sess.ID, 20)
+	if err != nil {
+		t.Fatalf("TailMessages (mid-turn): %v", err)
+	}
+	if len(early) != 1 {
+		t.Fatalf("expected inbound user persisted at accept before mid-turn Append, got %d messages", len(early))
+	}
+	if early[0].Role != "user" || early[0].Content != userPrompt {
+		t.Fatalf("expected persisted user prompt at accept, got role=%q content=%q", early[0].Role, early[0].Content)
+	}
+
+	srv.BroadcastToSession(sess.ID, "delegation_preview_timeout", map[string]any{
+		"thread_id":       "thr-steve-1",
+		"agent_id":        "Steve",
+		"timeout_seconds": 30,
+	})
+	srv.BroadcastToSession(sess.ID, "thread_started", map[string]any{
+		"thread_id": "thr-steve-1",
+		"agent_id":  "Steve",
+		"task":      "hostname",
+	})
+	srv.BroadcastToSession(sess.ID, "thread_done", map[string]any{
+		"thread_id": "thr-steve-1",
+		"agent_id":  "Steve",
+		"summary":   "Completed delegated work.",
+	})
+
+	mid, err := sqliteStore.TailMessages(sess.ID, 20)
+	if err != nil {
+		t.Fatalf("TailMessages (after announcements): %v", err)
+	}
+	if len(mid) != 4 {
+		t.Fatalf("expected user + 3 announcements mid-turn, got %d", len(mid))
+	}
+	if mid[0].Role != "user" || mid[0].Content != userPrompt {
+		t.Fatalf("session read mid-turn: prompt must precede announcements, got role=%q content=%q", mid[0].Role, mid[0].Content)
+	}
+	for i := 1; i < 4; i++ {
+		if mid[i].Type != "thread_event" {
+			t.Fatalf("msgs[%d] type=%q, want thread_event", i, mid[i].Type)
+		}
+	}
+
+	close(release)
+
+	deadline := time.After(5 * time.Second)
+	done := false
+	for !done {
+		select {
+		case m := <-client.send:
+			if m.Type == "done" || m.Type == "error" {
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for done/error")
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	assertUserPromptFirst := func(t *testing.T, source string, roles []string, contents []string) {
+		t.Helper()
+		if len(roles) < 2 {
+			t.Fatalf("%s: expected at least user + later rows, got %d", source, len(roles))
+		}
+		if roles[0] != "user" || contents[0] != userPrompt {
+			t.Fatalf("%s: first row must be the user prompt, got role=%q content=%q", source, roles[0], contents[0])
+		}
+		for i := 1; i < len(contents); i++ {
+			if contents[i] == userPrompt {
+				t.Fatalf("%s: user prompt appeared again at index %d (order %v)", source, i, roles)
+			}
+		}
+	}
+
+	msgs, err := sqliteStore.TailMessages(sess.ID, 20)
+	if err != nil {
+		t.Fatalf("TailMessages (final): %v", err)
+	}
+	if len(msgs) < 5 {
+		t.Fatalf("expected user + 3 announcements + assistant, got %d", len(msgs))
+	}
+	roles := make([]string, len(msgs))
+	contents := make([]string, len(msgs))
+	for i, m := range msgs {
+		roles[i] = m.Role
+		contents[i] = m.Content
+	}
+	assertUserPromptFirst(t, "session TailMessages", roles, contents)
+	if msgs[len(msgs)-1].Role != "assistant" {
+		t.Fatalf("session read: last row should be assistant, got %q", msgs[len(msgs)-1].Role)
+	}
+
+	spaceRes, err := spaceStore.ListSpaceMessages(ch.ID, nil, 50)
+	if err != nil {
+		t.Fatalf("ListSpaceMessages: %v", err)
+	}
+	if len(spaceRes.Messages) < 5 {
+		t.Fatalf("space read: expected user + announcements + assistant, got %d", len(spaceRes.Messages))
+	}
+	spaceRoles := make([]string, len(spaceRes.Messages))
+	spaceContents := make([]string, len(spaceRes.Messages))
+	for i, m := range spaceRes.Messages {
+		spaceRoles[i] = m.Role
+		spaceContents[i] = m.Content
+	}
+	assertUserPromptFirst(t, "ListSpaceMessages", spaceRoles, spaceContents)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sess.ID+"/messages", nil)
+	req.SetPathValue("id", sess.ID)
+	w := httptest.NewRecorder()
+	srv.handleGetMessages(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET session messages: %d %s", w.Code, w.Body.String())
+	}
+	var apiMsgs []session.SessionMessage
+	if err := json.NewDecoder(w.Body).Decode(&apiMsgs); err != nil {
+		t.Fatalf("decode session messages: %v", err)
+	}
+	apiRoles := make([]string, len(apiMsgs))
+	apiContents := make([]string, len(apiMsgs))
+	for i, m := range apiMsgs {
+		apiRoles[i] = m.Role
+		apiContents[i] = m.Content
+	}
+	assertUserPromptFirst(t, "GET /sessions/{id}/messages", apiRoles, apiContents)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/space-messages/"+ch.ID, nil)
+	req.SetPathValue("id", ch.ID)
+	w = httptest.NewRecorder()
+	srv.handleListSpaceMessages(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET space-messages: %d %s", w.Code, w.Body.String())
+	}
+	var apiSpace spaces.SpaceMessagesResult
+	if err := json.NewDecoder(w.Body).Decode(&apiSpace); err != nil {
+		t.Fatalf("decode space messages: %v", err)
+	}
+	apiSpaceRoles := make([]string, len(apiSpace.Messages))
+	apiSpaceContents := make([]string, len(apiSpace.Messages))
+	for i, m := range apiSpace.Messages {
+		apiSpaceRoles[i] = m.Role
+		apiSpaceContents[i] = m.Content
+	}
+	assertUserPromptFirst(t, "GET /space-messages/{id}", apiSpaceRoles, apiSpaceContents)
 }

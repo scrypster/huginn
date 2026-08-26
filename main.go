@@ -2436,6 +2436,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			spaceStore = spaces.NewSQLiteSpaceStore(sqlDB)
 			srv.SetSpaceStore(spaceStore)
 			autoCreateDMSpaces(spaceStore)
+			// Create() already denies non-members when a SpaceID is set, but
+			// the checker was never wired — so delegate_to_agent could spawn
+			// Steve from a Tess-only DM. Standalone sessions have no SpaceID
+			// and keep the all-agents path.
+			if checker, ok := spaceStore.(threadmgr.SpaceMembershipChecker); ok {
+				tm.SetMembershipChecker(checker)
+			}
 		}
 	}
 
@@ -2869,6 +2876,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				})
 				if createErr != nil {
 					logger.Error("delegate_to_agent: thread create failed", "agent", p.AgentName, "err", createErr)
+					reason := "create_failed"
+					if errors.Is(createErr, threadmgr.ErrAgentNotSpaceMember) {
+						reason = "not_in_roster"
+					}
+					srv.BroadcastToSession(sessionID, "delegation_error", map[string]any{
+						"session_id":    sessionID,
+						"parent_msg_id": parentMsgID,
+						"agent":         p.AgentName,
+						"error":         createErr.Error(),
+						"reason":        reason,
+					})
 					return threadmgr.DelegateResult{Err: createErr}
 				}
 				logger.Info("delegate_to_agent: thread created", "thread_id", t.ID, "agent", p.AgentName)
@@ -3088,11 +3106,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// present in the user's original message, preventing double-delegation
 			// when the assistant echoes back an @mention the user typed.
 			dedupedMsg := threadmgr.DedupMentions(originalUserMsg, assistantMsg)
+			// Same roster as user-text addressee routing: DM = that one agent,
+			// channel = lead + members. Empty means standalone / no roster.
+			var spaceMemberNames []string
+			if spaceStore != nil && spaceID != "" {
+				if sp, spErr := spaceStore.GetSpace(spaceID); spErr == nil {
+					spaceMemberNames = spaces.RosterNames(sp)
+				}
+			}
 			logger.Info("mentionDelegate: resolved context",
 				"session_id", sessionID, "caller_agent", callerAgent,
 				"space_id", spaceID, "sess_nil", sess == nil,
-				"deduped", dedupedMsg != assistantMsg)
-			threadmgr.CreateFromMentions(spawnCtx, sessionID, dedupedMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
+				"deduped", dedupedMsg != assistantMsg,
+				"roster", spaceMemberNames)
+			threadmgr.CreateFromMentions(spawnCtx, sessionID, dedupedMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent, spaceMemberNames)
 			logger.Info("mentionDelegate: CreateFromMentions returned", "session_id", sessionID)
 		})
 

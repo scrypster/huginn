@@ -160,7 +160,7 @@
 
           <!-- Agents chip (space context) -->
           <button v-if="activeSpace"
-            @click="toggleMemberPanel()"
+            @click="activeSpace.kind === 'channel' ? (rosterOpen = true) : toggleMemberPanel()"
             class="flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs transition-all duration-150 hover:bg-huginn-surface active:scale-95"
             style="border:1px solid rgba(255,255,255,0.08)"
             title="Manage agents"
@@ -349,8 +349,9 @@
           </div>
         </div>
 
-        <!-- Empty chat -->
-        <div v-else-if="messages.length === 0 && !streaming" class="flex flex-col items-center justify-center h-full gap-3 pb-16">
+        <!-- Empty chat — hide while a space timeline is still hydrating so /space/:id
+             does not flash "Send your first message" over the spinner. -->
+        <div v-else-if="messages.length === 0 && !streaming && !spaceLoadingInitial" class="flex flex-col items-center justify-center h-full gap-3 pb-16">
           <div class="w-12 h-12 rounded-2xl flex items-center justify-center select-none"
             :style="displayAgent
               ? `background:${displayAgent.color}18;border:1px solid ${displayAgent.color}33`
@@ -391,6 +392,15 @@
                   View thread →
                 </button>
               </div>
+            </div>
+
+            <!-- Harness announcement — system/delegation row, not teammate voice -->
+            <div v-else-if="msg.systemLine"
+              class="flex items-center justify-center gap-2 px-3 my-2"
+              data-testid="system-line">
+              <div class="flex-1 h-px bg-huginn-border/40" />
+              <span class="text-[11px] text-huginn-muted/70 text-center max-w-[80%]">{{ msg.content }}</span>
+              <div class="flex-1 h-px bg-huginn-border/40" />
             </div>
 
             <!-- User message (right-aligned bubble) -->
@@ -529,7 +539,7 @@
                 />
                 <!-- Message text — system-fail prefixes are not teammate speech -->
                 <div
-                  v-if="parseSystemFailSpeech(msg.content)"
+                  v-if="isBareFailSpeech(msg.content)"
                   data-testid="system-fail-line"
                   class="inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
                          border border-huginn-red/30 bg-huginn-red/8 text-huginn-red"
@@ -542,11 +552,11 @@
                     <span v-if="parseSystemFailSpeech(msg.content)!.message"> · {{ parseSystemFailSpeech(msg.content)!.message }}</span>
                   </span>
                 </div>
-                <div v-else-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
+                <div v-else-if="msg.content && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
                   v-html="renderWithMentions(msg.content)" />
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
-                <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
+                <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2">
                   <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50">
                     <div class="flex gap-0.5 flex-shrink-0">
                       <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:0ms" />
@@ -557,7 +567,7 @@
                       <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                     </svg>
                     <span class="text-xs text-huginn-text">
-                      {{ activeMemoryChipText || `${activeToolCalls.length} tool call${activeToolCalls.length === 1 ? '' : 's'}` }}
+                      {{ activeMemoryChipText || `${visibleToolCalls(activeToolCalls).length} tool call${visibleToolCalls(activeToolCalls).length === 1 ? '' : 's'}` }}
                     </span>
                     <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
                   </div>
@@ -717,7 +727,7 @@
                 <!-- Tool call chip (completed, attached to this message).
                      Visible as soon as no tool calls are actively running, so the
                      chip persists below the content even while text is still streaming. -->
-                <div v-if="msg.toolCalls?.length && (!msg.streaming || !activeToolCalls.length)" class="mt-2">
+                <div v-if="msg.toolCalls?.length && (!msg.streaming || !visibleToolCalls(activeToolCalls).length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
                     class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100">
@@ -983,8 +993,8 @@
       <div class="px-4 pb-4 flex-shrink-0">
         <ChatEditor
           ref="chatEditorRef"
-          :disabled="streaming"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
+          :member-names="mentionMemberNames"
           @send="handleEditorSend"
         />
       </div>
@@ -1093,8 +1103,9 @@
 import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useSpaceTimeline } from '../composables/useSpaceTimeline'
+import { useSpaceTimeline, getSessionSpaceId, getSpaceTimelineState } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
+import { spaceRosterNames } from '../components/ChatEditor/mentionSuggestions'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
 import ThreadDetail from '../components/ThreadDetail.vue'
@@ -1116,9 +1127,9 @@ import { useUnreadTracking } from '../composables/useUnreadTracking'
 import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
-import { messageToolChipFailed, parseSystemFailSpeech } from '../utils/honesty'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
+import { isBareFailSpeech, messageToolChipFailed, parseSystemFailSpeech, visibleToolCalls } from '../utils/honesty'
 
 interface Agent {
   name: string
@@ -1144,6 +1155,7 @@ const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 const router  = useRouter()
 const wsRef   = inject<Ref<HuginnWS | null>>('ws')!
 const markSpaceSeen = inject<(spaceId: string) => void>('markSpaceSeen')
+const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 
 // ── Space timeline mode ────────────────────────────────────────────────────────
 // currentSpaceTimeline holds the active space timeline instance.
@@ -1171,13 +1183,15 @@ watch(() => props.spaceId, async (newId) => {
   // Clear stale unseen-badge entries for this space after hydration so
   // sessionToSpaceMap is populated and getSessionSpaceId returns correct results.
   markSpaceSeen?.(newId)
-  // Hydrate thread badges for each session visible in this space.
-  const spMsgs = tl.getState().messages ?? []
-  const sessionIds = [...new Set(spMsgs.map(m => m.session_id).filter(Boolean))]
-  for (const sid of sessionIds) {
+  // Load REST threads + reply badges for the active session and every
+  // session_id on the timeline so ThreadPanel / strips work in space mode.
+  for (const sid of collectSpaceSessionIds(tl)) {
+    await loadThreads(sid)
     await hydrateThreadBadges(sid)
+    applyLiveThreadSummaries(sid)
   }
   await scrollToBottom()
+  markCurrentSessionSeen()
 
   // Set up IntersectionObserver on the top sentinel for infinite scroll.
   await nextTick()
@@ -1197,7 +1211,12 @@ watch(() => props.spaceId, async (newId) => {
 
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
   getLastSeenMessageId, setLastSeenMessageId } = useSessions()
-const { activeSpace } = useSpaces()
+const { activeSpace, dms, openDM } = useSpaces()
+const mentionMemberNames = computed(() => spaceRosterNames(activeSpace.value))
+
+function isKnownSession(id: string): boolean {
+  return sessions.value.some(s => s.id === id)
+}
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
 // When the pre-hydration WS event queue overflows (> 500 events dropped while
@@ -1312,6 +1331,17 @@ const {
 } = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
 const pendingPermission = ref<WSMessage | null>(null)
+const pendingPermissionBySpace = new Map<string, WSMessage>()
+
+// Permission prompts are per owner space. Switching Tess → Steve must not
+// keep Tess's modal on Steve; reopening Tess restores it.
+watch(() => props.spaceId, (newId, oldId) => {
+  if (oldId && oldId !== newId) {
+    if (pendingPermission.value) pendingPermissionBySpace.set(oldId, pendingPermission.value)
+    else pendingPermissionBySpace.delete(oldId)
+  }
+  pendingPermission.value = (newId && pendingPermissionBySpace.get(newId)) || null
+})
 const runtimeState      = ref('')
 // pendingToolResults buffers tool results that arrive before the assistant message exists
 // (e.g. prefetch tools like muninn_recall/muninn_where_left_off that fire before streaming starts).
@@ -1389,6 +1419,54 @@ const selectedAgentName = ref('')
 const agentDropdownOpen = ref(false)
 const rosterOpen        = ref(false)
 
+function agentDMNeedle(id: string): string {
+  return id.toLowerCase()
+}
+
+function findDMForAgent(name: string) {
+  const needle = agentDMNeedle(name)
+  return dms.value.find(dm => dm.leadAgent.toLowerCase() === needle)
+}
+
+function findAgentByName(name: string) {
+  const needle = agentDMNeedle(name)
+  return agentsList.value.find(a => a.name.toLowerCase() === needle)
+}
+
+// True when /chat/:sessionId is an agent name (Steve), not a real session id.
+// Used to block send/fetch so we never persist a session named after the agent.
+function isAgentDMAlias(id: string | undefined): boolean {
+  if (!id || isKnownSession(id)) return false
+  return !!findDMForAgent(id) || !!findAgentByName(id)
+}
+
+// Bookmarks like /#/chat/Steve are not session IDs — they collide with the
+// agent DM at /space/<ulid>. Resolve via dms, then openDM for a known agent.
+async function redirectUnknownSessionToAgentDM(sessionId: string): Promise<boolean> {
+  if (!sessionId || props.spaceId || isKnownSession(sessionId)) return false
+  const existing = findDMForAgent(sessionId)
+  if (existing?.id) {
+    await router.replace(`/space/${existing.id}`)
+    return true
+  }
+  if (!findAgentByName(sessionId)) return false
+  const space = await openDM(sessionId)
+  if (space?.id) {
+    await router.replace(`/space/${space.id}`)
+    return true
+  }
+  return false
+}
+
+watch(
+  [() => props.sessionId, agentsList, dms],
+  async ([id]) => {
+    if (!id || props.spaceId || isKnownSession(id)) return
+    await redirectUnknownSessionToAgentDM(id)
+  },
+  { immediate: true },
+)
+
 // ── Extracted composables (depend on agentsList / messagesEl / messages) ──
 const { renderWithMentions } = useMarkdownRenderer(agentsList)
 
@@ -1402,7 +1480,6 @@ watch(() => swarmState.value?.sessionId, (id) => {
 const agentProfile      = ref<Agent | null>(null) // agent shown in read-only profile modal
 
 // ── Thread panel state ────────────────────────────────────────────────
-const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 const threadPanelOpen   = ref(false)
 const threadPanelPinned = ref(false) // true = don't auto-close when threads finish
 
@@ -1436,12 +1513,13 @@ async function openThreadDetailById(threadId: string) {
     return
   }
   // Thread not in live state — fetch from API to get parentMessageId
-  if (!props.sessionId) {
+  const lookupSessionId = resolvedThreadSessionId.value
+  if (!lookupSessionId) {
     threadPanelOpen.value = true
     return
   }
   try {
-    const fetched = await api.threads.get(props.sessionId, threadId)
+    const fetched = await api.threads.get(lookupSessionId, threadId)
     if (fetched?.parentMessageId) {
       threadPanelOpen.value = false
       openThreadLiveId.value = threadId
@@ -1499,6 +1577,34 @@ function openAgentAccess(agentName: string) {
 // refresh. Calls GET /api/v1/containers/{id}/threads which returns root messages
 // that have at least one reply (thread_reply_count > 0), then attaches
 // delegatedThreads to the matching message in the UI.
+function collectSpaceSessionIds(tl: { getState: () => { activeSessionId: string | null; messages: Array<{ session_id?: string }> } }): string[] {
+  const state = tl.getState()
+  const ids = new Set<string>()
+  if (state.activeSessionId) ids.add(state.activeSessionId)
+  for (const m of state.messages ?? []) {
+    if (m.session_id) ids.add(m.session_id)
+  }
+  return [...ids]
+}
+
+function applyLiveThreadSummaries(sessionId: string) {
+  if (!sessionId) return
+  const threads = getSessionThreads(sessionId)
+  if (!threads.length) return
+  const msgs = getSourceMessages()
+  for (const t of threads) {
+    const summary = t.Summary?.Summary
+    if (!summary) continue
+    for (const m of msgs) {
+      const entry = m.delegatedThreads?.find(d => d.threadId === t.ID)
+      if (entry && !entry.inlineSummary) {
+        entry.inlineSummary = summary
+        if (!isRunning(t)) entry.done = true
+      }
+    }
+  }
+}
+
 const hydratingBadgesFor = new Set<string>()
 async function hydrateThreadBadges(sessionId: string) {
   if (!sessionId || hydratingBadgesFor.has(sessionId)) return
@@ -1561,6 +1667,26 @@ function getSourceMessages(): ChatMessage[] {
   return props.sessionId ? getMessages(props.sessionId) : []
 }
 
+// Owner-space routing: /#/space/:id has no route sessionId, so isForActiveSession
+// is true for every event. Write timeline rows to the space that owns
+// msg.session_id (via getSessionSpaceId), not the room currently on screen.
+function getOwnerMessages(sessionId?: string): ChatMessage[] | null {
+  if (props.sessionId) {
+    if (sessionId && sessionId !== props.sessionId) return null
+    return getMessages(props.sessionId)
+  }
+  if (!props.spaceId || !sessionId) return null
+  const ownerSpaceId = getSessionSpaceId(sessionId)
+  if (!ownerSpaceId) return null
+  return getSpaceTimelineState(ownerSpaceId).messages as ChatMessage[]
+}
+
+function isOwnerView(sessionId?: string): boolean {
+  if (props.sessionId) return !sessionId || sessionId === props.sessionId
+  if (!props.spaceId || !sessionId) return false
+  return getSessionSpaceId(sessionId) === props.spaceId
+}
+
 const messages = computed(() => {
   if (props.spaceId) {
     const spMsgs = currentSpaceTimeline.value?.getState().messages ?? []
@@ -1608,9 +1734,10 @@ const {
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (chatSearchInputEl satisfies unknown)
 
+const spaceIdRef = computed(() => props.spaceId)
 const {
   atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
-} = useUnreadTracking(sessionIdRef, messages as any, messagesEl)
+} = useUnreadTracking(sessionIdRef, messages as any, messagesEl, spaceIdRef)
 
 const selectedAgent = computed(() =>
   agentsList.value.find(a => a.name === selectedAgentName.value) ?? null
@@ -1666,12 +1793,26 @@ function exportSession() {
   URL.revokeObjectURL(url)
 }
 
+// Session-mode uses props.sessionId. Space-mode DMs/channels have an empty
+// sessionId prop — resolve to the timeline's active session (and every other
+// session_id on the timeline) so the same thread helpers work.
+const resolvedThreadSessionId = computed(() => {
+  if (props.sessionId) return props.sessionId
+  return currentSpaceTimeline.value?.getState().activeSessionId ?? ''
+})
+
+const spaceThreadSessionIds = computed(() => {
+  if (props.sessionId) return [props.sessionId]
+  if (!currentSpaceTimeline.value) return []
+  return collectSpaceSessionIds(currentSpaceTimeline.value)
+})
+
 const sessionThreads = computed(() =>
-  props.sessionId ? getSessionThreads(props.sessionId) : []
+  spaceThreadSessionIds.value.flatMap(id => getSessionThreads(id))
 )
 
 const activeThreadCount = computed(() =>
-  props.sessionId ? getActiveThreadCount(props.sessionId) : 0
+  spaceThreadSessionIds.value.reduce((n, id) => n + getActiveThreadCount(id), 0)
 )
 
 const blockedThreadCount = computed(() =>
@@ -1680,8 +1821,16 @@ const blockedThreadCount = computed(() =>
 
 // Pending delegation previews for this session (shown as approval banners).
 const sessionPreviews = computed(() =>
-  props.sessionId ? getSessionPreviews(props.sessionId) : []
+  spaceThreadSessionIds.value.flatMap(id => getSessionPreviews(id))
 )
+
+watch(resolvedThreadSessionId, (sid, prev) => {
+  if (!props.spaceId || !sid || sid === prev) return
+  loadThreads(sid).then(() => {
+    hydrateThreadBadges(sid)
+    applyLiveThreadSummaries(sid)
+  })
+})
 
 const agentColorMap = computed(() => {
   const m: Record<string, string> = {}
@@ -1696,7 +1845,6 @@ const agentIconMap = computed(() => {
 })
 
 // Replication status chip
-const spaceIdRef = computed(() => props.spaceId)
 const { chipText: replChipText, chipClass: replChipClass } = useReplicationStatus(spaceIdRef)
 
 // Auto-show panel when threads appear; auto-hide 4s after all finish (unless pinned)
@@ -1705,7 +1853,7 @@ watch(activeThreadCount, (count) => {
     threadPanelOpen.value = true
   } else if (!threadPanelPinned.value && sessionThreads.value.length > 0) {
     setTimeout(() => {
-      if (getActiveThreadCount(props.sessionId ?? '') === 0 && !threadPanelPinned.value) {
+      if (activeThreadCount.value === 0 && !threadPanelPinned.value) {
         threadPanelOpen.value = false
       }
     }, 4000)
@@ -1827,6 +1975,83 @@ const updateRoute = ref<UpdateRoute>('all_active')
 const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
+
+// Per-space run chrome. ChatView is reused across /space/:id, so a single
+// streaming / currentRunId / queuedRunIds / prestreamThinking would paint
+// Steve's quiet DM as busy while Tess is the one running, and queue Steve's
+// next send against Tess's turn.
+type OwnerRunState = {
+  streaming: boolean
+  prestreamThinking: boolean
+  currentRunId: string
+  queuedRunIds: string[]
+}
+const runByOwner = ref<Record<string, OwnerRunState>>({})
+
+function snapshotOwnerRun(): OwnerRunState {
+  return {
+    streaming: streaming.value,
+    prestreamThinking: prestreamThinking.value,
+    currentRunId: currentRunId.value,
+    queuedRunIds: [...queuedRunIds.value],
+  }
+}
+
+function persistOwnerRun(key: string) {
+  if (!key) return
+  runByOwner.value = { ...runByOwner.value, [key]: snapshotOwnerRun() }
+}
+
+function applyOwnerRun(state: OwnerRunState) {
+  streaming.value = state.streaming
+  prestreamThinking.value = state.prestreamThinking
+  currentRunId.value = state.currentRunId
+  queuedRunIds.value = [...state.queuedRunIds]
+  if (state.streaming) {
+    startStreamingWatchdog()
+    startElapsedTimer()
+  } else {
+    clearStreamingWatchdog()
+    stopElapsedTimer()
+  }
+}
+
+function restoreOwnerRun(key: string) {
+  if (!key) return
+  const saved = runByOwner.value[key]
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] })
+}
+
+function finishStoredOwnerRun(key: string) {
+  const saved = runByOwner.value[key]
+  if (!saved) return
+  if (saved.queuedRunIds.length > 0) {
+    const next = saved.queuedRunIds[0]!
+    const rest = saved.queuedRunIds.slice(1)
+    runByOwner.value = {
+      ...runByOwner.value,
+      [key]: { streaming: true, prestreamThinking: true, currentRunId: next, queuedRunIds: rest },
+    }
+    return
+  }
+  runByOwner.value = {
+    ...runByOwner.value,
+    [key]: { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] },
+  }
+}
+
+function finishBackgroundOwnerRun(runId: string): boolean {
+  const key = Object.entries(runByOwner.value).find(([, s]) => s.currentRunId === runId)?.[0]
+  if (!key) return false
+  finishStoredOwnerRun(key)
+  return true
+}
+
+watch(() => props.spaceId, (newId, oldId) => {
+  if (oldId && oldId !== newId) persistOwnerRun(oldId)
+  if (newId) restoreOwnerRun(newId)
+})
+
 const activeDelegateAgents = computed(() => {
   const out = new Set<string>()
   for (const t of sessionThreads.value) {
@@ -1947,7 +2172,7 @@ async function handleEditorSend(markdown: string) {
   }
 
   // ── Session mode ────────────────────────────────────────────────────
-  if (!props.sessionId) return
+  if (!props.sessionId || isAgentDMAlias(props.sessionId)) return
 
   // Auto-select default agent on first send if none chosen yet
   if (!selectedAgentName.value && agentsList.value.length > 0) {
@@ -2001,15 +2226,16 @@ function handleRetry(content: string) {
 
 function cancelThread(threadId: string) {
   const ws = wsRef.value
-  if (!ws || !props.sessionId) return
-  ws.send({ type: 'thread_cancel', payload: { thread_id: threadId }, session_id: props.sessionId })
+  const sessionId = getThreadById(threadId)?.SessionID || resolvedThreadSessionId.value
+  if (!ws || !sessionId) return
+  ws.send({ type: 'thread_cancel', payload: { thread_id: threadId }, session_id: sessionId })
 }
 
 function injectThread(threadId: string, content: string) {
   const ws = wsRef.value
   if (!ws) return
   const threadSessionId = getThreadById(threadId)?.SessionID
-  const sessionId = threadSessionId || props.sessionId
+  const sessionId = threadSessionId || resolvedThreadSessionId.value
   if (!sessionId) return
   ws.send({ type: 'thread_inject', payload: { thread_id: threadId, content }, session_id: sessionId })
 }
@@ -2039,6 +2265,7 @@ function approvePermission(approved: boolean) {
     payload: { id: (pendingPermission.value.payload as Record<string, string>)?.id, approved },
   })
   pendingPermission.value = null
+  if (props.spaceId) pendingPermissionBySpace.delete(props.spaceId)
 }
 
 async function fetchStatus() {
@@ -2145,7 +2372,17 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'permission_request', (msg: WSMessage) => {
-    if (!isForActiveSession(msg)) return
+    if (props.sessionId) {
+      if (!isForActiveSession(msg)) return
+      pendingPermission.value = msg
+      scrollToBottom()
+      return
+    }
+    if (!props.spaceId || !msg.session_id) return
+    const ownerSpaceId = getSessionSpaceId(msg.session_id)
+    if (!ownerSpaceId) return
+    pendingPermissionBySpace.set(ownerSpaceId, msg)
+    if (ownerSpaceId !== props.spaceId) return
     pendingPermission.value = msg
     scrollToBottom()
   })
@@ -2155,6 +2392,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     // Ignore stale done events from previous chat runs (e.g. buffered in the WS connection).
     // run_id was introduced alongside this guard; old messages without run_id are also ignored.
     if (!msg.run_id || msg.run_id !== currentRunId.value) {
+      if (msg.run_id && finishBackgroundOwnerRun(msg.run_id)) return
       console.debug('[done] ignoring stale done, run_id=', msg.run_id, 'expected=', currentRunId.value)
       return
     }
@@ -2195,19 +2433,21 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       }
     }
     promoteNextQueuedRun()
+    if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
     fetchStatus()
     // Browser notification — only fires when tab is hidden (checked inside notify())
-    if (props.sessionId) {
-      const msgs = getMessages(props.sessionId)
+    if (props.sessionId || props.spaceId) {
+      const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
       const last = msgs.at(-1)
       const agentName = last?.agent ?? 'Agent'
       const preview = last?.content?.slice(0, 80) ?? ''
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName,
         preview || 'Finished responding',
-        `session-done-${props.sessionId}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        `session-done-${props.spaceId || props.sessionId}`,
+        () => router.push(dest)
       )
     }
   })
@@ -2216,7 +2456,10 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
-    if (msg.run_id && msg.run_id !== currentRunId.value) return
+    if (msg.run_id && msg.run_id !== currentRunId.value) {
+      if (finishBackgroundOwnerRun(msg.run_id)) return
+      return
+    }
     clearStreamingWatchdog()
     stopElapsedTimer()
     streaming.value = false
@@ -2227,15 +2470,16 @@ registerWS(ws, 'error', (msg: WSMessage) => {
       if (streamMsg?.streaming) { streamMsg.content += `\n\nerror: ${msg.content}`; streamMsg.streaming = false }
     }
     promoteNextQueuedRun()
+    if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
   })
 
 registerWS(ws, 'warning', (msg: WSMessage) => {
-    if (!isForActiveSession(msg)) return
-    // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
-    // Surface it inline so the user knows memory tools are disabled rather
-    // than silently missing tool calls.
     if (props.sessionId) {
+      if (!isForActiveSession(msg)) return
+      // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
+      // Surface it inline so the user knows memory tools are disabled rather
+      // than silently missing tool calls.
       const msgs = getMessages(props.sessionId)
       const warningForQueuedRun = !!msg.run_id && msg.run_id !== currentRunId.value
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
@@ -2245,22 +2489,22 @@ registerWS(ws, 'warning', (msg: WSMessage) => {
         const id = `warn-${Date.now()}`
         msgs.push({ id, role: 'assistant', content: msg.content ?? '', createdAt: new Date().toISOString(), toolCalls: [] })
       }
-    } else if (props.spaceId && currentSpaceTimeline.value) {
-      const st = currentSpaceTimeline.value.getState()
-      const sessionId = st.activeSessionId
-      if (sessionId) {
-        st.messages.push({
-          id: `warn-${Date.now()}`,
-          session_id: sessionId,
-          seq: -1,
-          ts: new Date().toISOString(),
-          role: 'assistant',
-          content: msg.content ?? '',
-          agent: '',
-        })
-      }
+      scrollToBottom()
+      return
     }
-    scrollToBottom()
+    if (!props.spaceId) return
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
+    msgs.push({
+      id: `warn-${Date.now()}`,
+      session_id: msg.session_id as string,
+      seq: -1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: msg.content ?? '',
+      agent: '',
+    } as ChatMessage)
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
 registerWS(ws, 'primary_agent_changed', (msg: WSMessage) => {
@@ -2300,6 +2544,7 @@ registerWS(ws, 'thread_started', (msg: WSMessage) => {
 registerWS(ws, 'thread_help', (_msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && _msg.session_id !== props.sessionId) return
+    if (props.spaceId && !isOwnerView(_msg.session_id)) return
     const p = (_msg.payload as Record<string, unknown> | undefined) ?? {}
     const threadId = typeof p.thread_id === 'string' ? p.thread_id : ''
     const helpMessage = typeof p.message === 'string' ? p.message : ''
@@ -2310,12 +2555,13 @@ registerWS(ws, 'thread_help', (_msg: WSMessage) => {
       agent: agentName,
       message: helpMessage,
     })
-    if (props.sessionId) {
+    if (props.sessionId || props.spaceId) {
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         `${agentName} needs input`,
         helpMessage || 'A delegated thread is blocked and waiting for guidance.',
         `thread-help-${threadId || Date.now().toString()}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        () => router.push(dest)
       )
     }
   })
@@ -2364,7 +2610,8 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Only add if there isn't already a follow-up streaming bubble
     const alreadyExists = msgs.some(m => (m as any).followUpStreaming)
     if (!alreadyExists) {
@@ -2385,7 +2632,7 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
         fupStreamMsg.ts = new Date().toISOString()
       }
       msgs.push(fupStreamMsg)
-      scrollToBottom()
+      if (isOwnerView(msg.session_id)) scrollToBottom()
     }
   })
 
@@ -2398,7 +2645,8 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
     const agentName = p?.agent as string | undefined
     const token = p?.token as string | undefined
     if (!token) return
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Find the existing follow-up streaming bubble or create one
     const existing = [...msgs].reverse().find(m => (m as any).followUpStreaming)
     if (existing) {
@@ -2420,7 +2668,7 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
       }
       msgs.push(fupFallback)
     }
-    scrollToBottom()
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
 // agent_follow_up: final persisted follow-up reply from the lead agent.
@@ -2434,7 +2682,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     const agentName = p?.agent as string | undefined
     const content = p?.content as string | undefined
     if (!content) return
-    const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
@@ -2456,13 +2705,14 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
       fupMsg.ts = new Date().toISOString()
     }
     msgs.push(fupMsg)
-    scrollToBottom()
-    if (props.sessionId) {
+    if (isOwnerView(msg.session_id)) scrollToBottom()
+    if (props.sessionId || isOwnerView(msg.session_id)) {
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName ?? 'Agent',
         'Has a follow-up for you',
-        `follow-up-${props.sessionId}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        `follow-up-${props.spaceId || props.sessionId}`,
+        () => router.push(dest)
       )
     }
   })
@@ -2472,7 +2722,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
 registerWS(ws, 'follow_up_cancelled', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && msg.session_id !== props.sessionId) return
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Remove the thinking bubble if it exists
     const idx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (idx >= 0) msgs.splice(idx, 1)
@@ -2502,8 +2753,9 @@ registerWS(ws, 'thread_inject_error', (_msg: WSMessage) => {
   // in side panels for delegated outcomes.
 registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
-    // In session mode, verify session_id matches. In space mode, accept any
-    // thread_done for sessions in this space (the WS subscription handles scoping).
+    // In session mode, verify session_id matches. In space mode, write the
+    // completion card onto the owner space (getSessionSpaceId), not the
+    // currently viewed room — the WS subscription is not per-space.
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const threadId = p?.thread_id as string | undefined
@@ -2513,7 +2765,8 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     for (const m of msgs) {
       const dt = m.delegatedThreads
       if (dt) {
@@ -2575,8 +2828,9 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
     const agentId = typeof p.agent_id === 'string'
       ? p.agent_id
       : (typeof p.agent === 'string' ? p.agent : 'Delegate')
-    showAutoApproveNotice(agentId)
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
+    if (isOwnerView(msg.session_id)) showAutoApproveNotice(agentId)
     const eventId = `preview-timeout-${threadId}`
     if (msgs.some(m => m.id === eventId)) return
     const timeoutLabel = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 30
@@ -2591,7 +2845,7 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
         ts: new Date().toISOString(),
       } : {}),
     })
-    scrollToBottom()
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
   // thread_reply_updated: parent message reply count changed in persistence.
@@ -2680,7 +2934,7 @@ registerWS(ws, 'thread_permission_denied', (msg: WSMessage) => {
   })
 
   // Wire thread events via useThreads composable
-  const cleanupThreadWS = wireThreadWS(ws, () => props.sessionId ?? '')
+  const cleanupThreadWS = wireThreadWS(ws, () => resolvedThreadSessionId.value)
   if (typeof cleanupThreadWS === 'function') {
     wsCleanupFns.push(cleanupThreadWS)
   }
@@ -2711,6 +2965,9 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   if (oldSessionId && oldSessionId !== newSessionId) {
     clearSessionPreviews(oldSessionId)
   }
+  // Leaving session mode (e.g. /chat/:id → /space/:id) must not wipe
+  // space-keyed run chrome that restoreOwnerRun just applied.
+  if (!newSessionId) return
   resetStreaming()
   prestreamThinking.value = false
   queuedRunIds.value = []
@@ -2722,7 +2979,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   fetchStatus()
   nextTick(() => chatEditorRef.value?.focus())
   // Load existing threads and message history for this session
-  if (props.sessionId) {
+  if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     loadThreads(props.sessionId)
     // Only show skeleton if the session has no cached messages yet
     const alreadyCached = getMessages(props.sessionId).length > 0
@@ -2730,6 +2987,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
     await fetchMessages(props.sessionId)
     sessionSwitching.value = false
     hydrateThreadBadges(props.sessionId)
+    applyLiveThreadSummaries(props.sessionId)
     // Mark session as seen on switch (starts unread count from here)
     markCurrentSessionSeen()
     await scrollToBottom()
@@ -2781,7 +3039,7 @@ onMounted(async () => {
   await loadAgents()
   syncSessionAgent()
   fetchStatus()
-  if (props.sessionId) {
+  if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     await fetchMessages(props.sessionId)
     hydrateThreadBadges(props.sessionId)
     markCurrentSessionSeen()

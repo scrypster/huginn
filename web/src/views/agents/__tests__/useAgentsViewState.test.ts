@@ -102,6 +102,17 @@ describe('useAgentsViewState', () => {
     expect(state.advertiseMemory.value).toBe(false)
   })
 
+  it('color input change matching the default does not mark dirty', async () => {
+    const { state } = mountHarness('new')
+    await flushPromises()
+    expect(state.dirty.value).toBe(false)
+    state.onColorInputChange()
+    expect(state.dirty.value).toBe(false)
+    state.form.value.color = '#111111'
+    state.onColorInputChange()
+    expect(state.dirty.value).toBe(true)
+  })
+
   it('openDM routes to DM space when lookup succeeds', async () => {
     mockApiFetch.mockResolvedValueOnce({ id: 'space-123' })
     const { state } = mountHarness()
@@ -117,6 +128,49 @@ describe('useAgentsViewState', () => {
     await state.openDM({ name: 'Alpha' })
 
     expect(mockRouterPush).toHaveBeenCalledWith('/agents/Alpha')
+  })
+
+  it('toggleLocalAllowAll enable without confirm does not write wildcard', () => {
+    const { state } = mountHarness()
+    state.form.value.local_tools = []
+    state.dirty.value = false
+
+    state.toggleLocalAllowAll()
+
+    expect(state.form.value.local_tools).toEqual([])
+    expect(state.form.value.local_tools).not.toEqual(['*'])
+    expect(state.showLocalAllowAllConfirm.value).toBe(true)
+    expect(state.dirty.value).toBe(false)
+  })
+
+  it('confirmLocalAllowAll writes wildcard and marks dirty; cancel does not write', () => {
+    const { state } = mountHarness()
+    state.form.value.local_tools = ['read_file']
+    state.dirty.value = false
+
+    state.toggleLocalAllowAll()
+    state.cancelLocalAllowAll()
+    expect(state.form.value.local_tools).toEqual(['read_file'])
+    expect(state.showLocalAllowAllConfirm.value).toBe(false)
+    expect(state.dirty.value).toBe(false)
+
+    state.toggleLocalAllowAll()
+    state.confirmLocalAllowAll()
+    expect(state.form.value.local_tools).toEqual(['*'])
+    expect(state.showLocalAllowAllConfirm.value).toBe(false)
+    expect(state.dirty.value).toBe(true)
+  })
+
+  it('toggleLocalAllowAll disable path immediately clears local tools', () => {
+    const { state } = mountHarness()
+    state.form.value.local_tools = ['*']
+    state.dirty.value = false
+
+    state.toggleLocalAllowAll()
+
+    expect(state.form.value.local_tools).toEqual([])
+    expect(state.showLocalAllowAllConfirm.value).toBe(false)
+    expect(state.dirty.value).toBe(true)
   })
 
   it('toggleConnectionsAllowAll toggles explicit assignable connections', async () => {

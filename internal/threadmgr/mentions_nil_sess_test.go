@@ -36,7 +36,8 @@ func TestCreateFromMentions_NilSess_DoesNotPanic(t *testing.T) {
 		func(_ string, _ string, _ map[string]any) {},
 		NewCostAccumulator(0),
 		tm,
-		"", // callerAgent: empty for this test
+		"",  // callerAgent: empty for this test
+		nil, // spaceMemberNames: standalone, all-agents
 	)
 }
 

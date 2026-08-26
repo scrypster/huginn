@@ -3,6 +3,16 @@ import { useSpaces, wireSpaceWS } from '../useSpaces'
 import { setToken } from '../useApi'
 import type { HuginnWS, WSMessage } from '../useHuginnWS'
 
+const { mockNotify } = vi.hoisted(() => ({
+  mockNotify: vi.fn(),
+}))
+
+vi.mock('../useBrowserNotifications', () => ({
+  useBrowserNotifications: () => ({
+    notify: mockNotify,
+  }),
+}))
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function okJson(body: unknown, status = 200): Response {
@@ -42,6 +52,7 @@ const sampleDM = {
 
 beforeEach(() => {
   setToken('test-token')
+  mockNotify.mockClear()
   // Reset shared state between tests
   const { clearSpaces } = useSpaces()
   clearSpaces()
@@ -617,6 +628,41 @@ describe('wireSpaceWS', () => {
     ws._emit(makeMsg('space_activity', { space_id: 'dm-1', unseen_count: 5 }))
 
     expect(spaces.value[0].unseenCount).toBe(5)
+  })
+
+  it('space_activity increment on inactive space calls notify', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson([sampleDM]))
+    const { fetchSpaces } = useSpaces()
+    await fetchSpaces()
+
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+    ws._emit(makeMsg('space_activity', { space_id: 'dm-1', unseen_count: 5 }))
+
+    expect(mockNotify).toHaveBeenCalledTimes(1)
+    expect(mockNotify).toHaveBeenCalledWith(
+      'atlas',
+      'New message',
+      'space-activity-dm-1',
+      expect.any(Function),
+    )
+  })
+
+  it('space_activity increment on active space does not call notify', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(okJson([sampleDM]))
+      .mockResolvedValueOnce(okJson([]))   // fetchSpaceSessions triggered by setActiveSpace
+    const { fetchSpaces, setActiveSpace, spaces } = useSpaces()
+    await fetchSpaces()
+    setActiveSpace('dm-1')
+    expect(spaces.value[0].unseenCount).toBe(0)
+
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+    ws._emit(makeMsg('space_activity', { space_id: 'dm-1', unseen_count: 3 }))
+
+    expect(spaces.value[0].unseenCount).toBe(0)
+    expect(mockNotify).not.toHaveBeenCalled()
   })
 
   it('space_activity ignores increments for the active space', async () => {

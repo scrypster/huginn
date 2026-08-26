@@ -12,6 +12,7 @@ import tippy from 'tippy.js'
 import type { Instance as TippyInstance } from 'tippy.js'
 import type { SuggestionProps, SuggestionKeyDownProps } from '@tiptap/suggestion'
 import MentionList from './MentionList.vue'
+import { filterMentionSuggestions } from './mentionSuggestions'
 
 const lowlight = createLowlight(common)
 
@@ -42,9 +43,14 @@ export function useEditor(options: {
   // the wrapping component (e.g. when the active DM changes) updates the
   // placeholder without re-creating the editor.
   placeholderRef?: Ref<string | undefined>
+  // Active-space roster. When set, @ suggestions list only those members.
+  // Undefined = standalone session (every agent).
+  memberNames?: Ref<string[] | undefined>
 }) {
   const editor = ref<Editor | null>(null)
   let suggestionOpen = false
+  // After Escape, refuse rematch until the cursor leaves that @.
+  let dismissedFrom: number | null = null
 
   function createMentionExtension() {
     // Extend Mention with a tiptap-markdown serializer so @Name renders as
@@ -64,12 +70,20 @@ export function useEditor(options: {
       HTMLAttributes: { class: 'mention' },
       suggestion: {
         items: ({ query }: { query: string }) =>
-          options.agents.value
-            .filter(a => String(a.name).toLowerCase().startsWith(query.toLowerCase()))
-            .slice(0, 6),
+          filterMentionSuggestions(options.agents.value, query, options.memberNames?.value),
+
+        allow: ({ range, state }: { range: { from: number; to: number }; state: { selection: { from: number } } }) => {
+          if (dismissedFrom == null) return true
+          const pos = state.selection.from
+          if (pos < range.from || pos > range.to) {
+            dismissedFrom = null
+            return true
+          }
+          return range.from !== dismissedFrom
+        },
 
         render: () => {
-          let component: VueRenderer
+          let component: VueRenderer | undefined
           let popup: TippyInstance | null = null
 
           return {
@@ -93,24 +107,27 @@ export function useEditor(options: {
               })
             },
             onUpdate(props: SuggestionProps) {
-              component.updateProps(props)
+              component?.updateProps(props)
               if (!props.clientRect || !popup) return
               popup.setProps({
                 getReferenceClientRect: props.clientRect as () => DOMRect,
               })
             },
+            // Escape: record the range, then return false so the plugin exits.
             onKeyDown(props: SuggestionKeyDownProps) {
               if (props.event.key === 'Escape') {
-                popup?.hide()
-                return true
+                dismissedFrom = props.range.from
+                return false
               }
-              return (component.ref as MentionListRef | null)
+              return (component?.ref as MentionListRef | null)
                 ?.onKeyDown(props) ?? false
             },
             onExit() {
               suggestionOpen = false
               popup?.destroy()
-              component.destroy()
+              popup = null
+              component?.destroy()
+              component = undefined
             },
           }
         },
