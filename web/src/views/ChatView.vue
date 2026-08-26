@@ -1811,7 +1811,6 @@ const agentIconMap = computed(() => {
 })
 
 // Replication status chip
-const spaceIdRef = computed(() => props.spaceId)
 const { chipText: replChipText, chipClass: replChipClass } = useReplicationStatus(spaceIdRef)
 
 // Auto-show panel when threads appear; auto-hide 4s after all finish (unless pinned)
