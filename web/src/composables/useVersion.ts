@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import { api } from './useApi'
+import { formatVersionLabel } from '../utils/honesty'
 
 const version = ref<string>('')
 const stale = ref<boolean>(false)
@@ -50,7 +51,7 @@ export function useVersion() {
     }
   }
 
-  const versionLabel = computed(() => version.value || '…')
+  const versionLabel = computed(() => formatVersionLabel(version.value))
 
   return { version, versionLabel, stale, loadVersion, startPolling, stopPolling }
 }

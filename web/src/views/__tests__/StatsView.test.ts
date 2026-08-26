@@ -144,6 +144,22 @@ describe('StatsView', () => {
     expect(w.text()).toContain('1.2.3')
   })
 
+  it('collapses a doubled leading v on the Stats SERVER version', async () => {
+    mockApiHealth.mockResolvedValueOnce({ status: 'ok', version: 'vv0.4.0-try-all' })
+    const w = mountView()
+    await flushPromises()
+    const label = w.get('[data-testid="stats-server-version"]')
+    expect(label.text()).toBe('v0.4.0-try-all')
+    expect(label.text()).not.toContain('vv')
+  })
+
+  it('does not prefix another v onto a version that already has one', async () => {
+    mockApiHealth.mockResolvedValueOnce({ status: 'ok', version: 'v0.4.0-try-all' })
+    const w = mountView()
+    await flushPromises()
+    expect(w.get('[data-testid="stats-server-version"]').text()).toBe('v0.4.0-try-all')
+  })
+
   it('shows top agents section', async () => {
     const w = mountView()
     await flushPromises()

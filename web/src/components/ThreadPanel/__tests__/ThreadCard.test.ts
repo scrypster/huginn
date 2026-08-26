@@ -271,6 +271,16 @@ describe('ThreadCard — tool calls section', () => {
     expect(wrapper.html()).toContain('running')
   })
 
+  it('shows "failed" instead of "done" when the tool result is an error', async () => {
+    const wrapper = mountCard(makeThread({
+      toolCalls: [{ tool: 'json', done: true, resultSummary: 'error: tool "json" is not available' }],
+    }))
+    const toolsBtn = wrapper.findAll('button').find(b => b.text().includes('tool call'))
+    await toolsBtn!.trigger('click')
+    expect(wrapper.html()).toContain('failed')
+    expect(wrapper.text()).not.toMatch(/\bdone\b/)
+  })
+
   it('shows "done" indicator for a completed tool call when expanded', async () => {
     const wrapper = mountCard(makeThread({
       toolCalls: [{ tool: 'read_file', done: true }],

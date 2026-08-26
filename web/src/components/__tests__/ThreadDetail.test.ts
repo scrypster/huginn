@@ -530,6 +530,31 @@ describe('ThreadDetail — tool call chip (persisted toolCalls)', () => {
     }
   }
 
+  it('failed tool result chip says failed, not done', () => {
+    const msg = makeMessage({
+      role: 'assistant',
+      content: 'TOOL_FAIL: The "json" tool is not available.',
+      toolCalls: [makeToolCallRecord({ result: 'error: tool "json" is not available' })],
+    })
+    const wrapper = mountComponent({ messages: [msg] })
+    expect(wrapper.find('[data-testid="system-fail-line"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('failed')
+    expect(wrapper.html()).not.toContain('· done')
+  })
+
+  it('bare TOOL_FAIL token is a system chip without an empty reason span', () => {
+    const msg = makeMessage({
+      role: 'assistant',
+      content: 'TOOL_FAIL',
+    })
+    const wrapper = mountComponent({ messages: [msg] })
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text().trim()).toBe('TOOL_FAIL')
+    expect(fail.text()).not.toContain('·')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
   it('renders chip on assistant message when toolCalls is present', () => {
     const msg = makeMessage({
       role: 'assistant',

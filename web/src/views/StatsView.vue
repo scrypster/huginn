@@ -140,7 +140,7 @@
                 />
                 <span class="text-huginn-text">{{ healthData.status }}</span>
               </div>
-              <span class="text-huginn-muted">v{{ healthData.version }}</span>
+              <span class="text-huginn-muted" data-testid="stats-server-version">{{ serverVersionLabel }}</span>
               <span v-if="healthData.backend_status && healthData.backend_status !== 'unknown'"
                 class="px-2 py-0.5 rounded-full text-[10px] border"
                 :class="cbStatusClass(healthData.backend_status)">
@@ -159,6 +159,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../composables/useApi'
+import { formatVersionLabel } from '../utils/honesty'
 
 interface SessionManifest {
   session_id?: string
@@ -184,6 +185,8 @@ const costHistory = ref<Array<{ ts: number; session_id: string; cost_usd: number
 const loading = ref(true)
 const error = ref('')
 const lastRefreshed = ref('')
+
+const serverVersionLabel = computed(() => formatVersionLabel(healthData.value?.version ?? ''))
 
 const totalSessions = computed(() => sessionsData.value.length)
 
