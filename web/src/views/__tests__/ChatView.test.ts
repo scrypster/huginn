@@ -119,12 +119,21 @@ vi.mock('../../composables/useSpaceTimeline', () => ({
   wireSpaceTimelineWS: vi.fn(),
 }))
 
-const mockRouterPush = vi.fn()
-const mockRouterReplace = vi.fn()
+const { mockRouterPush, mockRouterReplace, mockNotify } = vi.hoisted(() => ({
+  mockRouterPush: vi.fn(),
+  mockRouterReplace: vi.fn(),
+  mockNotify: vi.fn(),
+}))
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: {}, query: {} }),
   useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
+}))
+
+vi.mock('../../composables/useBrowserNotifications', () => ({
+  useBrowserNotifications: () => ({
+    notify: mockNotify,
+  }),
 }))
 
 // Stub heavy child components
@@ -2351,6 +2360,41 @@ describe('ChatView — space mode', () => {
     expect(mockSpaceState.messages).toEqual(expect.arrayContaining(inflightBefore))
     const chatSends = mockWs.sentMessages.filter((m: any) => m.type === 'chat')
     expect(chatSends.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('WS done handler: fires desktop notify with click-through to the space', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello space')
+    await flushPromises()
+
+    mockSpaceState.messages.push({
+      id: 'a-1',
+      session_id: NEW_SESSION_ID,
+      seq: 2,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'Space reply',
+      agent: 'atlas',
+    })
+
+    const chatMsg = mockWs.sentMessages.find((m: any) => m.type === 'chat')
+    expect(chatMsg).toBeDefined()
+    mockWs.simulateMessage({ type: 'done', run_id: chatMsg.run_id })
+    await nextTick()
+
+    expect(mockNotify).toHaveBeenCalledWith(
+      'atlas',
+      'Space reply',
+      `session-done-${SPACE_ID}`,
+      expect.any(Function),
+    )
+    const onClick = mockNotify.mock.calls.at(-1)?.[3] as (() => void) | undefined
+    onClick?.()
+    expect(mockRouterPush).toHaveBeenCalledWith(`/space/${SPACE_ID}`)
   })
 })
 

@@ -25,6 +25,7 @@ All notable changes to Huginn are documented here.
 - Stats and Settings routes keep the Channels/DMs sidebar visible instead of unmounting the context panel
 - Chat sidebar no longer flashes “No channels yet” / “No agents configured” while spaces are still loading
 - Channel header "N agents / Manage agents" chip now opens the agent roster modal (add, remove, set lead) instead of only the read-only member panel; DMs stay read-only and the panel chevron still toggles the rail
+- Desktop notifications now fire for space-mode agent replies when the Huginn tab is in the background
 
 ## [0.4.0] - 2026-06-10
 

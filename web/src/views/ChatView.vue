@@ -2313,16 +2313,17 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     scrollToBottom()
     fetchStatus()
     // Browser notification — only fires when tab is hidden (checked inside notify())
-    if (props.sessionId) {
-      const msgs = getMessages(props.sessionId)
+    if (props.sessionId || props.spaceId) {
+      const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
       const last = msgs.at(-1)
       const agentName = last?.agent ?? 'Agent'
       const preview = last?.content?.slice(0, 80) ?? ''
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName,
         preview || 'Finished responding',
-        `session-done-${props.sessionId}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        `session-done-${props.spaceId || props.sessionId}`,
+        () => router.push(dest)
       )
     }
   })
@@ -2425,12 +2426,13 @@ registerWS(ws, 'thread_help', (_msg: WSMessage) => {
       agent: agentName,
       message: helpMessage,
     })
-    if (props.sessionId) {
+    if (props.sessionId || props.spaceId) {
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         `${agentName} needs input`,
         helpMessage || 'A delegated thread is blocked and waiting for guidance.',
         `thread-help-${threadId || Date.now().toString()}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        () => router.push(dest)
       )
     }
   })
@@ -2572,12 +2574,13 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     }
     msgs.push(fupMsg)
     scrollToBottom()
-    if (props.sessionId) {
+    if (props.sessionId || props.spaceId) {
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName ?? 'Agent',
         'Has a follow-up for you',
-        `follow-up-${props.sessionId}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        `follow-up-${props.spaceId || props.sessionId}`,
+        () => router.push(dest)
       )
     }
   })
