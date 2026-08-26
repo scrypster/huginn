@@ -1047,6 +1047,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Unauthenticated endpoints — safe because server binds to 127.0.0.1 only.
 	mux.HandleFunc("GET /api/v1/token", loggingMiddleware(s.handleGetToken))
 	mux.HandleFunc("GET /api/v1/health", loggingMiddleware(requestIDMiddleware(s.handleHealth)))
+	// claude-approve is called by the `huginn claude-approve` PreToolUse hook
+	// (cmd_claude_approve.go), which never sends an Authorization header or
+	// ?token= — it is a local child process, not a browser client. Wrapping
+	// this in api() would make authMiddleware 401 every real approval request,
+	// which the hook client treats as a deny — i.e. approval would silently
+	// never work. Left unauthenticated on the same 127.0.0.1-only basis as
+	// /token and /health above; body size is still capped defensively.
+	mux.HandleFunc("POST /api/v1/claude/approve",
+		loggingMiddleware(requestIDMiddleware(withMaxBody(1<<20, s.handleClaudeApprove))))
 
 	// REST API (auth required)
 	mux.HandleFunc("POST /api/v1/restart", api(s.handleRestart))
@@ -1219,6 +1228,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/muninn/tool", api(s.handleMuninnTool))
 
 	// Claude Code bridge API (authenticated)
+	// POST /api/v1/claude/approve is registered in the unauthenticated block
+	// above, not here — see the comment there for why.
 	mux.HandleFunc("GET /api/v1/claude/status", api(s.handleClaudeStatus))
 	mux.HandleFunc("POST /api/v1/claude/backfill", api(s.handleClaudeBackfill))
 
