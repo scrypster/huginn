@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
@@ -407,6 +408,14 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	result := &LoopResult{}
 
 	var consecutiveParseFailures int
+	var denied atomic.Bool
+	origDenied := cfg.OnPermissionDenied
+	cfg.OnPermissionDenied = func(name string) {
+		denied.Store(true)
+		if origDenied != nil {
+			origDenied(name)
+		}
+	}
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
@@ -449,6 +458,11 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// the loop executes the grant instead of treating it as a final answer.
 		backend.PromoteContentToolCalls(chatResult)
 		backend.RevealContentToolCalls(chatResult)
+		if denied.Load() {
+			// After a deny the model often dumps another tool JSON into
+			// content (not always leading). That must not be user-visible.
+			chatResult.Content = backend.VisibleAssistantContentAfterDeny(chatResult.Content)
+		}
 
 		// Append assistant response to history
 		assistantMsg := backend.Message{

@@ -45,6 +45,8 @@ All notable changes to Huginn are documented here.
 - Mixed JSON-in-content tool calls (and streamed JSON tokens) are stripped from the user-visible assistant bubble so harness invocations never render as chat text.
 - Streamed leftover after JSON-in-content (`}PONG`) stays one bubble — the first character is not dropped or forked into a nameless `ONG` row, and the sidebar preview keeps `PONG`.
 - Model tool warning persists on agent cards, the editor, and chat header/composer (not only the create-agent picker)
+- **bash `~` / `$HOME`** — the bash tool now expands `~` and `$HOME` in the command string the way a shell does (process home, not the session temp HOME). `ls ~` lists the real home (or a test fake home). If home cannot be resolved, the tool returns a loud expansion error instead of empty-success.
+- **Permission-deny leftover JSON** — after a tool is denied, leftover harness JSON such as `{"name":"gh_issue_create",...}` is stripped from VisibleAssistantContent and oneshot `agentOutput` so it never appears in the visible answer.
 
 ## [0.4.0] - 2026-06-10
 

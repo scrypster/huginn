@@ -13,6 +13,30 @@ import (
 // tool JSON immediately followed by the model's prose answer.
 const liveMixedJSONProse = `{"name": "bash", "arguments": {"command": "echo PONG"}}PONG`
 
+const leftoverIssueJSON = `{"name":"gh_issue_create","arguments":{"title":"need help","body":"bash denied"}}`
+
+func TestVisibleAssistantContentAfterDeny_HidesLeftoverIssueJSON(t *testing.T) {
+	mixed := "I can't run bash without approval.\n" + leftoverIssueJSON
+	got := VisibleAssistantContentAfterDeny(mixed)
+	if strings.Contains(got, "gh_issue_create") || strings.Contains(got, `"name"`) {
+		t.Errorf("harness JSON leaked after deny: %q", got)
+	}
+	if !strings.Contains(got, "I can't run bash") {
+		t.Errorf("prose was stripped: %q", got)
+	}
+
+	if got := VisibleAssistantContentAfterDeny(leftoverIssueJSON); got != "" {
+		t.Errorf("pure leftover JSON should be hidden, got %q", got)
+	}
+}
+
+func TestVisibleAssistantContentAfterDeny_FencedSampleUnchanged(t *testing.T) {
+	content := "Here is an example:\n```json\n" + leftoverIssueJSON + "\n```"
+	if got := VisibleAssistantContentAfterDeny(content); !strings.Contains(got, leftoverIssueJSON) {
+		t.Errorf("fenced sample must stay after deny, got %q", got)
+	}
+}
+
 func TestVisibleAssistantContent_JSONThenProse(t *testing.T) {
 	got := VisibleAssistantContent(liveMixedJSONProse)
 	if got != "PONG" {

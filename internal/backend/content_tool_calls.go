@@ -458,6 +458,71 @@ func RevealContentToolCalls(resp *ChatResponse) {
 	resp.Content = VisibleAssistantContent(resp.Content)
 }
 
+// VisibleAssistantContentAfterDeny is the display filter used after a tool
+// permission deny. It strips a leading tool-call prefix (same as
+// VisibleAssistantContent) and any remaining unfenced harness JSON objects
+// so leftover `{"name":"gh_issue_create",...}` never appears as an answer.
+func VisibleAssistantContentAfterDeny(content string) string {
+	return stripEmbeddedHarnessToolJSON(VisibleAssistantContent(content))
+}
+
+// stripEmbeddedHarnessToolJSON removes unfenced JSON objects that parse as
+// tool calls. Fenced code samples are left alone.
+func stripEmbeddedHarnessToolJSON(content string) string {
+	if content == "" {
+		return content
+	}
+	parts := strings.Split(content, "```")
+	for i, part := range parts {
+		if i%2 == 1 {
+			continue // inside a fence
+		}
+		parts[i] = removeToolJSONObjects(part)
+	}
+	return strings.TrimSpace(strings.Join(parts, "```"))
+}
+
+func removeToolJSONObjects(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] != '{' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		rest := s[i:]
+		obj, after, ok := readJSONObject(rest)
+		if !ok {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		consumed := len(rest) - len(after)
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(obj), &raw); err != nil {
+			b.WriteString(s[i : i+consumed])
+			i += consumed
+			continue
+		}
+		if _, valid := toolCallFromRaw(raw); !valid {
+			b.WriteString(s[i : i+consumed])
+			i += consumed
+			continue
+		}
+		i += consumed
+		if i < len(s) && (s[i] == '\n' || s[i] == ' ' || s[i] == '\t' || s[i] == '\r') {
+			// drop one separator so "prose\n{json}\n" does not leave a hole
+			if s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+				i += 2
+			} else {
+				i++
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func stripLeadingContentToolCalls(content string) (leftover string, stripped bool) {
 	s := strings.TrimSpace(content)
 	if s == "" {

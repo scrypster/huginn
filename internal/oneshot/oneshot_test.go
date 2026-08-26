@@ -520,3 +520,80 @@ func TestRun_DelegationToolsInSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestRun_DeniedTool_HidesLeftoverHarnessJSON(t *testing.T) {
+	issueJSON := `{"name":"gh_issue_create","arguments":{"title":"need help","body":"bash denied"}}`
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_bash_1",
+					Function: backend.ToolCallFunction{
+						Name:      "bash",
+						Arguments: map[string]any{"command": "ls ~"},
+					},
+				}},
+			},
+			{Content: "I can't run bash.\n" + issueJSON, DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "list my agents folder",
+		AgentName:       "Steve",
+		SkipPermissions: false,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) == 0 {
+		t.Fatal("expected the denied bash attempt to be recorded")
+	}
+	if !strings.Contains(res.ToolsCalled[0].Result, "permission denied") {
+		t.Errorf("toolsCalled[0].result = %q, want permission denied", res.ToolsCalled[0].Result)
+	}
+	if strings.Contains(res.AgentOutput, "gh_issue_create") || strings.Contains(res.AgentOutput, `"name"`) {
+		t.Errorf("oneshot agentOutput leaked harness JSON: %q", res.AgentOutput)
+	}
+	if visible := backend.VisibleAssistantContentAfterDeny(res.AgentOutput); strings.Contains(visible, "gh_issue_create") {
+		t.Errorf("VisibleAssistantContentAfterDeny leaked JSON: %q", visible)
+	}
+	if !strings.Contains(res.AgentOutput, "I can't run bash") {
+		t.Errorf("prose missing from agentOutput: %q", res.AgentOutput)
+	}
+}
+
+func TestRun_DeniedTool_PureIssueJSONHidden(t *testing.T) {
+	issueJSON := `{"name":"gh_issue_create","arguments":{"title":"need help"}}`
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID:       "call_bash_1",
+					Function: backend.ToolCallFunction{Name: "bash", Arguments: map[string]any{"command": "ls"}},
+				}},
+			},
+			{Content: issueJSON, DoneReason: "stop"},
+			{Content: "I'll skip creating an issue.", DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:    "list files",
+		AgentName: "Steve",
+		Backend:   b,
+		Registry:  steveRegistry(),
+		Tools:     bashToolReg(),
+		Models:    modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(res.AgentOutput, "gh_issue_create") {
+		t.Errorf("pure leftover JSON leaked into agentOutput: %q", res.AgentOutput)
+	}
+}

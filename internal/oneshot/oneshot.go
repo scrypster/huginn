@@ -203,7 +203,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 
-	result.AgentOutput = buf.String()
+	denied := false
+	for _, c := range pending {
+		if strings.Contains(strings.ToLower(c.Result), "permission denied") {
+			denied = true
+			break
+		}
+	}
+	if denied {
+		result.AgentOutput = backend.VisibleAssistantContentAfterDeny(buf.String())
+	} else {
+		result.AgentOutput = backend.VisibleAssistantContent(buf.String())
+	}
 	result.ToolsCalled = pending
 	if result.ToolsCalled == nil {
 		result.ToolsCalled = []ToolCall{}
