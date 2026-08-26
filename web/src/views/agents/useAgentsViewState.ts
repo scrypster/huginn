@@ -188,6 +188,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   const loadError = ref(false)
   const loadErrorMsg = ref('')
   const showDeleteConfirm = ref(false)
+  const showLocalAllowAllConfirm = ref(false)
   const wildcardStripped = ref(false)
   const availableModels = ref<OllamaModel[]>([])
   const modelsLoading = ref(false)
@@ -724,10 +725,21 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   function toggleLocalAllowAll() {
     if (isLocalAllowAll.value) {
       form.value.local_tools = []
-    } else {
-      form.value.local_tools = ['*']
+      showLocalAllowAllConfirm.value = false
+      markDirty()
+      return
     }
+    showLocalAllowAllConfirm.value = true
+  }
+
+  function confirmLocalAllowAll() {
+    form.value.local_tools = ['*']
+    showLocalAllowAllConfirm.value = false
     markDirty()
+  }
+
+  function cancelLocalAllowAll() {
+    showLocalAllowAllConfirm.value = false
   }
 
   const showLocalAccessModal = ref(false)
@@ -936,6 +948,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     form.value = JSON.parse(original.value)
     dirty.value = false
     wildcardStripped.value = false
+    showLocalAllowAllConfirm.value = false
   }
 
   function confirmDelete() { showDeleteConfirm.value = true }
@@ -971,6 +984,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
 
   watch(agentName, (name) => {
     showDeleteConfirm.value = false
+    showLocalAllowAllConfirm.value = false
     if (name && name !== 'new') {
       loadAgent(name)
       startVaultHealthPolling()
@@ -1046,6 +1060,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     loadError,
     loadErrorMsg,
     showDeleteConfirm,
+    showLocalAllowAllConfirm,
     wildcardStripped,
     availableModels,
     modelsLoading,
@@ -1122,6 +1137,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     addAllSkills,
     clearAllSkills,
     toggleLocalAllowAll,
+    confirmLocalAllowAll,
+    cancelLocalAllowAll,
     openLocalAccessModal,
     saveLocalAccessModal,
     localModalGrant,

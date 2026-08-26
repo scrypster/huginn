@@ -130,6 +130,49 @@ describe('useAgentsViewState', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/agents/Alpha')
   })
 
+  it('toggleLocalAllowAll enable without confirm does not write wildcard', () => {
+    const { state } = mountHarness()
+    state.form.value.local_tools = []
+    state.dirty.value = false
+
+    state.toggleLocalAllowAll()
+
+    expect(state.form.value.local_tools).toEqual([])
+    expect(state.form.value.local_tools).not.toEqual(['*'])
+    expect(state.showLocalAllowAllConfirm.value).toBe(true)
+    expect(state.dirty.value).toBe(false)
+  })
+
+  it('confirmLocalAllowAll writes wildcard and marks dirty; cancel does not write', () => {
+    const { state } = mountHarness()
+    state.form.value.local_tools = ['read_file']
+    state.dirty.value = false
+
+    state.toggleLocalAllowAll()
+    state.cancelLocalAllowAll()
+    expect(state.form.value.local_tools).toEqual(['read_file'])
+    expect(state.showLocalAllowAllConfirm.value).toBe(false)
+    expect(state.dirty.value).toBe(false)
+
+    state.toggleLocalAllowAll()
+    state.confirmLocalAllowAll()
+    expect(state.form.value.local_tools).toEqual(['*'])
+    expect(state.showLocalAllowAllConfirm.value).toBe(false)
+    expect(state.dirty.value).toBe(true)
+  })
+
+  it('toggleLocalAllowAll disable path immediately clears local tools', () => {
+    const { state } = mountHarness()
+    state.form.value.local_tools = ['*']
+    state.dirty.value = false
+
+    state.toggleLocalAllowAll()
+
+    expect(state.form.value.local_tools).toEqual([])
+    expect(state.showLocalAllowAllConfirm.value).toBe(false)
+    expect(state.dirty.value).toBe(true)
+  })
+
   it('toggleConnectionsAllowAll toggles explicit assignable connections', async () => {
     mockConnectionsList.mockResolvedValueOnce([
       { id: 'conn-1', provider: 'github', account_label: 'GitHub' },

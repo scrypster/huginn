@@ -63,6 +63,13 @@
             <button @click="showDeleteConfirm = false" class="px-3 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">Cancel</button>
           </div>
         </div>
+        <div v-if="showLocalAllowAllConfirm" data-testid="local-access-allow-all-confirm" class="px-4 pt-3">
+          <div class="flex items-center gap-3 px-4 py-3 rounded-xl border border-huginn-red/40 bg-huginn-red/8">
+            <p class="text-xs text-huginn-red flex-1">Enable <strong>all local tools</strong> (God Mode), including shell?</p>
+            <button data-testid="local-access-allow-all-confirm-btn" @click="confirmLocalAllowAll" class="px-3 py-1.5 text-xs font-medium text-huginn-red border border-huginn-red/40 rounded-lg hover:bg-huginn-red/15 transition-all">Confirm</button>
+            <button data-testid="local-access-allow-all-cancel-btn" @click="cancelLocalAllowAll" class="px-3 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">Cancel</button>
+          </div>
+        </div>
         <div v-if="saveMsg" class="px-4 pt-3">
           <div class="px-4 py-2.5 rounded-xl border text-xs"
             :class="saveError ? 'border-huginn-red/40 text-huginn-red bg-huginn-red/8' : 'border-huginn-green/40 text-huginn-green bg-huginn-green/8'">
@@ -1336,6 +1343,7 @@ const {
   loadError,
   loadErrorMsg,
   showDeleteConfirm,
+  showLocalAllowAllConfirm,
   wildcardStripped,
   availableModels,
   showModelPicker,
@@ -1384,6 +1392,8 @@ const {
   isLocalAllowAll,
   localAccessSummary,
   toggleLocalAllowAll,
+  confirmLocalAllowAll,
+  cancelLocalAllowAll,
   showLocalAccessModal,
   LOCAL_TOOL_CATALOG,
   SHELL_TOOLS,

@@ -15,6 +15,7 @@ All notable changes to Huginn are documented here.
 - Settings → Stats no longer reports 0 messages / 0 tokens when transcripts exist: `Append` persists `message_count` / `last_message_id` / `updated_at` with the message, existing sessions are backfilled from `messages`, token usage is stamped on the assistant row and written to `cost_history` when known, and Last LLM Call shows "—" instead of a fake 0
 - `/chat/:name` for an agent name (e.g. `/#/chat/Steve`) now redirects to that agent's DM space instead of treating the name as a new empty session
 - Composer `@` mention picker now dismisses on Escape via TipTap suggestion `onExit`, instead of only hiding the popup
+- Local Access “Allow all” now asks for confirmation before enabling God Mode (`local_tools: ["*"]`, including shell)
 
 ## [0.4.0] - 2026-06-10
 

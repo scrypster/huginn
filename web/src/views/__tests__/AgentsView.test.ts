@@ -152,4 +152,46 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/agents/Alpha')
   })
+
+  it('local access Allow all warning click must confirm first', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/agents/')) {
+        return {
+          name: 'Alpha',
+          model: 'gpt-4',
+          system_prompt: '',
+          toolbelt: [],
+          skills: [],
+          local_tools: [],
+        }
+      }
+      return {}
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const allowAll = wrapper.find('[data-testid="local-access-allow-all-btn"]')
+    expect(allowAll.exists()).toBe(true)
+    expect(allowAll.text()).toBe('Allow all')
+
+    await allowAll.trigger('click')
+    await flushPromises()
+
+    const confirmBanner = wrapper.find('[data-testid="local-access-allow-all-confirm"]')
+    expect(confirmBanner.exists()).toBe(true)
+    expect(confirmBanner.text()).toMatch(/God Mode/i)
+    expect(confirmBanner.text()).toMatch(/shell/i)
+    expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('Allow all')
+
+    await wrapper.find('[data-testid="local-access-allow-all-confirm-btn"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="local-access-allow-all-confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('✓ Allow all')
+  })
 })
