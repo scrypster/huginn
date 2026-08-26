@@ -21,6 +21,7 @@ import {
   useSpaceTimeline,
   clearSpaceTimeline,
   getSessionSpaceId,
+  listCachedSpaceMessages,
 } from '../useSpaceTimeline'
 
 // ── Mock WS factory ───────────────────────────────────────────────────
@@ -686,5 +687,28 @@ describe('getSessionSpaceId', () => {
 
     expect(getSessionSpaceId(SESSION_ID)).toBe(SPACE_ID)
     expect(getSessionSpaceId(SESSION_B)).toBe(SPACE_B)
+  })
+})
+
+describe('listCachedSpaceMessages', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+    clearSpaceTimeline(SPACE_B)
+  })
+
+  it('returns only spaces that have cached messages', () => {
+    useSpaceTimeline(SPACE_ID).getState().messages.push({
+      id: 'm1', session_id: SESSION_ID, seq: 1, ts: '', role: 'user', content: 'hi', agent: '',
+    })
+    useSpaceTimeline(SPACE_B).getState()
+
+    const listed = listCachedSpaceMessages()
+    expect(listed).toHaveLength(1)
+    expect(listed[0].spaceId).toBe(SPACE_ID)
+    expect(listed[0].messages).toHaveLength(1)
   })
 })

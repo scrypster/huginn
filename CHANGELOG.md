@@ -4,6 +4,9 @@ All notable changes to Huginn are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Cmd+K global search now finds channel/DM (space) messages and opens `/#/space/:id` instead of leftover `/#/chat/:sessionId` chrome
+
 ## [0.4.0] - 2026-06-10
 
 ### Added
