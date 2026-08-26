@@ -317,6 +317,7 @@ func main() {
 			if orchErr != nil {
 				fatalf("headless: orchestrator init: %v", orchErr)
 			}
+			hlOrch.SetAgentBackendOverride(claudeCodeUnavailable("headless mode"))
 			hcfg.AgentRun = func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
 				var buf strings.Builder
 				var toolsCalled []string
@@ -362,6 +363,7 @@ func main() {
 		if err != nil {
 			fatalf("failed to create orchestrator: %v", err)
 		}
+		printOrch.SetAgentBackendOverride(claudeCodeUnavailable("--print"))
 		err = printOrch.Chat(context.Background(), *printFlag, func(token string) {
 			fmt.Print(token)
 		}, nil)
@@ -386,6 +388,14 @@ func main() {
 		if !ok {
 			fmt.Fprintf(os.Stderr, "unknown agent %q; available: %s\n",
 				*agentFlag, strings.Join(agentReg.Names(), ", "))
+			os.Exit(1)
+		}
+		// This path builds an ExternalBackend directly and never looks at
+		// ag.Provider, so a claude-code agent here would silently be answered
+		// by whatever endpoint is configured — wearing that agent's name and
+		// with none of its session, tools or approval gate. Say so instead.
+		if _, _, claudeErr := claudeCodeUnavailable("`huginn --agent`")(ag); claudeErr != nil {
+			fmt.Fprintln(os.Stderr, claudeErr)
 			os.Exit(1)
 		}
 		if *modelFlag != "" {
@@ -631,6 +641,9 @@ func main() {
 	orch.SetGitRoot(detection.Root)
 	orch.SetAgentRegistry(agentReg)
 	orch.SetHuginnHome(huginnHome)
+	// The TUI has no HTTP server, so a claude-code agent's approval hook has
+	// nowhere to ask. Refuse by name rather than by "unknown provider".
+	orch.SetAgentBackendOverride(claudeCodeUnavailable("the interactive TUI"))
 	if memStore != nil {
 		orch.SetMemoryStore(memStore)
 	}
@@ -2899,10 +2912,27 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		})
 	}
 	// claudeCodeResolver is the ONE place that decides whether an agent is
-	// backed by Claude Code. Both the orchestrator's primary chat path and
-	// the completion notifier's follow-up call go through it; two copies of
-	// this decision would drift, and the two paths would disagree about
-	// which process is driving the agent's session.
+	// backed by Claude Code — two copies of this decision would drift, and the
+	// paths would then disagree about which process is driving the session.
+	//
+	// EVERY server-side resolution path routes through this single closure.
+	// Enumerated rather than asserted, because an earlier version of this
+	// comment claimed "the ONE place" while two paths bypassed it entirely and
+	// failed with `unknown provider "claude-code"`:
+	//
+	//  1. the orchestrator's primary chat path — orch.SetAgentBackendOverride
+	//     below (internal/agent/config.go backendFor);
+	//  2. the completion notifier's follow-up call — CompletionNotifier.BackendFor;
+	//  3. delegated sub-threads (@Codey, delegate_to_agent) —
+	//     tm.SetAgentBackendResolver, which had to be ADDED because
+	//     ThreadManager.SetBackendResolver takes a (provider, endpoint, apiKey,
+	//     model) four-tuple that structurally cannot express a session binding.
+	//
+	// Not routed, and deliberately so: the TUI, --print and headless
+	// orchestrators. They run WITHOUT a Huginn server, so there is no
+	// /api/v1/claude/approve for the PreToolUse hook to ask. Those three
+	// install claudeCodeUnavailable instead, which names the limitation rather
+	// than failing with an opaque "unknown provider".
 	//
 	// Declining (false) means "not a Claude Code agent" and leaves the
 	// caller to resolve it exactly as before.
@@ -3441,6 +3471,14 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			return serveCache.For(provider, endpoint, apiKey, model)
 		})
 
+		// ...and the agent-aware resolver AHEAD of it, so a claude-code agent
+		// reached by @-mention or delegate_to_agent resolves to its session
+		// instead of dying with `unknown provider "claude-code"`. The
+		// four-tuple above cannot express a session binding, which is exactly
+		// why this second hook exists. It only ever CLAIMS claude-code agents;
+		// every other agent falls through to the resolver above, unchanged.
+		tm.SetAgentBackendResolver(claudeCodeResolver)
+
 		// Wire the unified tool registry into the thread manager so sub-agent
 		// threads can resolve and execute their local_tools. This replaces the
 		// old subToolReg block (now removed) which was wired but never read.
@@ -3812,6 +3850,29 @@ func gatedToolsFor(ag *agentslib.Agent) []string {
 		return append([]string(nil), ag.ClaudeGatedTools...)
 	}
 	return append([]string(nil), claudecode.DefaultGatedTools...)
+}
+
+// claudeCodeUnavailable is the resolver installed on every orchestrator that
+// runs WITHOUT a Huginn server: the TUI, `--print`, and headless mode.
+//
+// A claude-code agent's tool calls are gated by a PreToolUse hook that POSTs to
+// /api/v1/claude/approve. No server means no endpoint, so every gated tool
+// would be refused with "Huginn unreachable" — and if the hook could not be
+// executed at all, Claude Code's contract (any exit code other than 0 and 2 is
+// a NON-blocking error) would let those tools run entirely ungated. Neither is
+// acceptable for an unattended agent, so this claims the agent and refuses.
+//
+// It CLAIMS rather than declines on purpose. Declining would fall through to
+// backend.newFromResolvedConfig's default arm and produce
+// `backend: unknown provider "claude-code"`, which tells the user nothing about
+// what is actually wrong or what to do about it.
+func claudeCodeUnavailable(mode string) func(*agentslib.Agent) (backend.Backend, bool, error) {
+	return func(ag *agentslib.Agent) (backend.Backend, bool, error) {
+		if ag == nil || ag.Provider != "claude-code" {
+			return nil, false, nil
+		}
+		return nil, true, fmt.Errorf("agent %q uses provider \"claude-code\", which is only supported in server mode: its tool calls are approved over the Huginn server's loopback endpoint, and %s runs without one. Start `huginn serve` and use the web UI to chat with this agent", ag.Name, mode)
+	}
 }
 
 // claudeApproveEndpointFor renders the approval URL for a server bound at addr

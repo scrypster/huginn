@@ -336,3 +336,40 @@ func TestClaudeHookCommandCarriesTheBoundEndpoint(t *testing.T) {
 		t.Errorf("round-trip endpoint = %q, want %q", got, ep)
 	}
 }
+
+// TestClaudeCodeUnavailableNamesTheLimitation is the other half of Finding 5.
+// The TUI, --print, headless and `huginn --agent` paths run with no Huginn
+// server, so a claude-code agent's PreToolUse hook has no
+// /api/v1/claude/approve to ask. Before this, those paths either failed with an
+// opaque `backend: unknown provider "claude-code"` or (on the --agent path)
+// silently answered from an unrelated endpoint while wearing the agent's name.
+func TestClaudeCodeUnavailableNamesTheLimitation(t *testing.T) {
+	resolve := claudeCodeUnavailable("the interactive TUI")
+
+	b, claimed, err := resolve(&agentslib.Agent{Name: "Codey", Provider: "claude-code"})
+	if !claimed {
+		t.Fatal("declined a claude-code agent; it would fall through to `unknown provider \"claude-code\"`")
+	}
+	if err == nil {
+		t.Fatal("claimed the agent and returned no error — the caller would use a nil backend")
+	}
+	if b != nil {
+		t.Error("returned a backend for an agent that cannot run here")
+	}
+	for _, want := range []string{"Codey", "claude-code", "server mode", "the interactive TUI", "huginn serve"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q; an opaque message is what this replaces", err.Error(), want)
+		}
+	}
+
+	// Every other agent must be untouched: declining is a byte-for-byte no-op.
+	for _, ag := range []*agentslib.Agent{
+		nil,
+		{Name: "Tom", Provider: "anthropic"},
+		{Name: "Local", Provider: ""},
+	} {
+		if _, claimed, err := resolve(ag); claimed || err != nil {
+			t.Errorf("resolver claimed a non-claude-code agent %v (err=%v)", ag, err)
+		}
+	}
+}

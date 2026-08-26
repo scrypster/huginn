@@ -150,6 +150,7 @@ func (tm *ThreadManager) SpawnThread(
 		helpResolver := tm.helpResolver
 		completionNotifier := tm.completionNotifier
 		resolveBackend := tm.backendFor
+		resolveAgentBackend := tm.agentBackendFor
 		preparer := tm.runtimePreparer
 		tm.mu.RUnlock()
 
@@ -180,8 +181,38 @@ func (tm *ThreadManager) SpawnThread(
 		// Agents that specify a provider (e.g. "anthropic") need the resolver
 		// to get the right backend; without this Sam would talk to Ollama.
 		agentBackend := b
-		if resolveBackend != nil && reg != nil {
-			if ag, found := reg.ByName(agentID); found && ag.Provider != "" {
+		var ag *agents.Agent
+		if reg != nil {
+			if found, ok := reg.ByName(agentID); ok {
+				ag = found
+			}
+		}
+		// The agent-aware resolver goes FIRST. Its whole reason to exist is
+		// agents whose backend is bound to per-agent state the four-tuple
+		// below cannot carry — a Claude Code session id, for instance — which
+		// otherwise fell through to newFromResolvedConfig's default arm and
+		// failed with `unknown provider "claude-code"` on every @-mention.
+		claimed := false
+		if resolveAgentBackend != nil && ag != nil {
+			resolved, wasClaimed, err := resolveAgentBackend(ag)
+			switch {
+			case err != nil:
+				// Claimed but unusable. Do NOT fall through to the generic
+				// resolver: that would answer as some other provider entirely
+				// and look like a working reply. Fail the thread loudly.
+				claimed = true
+				agentBackend = failedBackend{err: err}
+				logger.Error("SpawnThread: agent backend resolver refused the agent",
+					"thread_id", threadID, "agent", agentID, "err", err)
+			case wasClaimed:
+				claimed = true
+				agentBackend = resolved
+				logger.Info("SpawnThread: resolved agent backend via the agent-aware resolver",
+					"thread_id", threadID, "agent", agentID, "provider", ag.Provider)
+			}
+		}
+		if !claimed && resolveBackend != nil && reg != nil {
+			if ag != nil && ag.Provider != "" {
 				if resolved, err := resolveBackend(ag.Provider, ag.Endpoint, ag.APIKey, ag.GetModelID()); err == nil {
 					agentBackend = resolved
 					logger.Info("SpawnThread: resolved agent-specific backend",
@@ -194,7 +225,7 @@ func (tm *ThreadManager) SpawnThread(
 				logger.Info("SpawnThread: using default backend (no provider set)",
 					"thread_id", threadID, "agent", agentID)
 			}
-		} else {
+		} else if !claimed {
 			logger.Info("SpawnThread: no resolveBackend or reg, using default backend",
 				"thread_id", threadID, "agent", agentID)
 		}
@@ -1004,3 +1035,17 @@ func delegatedToolRisk(toolName string) (provider, action string, highRisk bool)
 	}
 	return provider, action, true
 }
+
+// failedBackend carries a resolution error into the thread's normal error
+// path. A resolver that CLAIMS an agent and then fails has said "this agent is
+// mine and it cannot run"; substituting the generic fallback there would let a
+// completely different provider answer in that agent's name, which reads as a
+// working reply. Surfacing the reason instead is loud and diagnosable.
+type failedBackend struct{ err error }
+
+func (f failedBackend) ChatCompletion(context.Context, backend.ChatRequest) (*backend.ChatResponse, error) {
+	return nil, f.err
+}
+func (f failedBackend) Health(context.Context) error   { return f.err }
+func (f failedBackend) Shutdown(context.Context) error { return nil }
+func (f failedBackend) ContextWindow() int             { return 0 }

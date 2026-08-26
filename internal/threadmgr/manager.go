@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/session"
 )
@@ -108,6 +109,20 @@ type ThreadManager struct {
 	// (e.g. Anthropic vs Ollama). When nil, the raw backend passed to
 	// SpawnThread is used for all agents. Set via SetBackendResolver.
 	backendFor func(provider, endpoint, apiKey, model string) (backend.Backend, error)
+
+	// agentBackendFor, if set, gets FIRST REFUSAL on every delegated thread's
+	// backend, ahead of backendFor. It exists because backendFor's four-tuple
+	// (provider, endpoint, apiKey, model) structurally cannot express a
+	// backend bound to per-agent state — a Claude Code session id and working
+	// directory, for instance — so such an agent resolved through it fell into
+	// the "unknown provider" arm and @-mentioning it simply failed.
+	//
+	// Same shape as Orchestrator.SetAgentBackendOverride on purpose: one
+	// resolver can be installed on both, which is the only way the two paths
+	// stay in agreement about which process is driving an agent's session.
+	// Returns (backend, true, nil) to claim, (nil, false, nil) to decline, or
+	// an error to fail the thread outright. Set via SetAgentBackendResolver.
+	agentBackendFor func(*agents.Agent) (backend.Backend, bool, error)
 
 	// toolRegistry, if set, provides agent-specific tool schemas and dispatch.
 	// Sub-agent threads use this to build per-agent toolbelts filtered by the
@@ -306,6 +321,18 @@ func (tm *ThreadManager) SetBackendResolver(fn func(provider, endpoint, apiKey, 
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.backendFor = fn
+}
+
+// SetAgentBackendResolver installs a resolver that gets first refusal on every
+// delegated thread's backend, before SetBackendResolver's four-tuple lookup.
+// See the agentBackendFor field for why both exist.
+//
+// Nil (the default) is a complete no-op: resolution behaves exactly as it did
+// before this hook existed.
+func (tm *ThreadManager) SetAgentBackendResolver(fn func(*agents.Agent) (backend.Backend, bool, error)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.agentBackendFor = fn
 }
 
 // OnStatusChange registers a callback invoked whenever a thread transitions to a
