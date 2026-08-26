@@ -2,11 +2,13 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
 )
@@ -25,33 +27,66 @@ func agentBackendCfg(t *testing.T) AgentBackendConfig {
 	}
 }
 
-// writeFakeCLI writes a stand-in `claude` that records the exact argv it was
-// handed — one argument per line, so values containing spaces or quotes stay
-// intact — and then emits the given stream-json lines. It returns the binary
-// path and the argv file path.
-func writeFakeCLI(t *testing.T, streamLines []string) (binary, argvFile string) {
+// fakeCLI describes a stand-in `claude` binary.
+type fakeCLI struct {
+	stream []string // stream-json lines to print on stdout
+	stderr string   // text to print on stderr
+	exit   int      // exit status
+	// hang replaces the whole run with `exec sleep <hang>`, after argv is
+	// recorded. exec, not a plain sleep, so the sleeping process IS the one
+	// exec.CommandContext will signal on cancel.
+	hang string
+}
+
+// writeFakeCLI writes a stand-in `claude` that records the exact argv of every
+// invocation — one argument per line, preceded by a marker, so repeated turns
+// stay distinguishable and values containing spaces or quotes stay intact.
+func writeFakeCLI(t *testing.T, f fakeCLI) (binary, argvFile string) {
 	t.Helper()
 	dir := t.TempDir()
 	binary = filepath.Join(dir, "fake-claude.sh")
 	argvFile = filepath.Join(dir, "argv.txt")
 
-	script := fmt.Sprintf(
-		"#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >> %q; done\ncat <<'HUGINN_EOF'\n%s\nHUGINN_EOF\nexit 0\n",
-		argvFile, strings.Join(streamLines, "\n"),
-	)
-	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+	var sb strings.Builder
+	sb.WriteString("#!/bin/sh\n")
+	fmt.Fprintf(&sb, "printf '%%s\\n' '--RUN--' >> %q\n", argvFile)
+	fmt.Fprintf(&sb, "for a in \"$@\"; do printf '%%s\\n' \"$a\" >> %q; done\n", argvFile)
+	if f.hang != "" {
+		fmt.Fprintf(&sb, "exec sleep %s\n", f.hang)
+	}
+	if f.stderr != "" {
+		fmt.Fprintf(&sb, "printf '%%s\\n' %q >&2\n", f.stderr)
+	}
+	if len(f.stream) > 0 {
+		fmt.Fprintf(&sb, "cat <<'HUGINN_EOF'\n%s\nHUGINN_EOF\n", strings.Join(f.stream, "\n"))
+	}
+	fmt.Fprintf(&sb, "exit %d\n", f.exit)
+
+	if err := os.WriteFile(binary, []byte(sb.String()), 0o755); err != nil {
 		t.Fatalf("write fake cli: %v", err)
 	}
 	return binary, argvFile
 }
 
-func readArgvFile(t *testing.T, path string) []string {
+// readArgvRuns returns the argv of each invocation, in order.
+func readArgvRuns(t *testing.T, path string) [][]string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read argv file: %v", err)
 	}
-	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	var runs [][]string
+	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		if line == "--RUN--" {
+			runs = append(runs, nil)
+			continue
+		}
+		if len(runs) == 0 {
+			t.Fatalf("argv line before any run marker: %q", line)
+		}
+		runs[len(runs)-1] = append(runs[len(runs)-1], line)
+	}
+	return runs
 }
 
 func TestAgentBackendSendsOnlyTheNewestMessage(t *testing.T) {
@@ -98,28 +133,119 @@ func TestAgentBackendNeverReturnsDispatchableToolCalls(t *testing.T) {
 	}
 }
 
-func TestAgentBackendUsesResumeAfterFirstTurn(t *testing.T) {
+// This is the proof for the FirstTurn fix: ONE backend, TWO turns. Backends are
+// cached per agent, so a config flag that nothing ever flips would leave every
+// turn after the first re-creating a session that already exists.
+func TestAgentBackendSwitchesToResumeOnItsSecondTurn(t *testing.T) {
 	cfg := agentBackendCfg(t)
+	bin, argvFile := writeFakeCLI(t, fakeCLI{stream: execToolStream})
+	cfg.Binary = bin
 	cfg.FirstTurn = true
-	first := NewAgentBackend(cfg)
-	if _, err := first.ChatCompletion(context.Background(), backend.ChatRequest{
-		Messages: []backend.Message{{Role: "user", Content: "hi"}},
-	}); err != nil {
-		t.Fatalf("first turn: %v", err)
-	}
-	if j := strings.Join(first.lastArgs(), " "); !strings.Contains(j, "--session-id") || strings.Contains(j, "--resume") {
-		t.Errorf("first turn must use --session-id, not --resume: %v", first.lastArgs())
+
+	b := NewAgentBackend(cfg)
+	for _, msg := range []string{"turn one", "turn two"} {
+		if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+			Messages: []backend.Message{{Role: "user", Content: msg}},
+		}); err != nil {
+			t.Fatalf("turn %q: %v", msg, err)
+		}
 	}
 
+	runs := readArgvRuns(t, argvFile)
+	if len(runs) != 2 {
+		t.Fatalf("the CLI ran %d times, want 2: %v", len(runs), runs)
+	}
+	one, two := strings.Join(runs[0], " "), strings.Join(runs[1], " ")
+	if !strings.Contains(one, "--session-id "+cfg.SessionID) || strings.Contains(one, "--resume") {
+		t.Errorf("turn 1 must create the session with --session-id: %v", runs[0])
+	}
+	if !strings.Contains(two, "--resume "+cfg.SessionID) {
+		t.Errorf("turn 2 must resume the session, not re-create it: %v", runs[1])
+	}
+	if strings.Contains(two, "--session-id") {
+		t.Errorf("turn 2 still passed --session-id for a session that already exists: %v", runs[1])
+	}
+}
+
+// A backend told the session already exists must resume from its very first turn.
+func TestAgentBackendResumesImmediatelyWhenSessionAlreadyExists(t *testing.T) {
+	cfg := agentBackendCfg(t)
 	cfg.FirstTurn = false
-	later := NewAgentBackend(cfg)
-	if _, err := later.ChatCompletion(context.Background(), backend.ChatRequest{
+	b := NewAgentBackend(cfg)
+	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
 		Messages: []backend.Message{{Role: "user", Content: "hi again"}},
 	}); err != nil {
-		t.Fatalf("later turn: %v", err)
+		t.Fatalf("ChatCompletion: %v", err)
 	}
-	if j := strings.Join(later.lastArgs(), " "); !strings.Contains(j, "--resume") {
-		t.Errorf("later turns must use --resume: %v", later.lastArgs())
+	if j := strings.Join(b.lastArgs(), " "); !strings.Contains(j, "--resume") {
+		t.Errorf("want --resume: %v", b.lastArgs())
+	}
+}
+
+// If turn 1 never got far enough to create the session, turn 2 must still try
+// to create it — flipping to --resume there wedges the agent the other way.
+func TestAgentBackendKeepsCreatingWhenTheSessionWasNeverCreated(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, argvFile := writeFakeCLI(t, fakeCLI{stderr: "boom: could not start", exit: 1})
+	cfg.Binary = bin
+	cfg.FirstTurn = true
+
+	b := NewAgentBackend(cfg)
+	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "one"}},
+	}); err == nil {
+		t.Fatal("want an error from the failing first turn")
+	}
+	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "two"}},
+	}); err == nil {
+		t.Fatal("want an error from the failing second turn")
+	}
+
+	runs := readArgvRuns(t, argvFile)
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	for i, r := range runs {
+		if strings.Contains(strings.Join(r, " "), "--resume") {
+			t.Errorf("turn %d resumed a session the CLI never reported creating: %v", i+1, r)
+		}
+	}
+}
+
+// ...but a run that DID report a session id created it, even though it then
+// failed. The next turn must resume rather than collide with it.
+func TestAgentBackendResumesAfterAFailedTurnThatCreatedTheSession(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, argvFile := writeFakeCLI(t, fakeCLI{
+		stream: []string{`{"type":"system","subtype":"init","session_id":"11111111-2222-3333-4444-555555555555"}`},
+		stderr: "died mid-turn",
+		exit:   1,
+	})
+	cfg.Binary = bin
+	cfg.FirstTurn = true
+
+	b := NewAgentBackend(cfg)
+	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "one"}},
+	}); err == nil {
+		t.Fatal("want an error from the failing turn")
+	}
+	if _, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "two"}},
+	}); err == nil {
+		t.Fatal("want an error from the second turn too")
+	}
+
+	runs := readArgvRuns(t, argvFile)
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	if strings.Contains(strings.Join(runs[1], " "), "--session-id") {
+		t.Errorf("turn 2 tried to re-create a session the CLI had already reported: %v", runs[1])
+	}
+	if !strings.Contains(strings.Join(runs[1], " "), "--resume") {
+		t.Errorf("turn 2 should resume: %v", runs[1])
 	}
 }
 
@@ -148,18 +274,41 @@ func TestAgentBackendEmptyMessagesIsAnError(t *testing.T) {
 	}
 }
 
+// A blank newest turn must fail loudly rather than quietly re-sending an older
+// prompt the user has already had answered.
+func TestAgentBackendBlankNewestMessageDoesNotReplayAnOlderOne(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, argvFile := writeFakeCLI(t, fakeCLI{stream: execToolStream})
+	cfg.Binary = bin
+
+	b := NewAgentBackend(cfg)
+	_, err := b.ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{
+			{Role: "user", Content: "an older question"},
+			{Role: "assistant", Content: "an older answer"},
+			{Role: "user", Content: "   "},
+		},
+	})
+	if err == nil {
+		t.Fatal("want an error for a blank newest user message")
+	}
+	if _, statErr := os.Stat(argvFile); statErr == nil {
+		t.Errorf("the CLI was invoked anyway, with: %v", readArgvRuns(t, argvFile))
+	}
+}
+
 // The stream the richer fake emits: a text block, a tool_use, its tool_result
 // on the following user line, and a success result.
 var execToolStream = []string{
-	`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Editing."}]}}`,
-	`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"/tmp/a.txt","content":"hi"}}]}}`,
+	`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Editing."}],"usage":{"input_tokens":1200,"output_tokens":30}}}`,
+	`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"/tmp/a.txt","content":"hi"}}],"usage":{"input_tokens":1500,"output_tokens":12}}}`,
 	`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"File written."}]}}`,
-	`{"type":"result","subtype":"success","result":"Wrote the file.","total_cost_usd":0.01,"duration_ms":10,"num_turns":2,"session_id":"S"}`,
+	`{"type":"result","subtype":"success","result":"Wrote the file.","total_cost_usd":0.01,"duration_ms":10,"num_turns":2,"session_id":"11111111-2222-3333-4444-555555555555"}`,
 }
 
 func TestAgentBackendExecutedToolsCarryNameArgumentsAndResult(t *testing.T) {
 	cfg := agentBackendCfg(t)
-	bin, _ := writeFakeCLI(t, execToolStream)
+	bin, _ := writeFakeCLI(t, fakeCLI{stream: execToolStream})
 	cfg.Binary = bin
 
 	b := NewAgentBackend(cfg)
@@ -193,9 +342,79 @@ func TestAgentBackendExecutedToolsCarryNameArgumentsAndResult(t *testing.T) {
 	}
 }
 
+// Token usage must reach the loop, which sums it into LoopResult.
+func TestAgentBackendReportsTokenUsage(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{stream: execToolStream})
+	cfg.Binary = bin
+
+	resp, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	// Input is the last reported context size, not a sum: each assistant
+	// message restates the whole prompt.
+	if resp.PromptTokens != 1500 {
+		t.Errorf("PromptTokens = %d, want 1500 (last reported, not 2700)", resp.PromptTokens)
+	}
+	if resp.CompletionTokens != 42 {
+		t.Errorf("CompletionTokens = %d, want 42 (30+12, summed)", resp.CompletionTokens)
+	}
+}
+
+func TestAgentBackendCorrelatesToolResultsSafely(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{stream: []string{
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"","name":"Bash","input":{"command":"ls"}}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_dup","name":"Read","input":{"file_path":"/a"}}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_dup","name":"Read","input":{"file_path":"/b"}}]}}`,
+		// An id nobody declared, an empty id, and a duplicate id.
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_nobody","content":"orphan"}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":"anonymous"}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_dup","content":"the one result"}]}}`,
+		`{"type":"result","subtype":"success","result":"ok","session_id":"S"}`,
+	}})
+	cfg.Binary = bin
+
+	resp, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if len(resp.ExecutedTools) != 3 {
+		t.Fatalf("ExecutedTools = %d, want 3 (every tool that ran is reported): %+v", len(resp.ExecutedTools), resp.ExecutedTools)
+	}
+	// The empty-id call must NOT have absorbed the empty-id tool_result.
+	if got := resp.ExecutedTools[0]; got.Result != "" {
+		t.Errorf("empty-id call picked up %q; an empty tool_use_id correlates to nothing", got.Result)
+	}
+	// A duplicate id fills exactly one call, not both.
+	filled := 0
+	for _, et := range resp.ExecutedTools[1:] {
+		if et.Result != "" {
+			filled++
+			if et.Result != "the one result" {
+				t.Errorf("Result = %q, want %q", et.Result, "the one result")
+			}
+		}
+	}
+	if filled != 1 {
+		t.Errorf("a duplicate tool_use_id filled %d calls, want exactly 1: %+v", filled, resp.ExecutedTools)
+	}
+	// The orphan result must not have been attached to anything.
+	for _, et := range resp.ExecutedTools {
+		if et.Result == "orphan" {
+			t.Errorf("an unmatched tool_result was attached to %q", et.Call.Function.Name)
+		}
+	}
+}
+
 func TestAgentBackendActuallyPassesRecordedArgsToTheProcess(t *testing.T) {
 	cfg := agentBackendCfg(t)
-	bin, argvFile := writeFakeCLI(t, execToolStream)
+	bin, argvFile := writeFakeCLI(t, fakeCLI{stream: execToolStream})
 	cfg.Binary = bin
 	cfg.FirstTurn = true
 
@@ -206,7 +425,11 @@ func TestAgentBackendActuallyPassesRecordedArgsToTheProcess(t *testing.T) {
 		t.Fatalf("ChatCompletion: %v", err)
 	}
 
-	real := readArgvFile(t, argvFile)
+	runs := readArgvRuns(t, argvFile)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	real := runs[0]
 	recorded := b.lastArgs()
 	if strings.Join(real, "\x00") != strings.Join(recorded, "\x00") {
 		t.Fatalf("argv the process received != lastArgs()\n got: %q\nwant: %q", real, recorded)
@@ -236,9 +459,46 @@ func TestAgentBackendActuallyPassesRecordedArgsToTheProcess(t *testing.T) {
 	}
 }
 
-func TestAgentBackendStreamsTextTokens(t *testing.T) {
+// Production sets BOTH callbacks. The relay builds its live token messages from
+// OnToken and ignores StreamText in its OnEvent handler, so an else-if here
+// means the user sees nothing stream.
+func TestAgentBackendCallsBothCallbacksWhenBothAreSet(t *testing.T) {
 	cfg := agentBackendCfg(t)
-	bin, _ := writeFakeCLI(t, execToolStream)
+	bin, _ := writeFakeCLI(t, fakeCLI{stream: execToolStream})
+	cfg.Binary = bin
+
+	var tokens []string
+	var eventText []string
+	var toolEvents []string
+	if _, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+		OnEvent: func(e backend.StreamEvent) {
+			switch e.Type {
+			case backend.StreamText:
+				eventText = append(eventText, e.Content)
+			case backend.StreamToolCall:
+				name, _ := e.Payload["tool"].(string)
+				toolEvents = append(toolEvents, name)
+			}
+		},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if strings.Join(tokens, "") != "Editing." {
+		t.Errorf("OnToken got %q, want the assistant text — OnEvent being set must not suppress it", tokens)
+	}
+	if strings.Join(eventText, "") != "Editing." {
+		t.Errorf("OnEvent StreamText got %q, want the assistant text", eventText)
+	}
+	if len(toolEvents) != 1 || toolEvents[0] != "Write" {
+		t.Errorf("tool_call events = %v, want [Write]", toolEvents)
+	}
+}
+
+func TestAgentBackendStreamsTextTokensWithOnlyOnToken(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{stream: execToolStream})
 	cfg.Binary = bin
 
 	var tokens []string
@@ -255,9 +515,9 @@ func TestAgentBackendStreamsTextTokens(t *testing.T) {
 
 func TestAgentBackendSurfacesCLIErrors(t *testing.T) {
 	cfg := agentBackendCfg(t)
-	bin, _ := writeFakeCLI(t, []string{
+	bin, _ := writeFakeCLI(t, fakeCLI{stream: []string{
 		`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"S"}`,
-	})
+	}})
 	cfg.Binary = bin
 
 	resp, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
@@ -271,29 +531,160 @@ func TestAgentBackendSurfacesCLIErrors(t *testing.T) {
 	}
 }
 
-func TestDefaultGatedToolsGateEveryMutatingTool(t *testing.T) {
-	has := func(name string) bool {
-		for _, g := range DefaultGatedTools {
-			if g == name {
-				return true
-			}
-		}
-		return false
+// A non-zero exit with the cause on stderr is the failure mode a misconfigured
+// session actually produces. Throwing stderr away leaves a bare "exit status 1".
+func TestAgentBackendNonZeroExitIncludesStderr(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{
+		stderr: "Error: session ID already in use",
+		exit:   1,
+	})
+	cfg.Binary = bin
+
+	_, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+	})
+	if err == nil {
+		t.Fatal("want an error for a non-zero exit")
 	}
-	// An unconfigured agent runs unattended: everything that can mutate state
-	// or reach the network must require approval.
-	for _, want := range []string{"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "Task"} {
-		if !has(want) {
-			t.Errorf("DefaultGatedTools missing %q: %v", want, DefaultGatedTools)
+	if !strings.Contains(err.Error(), "session ID already in use") {
+		t.Errorf("error = %v, want it to carry the CLI's stderr", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("error = %v, want it to keep the exit status too", err)
+	}
+}
+
+func TestAgentBackendStderrTailIsBounded(t *testing.T) {
+	tb := &tailBuffer{max: 32}
+	for i := 0; i < 100; i++ {
+		if _, err := tb.Write([]byte("0123456789")); err != nil {
+			t.Fatalf("write: %v", err)
 		}
 	}
-	// Huginn's own tool names must never leak into Claude Code's namespace.
-	for _, never := range []string{"bash", "write_file", "read_file", "web_search"} {
-		if has(never) {
-			t.Errorf("DefaultGatedTools contains Huginn tool name %q; Claude Code's namespace is Bash/Write/Read/WebFetch: %v", never, DefaultGatedTools)
-		}
+	if len(tb.buf) > 32 {
+		t.Errorf("retained %d bytes, want at most 32", len(tb.buf))
 	}
+	if !strings.Contains(tb.String(), "truncated") {
+		t.Errorf("String() = %q, want it to flag truncation", tb.String())
+	}
+	if !strings.HasSuffix(tb.String(), "0123456789") {
+		t.Errorf("String() = %q, want the TAIL of the stream (where the error is)", tb.String())
+	}
+}
+
+func TestAgentBackendCancellationIsReportedAsCancelled(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{hang: "30"})
+	cfg.Binary = bin
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := NewAgentBackend(cfg).ChatCompletion(ctx, backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+	})
+	if err == nil {
+		t.Fatal("want an error when the turn is cancelled mid-flight")
+	}
+	// The relay distinguishes user cancels from failures with errors.Is; a bare
+	// "signal: killed" never matches and gets persisted as a failed session.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to wrap context.Canceled", err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Errorf("cancellation took %s — the turn did not abort promptly", d)
+	}
+}
+
+func TestAgentBackendTurnTimeoutIsBoundedAndDistinguishable(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{hang: "30"})
+	cfg.Binary = bin
+	cfg.TimeoutSecs = 1
+
+	start := time.Now()
+	_, err := NewAgentBackend(cfg).ChatCompletion(context.Background(), backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "go"}},
+	})
+	if err == nil {
+		t.Fatal("want an error when the turn exceeds TimeoutSecs")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want it to wrap context.DeadlineExceeded, distinct from a user cancel", err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Errorf("timeout took %s — the deadline did not bound the turn", d)
+	}
+}
+
+// A queued caller must be able to abandon the wait; a sync.Mutex would pin it
+// behind an unrelated turn on this shared, cached backend.
+func TestAgentBackendQueuedCallerCanBeCancelled(t *testing.T) {
+	cfg := agentBackendCfg(t)
+	bin, _ := writeFakeCLI(t, fakeCLI{hang: "30"})
+	cfg.Binary = bin
+
+	b := NewAgentBackend(cfg)
+	hogCtx, stopHog := context.WithCancel(context.Background())
+	defer stopHog()
+	running := make(chan struct{})
+	go func() {
+		close(running)
+		_, _ = b.ChatCompletion(hogCtx, backend.ChatRequest{
+			Messages: []backend.Message{{Role: "user", Content: "long"}},
+		})
+	}()
+	<-running
+	time.Sleep(150 * time.Millisecond) // let the hog take the slot
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := b.ChatCompletion(ctx, backend.ChatRequest{
+		Messages: []backend.Message{{Role: "user", Content: "queued"}},
+	})
+	if err == nil {
+		t.Fatal("want an error for the queued caller")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want the queued caller's own deadline to release it", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("queued caller waited %s — its context could not reach the lock", d)
+	}
+}
+
+// Property, not a copy of the literal slice: with the default configuration, a
+// tool that can mutate state or reach the network actually gets a PreToolUse
+// hook. That is what "gated" means; the slice is only how it is spelled.
+func TestDefaultGatedToolsProduceAHookForEveryMutatingTool(t *testing.T) {
 	if len(DefaultGatedTools) == 0 {
 		t.Fatal("an empty gated list emits no hooks and gates nothing at all")
+	}
+	settings, err := BuildHookSettings(DefaultGatedTools, "huginn claude-approve")
+	if err != nil {
+		t.Fatalf("BuildHookSettings: %v", err)
+	}
+	if settings == "" {
+		t.Fatal("the default gated set produced no --settings payload, so nothing is gated")
+	}
+
+	mutating := []string{"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "Task"}
+	for _, tool := range mutating {
+		if !strings.Contains(settings, `"matcher":"`+tool+`"`) {
+			t.Errorf("%s can mutate state or reach the network but has no PreToolUse hook by default: %s", tool, settings)
+		}
+	}
+	// Huginn's own tool names must never leak into Claude Code's namespace: a
+	// matcher that names no real tool gates nothing while looking like it does.
+	for _, never := range []string{"bash", "write_file", "read_file", "web_search"} {
+		if strings.Contains(settings, `"matcher":"`+never+`"`) {
+			t.Errorf("gated set contains Huginn tool name %q; Claude Code's namespace is Bash/Write/Read/WebFetch: %v", never, DefaultGatedTools)
+		}
 	}
 }

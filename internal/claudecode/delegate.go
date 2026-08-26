@@ -45,6 +45,20 @@ type DelegateResult struct {
 	NumTurns   int
 	IsError    bool
 	ErrorText  string
+
+	// ReportedSessionID is the session id the CLI itself echoed back, on any
+	// line that carries one. It is the only trustworthy evidence that a
+	// session actually EXISTS on disk: Delegate assigns SessionID up front and
+	// never learns whether the CLI got far enough to create it. AgentBackend
+	// keys its --session-id/--resume decision off this.
+	ReportedSessionID string
+
+	// InputTokens/OutputTokens are accumulated from assistant-line usage.
+	// Output is summed across the run; input is the LAST reported value, since
+	// each assistant message restates the whole context rather than a delta —
+	// summing it would multiply-count the same prompt.
+	InputTokens  int
+	OutputTokens int
 }
 
 // StreamEvent is a live update emitted while the delegated run proceeds.
@@ -99,10 +113,20 @@ func BuildArgs(cfg DelegateConfig, req DelegateRequest, sessionID string) []stri
 	if turns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(turns))
 	}
+	// ASSUMPTION (not verified against the real CLI): --allowedTools accepts
+	// its tools as separate space-separated argv elements. The comma-separated
+	// single-argument form is the other candidate. This predates the agent
+	// backend and has never been exercised in production, so if pre-authorised
+	// tools appear to be ignored, check this form FIRST.
 	if len(req.AllowedTools) > 0 {
 		args = append(args, "--allowedTools")
 		args = append(args, req.AllowedTools...)
 	}
+	// ASSUMPTION (not verified against the real CLI): the three flags below
+	// take a single following argument, and --settings accepts inline JSON as
+	// well as a file path. Unlike --max-turns above, none of these has been
+	// empirically confirmed — do not upgrade this marker to VERIFIED without
+	// actually running the CLI.
 	if req.AppendSystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
 	}
@@ -191,15 +215,20 @@ func Delegate(
 // result, total_cost_usd, duration_ms, num_turns, subtype ("success"),
 // session_id, type ("result"). Field names here match that output.
 type streamLine struct {
-	Type     string  `json:"type"`
-	Subtype  string  `json:"subtype"`
-	Result   string  `json:"result"`
-	IsError  bool    `json:"is_error"`
-	Cost     float64 `json:"total_cost_usd"`
-	Duration int     `json:"duration_ms"`
-	NumTurns int     `json:"num_turns"`
-	Message  struct {
+	Type      string  `json:"type"`
+	Subtype   string  `json:"subtype"`
+	Result    string  `json:"result"`
+	IsError   bool    `json:"is_error"`
+	Cost      float64 `json:"total_cost_usd"`
+	Duration  int     `json:"duration_ms"`
+	NumTurns  int     `json:"num_turns"`
+	SessionID string  `json:"session_id"`
+	Message   struct {
 		Content contentBlocks `json:"content"`
+		Usage   struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	} `json:"message"`
 }
 
@@ -213,8 +242,17 @@ func applyStreamLine(raw []byte, res *DelegateResult, onEvent func(StreamEvent))
 	// Both are deliberately ignored here — the default switch arm drops any
 	// line type this bridge does not consume, so new line types in future CLI
 	// versions cannot break a delegation.
+	// Recorded regardless of line type: the CLI emits session_id on its
+	// `system`/init line too, which is the earliest proof the session exists.
+	if sl.SessionID != "" {
+		res.ReportedSessionID = sl.SessionID
+	}
 	switch sl.Type {
 	case "assistant":
+		if u := sl.Message.Usage; u.InputTokens > 0 {
+			res.InputTokens = u.InputTokens
+		}
+		res.OutputTokens += sl.Message.Usage.OutputTokens
 		if onEvent == nil {
 			return
 		}
