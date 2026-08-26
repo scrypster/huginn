@@ -30,6 +30,7 @@ All notable changes to Huginn are documented here.
 - Cmd+K global search now finds channel/DM (space) messages and opens `/#/space/:id` instead of leftover `/#/chat/:sessionId` chrome
 - Persist inbound user messages at accept so mid-turn harness announcements no longer appear before the prompt after reload
 - Mid-text `@Name` of someone not in the space no longer addresses them or extra-spawns a thread; leftover is dropped with the same "not in this channel" hint as a leading leftover. Spaces with a roster only address or extra-spawn roster names
+- Switching DMs no longer paints a quiet room as busy: the responding banner, preparing-context line, and update-active-work strip stay on the space that owns the in-flight run
 
 ## [0.4.0] - 2026-06-10
 

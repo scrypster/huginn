@@ -1944,6 +1944,83 @@ const updateRoute = ref<UpdateRoute>('all_active')
 const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
+
+// Per-space run chrome. ChatView is reused across /space/:id, so a single
+// streaming / currentRunId / queuedRunIds / prestreamThinking would paint
+// Steve's quiet DM as busy while Tess is the one running, and queue Steve's
+// next send against Tess's turn.
+type OwnerRunState = {
+  streaming: boolean
+  prestreamThinking: boolean
+  currentRunId: string
+  queuedRunIds: string[]
+}
+const runByOwner = ref<Record<string, OwnerRunState>>({})
+
+function snapshotOwnerRun(): OwnerRunState {
+  return {
+    streaming: streaming.value,
+    prestreamThinking: prestreamThinking.value,
+    currentRunId: currentRunId.value,
+    queuedRunIds: [...queuedRunIds.value],
+  }
+}
+
+function persistOwnerRun(key: string) {
+  if (!key) return
+  runByOwner.value = { ...runByOwner.value, [key]: snapshotOwnerRun() }
+}
+
+function applyOwnerRun(state: OwnerRunState) {
+  streaming.value = state.streaming
+  prestreamThinking.value = state.prestreamThinking
+  currentRunId.value = state.currentRunId
+  queuedRunIds.value = [...state.queuedRunIds]
+  if (state.streaming) {
+    startStreamingWatchdog()
+    startElapsedTimer()
+  } else {
+    clearStreamingWatchdog()
+    stopElapsedTimer()
+  }
+}
+
+function restoreOwnerRun(key: string) {
+  if (!key) return
+  const saved = runByOwner.value[key]
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] })
+}
+
+function finishStoredOwnerRun(key: string) {
+  const saved = runByOwner.value[key]
+  if (!saved) return
+  if (saved.queuedRunIds.length > 0) {
+    const next = saved.queuedRunIds[0]!
+    const rest = saved.queuedRunIds.slice(1)
+    runByOwner.value = {
+      ...runByOwner.value,
+      [key]: { streaming: true, prestreamThinking: true, currentRunId: next, queuedRunIds: rest },
+    }
+    return
+  }
+  runByOwner.value = {
+    ...runByOwner.value,
+    [key]: { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] },
+  }
+}
+
+function finishBackgroundOwnerRun(runId: string): boolean {
+  const key = Object.entries(runByOwner.value).find(([, s]) => s.currentRunId === runId)?.[0]
+  if (!key) return false
+  finishStoredOwnerRun(key)
+  return true
+}
+
+watch(() => props.spaceId, (newId, oldId) => {
+  if (oldId && oldId !== newId) persistOwnerRun(oldId)
+  if (newId) restoreOwnerRun(newId)
+})
+
 const activeDelegateAgents = computed(() => {
   const out = new Set<string>()
   for (const t of sessionThreads.value) {
@@ -2273,6 +2350,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     // Ignore stale done events from previous chat runs (e.g. buffered in the WS connection).
     // run_id was introduced alongside this guard; old messages without run_id are also ignored.
     if (!msg.run_id || msg.run_id !== currentRunId.value) {
+      if (msg.run_id && finishBackgroundOwnerRun(msg.run_id)) return
       console.debug('[done] ignoring stale done, run_id=', msg.run_id, 'expected=', currentRunId.value)
       return
     }
@@ -2313,6 +2391,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       }
     }
     promoteNextQueuedRun()
+    if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
     fetchStatus()
     // Browser notification — only fires when tab is hidden (checked inside notify())
@@ -2335,7 +2414,10 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
-    if (msg.run_id && msg.run_id !== currentRunId.value) return
+    if (msg.run_id && msg.run_id !== currentRunId.value) {
+      if (finishBackgroundOwnerRun(msg.run_id)) return
+      return
+    }
     clearStreamingWatchdog()
     stopElapsedTimer()
     streaming.value = false
@@ -2346,6 +2428,7 @@ registerWS(ws, 'error', (msg: WSMessage) => {
       if (streamMsg?.streaming) { streamMsg.content += `\n\nerror: ${msg.content}`; streamMsg.streaming = false }
     }
     promoteNextQueuedRun()
+    if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
   })
 
@@ -2832,6 +2915,9 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   if (oldSessionId && oldSessionId !== newSessionId) {
     clearSessionPreviews(oldSessionId)
   }
+  // Leaving session mode (e.g. /chat/:id → /space/:id) must not wipe
+  // space-keyed run chrome that restoreOwnerRun just applied.
+  if (!newSessionId) return
   resetStreaming()
   prestreamThinking.value = false
   queuedRunIds.value = []
