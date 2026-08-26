@@ -65,4 +65,14 @@ test.describe('Composer @ picker roster', () => {
     await expect(page.getByTestId('unknown-mention-hint')).toContainText('not in this channel')
     await walkthroughShot(page, 'leftover_non_member_mention_hint.png')
   })
+
+  test('mid-text leftover @Name of a non-member shows the same hint', async ({ page }) => {
+    await openSpace(page, 'dm-alice')
+    const editor = page.locator('.editor-content .ProseMirror')
+    await editor.click()
+    await page.keyboard.type('please ask @GitAgent about hostname')
+    await page.locator('button[title="Send (⏎)"]').click()
+    await expect(page.getByTestId('unknown-mention-hint')).toContainText('not in this channel')
+    await walkthroughShot(page, 'mid_text_leftover_non_member_mention_hint.png')
+  })
 })

@@ -306,6 +306,23 @@ describe('ChatEditor', () => {
     expect(wrapper.emitted('send')).toBeFalsy()
   })
 
+  it('drops mid-text @Name of a non-member, warns, and sends the rest', async () => {
+    mockEditorInstance.isEmpty = false
+    mockEditorState.isEmpty = false
+    mockEditorState.markdown = 'please ask @Steve about hostname'
+
+    const wrapper = mount(ChatEditor, {
+      props: { memberNames: ['Tess'] },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+
+    expect(wrapper.emitted('unknown-mention')).toEqual([['Steve']])
+    expect(wrapper.find('[data-testid="unknown-mention-hint"]').text()).toContain('not in this channel')
+    expect(wrapper.emitted('send')).toEqual([['please ask about hostname']])
+  })
+
   it('keeps a member leading mention on send', async () => {
     mockEditorInstance.isEmpty = false
     mockEditorState.isEmpty = false

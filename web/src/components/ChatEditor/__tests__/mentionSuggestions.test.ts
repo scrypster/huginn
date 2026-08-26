@@ -115,6 +115,24 @@ describe('dropUnknownLeadMention', () => {
     expect(result.content.trim()).toBe('')
     expect(result.dropped).toBe('Tess')
   })
+
+  it('drops mid-text @Name of a non-member and keeps the rest', () => {
+    const result = dropUnknownLeadMention('please ask @Steve about hostname', ['Tess'])
+    expect(result.content).toBe('please ask about hostname')
+    expect(result.dropped).toBe('Steve')
+  })
+
+  it('keeps a mid-text member mention', () => {
+    const result = dropUnknownLeadMention('please ask @Steve about hostname', ['Tess', 'Steve'])
+    expect(result.content).toBe('please ask @Steve about hostname')
+    expect(result.dropped).toBeUndefined()
+  })
+
+  it('drops a mid-text non-member while keeping a member mention', () => {
+    const result = dropUnknownLeadMention('@Steve please ask @Tess about hostname', ['Steve'])
+    expect(result.content).toBe('@Steve please ask about hostname')
+    expect(result.dropped).toBe('Tess')
+  })
 })
 
 describe('extractLeadMention', () => {
