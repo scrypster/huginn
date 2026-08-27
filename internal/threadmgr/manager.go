@@ -21,9 +21,44 @@ type SpaceMembershipChecker interface {
 	SpaceMembers(spaceID string) ([]string, error)
 }
 
+// DeskFloorChecker optionally widens desk-DM A2A to the desk floor.
+// SQLiteSpaceStore implements this. Stubs that omit it keep SpaceMembers-only.
+type DeskFloorChecker interface {
+	DeskPeerNames() ([]string, error)
+	SpaceIsDeskDM(spaceID string) (bool, error)
+}
+
+// CompanyGate looks up a space's company and whether an agent is seated there.
+// Empty company ID means desk-level: callers keep today's space-roster check.
+// SQLiteSpaceStore implements this.
+type CompanyGate interface {
+	SpaceCompanyID(spaceID string) (string, error)
+	AgentInCompany(agent, companyID string) (bool, error)
+}
+
 // ErrAgentNotSpaceMember is returned by Create when a SpaceID is set and the
 // requested agent is not a member of that space.
 var ErrAgentNotSpaceMember = errors.New("agent is not a member of the space")
+
+// ErrAgentNotInCompany is returned by Create when the space belongs to a
+// company and the target agent is not seated in that company's roster.
+var ErrAgentNotInCompany = errors.New("agent is not seated in this company")
+
+// notInCompanyError is the human fail copy the lead agent (and bubble) see.
+// Hover/diagnose may still wrap this with DELEGATE_FAIL; speech must not.
+type notInCompanyError struct {
+	Agent string
+}
+
+func (e *notInCompanyError) Error() string {
+	name := strings.TrimSpace(e.Agent)
+	if name == "" {
+		name = "That agent"
+	}
+	return name + " isn't in this company."
+}
+
+func (e *notInCompanyError) Unwrap() error { return ErrAgentNotInCompany }
 
 // ErrCyclicDependency is returned by Create when the requested DependsOn IDs
 // would introduce a cycle in the thread dependency graph.
@@ -131,6 +166,10 @@ type ThreadManager struct {
 	// memberChecker, if set, validates that the AgentID in CreateParams is a
 	// member of the given SpaceID before creating the thread.
 	memberChecker SpaceMembershipChecker
+
+	// companyGate, if set, isolates A2A delegation to agents seated in the
+	// space's company. Empty company_id keeps the space-roster check.
+	companyGate CompanyGate
 
 	// auditMu guards auditLog.
 	auditMu sync.Mutex
@@ -298,6 +337,63 @@ func (tm *ThreadManager) SetMembershipChecker(c SpaceMembershipChecker) {
 	tm.memberChecker = c
 }
 
+// SetCompanyGate wires the CompanyGate used to isolate A2A delegation to
+// agents seated in the space's company. Pass nil to disable (desk-only).
+func (tm *ThreadManager) SetCompanyGate(g CompanyGate) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.companyGate = g
+}
+
+// widenDeskDMMembers unions DeskPeerNames onto SpaceMembers for a desk DM.
+// Channels and company-scoped spaces are unchanged. Missing DeskFloorChecker
+// keeps today's SpaceMembers-only deny.
+func widenDeskDMMembers(checker SpaceMembershipChecker, spaceID string, members []string) ([]string, error) {
+	floor, ok := checker.(DeskFloorChecker)
+	if !ok {
+		return members, nil
+	}
+	isDeskDM, err := floor.SpaceIsDeskDM(spaceID)
+	if err != nil {
+		return nil, err
+	}
+	if !isDeskDM {
+		return members, nil
+	}
+	peers, err := floor.DeskPeerNames()
+	if err != nil {
+		return nil, err
+	}
+	if len(peers) == 0 {
+		return members, nil
+	}
+	seen := make(map[string]struct{}, len(members)+len(peers))
+	out := make([]string, 0, len(members)+len(peers))
+	for _, m := range members {
+		key := strings.ToLower(strings.TrimSpace(m))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	for _, m := range peers {
+		key := strings.ToLower(strings.TrimSpace(m))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
 // SetBackendResolver wires a function that resolves the correct backend for
 // a given agent (provider, endpoint, apiKey, model). When set, delegated
 // threads use this to obtain an agent-specific backend (e.g. Anthropic for
@@ -400,16 +496,44 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 		}
 	}
 
-	// Space membership check: runs BEFORE acquiring the write lock to avoid
-	// blocking concurrent Create() calls during I/O against the space store.
+	// Space / company membership check: runs BEFORE acquiring the write lock
+	// to avoid blocking concurrent Create() calls during I/O.
 	if p.SpaceID != "" {
 		tm.mu.RLock()
 		checker := tm.memberChecker
+		gate := tm.companyGate
 		tm.mu.RUnlock()
-		if checker != nil {
+
+		// Company isolation is the stricter gate. When the space has a
+		// company_id, the target must be in CompanyRoster — space roster
+		// membership is not enough. Empty company_id is desk-level: keep
+		// today's not_in_roster / space-roster behavior.
+		companyScoped := false
+		if gate != nil {
+			companyID, err := gate.SpaceCompanyID(p.SpaceID)
+			if err != nil {
+				return nil, fmt.Errorf("threadmgr: space company lookup: %w", err)
+			}
+			if strings.TrimSpace(companyID) != "" {
+				companyScoped = true
+				in, err := gate.AgentInCompany(p.AgentID, companyID)
+				if err != nil {
+					return nil, fmt.Errorf("threadmgr: company roster: %w", err)
+				}
+				if !in {
+					return nil, &notInCompanyError{Agent: p.AgentID}
+				}
+			}
+		}
+
+		if !companyScoped && checker != nil {
 			members, err := checker.SpaceMembers(p.SpaceID)
 			if err != nil {
 				return nil, fmt.Errorf("threadmgr: space lookup: %w", err)
+			}
+			members, err = widenDeskDMMembers(checker, p.SpaceID, members)
+			if err != nil {
+				return nil, fmt.Errorf("threadmgr: desk floor: %w", err)
 			}
 			// nil members = space not found → deny-all (safe default).
 			allowed := make(map[string]struct{}, len(members))
@@ -951,7 +1075,7 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 		for _, t := range all {
 			switch t.Status {
 			case StatusDone, StatusCancelled, StatusError:
-				if t.CollectedAt.IsZero() {
+				if t.CollectedAt.IsZero() && !staleUncollected(t) {
 					// Uncollected terminal thread — include in results immediately
 					immediatelyCompleted = append(immediatelyCompleted, t)
 				}
@@ -1001,6 +1125,25 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 		case <-ticker.C:
 		}
 	}
+}
+
+
+// staleUncollectedWindow is how long a finished thread may still be
+// collected by a session-wide wait. After a bounce CollectedAt is empty,
+// so without this a hallway wait re-dumps hours of old Winston clocks.
+const staleUncollectedWindow = 10 * time.Minute
+
+func staleUncollected(t *Thread) bool {
+	if t == nil {
+		return true
+	}
+	if !t.CompletedAt.IsZero() {
+		return time.Since(t.CompletedAt) > staleUncollectedWindow
+	}
+	if !t.StartedAt.IsZero() {
+		return time.Since(t.StartedAt) > staleUncollectedWindow
+	}
+	return false
 }
 
 // markCollected stamps CollectedAt on the live thread records whose results

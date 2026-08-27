@@ -35,8 +35,8 @@ type WorkflowStep struct {
 	// Timeout is the maximum duration a single step execution may run (e.g. "30m", "2h").
 	// Empty string means no per-step limit; the workflow-level timeout still applies.
 	// Valid range: 1s–24h. Shorter value wins when both step and workflow timeouts are set.
-	Timeout     string            `yaml:"timeout,omitempty"      json:"timeout,omitempty"`
-	Notify      *StepNotifyConfig `yaml:"notify,omitempty"       json:"notify,omitempty"`
+	Timeout string            `yaml:"timeout,omitempty"      json:"timeout,omitempty"`
+	Notify  *StepNotifyConfig `yaml:"notify,omitempty"       json:"notify,omitempty"`
 	// ModelOverride (Phase 7) lets a single step run against a different
 	// model than the agent's default. Empty string means "use the agent's
 	// configured model". The runner forwards this to the backend via
@@ -268,13 +268,16 @@ type WorkflowNotificationConfig struct {
 
 // Workflow is the parsed, in-memory representation of a workflow config.
 type Workflow struct {
-	ID           string                     `yaml:"id"                     json:"id"`
-	Slug         string                     `yaml:"slug,omitempty"         json:"slug,omitempty"`
-	Name         string                     `yaml:"name"                   json:"name"`
-	Description  string                     `yaml:"description,omitempty"  json:"description,omitempty"`
-	Tags         []string                   `yaml:"tags,omitempty"         json:"tags,omitempty"`
-	Enabled      bool                       `yaml:"enabled"                json:"enabled"`
-	Schedule     string                     `yaml:"schedule"               json:"schedule"`
+	ID          string   `yaml:"id"                     json:"id"`
+	Slug        string   `yaml:"slug,omitempty"         json:"slug,omitempty"`
+	Name        string   `yaml:"name"                   json:"name"`
+	Description string   `yaml:"description,omitempty"  json:"description,omitempty"`
+	Tags        []string `yaml:"tags,omitempty"         json:"tags,omitempty"`
+	Enabled     bool     `yaml:"enabled"                json:"enabled"`
+	Schedule    string   `yaml:"schedule"               json:"schedule"`
+	// CompanyID scopes this workflow to a company roster. Empty means desk-level
+	// (any agent). A Lab workflow cannot wake a Huginn-only agent such as Reggie.
+	CompanyID    string                     `yaml:"company_id,omitempty"   json:"company_id,omitempty"`
 	Steps        []WorkflowStep             `yaml:"steps"                  json:"steps"`
 	Notification WorkflowNotificationConfig `yaml:"notification,omitempty" json:"notification,omitempty"`
 	// Phase 5: workflow chaining. When set, the scheduler will automatically
@@ -287,10 +290,10 @@ type Workflow struct {
 	// these as the implicit MaxRetries / RetryDelay for any step that does
 	// NOT set its own — so users can author "retry every step three times"
 	// once at the top of the YAML.
-	Retry *WorkflowRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
-	FilePath     string                     `yaml:"-"                      json:"file_path,omitempty"`
-	CreatedAt    time.Time                  `yaml:"created_at,omitempty"   json:"created_at,omitempty"`
-	UpdatedAt    time.Time                  `yaml:"updated_at,omitempty"   json:"updated_at,omitempty"`
+	Retry     *WorkflowRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+	FilePath  string               `yaml:"-"                      json:"file_path,omitempty"`
+	CreatedAt time.Time            `yaml:"created_at,omitempty"   json:"created_at,omitempty"`
+	UpdatedAt time.Time            `yaml:"updated_at,omitempty"   json:"updated_at,omitempty"`
 	// Version is an optimistic-locking counter. It is incremented by SaveWorkflow
 	// on every successful write. PUT /api/v1/workflows/{id} rejects requests whose
 	// submitted Version does not match the stored Version (HTTP 409 Conflict).

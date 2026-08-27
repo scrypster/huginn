@@ -709,3 +709,101 @@ func TestRun_DeniedTool_PureIssueJSONHidden(t *testing.T) {
 		t.Errorf("pure leftover JSON leaked into agentOutput: %q", res.AgentOutput)
 	}
 }
+
+func TestRun_EmptyBelt_SchemasExcludeGitHub(t *testing.T) {
+	b := &fakeBackend{responses: []*backend.ChatResponse{
+		{Content: "I don't have github.", DoneReason: "stop"},
+	}}
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Reggie", ModelID: "test-reggie"})
+	toolReg := DefaultToolRegistry(t.TempDir(), time.Second)
+	if _, ok := toolReg.Get("gh_issue_create"); !ok {
+		toolReg.Register(&stubTool{name: "gh_issue_create", output: "created"})
+		toolReg.TagTools([]string{"gh_issue_create"}, "github_cli")
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "Use the github tool to create an issue titled test.",
+		AgentName:       "Reggie",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        agentReg,
+		Tools:           toolReg,
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, sch := range b.lastTools() {
+		n := strings.ToLower(sch.Function.Name)
+		if n == "gh_issue_create" || strings.HasPrefix(n, "gh_") || n == "github" || strings.Contains(n, "github") {
+			t.Fatalf("empty belt sent github schema %q", sch.Function.Name)
+		}
+	}
+	for _, tc := range res.ToolsCalled {
+		n := strings.ToLower(tc.Name)
+		if n == "gh_issue_create" || strings.HasPrefix(n, "gh_") || n == "github" || strings.Contains(n, "github") {
+			t.Fatalf("empty belt executed github tool %q", tc.Name)
+		}
+	}
+}
+
+func TestRun_ToolsCalled_DoesNotApplyMissingToolSpeech(t *testing.T) {
+	b := &fakeBackend{responses: []*backend.ChatResponse{
+		{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID: "call_delegate_1",
+				Function: backend.ToolCallFunction{
+					Name:      "delegate_to_agent",
+					Arguments: map[string]any{"agent": "Steve", "task": "hostname"},
+				},
+			}},
+		},
+		{Content: "Steve said MJs-MacBook-Pro. 56.", DoneReason: "stop"},
+	}}
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Winston", ModelID: "test-winston"})
+	agentReg.Register(&agents.Agent{Name: "Steve", ModelID: "test-steve", LocalTools: []string{"bash"}})
+	res, err := Run(context.Background(), Config{
+		Prompt:          "Ask Steve to run hostname with bash and wait. Then what is 7 times 8.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        agentReg,
+		Tools:           tools.NewRegistry(),
+		Models:          modelconfig.DefaultModels(),
+		SessionStore:    session.NewStore(t.TempDir()),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AgentOutput == "I don't have bash." {
+		t.Fatalf("tools-called run was stomped to missing-tool speech: %q", res.AgentOutput)
+	}
+	if !strings.Contains(res.AgentOutput, "MJs-MacBook-Pro") && !strings.Contains(res.AgentOutput, "56") {
+		t.Fatalf("agentOutput = %q, want hostname or 56", res.AgentOutput)
+	}
+}
+
+
+func TestDelegateToAgent_NoSessionID_DoesNotStub(t *testing.T) {
+	reg := tools.NewRegistry()
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Winston", ModelID: "test-model"})
+	store := session.NewStore(t.TempDir())
+	attachDelegation(context.Background(), reg, agentReg, &fakeBackend{}, store, "")
+	tool, ok := reg.Get("delegate_to_agent")
+	if !ok {
+		t.Fatal("delegate_to_agent not registered")
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"agent": "Winston",
+		"task":  "what time is it",
+	})
+	if !result.IsError {
+		t.Fatal("empty session ID must not silently stub and spawn")
+	}
+	if !strings.Contains(result.Error, "no session ID in context") {
+		t.Fatalf("err = %q", result.Error)
+	}
+}

@@ -225,6 +225,21 @@ const TEMPLATE_PLACEHOLDER_RE = /^[A-Za-z][^:]*:\s*<[^>]+>\s*$/
 const SEPARATOR_LINE_RE = /^\s*---+\s*$/
 // Playbook introductions: "After ... response, use the following format:"
 const PLAYBOOK_INTRO_RE = /^\s*(?:after|once|when)\s+.*\b(?:response|result|reply)\b.*,\s*use\s+(?:the\s+)?(?:following\s+)?format\s*:\s*$/i
+// Whole-line helpdesk filler
+const FILLER_LINE_RE = /^(?:(?:how can I|is there anything|how else|not currently delegating|nothing is currently delegated)\b.*|(?:if you have any (?:other )?questions(?: or need further assistance)?,\s*)?feel free to ask)[?.!]?\s*$/i
+// Same-line helpdesk closer after a real answer. Covers "need further assistance".
+const HELPDESK_CLOSER_SENTENCE_RE = /^(?:how can i (?:assist|help)(?: you(?: further)?)?[?.!]*|is there anything(?: else)?(?: i can (?:help|assist)(?: you)?(?: with)?| you need(?: (?:help|assistance)(?: with)?)?)?[?.!]*|if you have any (?:other )?questions(?: or need further assistance)?,\s*feel free to ask[?.!]*|feel free to ask(?: if you have any (?:other )?questions(?: or need further assistance)?)?[?.!]*)$/i
+const WAIT_PLAYBOOK_NAME_RE = /(?:please\s+)?(?:use|call)\s+`?wait_for_threads/i
+const SESSION_HISTORY_LEAK_RE = /session history could not be loaded/i
+const SPAWNED_PLAYBOOK_SENTENCE_RE = /(?:has been spawned|was spawned|spawned immediately|delegate(?:d)? task\b.{0,80}\bspawned\b)/i
+const LEFTOVER_HELPDESK_SENTENCE_RE = /^(?:i apologize for any confusion|let'?s try a different approach|(?:and\s+)?i can try again|if you have access to the api key, please provide it(?:\s*,?\s*and i can try again)?|the system encountered an api key resolution issue|i apologize, but there was an error when attempting to\b.*|i'?ll have\s+[A-Za-z][\w.-]*\s+gather the required information)[?.!]*$/i
+const TASK_DELEGATED_SENTENCE_RE = /^task delegated to\s+[A-Za-z][\w.-]*[?.!]*$/i
+const TASK_DELEGATED_NAME_RE = /task delegated to\s+([A-Za-z][\w-]*)/i
+const HAVE_AGENT_NAME_RE = /i'?ll have\s+([A-Za-z][\w-]*)\b/i
+const MISSING_AGENT_HELPDESK_RE = /^(?:it seems that\s+)?["“”']?([A-Za-z][\w.-]*)["“”']?\s+isn'?t one of the available agents[?.!]*$/i
+const HONEST_MISSING_AGENT_RE = /^([A-Za-z][\w.-]*) isn't (?:in this company|available here|in [A-Za-z][\w.-]*)[?.!]*$/i
+const TEAMMATE_TIMES_RE = /\b\d+\s+times\s+\d+\b/i
+const TEAMMATE_HOST_VALUE_RE = /\bhostname\b.*['"][^'"]{3,}['"]|['"][^'"]{3,}['"].*\bhostname\b/i
 
 export interface ResidualSpeechOptions {
   /** Tools already ran this turn: also drop unfenced tool-call JSON (any name) and echoed result objects. */
@@ -270,8 +285,9 @@ export function stripResidualSpeech(content: string | undefined | null, opts: Re
 
 function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean): string {
   if (!s) return s
-  // Language-tagged fences (```json, ```go, etc.) are always kept unchanged.
+  // Language-tagged fences stay unless they are leftover harness playbooks.
   if (isFenced && fenceHasLanguageTag(s)) {
+    if (afterTools && isHarnessPlaybookFence(s)) return ''
     return s
   }
   if (afterTools) s = removeResidualJSONObjects(s)
@@ -283,7 +299,7 @@ function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean
     const trim = line.trim()
     if (trim === '' && hadText) { inGlueChain = true; continue }
     if (trim === '') { kept.push(line); continue }
-    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim) || WAIT_GLUE_LINE_RE.test(trim)) { inGlueChain = true; continue }
+    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim) || WAIT_GLUE_LINE_RE.test(trim) || FILLER_LINE_RE.test(trim) || LEFTOVER_HELPDESK_SENTENCE_RE.test(trim) || TASK_DELEGATED_SENTENCE_RE.test(trim)) { inGlueChain = true; continue }
     if (PLAYBOOK_FORMAT_RE.test(trim) || PLAYBOOK_INTRO_RE.test(trim) || TEMPLATE_PLACEHOLDER_RE.test(trim) || SEPARATOR_LINE_RE.test(trim)) { inGlueChain = true; continue }
     if (inGlueChain && GLUE_CONTINUATION_RE.test(trim)) continue
     if ((BRACKET_STAGE_DIRECTION_RE.test(trim) && afterTools)) { continue }
@@ -292,6 +308,10 @@ function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean
     if (afterTools) {
       line = line.replace(GLUED_STRING_RE, '$1')
       line = line.replace(GLUED_SEPARATOR_RE, '$1')
+      line = dropPlaybookInstructionSentences(line)
+      line = dropHelpdeskCloserSentences(line)
+      line = rewriteMissingAgentHelpdesk(line, s)
+      if (!line.trim()) continue
     }
     kept.push(line)
   }
@@ -306,7 +326,7 @@ function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean
  * Splits on sentence-final punctuation and removes duplicates. Also removes earlier lines
  * that are duplicates of the final content. Mirrors backend.deduplicateSentencesInLastLine.
  */
-function deduplicateSentencesInLastLine(kept: string[], original: string): string[] {
+function deduplicateSentencesInLastLine(kept: string[], _original: string): string[] {
   if (!kept.length) return kept
   let lastIdx = kept.length - 1
   while (lastIdx >= 0 && !kept[lastIdx]!.trim()) lastIdx--
@@ -409,6 +429,144 @@ function findEndOfSentence(s: string): number {
     }
   }
   return idx
+}
+
+
+function hasTeammateAnswer(sent: string): boolean {
+  if (sent.includes('PONG')) return true
+  if (TEAMMATE_TIMES_RE.test(sent)) return true
+  return TEAMMATE_HOST_VALUE_RE.test(sent)
+}
+
+function presentAgentFromSpeech(s: string): string {
+  const d = s.match(TASK_DELEGATED_NAME_RE)
+  const h = s.match(HAVE_AGENT_NAME_RE)
+  const name = d?.[1] || h?.[1] || ''
+  return name.replace(/[.,:;!?]+$/, '')
+}
+
+function teammateNotInCompanyLine(missing: string, present: string): string {
+  let company = 'this company'
+  if (missing.toLowerCase() === 'steve' && present.toLowerCase() === 'sam') company = 'Lab'
+  if (present && present.toLowerCase() !== missing.toLowerCase()) {
+    return `${missing} isn't in ${company}. ${present} is.`
+  }
+  if (missing.toLowerCase() === 'steve' && !present) return `${missing} isn't available here.`
+  return `${missing} isn't in ${company}.`
+}
+
+function rewriteMissingAgentHelpdesk(line: string, original: string): string {
+  const trim = line.trim()
+  if (!trim) return line
+  const present = presentAgentFromSpeech(original)
+  const sentences: string[] = []
+  let cur = ''
+  for (let i = 0; i < trim.length; i++) {
+    cur += trim[i]
+    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
+      const sent = cur.trim()
+      if (sent) sentences.push(sent)
+      cur = ''
+    }
+  }
+  if (cur.trim()) sentences.push(cur.trim())
+  const kept: string[] = []
+  let rewrote = false
+  let missing = ''
+  for (const sent of sentences) {
+    const helpdesk = sent.match(MISSING_AGENT_HELPDESK_RE)
+    if (helpdesk?.[1]) {
+      if (hasTeammateAnswer(sent)) { kept.push(sent); continue }
+      missing = helpdesk[1]
+      rewrote = true
+      continue
+    }
+    const honest = sent.match(HONEST_MISSING_AGENT_RE)
+    if (honest?.[1]) {
+      missing = honest[1]
+      kept.push(sent)
+      continue
+    }
+    kept.push(sent)
+  }
+  if (rewrote && missing) kept.unshift(teammateNotInCompanyLine(missing, present))
+  if (!kept.length) return ''
+  const indent = line.length - line.trimLeft().length
+  return line.slice(0, indent) + kept.join(' ')
+}
+
+function isPlaybookInstructionSentence(sent: string): boolean {
+  if (hasTeammateAnswer(sent)) return false
+  return WAIT_PLAYBOOK_NAME_RE.test(sent) ||
+    SESSION_HISTORY_LEAK_RE.test(sent) ||
+    SPAWNED_PLAYBOOK_SENTENCE_RE.test(sent) ||
+    TASK_DELEGATED_SENTENCE_RE.test(sent)
+}
+
+function dropPlaybookInstructionSentences(line: string): string {
+  const trim = line.trim()
+  if (!trim) return line
+  const sentences: string[] = []
+  let cur = ''
+  for (let i = 0; i < trim.length; i++) {
+    cur += trim[i]
+    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
+      const sent = cur.trim()
+      if (sent) sentences.push(sent)
+      cur = ''
+    }
+  }
+  if (cur.trim()) sentences.push(cur.trim())
+  const kept = sentences.filter(s => !isPlaybookInstructionSentence(s))
+  if (!kept.length) return ''
+  const indent = line.length - line.trimLeft().length
+  return line.slice(0, indent) + kept.join(' ')
+}
+
+function dropHelpdeskCloserSentences(line: string): string {
+  const trim = line.trim()
+  if (!trim) return line
+  const sentences: string[] = []
+  let cur = ''
+  for (let i = 0; i < trim.length; i++) {
+    cur += trim[i]
+    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
+      const sent = cur.trim()
+      if (sent) sentences.push(sent)
+      cur = ''
+    }
+  }
+  if (cur.trim()) sentences.push(cur.trim())
+  const kept = sentences.filter(s => hasTeammateAnswer(s) || !(HELPDESK_CLOSER_SENTENCE_RE.test(s) || LEFTOVER_HELPDESK_SENTENCE_RE.test(s)))
+  if (!kept.length) return ''
+  const indent = line.length - line.trimLeft().length
+  return line.slice(0, indent) + kept.join(' ')
+}
+
+const HARNESS_PLAYBOOK_TOOLS = new Set([
+  'recall_thread_result',
+  'wait_for_threads',
+  'delegate_to_agent',
+  'bash',
+  'shell',
+  'exec',
+  'list_team_status',
+])
+
+function isHarnessPlaybookFence(s: string): boolean {
+  let body = s
+  if (fenceHasLanguageTag(s)) {
+    const i = s.indexOf('\n')
+    if (i >= 0) body = s.slice(i + 1)
+  }
+  const raw = body.replace(/\/\/[^\n]*/g, '').trim()
+  try {
+    const obj = JSON.parse(raw) as { name?: string; function_name?: string }
+    const name = obj.name || obj.function_name || ''
+    return HARNESS_PLAYBOOK_TOOLS.has(name)
+  } catch {
+    return false
+  }
 }
 
 /** Check if fence content starts with a language tag. */

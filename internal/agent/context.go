@@ -394,6 +394,41 @@ func BuildDMCrossSpaceContextBlock(selfName string, channels []ChannelRoster) st
 	return sb.String()
 }
 
+// BuildDeskFloorContextBlock tells a desk-DM lead they can A2A any other
+// desk-floor agent. peers should include capability cards. Returns empty
+// when there is no one else on the floor (so a lone DM stays quiet).
+func BuildDeskFloorContextBlock(selfName string, peers []SpaceMember) string {
+	others := make([]SpaceMember, 0, len(peers))
+	for _, m := range peers {
+		if strings.TrimSpace(m.Name) == "" {
+			continue
+		}
+		if strings.EqualFold(m.Name, selfName) {
+			continue
+		}
+		others = append(others, m)
+	}
+	if len(others) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n[Desk Floor]\n")
+	sb.WriteString("This is a 1:1 desk DM with the human. The desk is a shared floor: you may talk to any other desk agent with delegate_to_agent or consult_agent, then wait_for_threads and relay their answer.\n")
+	sb.WriteString("Do not do their job yourself when they exist, and do not say they are not a member of this space.\n\n")
+	sb.WriteString("**Desk agents you can reach:**\n")
+	for _, m := range others {
+		if m.Description != "" {
+			sb.WriteString(m.Description)
+			if !strings.HasSuffix(m.Description, "\n") {
+				sb.WriteString("\n")
+			}
+		} else {
+			fmt.Fprintf(&sb, "- **%s**: desk agent\n", m.Name)
+		}
+	}
+	return sb.String()
+}
+
 // BuildWithSymbols adds symbol context (future: from symbol store).
 // For now delegates to Build, reserving the method name for the future
 // when the symbol extractor is wired into the context pipeline.

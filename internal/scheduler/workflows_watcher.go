@@ -22,11 +22,12 @@ type WatcherScheduler interface {
 	RemoveWorkflow(id string)
 }
 
-// WorkflowsWatcher polls a directory for changes to *.yaml workflow files and
-// syncs the scheduler's cron entries when files are added, modified, or deleted.
+// WorkflowsWatcher polls a directory for changes to *.yaml / *.yml / *.json
+// workflow files and syncs the scheduler's cron entries when files are added,
+// modified, or deleted.
 //
 // On each detected change it:
-//   - Loads all *.yaml files in the directory via LoadWorkflows.
+//   - Loads all workflow files in the directory via LoadWorkflows.
 //   - Calls RegisterWorkflow for every workflow (respects enabled:false).
 //   - Calls RemoveWorkflow for every previously-known workflow no longer on disk.
 //
@@ -140,7 +141,7 @@ func (w *WorkflowsWatcher) sync() {
 	}
 }
 
-// computeHash walks dir and hashes the name, size, and mtime of every *.yaml file.
+// computeHash walks dir and hashes the name, size, and mtime of every workflow file.
 // Must be called without w.mu held (it does not need the lock; it reads only the filesystem).
 func (w *WorkflowsWatcher) computeHash() uint64 {
 	h := fnv.New64a()
@@ -150,8 +151,7 @@ func (w *WorkflowsWatcher) computeHash() uint64 {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		ext := filepath.Ext(path)
-		if ext != ".yaml" && ext != ".yml" {
+		if !IsWorkflowFilename(d.Name()) {
 			return nil
 		}
 		info, err := d.Info()

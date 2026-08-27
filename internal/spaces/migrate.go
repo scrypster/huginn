@@ -15,6 +15,14 @@ func Migrations() []sqlitedb.Migration {
 		{Name: "spaces_v1_initial_schema", Up: migrateSpacesV1},
 		{Name: "spaces_v2_messages_container_ts_index", Up: migrateSpacesV2},
 		{Name: "spaces_v3_channel_name_unique_index", Up: migrateSpacesV3},
+		{Name: "spaces_v4_companies", Up: migrateSpacesV4},
+		{Name: "spaces_v5_message_parent_id", Up: migrateSpacesV5},
+		{Name: "spaces_v6_thread_reads", Up: migrateSpacesV6},
+		{Name: "spaces_v7_company_unique_and_casefold", Up: migrateSpacesV7},
+		{Name: "spaces_v8_channel_name_per_company", Up: migrateSpacesV8},
+		{Name: "spaces_v9_channel_name_active_only", Up: migrateSpacesV9},
+		{Name: "spaces_v10_company_lead", Up: migrateSpacesV10},
+		{Name: "spaces_v11_space_for_you", Up: migrateSpacesV11},
 	}
 }
 
@@ -122,7 +130,8 @@ func migrateSpacesV1(tx *sql.Tx) error {
 // migrateSpacesV2 adds the idx_messages_container_ts index which accelerates
 // cross-session space timeline queries (ListSpaceMessages). Combined with the
 // existing idx_sessions_space index, SQLite resolves:
-//   space_id → session IDs → messages ordered by ts DESC
+//
+//	space_id → session IDs → messages ordered by ts DESC
 //
 // The WHERE clause excludes non-session and reply messages so the index is
 // small and covers the exact query pattern used in ListSpaceMessages.
@@ -149,6 +158,100 @@ func migrateSpacesV3(tx *sql.Tx) error {
 	return err
 }
 
+// migrateSpacesV4 creates the companies isolation tables and attaches
+// company_id on spaces. Desk-level spaces keep a NULL/empty company_id.
+// Empty company.vault is allowed (no silent vault substitution).
+func migrateSpacesV4(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS companies (
+			id         TEXT NOT NULL PRIMARY KEY,
+			name       TEXT NOT NULL,
+			vault      TEXT NOT NULL DEFAULT '',
+			icon       TEXT NOT NULL DEFAULT '',
+			color      TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS company_members (
+			company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+			agent_name TEXT NOT NULL,
+			PRIMARY KEY (company_id, agent_name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_company_members_agent ON company_members(agent_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return err
+		}
+	}
+	// Existing databases already have spaces; tolerate duplicate-column on
+	// a retry or a fresh schema that already included company_id.
+	if _, err := tx.Exec(`ALTER TABLE spaces ADD COLUMN company_id TEXT REFERENCES companies(id) ON DELETE SET NULL`); err != nil {
+		if !isColumnExistsError(err) {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_spaces_company ON spaces(company_id)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateSpacesV5 adds parent_id on messages for Slack-style space reply
+// threads. Empty parent_id means the message is a channel/DM root.
+// Distinct from parent_message_id (work-inspector / threadmgr).
+func migrateSpacesV5(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE messages ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !isColumnExistsError(err) {
+			return err
+		}
+	}
+	_, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_messages_space_parent
+		    ON messages(parent_id, ts ASC)
+		    WHERE parent_id != ''
+	`)
+	return err
+}
+
+// migrateSpacesV6 persists last-seen Slack-style thread replies per viewer.
+// Only participants (human posted root or a reply) get a row; spectators stay silent.
+func migrateSpacesV6(tx *sql.Tx) error {
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS space_thread_reads (
+			space_id     TEXT NOT NULL,
+			parent_id    TEXT NOT NULL,
+			viewer       TEXT NOT NULL DEFAULT 'local',
+			last_read_ts TEXT NOT NULL,
+			PRIMARY KEY (space_id, parent_id, viewer)
+		)
+	`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_space_thread_reads_parent
+		    ON space_thread_reads(space_id, parent_id)
+	`)
+	return err
+}
+
+// migrateSpacesV7 locks company names case-insensitively (concurrent
+// same-name create → unique) and seats case-fold (Winston/winston one row).
+func migrateSpacesV7(tx *sql.Tx) error {
+	if _, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_name_unique
+		ON companies(LOWER(name))
+	`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_company_members_lower
+		ON company_members(company_id, LOWER(agent_name))
+	`)
+	return err
+}
+
 func isColumnExistsError(err error) bool {
 	if err == nil {
 		return false
@@ -156,4 +259,84 @@ func isColumnExistsError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "duplicate column") ||
 		strings.Contains(msg, "already exists")
+}
+
+// migrateSpacesV8 scopes channel-name uniqueness per company (and desk).
+// Two companies may both have "#eng". Desk names stay unique among desk.
+func migrateSpacesV8(tx *sql.Tx) error {
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_spaces_channel_name_unique`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_channel_name_desk
+		ON spaces(LOWER(name))
+		WHERE kind = 'channel' AND COALESCE(company_id, '') = ''
+	`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_channel_name_company
+		ON spaces(company_id, LOWER(name))
+		WHERE kind = 'channel' AND COALESCE(company_id, '') != ''
+	`)
+	return err
+}
+
+// migrateSpacesV9 limits channel-name uniqueness to active rows. Archived
+// leftovers must not block company delete (ON DELETE SET NULL would otherwise
+// collide two archived "#eng" channels on the desk unique index).
+func migrateSpacesV9(tx *sql.Tx) error {
+	for _, name := range []string{
+		"idx_spaces_channel_name_desk",
+		"idx_spaces_channel_name_company",
+	} {
+		if _, err := tx.Exec(`DROP INDEX IF EXISTS ` + name); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_channel_name_desk
+		ON spaces(LOWER(name))
+		WHERE kind = 'channel' AND archived_at IS NULL AND COALESCE(company_id, '') = ''
+	`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_channel_name_company
+		ON spaces(company_id, LOWER(name))
+		WHERE kind = 'channel' AND archived_at IS NULL AND COALESCE(company_id, '') != ''
+	`)
+	return err
+}
+
+// migrateSpacesV10 adds optional company.lead (the company CoS). Empty means
+// DefaultCompanyLead (Winston if seated, else first seated member).
+func migrateSpacesV10(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE companies ADD COLUMN lead TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !isColumnExistsError(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateSpacesV11 persists follow/@me (space_reply_mention) per viewer so
+// the spaces list can return for_you on the wire. Spectator unseen stays a
+// count on the space/thread; this table is the rail badge only.
+func migrateSpacesV11(tx *sql.Tx) error {
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS space_for_you (
+			space_id TEXT NOT NULL,
+			viewer   TEXT NOT NULL DEFAULT 'local',
+			set_at   TEXT NOT NULL,
+			PRIMARY KEY (space_id, viewer)
+		)
+	`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_space_for_you_space
+		    ON space_for_you(space_id)
+	`)
+	return err
 }

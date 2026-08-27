@@ -48,7 +48,7 @@
     </Transition>
 
     <!-- ── Column 1: Icon strip (48px) ─────────────────────────────── -->
-    <nav class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
+    <nav data-testid="icon-rail" class="w-12 flex-shrink-0 flex flex-col items-center py-3 gap-1 border-r border-huginn-border" style="background:#090e14">
 
       <!-- Logo mark -->
       <div class="w-8 h-8 rounded-xl flex items-center justify-center mb-3 select-none"
@@ -56,16 +56,25 @@
         <span class="text-huginn-blue font-bold text-sm leading-none">H</span>
       </div>
 
-      <!-- Nav icons -->
+      <!-- Nav icons, Slack-class groups: chat / admin / logs -->
+      <template v-for="(group, gi) in navGroups" :key="group.id">
+        <div
+          v-if="gi > 0"
+          :data-testid="`rail-section-${group.id}`"
+          class="w-5 h-px my-1.5 bg-huginn-border"
+          role="separator"
+        />
       <button
-        v-for="item in navItems"
+        v-for="item in group.items"
         :key="item.section"
+        :data-testid="`rail-${item.section}`"
         @click="goToSection(item.path)"
         class="relative w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-150 group"
         :class="activeSection === item.section
           ? 'bg-huginn-blue/20 text-huginn-blue'
           : 'text-huginn-muted hover:text-huginn-text hover:bg-huginn-surface'"
         :title="item.label"
+        :aria-label="item.label"
       >
         <!-- Active left bar -->
         <div v-if="activeSection === item.section"
@@ -148,6 +157,7 @@
           {{ item.label }}
         </div>
       </button>
+      </template>
 
       <!-- Spacer -->
       <div class="flex-1" />
@@ -233,11 +243,12 @@
       leave-to-class="opacity-0"
     >
       <aside v-if="showPanel"
+        data-testid="context-panel"
         class="w-60 flex-shrink-0 flex flex-col bg-huginn-surface border-r border-huginn-border overflow-hidden">
 
         <!-- Panel header -->
         <div class="flex items-center gap-2 px-3 h-11 border-b border-huginn-border flex-shrink-0">
-          <!-- Chat / Stats / Settings: space-list search bar -->
+          <!-- Chat-only space-list search bar -->
           <template v-if="showSpaceList">
             <svg class="w-3 h-3 text-huginn-muted/40 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
@@ -295,8 +306,10 @@
           </template>
         </div>
 
-        <!-- ── Chat / Stats / Settings panel: Channels + DMs ── -->
-        <div v-if="showSpaceList" class="flex-1 overflow-y-auto">
+        <!-- ── Chat-only company / channel / DM rail ── -->
+        <div v-if="showSpaceList" data-testid="space-list" class="flex-1 overflow-y-auto">
+
+          <CompanySwitcher />
 
           <!-- Spaces loading spinner -->
           <div v-if="spacesLoading && channels.length === 0 && dms.length === 0"
@@ -318,19 +331,19 @@
               <div class="group w-full flex items-center gap-1.5 px-3 py-2 hover:bg-huginn-bg/40 transition-colors duration-100">
                 <button @click="channelSectionOpen = !channelSectionOpen"
                   class="flex items-center gap-1.5 flex-1 min-w-0">
-                  <svg class="w-2.5 h-2.5 text-huginn-muted/50 transition-transform duration-150 flex-shrink-0"
+                  <svg class="w-2.5 h-2.5 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                     :class="channelSectionOpen || sidebarSearch ? 'rotate-90' : ''"
                     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                     <polyline points="9 18 15 12 9 6" />
                   </svg>
-                  <span class="text-[10px] font-semibold text-huginn-muted/60 group-hover:text-huginn-muted uppercase tracking-widest">
+                  <span class="text-[10px] font-semibold text-huginn-muted uppercase tracking-widest">
                     Channels
                   </span>
                 </button>
-                <span v-if="channels.length" class="text-[10px] text-huginn-muted/30 tabular-nums">{{ channels.length }}</span>
+                <span v-if="deskChannels.length" class="text-[10px] text-huginn-muted tabular-nums">{{ deskChannels.length }}</span>
                 <button @click="showCreateChannelModal = true"
                   data-testid="create-channel-btn"
-                  class="w-4 h-4 flex items-center justify-center text-huginn-muted/30 hover:text-huginn-blue transition-colors flex-shrink-0 ml-1"
+                  class="w-4 h-4 flex items-center justify-center text-huginn-muted hover:text-huginn-blue transition-colors flex-shrink-0 ml-1"
                   title="New channel">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                     <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
@@ -339,11 +352,11 @@
               </div>
 
               <template v-if="channelSectionOpen || sidebarSearch">
-                <div v-if="filteredChannels.length === 0 && !spacesLoading" class="px-4 pb-1">
-                  <p class="text-[11px] text-huginn-muted/35 italic pl-4">{{ sidebarSearch ? 'No matches' : 'No channels yet' }}</p>
+                <div v-if="deskChannels.length === 0 && !spacesLoading" class="px-4 pb-1">
+                  <p class="text-[11px] text-huginn-muted italic pl-4">{{ sidebarSearch ? 'No matches' : 'No channels yet' }}</p>
                 </div>
                 <button
-                  v-for="sp in filteredChannels"
+                  v-for="sp in deskChannels"
                   :key="sp.id"
                   :data-testid="`channel-item-${sp.id}`"
                   @click="selectSpace(sp.id)"
@@ -357,7 +370,7 @@
                   <!-- Channel # icon with activity pulse when lead agent is active -->
                   <div class="relative flex-shrink-0 w-4 text-center">
                     <span class="text-[13px] font-medium text-huginn-muted/60">#</span>
-                    <span v-if="sp.leadAgent && isAgentActive(sp.leadAgent)"
+                    <span v-if="sp.leadAgent && railAgentActive(sp.leadAgent, sp.companyId)"
                       class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-huginn-green border border-huginn-sidebar animate-pulse" />
                   </div>
                   <!-- Unseen count badge for channels -->
@@ -382,14 +395,14 @@
                       {{ sp.name }}
                     </span>
                     <span v-if="!renamingSpaceId && spaceLastMessage(sp.id)"
-                      class="text-[10px] text-huginn-muted/50 truncate block leading-tight">
+                      class="text-[10px] text-huginn-muted/80 truncate block leading-tight">
                       {{ spaceLastMessage(sp.id)!.text }}
                     </span>
                   </div>
                   <!-- ⋯ menu -->
                   <div v-if="renamingSpaceId !== sp.id" class="relative flex-shrink-0 space-menu">
                     <div @click.stop="spaceMenuId = spaceMenuId === sp.id ? null : sp.id"
-                      class="w-5 h-5 flex items-center justify-center text-huginn-muted/30 hover:text-huginn-muted cursor-pointer opacity-0 group-hover/item:opacity-100 transition-opacity rounded"
+                      class="w-5 h-5 flex items-center justify-center text-huginn-muted hover:text-huginn-text cursor-pointer transition-opacity rounded"
                       title="Channel options">
                       <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                         <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
@@ -426,26 +439,29 @@
             <div>
               <button @click="dmSectionOpen = !dmSectionOpen"
                 class="group w-full flex items-center gap-1.5 px-3 py-2 hover:bg-huginn-bg/40 transition-colors duration-100">
-                <svg class="w-2.5 h-2.5 text-huginn-muted/50 transition-transform duration-150 flex-shrink-0"
+                <svg class="w-2.5 h-2.5 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                   :class="dmSectionOpen ? 'rotate-90' : ''"
                   viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                   <polyline points="9 18 15 12 9 6" />
                 </svg>
-                <span class="text-[10px] font-semibold text-huginn-muted/60 group-hover:text-huginn-muted uppercase tracking-widest">
+                <span class="text-[10px] font-semibold text-huginn-muted uppercase tracking-widest">
                   Direct Messages
                 </span>
-                <span v-if="dms.length" class="text-[10px] text-huginn-muted/30 tabular-nums ml-auto">{{ dms.length }}</span>
+                <span v-if="deskDMs.length" class="text-[10px] text-huginn-muted tabular-nums ml-auto">{{ deskDMs.length }}</span>
               </button>
 
               <template v-if="dmSectionOpen || sidebarSearch">
-                <div v-if="filteredDMs.length === 0 && !spacesLoading" class="px-4 pb-1">
-                  <p class="text-[11px] text-huginn-muted/35 italic pl-4">{{ sidebarSearch ? 'No matches' : 'No agents configured' }}</p>
+                <div v-if="deskDMs.length === 0 && !spacesLoading" class="px-4 pb-1">
+                  <p class="text-[11px] text-huginn-muted italic pl-4">{{ sidebarSearch ? 'No matches' : 'No agents configured' }}</p>
                 </div>
                 <button
-                  v-for="sp in filteredDMs"
+                  v-for="sp in deskDMs"
                   :key="sp.id"
                   :data-testid="`dm-item-${sp.id}`"
+                  :draggable="!!sp.leadAgent"
                   @click="selectSpace(sp.id)"
+                  @dragstart="onDeskDMDragStart($event, sp)"
+                  @dragend="onDeskDMDragEnd"
                   class="relative w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors duration-100 group/item"
                   :class="activeSpaceId === sp.id
                     ? 'bg-huginn-blue/8 text-huginn-text'
@@ -459,7 +475,8 @@
                       :style="{ background: (agentColorMap[sp.leadAgent] || '#58a6ff') + '33', color: agentColorMap[sp.leadAgent] || '#58a6ff' }">
                       {{ sp.leadAgent?.[0]?.toUpperCase() ?? '?' }}
                     </div>
-                    <span v-if="sp.leadAgent && isAgentActive(sp.leadAgent)"
+                    <span v-if="sp.leadAgent && railAgentActive(sp.leadAgent, sp.companyId)"
+                      :data-testid="`agent-pulse-${sp.leadAgent}`"
                       class="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-huginn-green border border-huginn-sidebar animate-pulse" />
                     <!-- Warning: agent has no model configured -->
                     <span v-else-if="agentsWithoutModel.has(sp.leadAgent)"
@@ -479,7 +496,7 @@
                       No model configured
                     </span>
                     <span v-else-if="spaceLastMessage(sp.id)"
-                      class="text-[10px] text-huginn-muted/50 truncate block leading-tight">
+                      class="text-[10px] text-huginn-muted/80 truncate block leading-tight">
                       {{ spaceLastMessage(sp.id)!.text }}
                     </span>
                   </div>
@@ -494,18 +511,27 @@
                       {{ spaceLastMessage(sp.id)!.relTime }}
                     </span>
                   </div>
-                  <!-- ⋯ menu (DM: delete only) -->
+                  <!-- ⋯ menu (DM: add to company + delete) -->
                   <div class="relative flex-shrink-0 space-menu">
                     <div @click.stop="spaceMenuId = spaceMenuId === sp.id ? null : sp.id"
-                      class="w-5 h-5 flex items-center justify-center text-huginn-muted/30 hover:text-huginn-muted cursor-pointer opacity-0 group-hover/item:opacity-100 transition-opacity rounded"
-                      title="DM options">
+                      class="w-5 h-5 flex items-center justify-center text-huginn-muted hover:text-huginn-text cursor-pointer transition-opacity rounded"
+                      title="DM options"
+                      data-testid="dm-options-btn">
                       <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                         <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
                       </svg>
                     </div>
                     <div v-if="spaceMenuId === sp.id"
-                      class="absolute right-0 top-full mt-1 w-28 rounded-lg border border-huginn-border shadow-xl overflow-hidden z-50 space-menu"
+                      class="absolute right-0 top-full mt-1 w-40 rounded-lg border border-huginn-border shadow-xl overflow-hidden z-50 space-menu"
                       style="background:rgba(22,27,34,0.97)">
+                      <div
+                        data-testid="dm-add-to-company"
+                        @click.stop="openAgentSeatPicker(sp.leadAgent)"
+                        class="flex items-center gap-2 px-3 py-2 text-xs text-huginn-text hover:bg-huginn-surface cursor-pointer transition-colors"
+                      >
+                        Add to company
+                      </div>
+                      <div class="mx-1.5 border-t border-huginn-border/40" />
                       <div @click.stop="doDeleteSpace(sp.id)"
                         class="flex items-center gap-2 px-3 py-2 text-xs text-huginn-red/70 hover:text-huginn-red hover:bg-huginn-red/5 cursor-pointer transition-colors">
                         <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -519,6 +545,130 @@
               </template>
             </div>
 
+            <!-- Company groups (Desk view) — collapse the existing list, do not replace it -->
+            <div v-if="companyRailGroups.length" class="pt-1">
+              <div v-for="g in companyRailGroups" :key="g.company.id"
+                :data-testid="`company-rail-${g.company.id}`">
+                <div
+                  :data-testid="`company-rail-toggle-${g.company.id}`"
+                  class="group w-full flex items-center gap-1.5 px-3 py-2 hover:bg-huginn-bg/40 transition-colors duration-100"
+                  :class="dragOverCompanyId === g.company.id ? 'ring-1 ring-inset ring-huginn-blue bg-huginn-blue/10' : ''"
+                  @dragover.prevent="onCompanyDragOver($event, g.company.id)"
+                  @dragleave="onCompanyDragLeave(g.company.id)"
+                  @drop.prevent="onCompanyDrop($event, g.company)"
+                >
+                  <button
+                    type="button"
+                    class="flex items-center gap-1.5 flex-1 min-w-0"
+                    @click="toggleCompanyCollapsed(g.company.id)"
+                  >
+                    <svg class="w-2.5 h-2.5 text-huginn-muted transition-transform duration-150 flex-shrink-0"
+                      :class="g.collapsed ? '' : 'rotate-90'"
+                      viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    <span
+                      class="w-4 h-4 rounded-[4px] flex items-center justify-center text-[9px] font-semibold flex-shrink-0"
+                      :style="g.company.color
+                        ? { background: g.company.color + '22', color: g.company.color }
+                        : { background: '#161b22', color: '#8b949e' }"
+                    >{{ (g.company.icon || g.company.name).slice(0, 1).toUpperCase() }}</span>
+                    <span class="flex-1 min-w-0 text-[11px] font-semibold text-huginn-muted group-hover:text-huginn-text truncate text-left">
+                      {{ g.company.name }}
+                    </span>
+                    <span
+                      v-if="g.collapsed && g.unread"
+                      :data-testid="`company-rail-unread-${g.company.id}`"
+                      class="w-1.5 h-1.5 rounded-full bg-huginn-blue flex-shrink-0"
+                    />
+                    <span v-else-if="!g.collapsed" class="text-[10px] text-huginn-muted tabular-nums">
+                      {{ g.channels.length + g.dms.length + g.seated.length }}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    :data-testid="`company-rail-add-${g.company.id}`"
+                    class="w-4 h-4 flex items-center justify-center text-huginn-muted hover:text-huginn-blue transition-colors flex-shrink-0"
+                    title="Add people"
+                    @click.stop="openCompanyPeoplePicker(g.company.id)"
+                  >
+                    <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                  </button>
+                </div>
+                <template v-if="!g.collapsed">
+                  <button
+                    v-for="sp in g.channels"
+                    :key="sp.id"
+                    :data-testid="`channel-item-${sp.id}`"
+                    @click="selectSpace(sp.id)"
+                    class="relative w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors duration-100"
+                    :class="activeSpaceId === sp.id
+                      ? 'bg-huginn-blue/8 text-huginn-text'
+                      : 'text-huginn-muted hover:bg-huginn-bg/40 hover:text-huginn-text'"
+                  >
+                    <div class="relative flex-shrink-0 w-4 text-center ml-3">
+                      <span class="text-[13px] font-medium text-huginn-muted/60">#</span>
+                      <span v-if="sp.leadAgent && railAgentActive(sp.leadAgent, g.company.id)"
+                        class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-huginn-green border border-huginn-sidebar animate-pulse" />
+                    </div>
+                    <span v-if="sp.unseenCount > 0"
+                      :data-testid="`channel-unseen-${sp.id}`"
+                      class="flex-shrink-0 min-w-[16px] h-4 px-1 rounded-full bg-huginn-blue text-white text-[9px] font-bold flex items-center justify-center leading-none">
+                      {{ sp.unseenCount > 9 ? '9+' : sp.unseenCount }}
+                    </span>
+                    <span class="text-xs truncate flex-1" :class="activeSpaceId === sp.id ? 'text-huginn-text font-medium' : ''">
+                      {{ sp.name }}
+                    </span>
+                  </button>
+                  <button
+                    v-for="sp in g.dms"
+                    :key="sp.id"
+                    :data-testid="`dm-item-${sp.id}`"
+                    @click="selectSpace(sp.id)"
+                    class="relative w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors duration-100"
+                    :class="activeSpaceId === sp.id
+                      ? 'bg-huginn-blue/8 text-huginn-text'
+                      : 'text-huginn-muted hover:bg-huginn-bg/40 hover:text-huginn-text'"
+                  >
+                    <div class="relative flex-shrink-0 ml-3">
+                      <div class="w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold"
+                        :style="{ background: (agentColorMap[sp.leadAgent] || '#58a6ff') + '33', color: agentColorMap[sp.leadAgent] || '#58a6ff' }">
+                        {{ sp.leadAgent?.[0]?.toUpperCase() ?? '?' }}
+                      </div>
+                      <span v-if="sp.leadAgent && railAgentActive(sp.leadAgent, g.company.id)"
+                        :data-testid="`agent-pulse-${sp.leadAgent}`"
+                        class="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-huginn-green border border-huginn-sidebar animate-pulse" />
+                    </div>
+                    <span class="text-xs truncate flex-1"
+                      :class="activeSpaceId === sp.id ? 'text-huginn-text font-medium' : ''">
+                      {{ sp.leadAgent }}
+                    </span>
+                    <span v-if="sp.unseenCount > 0"
+                      :data-testid="`dm-unseen-${sp.id}`"
+                      class="min-w-[16px] h-4 px-1 rounded-full bg-huginn-blue text-white text-[9px] font-bold flex items-center justify-center leading-none">
+                      {{ sp.unseenCount > 9 ? '9+' : sp.unseenCount }}
+                    </span>
+                  </button>
+                  <button
+                    v-for="name in g.seated"
+                    :key="g.company.id + '-seated-' + name"
+                    :data-testid="`company-seated-${g.company.id}-${name}`"
+                    @click="openSeatedAgent(name, g.company.id)"
+                    class="relative w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors duration-100 text-huginn-muted hover:bg-huginn-bg/40 hover:text-huginn-text"
+                  >
+                    <div class="relative flex-shrink-0 ml-3">
+                      <div class="w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold"
+                        :style="{ background: (agentColorMap[name] || '#58a6ff') + '33', color: agentColorMap[name] || '#58a6ff' }">
+                        {{ name?.[0]?.toUpperCase() ?? '?' }}
+                      </div>
+                    </div>
+                    <span class="text-xs truncate flex-1">{{ name }}</span>
+                  </button>
+                </template>
+              </div>
+            </div>
 
           </template>
         </div>
@@ -551,7 +701,7 @@
                   class="min-w-[16px] h-4 px-1 rounded-full bg-huginn-red text-white text-[9px] font-bold flex items-center justify-center leading-none flex-shrink-0">
                   {{ pendingCount > 9 ? '9+' : pendingCount }}
                 </span>
-                <svg v-else class="w-2.5 h-2.5 text-huginn-muted/30 group-hover:text-huginn-muted/60 transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+                <svg v-else class="w-2.5 h-2.5 text-huginn-muted transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
               </button>
 
               <!-- Items -->
@@ -589,8 +739,8 @@
                   :class="route.path.startsWith('/workflows') ? 'text-huginn-blue' : 'text-huginn-muted group-hover:text-huginn-text'">
                   Workflows
                 </span>
-                <span class="text-[10px] text-huginn-muted/35 tabular-nums flex-shrink-0">{{ workflows.length || '' }}</span>
-                <svg class="w-2.5 h-2.5 text-huginn-muted/30 group-hover:text-huginn-muted/60 transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+                <span class="text-[10px] text-huginn-muted tabular-nums flex-shrink-0">{{ workflows.length || '' }}</span>
+                <svg class="w-2.5 h-2.5 text-huginn-muted transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
               </button>
 
               <div v-if="workflows.length === 0" class="pb-1">
@@ -675,6 +825,24 @@
       @close="showCreateChannelModal = false"
       @created="(id) => { showCreateChannelModal = false; selectSpace(id) }"
     />
+
+    <CompanySeatPicker
+      v-if="seatPicker"
+      :agent="seatPicker.agent"
+      :company-id="seatPicker.companyId"
+      :mode="seatPicker.mode"
+      :companies="companies"
+      :agents="agents"
+      @close="seatPicker = null"
+      @seat="onSeatPickerSeat"
+      @unseat="onSeatPickerUnseat"
+    />
+
+    <div
+      v-if="seatToast"
+      data-testid="seat-toast"
+      class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[200] px-3 py-2 rounded-lg border border-huginn-border bg-huginn-surface text-xs text-huginn-text shadow-xl"
+    >{{ seatToast }}</div>
 
     <!-- ── Global Search Modal (Cmd+K) ──────────────────────────────── -->
     <Teleport to="body">
@@ -921,16 +1089,23 @@ import {
 import { pruneOrphanedUnseenIds } from './composables/unseenSessions'
 import { wireSwarmWS } from './composables/useSwarmStatus'
 import SpaceCreateModal from './components/SpaceCreateModal.vue'
+import CompanySeatPicker from './components/CompanySeatPicker.vue'
+import CompanySwitcher from './components/CompanySwitcher.vue'
+import { useCompanies } from './composables/useCompanies'
 import { useAgents } from './composables/useAgents'
-import { useThreads } from './composables/useThreads'
+import { useAgentActivity } from './composables/useAgentActivity'
 import { useDeliveryQueue } from './composables/useDeliveryQueue'
+import { sectionFromPath, showChatSidebar, showContextPanel, NAV_GROUPS } from './utils/navLayout'
 
 const route = useRoute()
 const router = useRouter()
 const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages, refetchMessages } = useSessions()
 const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } = useNotifications()
 const { wireWS: wireWorkflowsWS } = useWorkflows()
-const { isAgentActive } = useThreads()
+const { wireActivityWS, isAgentPulsing } = useAgentActivity()
+function railAgentActive(name: string, companyId?: string) {
+  return isAgentPulsing(name, companyId ?? null)
+}
 const { badgeCount, actionableEntries, hasIssues, fetchBadge, fetchActionable, retryEntry, dismissEntry, handleBadgeUpdate } = useDeliveryQueue()
 
 const drawerOpen = ref(false)
@@ -938,30 +1113,14 @@ watch(drawerOpen, (open) => {
   if (open) fetchActionable()
 })
 
-// ── Nav structure ────────────────────────────────────────────────────
-const navItems = [
-  { section: 'chat',       label: 'Chat',       path: '/chat',       icon: 'chat'       },
-  { section: 'agents',     label: 'Agents',     path: '/agents',     icon: 'agents'     },
-  { section: 'memory',     label: 'Memory',     path: '/memory',     icon: 'memory'     },
-  { section: 'models',     label: 'Models',     path: '/models',     icon: 'models'     },
-  { section: 'automation', label: 'Automation', path: '/workflows',  icon: 'automation' },
-  { section: 'connections',label: 'Connections',path: '/connections', icon: 'connections'},
-  { section: 'skills',     label: 'Skills',     path: '/skills/browse', icon: 'skills'     },
-  { section: 'stats',      label: 'Stats',      path: '/stats',      icon: 'stats'      },
-  { section: 'settings',   label: 'Settings',   path: '/settings',   icon: 'settings'   },
-  { section: 'logs',       label: 'Logs',       path: '/logs',       icon: 'logs'       },
-  { section: 'inbox',      label: 'Activity Log', path: '/inbox',      icon: 'inbox'      },
-]
+// ── Nav structure (Slack-class: chat / admin / logs) ─────────────────
+const navGroups = NAV_GROUPS
 
-const activeSection    = computed(() => {
-  const seg = route.path.split('/')[1] || 'chat'
-  if (seg === 'routines' || seg === 'workflows') return 'automation'
-  if (seg === 'space') return 'chat'  // space view lives within the chat section
-  return seg
-})
+const activeSection    = computed(() => sectionFromPath(route.path))
 const activeSessionId  = computed(() => route.params.sessionId as string || '')
-const showSpaceList    = computed(() => ['chat', 'stats', 'settings'].includes(activeSection.value))
-const showPanel        = computed(() => showSpaceList.value || ['agents', 'automation', 'skills'].includes(activeSection.value))
+// Company/channel/DM rail is chat-only. Top-level surfaces get full width next to the icon rail.
+const showSpaceList    = computed(() => showChatSidebar(route.path))
+const showPanel        = computed(() => showContextPanel(route.path))
 const panelTitle       = computed(() => {
   if (activeSection.value === 'chat') return 'Sessions'
   if (activeSection.value === 'automation') return 'Automation'
@@ -1177,6 +1336,7 @@ async function initApp() {
     appLoading.value = false
     await Promise.all([fetchSessions(), fetchSummary()])
     fetchSpaces()
+    fetchCompanies().catch(() => {})
     fetchAgents().catch(() => {})
     fetchCloudStatus().catch(() => {})
     wireWS(ws)
@@ -1186,6 +1346,11 @@ async function initApp() {
     wireSpaceWS(ws)
     wireSpaceTimelineWS(ws)
     wireSwarmWS(ws, () => activeSessionId.value)
+    wireActivityWS(ws)
+    ws.on('space_reply_mention', (msg) => {
+      const sid = typeof msg.payload?.['space_id'] === 'string' ? msg.payload['space_id'] as string : ''
+      if (sid) noteFollowUnread(sid, true)
+    })
 
     // Update session state live from WS events
     ws.on('token', (msg) => {
@@ -1276,8 +1441,12 @@ async function handleRestartNow(): Promise<void> {
 const {
   spaces, channels, dms, activeSpaceId, loading: spacesLoading, error: spacesError,
   fetchSpaces, setActiveSpace, markRead,
-  updateSpace, deleteSpace,
+  updateSpace, deleteSpace, openDM, ensureCompanyDM,
 } = useSpaces()
+const {
+  fetchCompanies, companies, isDesk, isCompanyCollapsed, toggleCompanyCollapsed, companyFollowUnread,
+  noteFollowUnread, seatMember, unseatMember, agentSeatedIn, setCompanyCollapsed,
+} = useCompanies()
 
 // When the user navigates to a space, clear unseen marks for sessions in that
 // space only. Uncached IDs are kept — they may belong to an unvisited space.
@@ -1370,6 +1539,34 @@ const filteredDMs = computed(() => {
   return dms.value.filter(s => s.leadAgent.toLowerCase().includes(q))
 })
 
+const groupingCompanies = computed(() => isDesk.value && companies.value.length > 0)
+const deskChannels = computed(() =>
+  groupingCompanies.value ? filteredChannels.value.filter(s => !s.companyId) : filteredChannels.value,
+)
+const deskDMs = computed(() =>
+  groupingCompanies.value ? filteredDMs.value.filter(s => !s.companyId) : filteredDMs.value,
+)
+const followSpaces = computed(() =>
+  spaces.value.map(s => ({ id: s.id, companyId: s.companyId, kind: s.kind, unseenCount: s.unseenCount, forYou: s.forYou })),
+)
+const companyRailGroups = computed(() => {
+  if (!groupingCompanies.value) return []
+  const q = sidebarSearch.value.trim().toLowerCase()
+  return companies.value.map(c => {
+    const ch = filteredChannels.value.filter(s => s.companyId === c.id)
+    const dm = filteredDMs.value.filter(s => s.companyId === c.id)
+    return {
+      company: c,
+      channels: ch,
+      dms: dm,
+      seated: (c.members || []).filter(n => !dm.some(s => s.leadAgent.toLowerCase() === n.toLowerCase())),
+      hidden: !!(q && ch.length === 0 && dm.length === 0 && !(c.members || []).length),
+      unread: companyFollowUnread(c.id, followSpaces.value),
+      collapsed: isCompanyCollapsed(c.id) && !q,
+    }
+  }).filter(g => !g.hidden)
+})
+
 const agentColorMap = computed(() => {
   const m: Record<string, string> = {}
   for (const a of agents.value) if (a.color) m[a.name] = a.color as string
@@ -1380,6 +1577,115 @@ function selectSpace(id: string) {
   setActiveSpace(id)
   markRead(id)
   router.push(`/space/${id}`)
+}
+
+const seatPicker = ref<null | { agent?: string; companyId?: string; mode: 'companies' | 'people' | 'confirm' }>(null)
+const seatToast = ref('')
+const dragOverCompanyId = ref<string | null>(null)
+const draggingAgent = ref('')
+let seatToastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showSeatToast(msg: string) {
+  seatToast.value = msg
+  if (seatToastTimer) clearTimeout(seatToastTimer)
+  seatToastTimer = setTimeout(() => { seatToast.value = '' }, 2400)
+}
+
+function openAgentSeatPicker(agent: string) {
+  spaceMenuId.value = null
+  if (!agent) return
+  seatPicker.value = { agent, mode: 'companies' }
+}
+
+function openCompanyPeoplePicker(companyId: string) {
+  if (!companyId) return
+  seatPicker.value = { companyId, mode: 'people' }
+}
+
+async function onSeatPickerSeat(agent: string, companyId: string) {
+  seatPicker.value = null
+  await addAgentToCompany(agent, companyId)
+}
+
+async function onSeatPickerUnseat(agent: string, companyId: string) {
+  seatPicker.value = null
+  if (!agent || !companyId) return
+  const updated = await unseatMember(companyId, agent)
+  if (!updated) {
+    showSeatToast(`Could not remove ${agent}`)
+    return
+  }
+  await fetchSpaces()
+}
+
+async function addAgentToCompany(agent: string, companyId: string) {
+  spaceMenuId.value = null
+  const company = companies.value.find(c => c.id === companyId)
+  if (!agent || !companyId) return
+  if (agentSeatedIn(agent, companyId)) {
+    showSeatToast(`${agent} is already in ${company?.name || 'this company'}`)
+    return
+  }
+  const updated = await seatMember(companyId, agent)
+  if (!updated) {
+    showSeatToast(`Could not add ${agent}`)
+    return
+  }
+  setCompanyCollapsed(companyId, false)
+  const dm = await ensureCompanyDM(agent, companyId)
+  await fetchSpaces()
+  if (dm) selectSpace(dm.id)
+}
+
+async function openSeatedAgent(agent: string, companyId: string) {
+  const existing = dms.value.find(s =>
+    s.companyId === companyId && s.leadAgent.toLowerCase() === agent.toLowerCase(),
+  )
+  if (existing) {
+    selectSpace(existing.id)
+    return
+  }
+  const created = await ensureCompanyDM(agent, companyId)
+  if (created) {
+    selectSpace(created.id)
+    return
+  }
+  // Desk DM stays desk-scoped — open it rather than steal company_id.
+  const desk = await openDM(agent)
+  if (desk) selectSpace(desk.id)
+}
+
+function onDeskDMDragStart(e: DragEvent, sp: { leadAgent: string }) {
+  const name = sp.leadAgent || ''
+  draggingAgent.value = name
+  e.dataTransfer?.setData('text/plain', name)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy'
+}
+
+function onDeskDMDragEnd() {
+  draggingAgent.value = ''
+  dragOverCompanyId.value = null
+}
+
+function onCompanyDragOver(e: DragEvent, companyId: string) {
+  e.dataTransfer && (e.dataTransfer.dropEffect = 'copy')
+  dragOverCompanyId.value = companyId
+}
+
+function onCompanyDragLeave(companyId: string) {
+  if (dragOverCompanyId.value === companyId) dragOverCompanyId.value = null
+}
+
+async function onCompanyDrop(e: DragEvent, company: { id: string; name: string }) {
+  dragOverCompanyId.value = null
+  const agent = (e.dataTransfer?.getData('text/plain') || draggingAgent.value).trim()
+  draggingAgent.value = ''
+  if (!agent) return
+  if (agentSeatedIn(agent, company.id)) {
+    showSeatToast(`${agent} is already in ${company.name}`)
+    return
+  }
+  seatPicker.value = { agent, companyId: company.id, mode: 'confirm' }
 }
 
 

@@ -9,6 +9,25 @@
       :title="copied ? 'Copied!' : 'Copy'"
     >{{ copied ? 'Copied!' : 'Copy' }}</button>
 
+    <button
+      v-if="showReply"
+      data-testid="msg-reply"
+      type="button"
+      @click.stop="$emit('reply')"
+      class="text-[10px] px-2 py-0.5 rounded transition-colors"
+      style="background:rgba(255,255,255,0.06);color:#8b949e"
+    >Reply</button>
+
+    <button
+      v-if="showDiagnose"
+      data-testid="msg-diagnose"
+      type="button"
+      @click.stop="$emit('diagnose')"
+      class="text-[10px] px-2 py-0.5 rounded transition-colors"
+      style="background:rgba(255,255,255,0.06);color:#8b949e"
+      title="Work inspector"
+    >Details</button>
+
     <!-- Retry (user messages only) -->
     <button
       v-if="msg.role === 'user'"
@@ -57,10 +76,14 @@ const MEMORY_TOOLS = ['muninn_remember', 'muninn_decide', 'muninn_evolve']
 const props = defineProps<{
   msg: ChatMessage
   agentVaultName: string
+  showReply?: boolean
+  showDiagnose?: boolean
 }>()
 
 defineEmits<{
   (e: 'retry', content: string): void
+  (e: 'reply'): void
+  (e: 'diagnose'): void
 }>()
 
 const copied = ref(false)

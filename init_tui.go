@@ -12,8 +12,8 @@ import (
 	"github.com/scrypster/huginn/internal/agent"
 	agentslib "github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/config"
-	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/memory"
+	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/notepad"
 	"github.com/scrypster/huginn/internal/pricing"
 	"github.com/scrypster/huginn/internal/repo"
@@ -72,19 +72,41 @@ func initTUI(
 
 	// Load channel names (and their lead agents) from the spaces store and wire
 	// them into the sidebar and channel picker.
+	var spaceStore spaces.StoreInterface
 	if sqlDB != nil {
-		spaceStore := spaces.NewSQLiteSpaceStore(sqlDB)
-		if spaceRes, listErr := spaceStore.ListSpaces(spaces.ListOpts{Kind: spaces.KindChannel}); listErr == nil {
+		ss := spaces.NewSQLiteSpaceStore(sqlDB)
+		spaceStore = ss
+		tuiApp.SetSpaceStore(ss)
+		if spaceRes, listErr := ss.ListSpaces(spaces.ListOpts{}); listErr == nil {
 			var channelNames []string
 			channelLeads := make(map[string]string)
+			rail := make([]tui.SidebarSpace, 0, len(spaceRes.Spaces))
 			for _, sp := range spaceRes.Spaces {
-				channelNames = append(channelNames, sp.Name)
-				if sp.LeadAgent != "" {
-					channelLeads[sp.Name] = sp.LeadAgent
+				rail = append(rail, tui.SidebarSpace{
+					ID:        sp.ID,
+					Name:      sp.Name,
+					Kind:      sp.Kind,
+					LeadAgent: sp.LeadAgent,
+					CompanyID: sp.CompanyID,
+					Unseen:    sp.UnseenCount,
+					ForYou:    sp.ForYou,
+				})
+				if sp.Kind == spaces.KindChannel {
+					channelNames = append(channelNames, sp.Name)
+					if sp.LeadAgent != "" {
+						channelLeads[sp.Name] = sp.LeadAgent
+					}
 				}
 			}
 			tuiApp.SetChannels(channelNames)
 			tuiApp.SetChannelLeads(channelLeads)
+			var cos []tui.SidebarCompany
+			if listed, err := ss.ListCompanies(); err == nil {
+				for _, c := range listed {
+					cos = append(cos, tui.SidebarCompany{ID: c.ID, Name: c.Name})
+				}
+			}
+			tuiApp.SetSpaceRail(rail, cos)
 		}
 	}
 
@@ -135,21 +157,24 @@ func initTUI(
 
 	// Build AppContext for future screen consumption.
 	appCtx := &services.AppContext{
-		Cfg:          cfg,
-		Orch:         orch,
-		Version:      version,
-		AgentReg:     agentReg,
-		SessionStore: sessStore,
-		StatsReg:     statsReg,
-		Store:        store,
-		Idx:          idx,
+		Cfg:           cfg,
+		Orch:          orch,
+		Version:       version,
+		AgentReg:      agentReg,
+		SessionStore:  sessStore,
+		StatsReg:      statsReg,
+		Store:         store,
+		Idx:           idx,
 		WorkspaceRoot: detection.Root,
-		PriceTracker: priceTracker,
-		SkillReg:     skillReg,
+		PriceTracker:  priceTracker,
+		SkillReg:      skillReg,
 	}
 	appCtx.Agents = services.NewDirectAgentService(agentReg)
 	appCtx.Config = services.NewDirectConfigService(cfg)
 	appCtx.Stats = services.NewDirectStatsService(statsReg)
+	if spaceStore != nil {
+		appCtx.Spaces = services.NewDirectSpaceService(spaceStore)
+	}
 	tuiApp.SetAppContext(appCtx)
 
 	res.App = tuiApp
@@ -226,4 +251,3 @@ func startSymbolExtraction(idx *repo.Index, store *storage.Store) {
 		}
 	}()
 }
-

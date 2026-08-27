@@ -122,3 +122,24 @@ func TestGlobalConfig_MCPToken_RoundTrip(t *testing.T) {
 		t.Fatalf("MCPToken: got %q, want mdb_testtoken", loaded.MCPToken)
 	}
 }
+
+func TestHuginnMCPURL_KeepsExplicitMCPPath(t *testing.T) {
+	got, err := HuginnMCPURL("http://127.0.0.1:12345/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://127.0.0.1:12345/mcp" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestHuginnMCPURL_RemapsREST(t *testing.T) {
+	got, err := HuginnMCPURL("http://localhost:8475")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://localhost:8750/mcp" {
+		t.Fatalf("got %q", got)
+	}
+}
+

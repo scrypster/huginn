@@ -316,6 +316,21 @@ func CreateFromMentions(
 			continue
 		}
 
+		mentionCtx, hopErr := PushDelegateHop(ctx, req.AgentName)
+		if hopErr != nil {
+			logger.Warn("CreateFromMentions: hop cap", "agent", req.AgentName, "err", hopErr)
+			if broadcast != nil {
+				broadcast(sessionID, "delegation_error", map[string]any{
+					"session_id":    sessionID,
+					"parent_msg_id": parentMsgID,
+					"agent":         req.AgentName,
+					"error":         hopErr.Error(),
+					"reason":        "hop_cap",
+				})
+			}
+			continue
+		}
+
 		t, err := tm.Create(CreateParams{
 			SessionID:       sessionID,
 			AgentID:         req.AgentName,
@@ -348,7 +363,7 @@ func CreateFromMentions(
 			dagFn := func() {
 				tm.EvaluateDAG(ctx, sessionID, store, sess, reg, b, broadcast, ca)
 			}
-			tm.SpawnThread(ctx, tid, store, sess, reg, b, broadcast, ca, dagFn)
+			tm.SpawnThread(mentionCtx, tid, store, sess, reg, b, broadcast, ca, dagFn)
 			logger.Info("CreateFromMentions: SpawnThread returned", "thread_id", tid)
 		}
 	}

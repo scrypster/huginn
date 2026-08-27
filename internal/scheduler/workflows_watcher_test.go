@@ -161,3 +161,40 @@ func TestWorkflowsWatcher_CtxCancel_Exits(t *testing.T) {
 		t.Fatal("watcher did not exit after context cancellation")
 	}
 }
+
+func writeWorkflowJSON(t *testing.T, dir, id string, enabled bool) {
+	t.Helper()
+	enabledStr := "false"
+	if enabled {
+		enabledStr = "true"
+	}
+	content := `{"id":"` + id + `","name":"Test","enabled":` + enabledStr + `,"schedule":"@daily","steps":[]}`
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write workflow json: %v", err)
+	}
+}
+
+func TestWorkflowsWatcher_JSONFile_Registers(t *testing.T) {
+	dir := t.TempDir()
+	stub := &stubWatcherScheduler{}
+	onChange := make(chan struct{}, 1)
+	w := scheduler.NewWorkflowsWatcher(dir, stub, func() {
+		select {
+		case onChange <- struct{}{}:
+		default:
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go w.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+	writeWorkflowJSON(t, dir, "wf-json", true)
+	select {
+	case <-onChange:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for JSON drop to register")
+	}
+	if atomic.LoadInt32(&stub.registered) < 1 {
+		t.Errorf("expected RegisterWorkflow for JSON drop, got 0")
+	}
+}

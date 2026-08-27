@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/spaces"
 )
 
@@ -29,8 +30,9 @@ func (s *Server) handleListSpaces(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
 	includeArchived := r.URL.Query().Get("archived") == "true"
 	cursor := r.URL.Query().Get("cursor")
+	companyID := r.URL.Query().Get("company_id")
 	res, err := s.spaceStore.ListSpaces(spaces.ListOpts{
-		Kind: kind, IncludeArchived: includeArchived, Cursor: cursor,
+		Kind: kind, IncludeArchived: includeArchived, Cursor: cursor, CompanyID: companyID,
 	})
 	if err != nil {
 		jsonError(w, 500, err.Error())
@@ -95,6 +97,7 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request) {
 		Members   []string `json:"member_agents"`
 		Icon      string   `json:"icon"`
 		Color     string   `json:"color"`
+		CompanyID string   `json:"company_id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024) // 32 KB cap — generous for space metadata
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -109,13 +112,8 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "name must be 80 characters or fewer")
 		return
 	}
-	// Prevent duplicate channel names (case-insensitive).
-	// FindChannelByName uses a SQL LOWER() lookup — O(1) vs the previous O(n)
-	// scan over ListSpaces results, and correct regardless of channel count.
-	if existing, err := s.spaceStore.FindChannelByName(strings.TrimSpace(body.Name)); err == nil && existing != nil {
-		jsonError(w, 409, fmt.Sprintf("a channel named %q already exists", existing.Name))
-		return
-	}
+	// Prevent duplicate channel names inside the same company (or desk).
+	// Two companies may both have "#eng".
 	if body.LeadAgent == "" {
 		jsonError(w, 400, "lead_agent is required")
 		return
@@ -148,13 +146,43 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sp, err := s.spaceStore.CreateChannel(body.Name, body.LeadAgent, body.Members, body.Icon, body.Color)
+	if cid := strings.TrimSpace(body.CompanyID); cid != "" {
+		if err := validateSpaceID(cid); err != nil {
+			jsonError(w, 400, "company_id: "+err.Error())
+			return
+		}
+		cs := s.companyAPI()
+		if cs == nil {
+			jsonError(w, 503, "companies not configured")
+			return
+		}
+		if _, err := cs.GetCompany(cid); err != nil {
+			jsonSpaceError(w, err)
+			return
+		}
+		body.CompanyID = cid
+	}
+	var (
+		sp  *spaces.Space
+		err error
+	)
+	if creator, ok := s.spaceStore.(interface {
+		CreateChannelForCompany(name, leadAgent string, members []string, icon, color, companyID string) (*spaces.Space, error)
+	}); ok {
+		sp, err = creator.CreateChannelForCompany(body.Name, body.LeadAgent, body.Members, body.Icon, body.Color, body.CompanyID)
+	} else {
+		sp, err = s.spaceStore.CreateChannel(body.Name, body.LeadAgent, body.Members, body.Icon, body.Color)
+		if err == nil && body.CompanyID != "" {
+			cid := body.CompanyID
+			sp, err = s.spaceStore.UpdateSpace(sp.ID, spaces.SpaceUpdates{CompanyID: &cid})
+		}
+	}
 	if err != nil {
 		if isUniqueConstraintError(err) {
 			jsonError(w, 409, fmt.Sprintf("a channel named %q already exists", body.Name))
 			return
 		}
-		jsonError(w, 500, err.Error())
+		jsonSpaceError(w, err)
 		return
 	}
 	s.emitSpaceEvent("space_created", sp)
@@ -189,6 +217,7 @@ func (s *Server) handleUpdateSpace(w http.ResponseWriter, r *http.Request) {
 		Color     *string   `json:"color"`
 		Members   *[]string `json:"member_agents"`
 		LeadAgent *string   `json:"lead_agent"`
+		CompanyID *string   `json:"company_id"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, 32*1024) // 32 KB cap
@@ -239,8 +268,14 @@ func (s *Server) handleUpdateSpace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if body.CompanyID != nil && strings.TrimSpace(*body.CompanyID) != "" {
+		if err := validateSpaceID(*body.CompanyID); err != nil {
+			jsonError(w, 400, "company_id: "+err.Error())
+			return
+		}
+	}
 	sp, err := s.spaceStore.UpdateSpace(id, spaces.SpaceUpdates{
-		Name: body.Name, Icon: body.Icon, Color: body.Color, Members: body.Members, LeadAgent: body.LeadAgent,
+		Name: body.Name, Icon: body.Icon, Color: body.Color, Members: body.Members, LeadAgent: body.LeadAgent, CompanyID: body.CompanyID,
 	})
 	if err != nil {
 		jsonSpaceError(w, err)
@@ -365,6 +400,108 @@ func (s *Server) handleListSpaceMessages(w http.ResponseWriter, r *http.Request)
 	jsonOK(w, result)
 }
 
+// handleListSpaceReplies serves GET /api/v1/space-messages/{id}/replies?parent_id=.
+func (s *Server) handleListSpaceReplies(w http.ResponseWriter, r *http.Request) {
+	if s.spaceStore == nil {
+		jsonError(w, 503, "spaces not configured")
+		return
+	}
+	spaceID := r.PathValue("id")
+	if err := validateSpaceID(spaceID); err != nil {
+		jsonError(w, 400, err.Error())
+		return
+	}
+	parentID := strings.TrimSpace(r.URL.Query().Get("parent_id"))
+	replies, err := s.spaceStore.ListSpaceReplies(spaceID, parentID)
+	if err != nil {
+		jsonSpaceError(w, err)
+		return
+	}
+	participant, _ := s.spaceStore.HasThreadParticipation(spaceID, parentID, spaces.LocalViewer)
+	unseen := 0
+	if participant {
+		unseen, _ = s.spaceStore.ThreadUnseenForViewer(spaceID, parentID, spaces.LocalViewer)
+	}
+	jsonOK(w, map[string]any{
+		"messages":    replies,
+		"participant": participant,
+		"unseen":      unseen,
+	})
+}
+
+// handlePostSpaceMessage serves POST /api/v1/space-messages/{id}.
+// Body: {"content":"...","parent_id":"..."}. Persists a human message only —
+// does not start an agent run.
+func (s *Server) handlePostSpaceMessage(w http.ResponseWriter, r *http.Request) {
+	if s.spaceStore == nil {
+		jsonError(w, 503, "spaces not configured")
+		return
+	}
+	spaceID := r.PathValue("id")
+	if err := validateSpaceID(spaceID); err != nil {
+		jsonError(w, 400, err.Error())
+		return
+	}
+	var body struct {
+		ID       string `json:"id"`
+		Content  string `json:"content"`
+		ParentID string `json:"parent_id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 70*1024)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, 400, "invalid JSON")
+		return
+	}
+	if strings.TrimSpace(body.ID) != "" && strings.TrimSpace(body.ID) == strings.TrimSpace(body.ParentID) {
+		jsonError(w, 400, "message cannot be its own parent")
+		return
+	}
+	msg, err := s.spaceStore.PostSpaceMessage(spaceID, body.Content, body.ParentID)
+	if err != nil {
+		jsonSpaceError(w, err)
+		return
+	}
+	if msg.ParentID != "" {
+		resp := s.afterSpaceReplyPersisted(spaceID, msg, body.Content)
+		jsonCreated(w, resp)
+		return
+	}
+	jsonCreated(w, msg)
+}
+
+// handleDeleteSpaceMessage serves DELETE /api/v1/space-messages/{id}/{msgID}.
+// Deletes that one message and, if it is a hallway root, its thread replies.
+func (s *Server) handleDeleteSpaceMessage(w http.ResponseWriter, r *http.Request) {
+	if s.spaceStore == nil {
+		jsonError(w, 503, "spaces not configured")
+		return
+	}
+	spaceID := r.PathValue("id")
+	if err := validateSpaceID(spaceID); err != nil {
+		jsonError(w, 400, err.Error())
+		return
+	}
+	msgID := r.PathValue("msgID")
+	if err := validateSpaceID(msgID); err != nil {
+		jsonError(w, 400, "invalid message ID")
+		return
+	}
+	if err := s.spaceStore.DeleteSpaceMessage(spaceID, msgID); err != nil {
+		jsonSpaceError(w, err)
+		return
+	}
+	if s.wsHub != nil {
+		s.BroadcastWS(WSMessage{
+			Type: "space_message_deleted",
+			Payload: map[string]any{
+				"space_id":   spaceID,
+				"message_id": msgID,
+			},
+		})
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
 // validateSpaceID rejects IDs that could enable path traversal or SQLite injection.
 // Space IDs are UUIDs or short alphanumeric slugs — they must never contain slashes,
 // dots-dot sequences, or characters outside the allowed set.
@@ -466,7 +603,9 @@ func (s *Server) emitSpaceEvent(eventType string, sp *spaces.Space) {
 // emitSpaceActivity broadcasts a space_activity event with the current unseen
 // session count for spaceID. It is called after a chat response completes so
 // that all connected browser tabs can update their unseen-badge counters without
-// polling. Failures are logged and swallowed — badge accuracy is best-effort.
+// polling. Also SendRelay the same type + payload for a remote puppet on the
+// HuginnCloud satellite. Failures are logged and swallowed — badge accuracy is
+// best-effort. Nil satellite / disconnected hub must not panic.
 func (s *Server) emitSpaceActivity(spaceID string) {
 	if s.spaceStore == nil || spaceID == "" {
 		return
@@ -476,12 +615,19 @@ func (s *Server) emitSpaceActivity(spaceID string) {
 		slog.Warn("server: unseen count failed", "space_id", spaceID, "err", err)
 		return
 	}
-	s.BroadcastWS(WSMessage{
-		Type: "space_activity",
-		Payload: map[string]any{
-			"space_id":     spaceID,
-			"unseen_count": count,
-		},
+	payload := map[string]any{
+		"space_id":     spaceID,
+		"unseen_count": count,
+	}
+	msg := WSMessage{Type: "space_activity", Payload: payload}
+	if s.onSpaceWS != nil {
+		s.onSpaceWS(msg)
+	}
+	s.BroadcastWS(msg)
+	s.SendRelay(relay.Message{
+		Type:    relay.MessageType("space_activity"),
+		SpaceID: spaceID,
+		Payload: payload,
 	})
 }
 
@@ -498,11 +644,17 @@ func jsonSpaceError(w http.ResponseWriter, err error) {
 	var se *spaces.SpaceError
 	if errors.As(err, &se) {
 		switch se.Code {
-		case "space_not_found":
+		case "space_not_found", "company_not_found", "parent_not_found":
 			jsonError(w, 404, se.Message)
 			return
-		case "dm_immutable":
+		case "dm_immutable", "not_in_company", "not_in_roster":
 			jsonError(w, 403, se.Message)
+			return
+		case "invalid_name", "invalid_agent", "invalid_content", "invalid_parent", "parent_wrong_space", "lead_not_seated":
+			jsonError(w, 400, se.Message)
+			return
+		case "company_name_taken", "channel_name_taken", "company_has_spaces", "company_reserved":
+			jsonError(w, 409, se.Message)
 			return
 		}
 	}

@@ -355,6 +355,58 @@ describe('stripResidualSpeech', () => {
     expect(stripResidualSpeech(s, { afterTools: true })).toBe('Here:\n```go\n// add returns a+b\nfunc add(a, b int) int { return a + b }\n```\nThat compiles.')
   })
 
+  it('drops exact live bullet5 wait playbook and assistance closer, keeps hostname/PONG/56', () => {
+    const spawned =
+      "Winston, please note that the delegate task to Steve has been spawned. Please use `wait_for_threads` to block until it finishes and collect the result. Since session history could not be loaded, please ensure to include all necessary context in the task description. The hostname of the machine is 'MJs-MacBook-Pro'. That completes the request. Is there anything else you need assistance with?"
+    expect(stripResidualSpeech(spawned, { afterTools: true })).toBe(
+      "The hostname of the machine is 'MJs-MacBook-Pro'. That completes the request.",
+    )
+
+    const pleaseCall =
+      "Please call wait_for_threads, with no additional arguments, to block until Steve's command has finished. Steve ran the 'hostname' command and received the output 'MJs-MacBook-Pro'."
+    expect(stripResidualSpeech(pleaseCall, { afterTools: true })).toBe(
+      "Steve ran the 'hostname' command and received the output 'MJs-MacBook-Pro'.",
+    )
+
+    const closer =
+      "The hostname of the system is 'MJs-MacBook-Pro'. If you have any other questions or need further assistance, feel free to ask."
+    expect(stripResidualSpeech(closer, { afterTools: true })).toBe(
+      "The hostname of the system is 'MJs-MacBook-Pro'.",
+    )
+
+    expect(
+      stripResidualSpeech(
+        "Please call wait_for_threads, with no additional arguments, to block until Steve's command has finished. Reggie said PONG. 7 times 8 is 56.",
+        { afterTools: true },
+      ),
+    ).toBe('Reggie said PONG. 7 times 8 is 56.')
+    expect(stripResidualSpeech('Steve spawned a worker to crunch the numbers.', { afterTools: true })).toBe(
+      'Steve spawned a worker to crunch the numbers.',
+    )
+  })
+
+  it('drops the live hallway helpdesk closer and keeps teammate prose', () => {
+    expect(stripResidualSpeech('The result of 7 * 8 is 56. If you have any other questions, feel free to ask!', { afterTools: true })).toBe('The result of 7 * 8 is 56.')
+    expect(stripResidualSpeech('If you have any other questions about the migration, ping Steve.', { afterTools: true })).toBe('If you have any other questions about the migration, ping Steve.')
+    expect(stripResidualSpeech('Feel free to ask Steve for the hostname.', { afterTools: true })).toBe('Feel free to ask Steve for the hostname.')
+  })
+
+  it('rewrites the live Lab Winston Steve-deny leftover to teammate speech', () => {
+    const liveLabWinstonSteveDeny =
+      'I apologize for any confusion. It seems that "Steve" isn\'t one of the available agents. Let\'s try a different approach. I\'ll have Sam gather the required information. Task delegated to Sam. I apologize, but there was an error when attempting to determine the hostname of this machine. The system encountered an API key resolution issue. If you have access to the API key, please provide it, and I can try again.'
+    expect(stripResidualSpeech(liveLabWinstonSteveDeny, { afterTools: true })).toBe("Steve isn't in Lab. Sam is.")
+    expect(stripResidualSpeech("Steve isn't in this company.", { afterTools: true })).toBe("Steve isn't in this company.")
+    expect(stripResidualSpeech("Steve isn't available here.", { afterTools: true })).toBe("Steve isn't available here.")
+    const keep =
+      "I apologize for any confusion. The hostname of the machine is 'MJs-MacBook-Pro'. Reggie said PONG. 7 times 8 is 56. Let's try a different approach."
+    const kept = stripResidualSpeech(keep, { afterTools: true })
+    expect(kept).toContain('MJs-MacBook-Pro')
+    expect(kept).toContain('PONG')
+    expect(kept).toContain('56')
+    expect(kept).not.toContain('I apologize')
+    expect(kept).not.toContain('different approach')
+  })
+
   it('classifies objects', () => {
     expect(isToolInvocationObject({ name: 'recall_thread_result', arguments: { thread_id: 'x' } })).toBe(true)
     expect(isToolInvocationObject({ function_name: 'bash' })).toBe(true)

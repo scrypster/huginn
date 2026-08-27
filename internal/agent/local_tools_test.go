@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
@@ -25,8 +26,8 @@ func buildLocalTestRegistry() *tools.Registry {
 
 type localTestTool struct{ name string }
 
-func (t *localTestTool) Name() string                  { return t.name }
-func (t *localTestTool) Description() string           { return "" }
+func (t *localTestTool) Name() string                      { return t.name }
+func (t *localTestTool) Description() string               { return "" }
 func (t *localTestTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *localTestTool) Schema() backend.Tool {
 	return backend.Tool{Type: "function", Function: backend.ToolFunction{Name: t.name}}
@@ -268,5 +269,205 @@ func TestApplyToolbelt_WildcardDeduplicatesDelegationTools(t *testing.T) {
 		if seen[name] == 0 {
 			t.Errorf("delegation tool %q missing from wildcard schemas (want exactly 1)", name)
 		}
+	}
+}
+
+func TestApplyToolbelt_WildcardIncludesGitHubCLI(t *testing.T) {
+	reg := tools.NewRegistry()
+	for _, name := range []string{"gh_issue_list", "gh_pr_list", "bash"} {
+		reg.Register(&localTestTool{name: name})
+	}
+	reg.TagTools([]string{"gh_issue_list", "gh_pr_list"}, "github_cli")
+	reg.TagTools([]string{"bash"}, "builtin")
+
+	ag := &agents.Agent{
+		Name:     "Astra",
+		Toolbelt: []agents.ToolbeltEntry{{Provider: "*", ConnectionID: "*"}},
+	}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+	names := map[string]bool{}
+	for _, s := range schemas {
+		names[s.Function.Name] = true
+	}
+	if !names["gh_issue_list"] || !names["gh_pr_list"] {
+		t.Fatalf("wildcard toolbelt missing github CLI schemas: %v", names)
+	}
+	if names["bash"] {
+		t.Error("wildcard toolbelt must not grant bash without local_tools")
+	}
+}
+
+func TestApplyToolbelt_EmptyBeltExcludesGitHubCLI(t *testing.T) {
+	reg := tools.NewRegistry()
+	for _, name := range []string{"gh_issue_create", "gh_issue_list", "gh_pr_list", "github"} {
+		reg.Register(&localTestTool{name: name})
+	}
+	reg.TagTools([]string{"gh_issue_create", "gh_issue_list", "gh_pr_list"}, "github_cli")
+	reg.TagTools([]string{"github"}, "github")
+	for _, name := range []string{"delegate_to_agent", "wait_for_threads", "list_team_status", "recall_thread_result"} {
+		reg.Register(&localTestTool{name: name})
+	}
+	reg.TagTools([]string{"delegate_to_agent", "wait_for_threads", "list_team_status", "recall_thread_result"}, "builtin")
+
+	ag := &agents.Agent{Name: "Reggie", LocalTools: nil, Toolbelt: nil}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+	var names []string
+	for _, s := range schemas {
+		n := s.Function.Name
+		names = append(names, n)
+		low := strings.ToLower(n)
+		if low == "gh_issue_create" || strings.HasPrefix(low, "gh_") || low == "github" || strings.Contains(low, "github") {
+			t.Fatalf("empty LocalTools+Toolbelt leaked github schema %q; schemas=%v", n, names)
+		}
+	}
+	// Delegation may still inject.
+	if !containsName(names, "delegate_to_agent") {
+		t.Fatalf("expected delegate_to_agent injection, got %v", names)
+	}
+}
+
+func containsName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestApplyToolbelt_EmptyBelt_ProductionTaggingNoGitHub(t *testing.T) {
+	// Same register+tag order as oneshot.DefaultToolRegistry / init_tools.
+	reg := tools.NewRegistry()
+	for _, name := range tools.GitHubCLIToolNames() {
+		reg.Register(&localTestTool{name: name})
+	}
+	reg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+	reg.TagTools(tools.BuiltinToolNames(), "builtin")
+	if p := reg.ProviderFor("gh_issue_create"); p == "builtin" {
+		t.Fatal("gh_issue_create must not be tagged builtin")
+	}
+	if p := reg.ProviderFor("gh_issue_create"); p != "github_cli" {
+		t.Fatalf("gh_issue_create provider = %q, want github_cli", p)
+	}
+
+	ag := &agents.Agent{Name: "Reggie", LocalTools: nil, Toolbelt: nil}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+	for _, s := range schemas {
+		n := strings.ToLower(s.Function.Name)
+		if n == "gh_issue_create" || strings.HasPrefix(n, "gh_") || n == "github" || strings.Contains(n, "github") {
+			t.Fatalf("production tagging leaked %q into empty-belt schemas", s.Function.Name)
+		}
+	}
+}
+
+func TestApplyToolbelt_CreateAgentGrantWall(t *testing.T) {
+	reg := buildLocalTestRegistry()
+	reg.Register(&localTestTool{name: "create_agent"})
+	// Intentionally not tagged builtin — God Mode must not receive hire.
+
+	star, _ := applyToolbelt(&agents.Agent{Name: "Astra", LocalTools: []string{"*"}}, reg, nil)
+	if hasSchema(star, "create_agent") {
+		t.Fatal("local_tools ['*'] must NOT include create_agent")
+	}
+
+	none, _ := applyToolbelt(&agents.Agent{Name: "Sam"}, reg, nil)
+	if hasSchema(none, "create_agent") {
+		t.Fatal("specialist without grant: schema must be absent")
+	}
+
+	named, _ := applyToolbelt(&agents.Agent{Name: "Sam", LocalTools: []string{"read_file"}}, reg, nil)
+	if hasSchema(named, "create_agent") {
+		t.Fatal("named specialist list without grant: schema must be absent")
+	}
+
+	winston, _ := applyToolbelt(&agents.Agent{Name: "Winston", LocalTools: []string{"create_agent"}}, reg, nil)
+	if !hasSchema(winston, "create_agent") {
+		t.Fatal("Winston with named grant must see create_agent")
+	}
+}
+
+func TestApplyToolbelt_ToolbeltWildcardDoesNotGrantCreateAgent(t *testing.T) {
+	reg := buildLocalTestRegistry()
+	reg.Register(&localTestTool{name: "create_agent"})
+	steve, _ := applyToolbelt(&agents.Agent{
+		Name:       "Steve",
+		LocalTools: []string{"bash"},
+		Toolbelt:   []agents.ToolbeltEntry{{Provider: "*", ConnectionID: "*"}},
+	}, reg, nil)
+	if hasSchema(steve, "create_agent") {
+		t.Fatal("toolbelt ['*'] must NOT include create_agent")
+	}
+	god, _ := applyToolbelt(&agents.Agent{Name: "hiregod", LocalTools: []string{"*"}}, reg, nil)
+	if hasSchema(god, "create_agent") {
+		t.Fatal("local_tools ['*'] must NOT include create_agent")
+	}
+	winston, _ := applyToolbelt(&agents.Agent{
+		Name:       "Winston",
+		LocalTools: []string{"create_agent"},
+		Toolbelt:   []agents.ToolbeltEntry{{Provider: "*", ConnectionID: "*"}},
+	}, reg, nil)
+	if !hasSchema(winston, "create_agent") {
+		t.Fatal("named create_agent grant must survive toolbelt wildcard")
+	}
+}
+
+func TestBuiltinToolNamesOmitsCreateAgent(t *testing.T) {
+	for _, n := range tools.BuiltinToolNames() {
+		if n == "create_agent" {
+			t.Fatal("create_agent must not be in BuiltinToolNames")
+		}
+	}
+}
+
+func hasSchema(schemas []backend.Tool, name string) bool {
+	for _, s := range schemas {
+		if s.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestApplyToolbelt_TierLowOmitsDelegate(t *testing.T) {
+	reg := buildDelegationTestRegistry()
+	ag := &agents.Agent{Name: "Tiny", ModelID: "qwen2.5-coder:7b", LocalTools: []string{"read_file"}}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+	if hasSchema(schemas, "delegate_to_agent") {
+		t.Fatal("TierLow must not receive delegate_to_agent")
+	}
+	if hasSchema(schemas, "wait_for_threads") || hasSchema(schemas, "list_team_status") {
+		t.Fatal("TierLow must not receive delegation tools")
+	}
+	if !hasSchema(schemas, "read_file") {
+		t.Fatal("named local tool must remain")
+	}
+}
+
+func TestApplyToolbelt_TierLowStarOmitsDelegate(t *testing.T) {
+	reg := buildDelegationTestRegistry()
+	ag := &agents.Agent{Name: "Tiny", ModelID: "qwen2.5-coder:7b", LocalTools: []string{"*"}}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+	if hasSchema(schemas, "delegate_to_agent") {
+		t.Fatal("TierLow LocalTools [*] must not keep delegate_to_agent from step 1")
+	}
+	if !hasSchema(schemas, "read_file") {
+		t.Fatal("wildcard builtins other than delegation must remain")
+	}
+}
+
+func TestApplyToolbelt_HighTierWinstonKeepsCreateAgentAndDelegate(t *testing.T) {
+	reg := buildDelegationTestRegistry()
+	reg.Register(&localTestTool{name: "create_agent"})
+	ag := &agents.Agent{
+		Name:       "Winston",
+		ModelID:    "claude-sonnet-4",
+		LocalTools: []string{"create_agent"},
+	}
+	schemas, _ := applyToolbelt(ag, reg, nil)
+	if !hasSchema(schemas, "create_agent") {
+		t.Fatal("Winston named create_agent grant must remain")
+	}
+	if !hasSchema(schemas, "delegate_to_agent") {
+		t.Fatal("high-tier Winston must still receive delegate_to_agent")
 	}
 }

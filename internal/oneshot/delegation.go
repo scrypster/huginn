@@ -50,13 +50,10 @@ func attachDelegation(
 
 	noopBroadcast := func(string, string, map[string]any) {}
 
-	loadSess := func(sid string) *session.Session {
-		if sessStore != nil {
-			if sess, err := sessStore.Load(sid); err == nil && sess != nil {
-				return sess
-			}
+	if sessionID != "" && sessStore != nil {
+		if _, err := session.LoadForDelegate(sessStore, sessionID, ""); err != nil {
+			// persist failure is non-fatal here; the tool call will surface it
 		}
-		return &session.Session{ID: sid}
 	}
 
 	toolReg.Register(&threadmgr.DelegateToAgentTool{
@@ -68,6 +65,10 @@ func attachDelegation(
 			if sid == "" {
 				return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: no session ID in context")}
 			}
+			sess, loadErr := session.LoadForDelegate(sessStore, sid, agent.GetSpaceID(ctx))
+			if loadErr != nil {
+				return threadmgr.DelegateResult{Err: loadErr}
+			}
 			if _, found := agentReg.ByName(p.AgentName); !found {
 				return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: unknown agent %q", p.AgentName)}
 			}
@@ -75,7 +76,6 @@ func attachDelegation(
 				return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: cannot delegate to yourself (%s) — do that work directly or pick a specialist", caller)}
 			}
 
-			sess := loadSess(sid)
 			t, createErr := tm.Create(threadmgr.CreateParams{
 				SessionID:       sid,
 				AgentID:         p.AgentName,
@@ -113,10 +113,11 @@ func attachDelegation(
 
 			if tm.IsReady(t.ID) {
 				tid := t.ID
+				childCtx := threadmgr.CarryDelegationContext(spawnCtx, ctx)
 				dagFn := func() {
-					tm.EvaluateDAG(spawnCtx, sid, sessStore, sess, agentReg, b, noopBroadcast, ca)
+					tm.EvaluateDAG(childCtx, sid, sessStore, sess, agentReg, b, noopBroadcast, ca)
 				}
-				tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, noopBroadcast, ca, dagFn)
+				tm.SpawnThread(childCtx, tid, sessStore, sess, agentReg, b, noopBroadcast, ca, dagFn)
 				return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: true}
 			}
 			return threadmgr.DelegateResult{ThreadID: t.ID, Spawned: false}

@@ -36,18 +36,18 @@ const (
 type Agent struct {
 	mu sync.Mutex
 
-	Name          string
-	SystemPrompt  string
-	Color         string // lipgloss hex, e.g. "#58A6FF"
-	Icon          string // single char, e.g. "C"
-	IsDefault     bool
-	ModelID       string
-	Provider      string
-	Endpoint      string
-	APIKey        string
-	History       []backend.Message
-	VaultName     string
-	Plasticity    string
+	Name                string
+	SystemPrompt        string
+	Color               string // lipgloss hex, e.g. "#58A6FF"
+	Icon                string // single char, e.g. "C"
+	IsDefault           bool
+	ModelID             string
+	Provider            string
+	Endpoint            string
+	APIKey              string
+	History             []backend.Message
+	VaultName           string
+	Plasticity          string
 	MemoryEnabled       bool
 	ContextNotesEnabled bool
 	MemoryMode          string
@@ -206,30 +206,33 @@ func (a *Agent) SnapshotHistory(n int) []backend.Message {
 
 // BuildPersonaPrompt constructs the system prompt for an agent call,
 // prepending the agent's persona before the codebase context block.
+// An addendum lists this agent's local tools, image-generation grant,
+// and whether it can delegate — so the model can say so like a teammate
+// instead of crashing on a missing capability.
 func BuildPersonaPrompt(ag *Agent, ctxText string) string {
+	var body string
 	if ag.SystemPrompt != "" {
 		prefix := ""
 		if ag.Name != "" {
 			prefix = "Your name is " + ag.Name + ".\n\n"
 		}
-		return prefix + ag.SystemPrompt + "\n\n" + ctxText
+		body = prefix + ag.SystemPrompt
+	} else {
+		body = "You are " + ag.Name + ", an expert assistant. " +
+			"Use markdown formatting — tables, bold, code blocks, lists — when it improves readability."
 	}
-	return "You are " + ag.Name + ", an expert assistant. " +
-		"Use markdown formatting — tables, bold, code blocks, lists — when it improves readability.\n\n" + ctxText
+	if add := capabilityAddendum(ag); add != "" {
+		body += "\n\n" + add
+	}
+	return body + "\n\n" + ctxText
 }
 
 // BuildPersonaPromptWithRoster builds the system prompt for a primary agent,
 // appending the agent roster when one is provided. Returns the base prompt
-// unchanged if roster is empty.
+// unchanged if roster is empty. Delegation instructions are omitted when
+// the agent's model does not support delegation (TierLow).
 func BuildPersonaPromptWithRoster(ag *Agent, ctxText, roster string) string {
-	base := BuildPersonaPrompt(ag, ctxText)
-	if roster == "" {
-		return base
-	}
-	return base + "\n\n## Your Team\n" + roster +
-		"\n\nUse `delegate_to_agent` to assign sub-tasks to team members, then `wait_for_threads` to collect their full results when you need them before replying. " +
-		"Only delegate when the request clearly requires another agent's specialized expertise. " +
-		"For simple conversational messages (greetings, questions, general chat), respond directly — do not delegate."
+	return AppendTeamRoster(BuildPersonaPrompt(ag, ctxText), roster, AgentSupportsDelegation(ag))
 }
 
 // BuildPersonaPromptWithMemory constructs the system prompt with cross-session context.

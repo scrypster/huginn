@@ -1,6 +1,9 @@
 package models
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -127,5 +130,99 @@ func TestTryRefreshProviderCatalog_SkipsWhenCacheIsFresh(t *testing.T) {
 	}
 	if string(got) != string(initial) {
 		t.Fatal("expected fresh cache file to remain unchanged")
+	}
+}
+
+func TestRefreshProviderCatalog_Non200StampsAndDoesNotRetry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	refreshProviderCatalog(srv.URL, 7*24*time.Hour)
+	if hits != 1 {
+		t.Fatalf("first start: hits=%d, want 1", hits)
+	}
+
+	stampPath := defaultProviderCatalogStampPath()
+	data, err := os.ReadFile(stampPath)
+	if err != nil {
+		t.Fatalf("expected last-attempt stamp at %s: %v", stampPath, err)
+	}
+	var stamp struct {
+		Status int `json:"status"`
+	}
+	if err := json.Unmarshal(data, &stamp); err != nil {
+		t.Fatalf("parse stamp: %v", err)
+	}
+	if stamp.Status != http.StatusForbidden {
+		t.Fatalf("stamp status=%d, want 403", stamp.Status)
+	}
+
+	if _, err := os.Stat(defaultProviderCatalogPath()); err == nil {
+		t.Fatal("403 must not write provider_catalog.json; bundled catalog stays")
+	}
+
+	// Second startServer: freshness gate sees the stamp and must not GET again.
+	refreshProviderCatalog(srv.URL, 7*24*time.Hour)
+	if hits != 1 {
+		t.Fatalf("second start retried CDN; hits=%d, want 1", hits)
+	}
+}
+
+func TestRefreshProviderCatalog_Non200PreservesExistingCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cachePath := defaultProviderCatalogPath()
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	initial := []byte(`{"catalog_version":"bundled-stay","providers":{}}`)
+	if err := os.WriteFile(cachePath, initial, 0644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+	// Age the cache so the freshness gate would otherwise refetch.
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(cachePath, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	refreshProviderCatalog(srv.URL, 7*24*time.Hour)
+	if hits != 1 {
+		t.Fatalf("hits=%d, want 1", hits)
+	}
+	got, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	if string(got) != string(initial) {
+		t.Fatalf("existing catalog overwritten on non-200: %s", got)
+	}
+
+	refreshProviderCatalog(srv.URL, 7*24*time.Hour)
+	if hits != 1 {
+		t.Fatalf("500 stamp did not gate retry; hits=%d", hits)
+	}
+}
+
+func TestDefaultProviderCatalogStampPath_UsesHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	got := defaultProviderCatalogStampPath()
+	want := filepath.Join(home, ".huginn", "provider_catalog.last_attempt")
+	if got != want {
+		t.Fatalf("defaultProviderCatalogStampPath() = %q, want %q", got, want)
 	}
 }

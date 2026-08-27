@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   spaceRosterNames,
+  mentionableNames,
   filterMentionSuggestions,
   dropUnknownLeadMention,
   extractLeadMention,
@@ -132,6 +133,44 @@ describe('dropUnknownLeadMention', () => {
     const result = dropUnknownLeadMention('@Steve please ask @Tess about hostname', ['Steve'])
     expect(result.content).toBe('@Steve please ask about hostname')
     expect(result.dropped).toBe('Tess')
+  })
+})
+
+describe('mentionableNames company ∩ space', () => {
+  const huginn = { kind: 'channel', leadAgent: 'Winston', memberAgents: ['Steve', 'Winston'], companyId: 'co-huginn' }
+  const lab = { kind: 'channel', leadAgent: 'Winston', memberAgents: ['Winston', 'Sam'], companyId: 'co-lab' }
+  const desk = { kind: 'channel', leadAgent: 'Winston', memberAgents: ['Steve', 'Reggie'], companyId: '' }
+
+  it('Lab space does not offer Reggie', () => {
+    const names = mentionableNames(lab, ['Winston', 'Sam'])
+    expect(names).not.toContain('Reggie')
+    expect(names).not.toContain('Steve')
+    const items = filterMentionSuggestions(
+      [{ name: 'Reggie' }, { name: 'Winston' }, { name: 'Sam' }, { name: 'Steve' }],
+      '',
+      names,
+    )
+    expect(items.map(a => a.name)).toEqual(['Winston', 'Sam'])
+    expect(items.map(a => a.name)).not.toContain('Reggie')
+  })
+
+  it('Huginn space does not offer Lab-only Sam', () => {
+    const names = mentionableNames(huginn, ['Winston', 'Steve'])
+    expect(names).toContain('Winston')
+    expect(names).toContain('Steve')
+    expect(names).not.toContain('Sam')
+    const items = filterMentionSuggestions(
+      [{ name: 'Sam' }, { name: 'Steve' }, { name: 'Winston' }, { name: 'Reggie' }],
+      '',
+      names,
+    )
+    expect(items.map(a => a.name)).toEqual(['Steve', 'Winston'])
+    expect(items.map(a => a.name)).not.toContain('Sam')
+  })
+
+  it('desk (empty company_id) stays space-member picker', () => {
+    const names = mentionableNames(desk, ['Winston'])
+    expect(names).toEqual(['Winston', 'Steve', 'Reggie'])
   })
 })
 

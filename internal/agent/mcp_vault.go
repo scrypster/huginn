@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/logger"
 	mcp "github.com/scrypster/huginn/internal/mcp"
 	mem "github.com/scrypster/huginn/internal/memory"
@@ -108,9 +109,10 @@ func connectVaultWithRetry(ctx context.Context, buildFn func() (*mcp.MCPClient, 
 type VaultReconnector struct {
 	mu            sync.Mutex
 	buildFn       func() (*mcp.MCPClient, func()) // captures endpoint+muninnCfg; re-reads token each call
-	sessionReg    *tools.Registry                  // the per-session fork (never the shared parent)
-	toolNames     []string                         // names currently registered, for cleanup
-	cancelCurrent func()                           // closes the current MCP transport
+	sessionReg    *tools.Registry                 // the per-session fork (never the shared parent)
+	toolNames     []string                        // names currently registered, for cleanup
+	cancelCurrent func()                          // closes the current MCP transport
+	vaultName     string                          // pinned on every muninn_* call; omit → Muninn default
 
 	// warnOnce gates the "vault lost" StreamWarning per connection lifetime.
 	// Stored as atomic.Pointer so TryReconnect (under mu) can reset it without
@@ -127,12 +129,14 @@ func newVaultReconnector(
 	sessionReg *tools.Registry,
 	toolNames []string,
 	cancelFn func(),
+	vaultName string,
 ) *VaultReconnector {
 	vr := &VaultReconnector{
 		buildFn:       buildFn,
 		sessionReg:    sessionReg,
 		toolNames:     append([]string(nil), toolNames...),
 		cancelCurrent: cancelFn,
+		vaultName:     pinMuninnVault(vaultName),
 	}
 	vr.warnOnce.Store(warnOnceKey{}, new(sync.Once))
 	return vr
@@ -177,7 +181,7 @@ func (vr *VaultReconnector) TryReconnect(ctx context.Context) bool {
 
 	newNames := make([]string, 0, len(mcpTools))
 	for _, t := range mcpTools {
-		vr.sessionReg.Register(mcp.NewMCPToolAdapter(client, t))
+		vr.sessionReg.Register(pinMuninnTool(mcp.NewMCPToolAdapter(client, t), t, vr.vaultName))
 		vr.sessionReg.TagTools([]string{t.Name}, "muninndb")
 		newNames = append(newNames, t.Name)
 	}
@@ -204,6 +208,15 @@ func (vr *VaultReconnector) Close() {
 		vr.cancelCurrent()
 		vr.cancelCurrent = nil
 	}
+}
+
+// logVaultUnavailable records a vault setup failure for operators.
+// The web UI shows a dismissible chip instead of a StreamWarning chat bubble.
+func logVaultUnavailable(agentName, sessionID, warning string) {
+	if warning == "" {
+		return
+	}
+	slog.Warn("vault unavailable for agent session", "agent", agentName, "session_id", sessionID, "warning", warning)
 }
 
 // vaultResult holds the outcome of a connectAgentVault call.
@@ -363,7 +376,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}}
 	}
 
-	logger.Warn("muninn mcp: connecting vault", "agent", ag.Name, "vault", ag.VaultName)
+	logger.Info("muninn mcp: connecting vault", "agent", ag.Name, "vault", ag.VaultName)
 
 	o.mu.Lock()
 	cfgPath := o.muninnCfgPath
@@ -422,7 +435,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	// Register vault tools into the FORK only — never the shared parent registry.
 	toolNames := make([]string, 0, len(mcpTools))
 	for _, t := range mcpTools {
-		sessionReg.Register(mcp.NewMCPToolAdapter(client, t))
+		sessionReg.Register(pinMuninnTool(mcp.NewMCPToolAdapter(client, t), t, ag.VaultName))
 		sessionReg.TagTools([]string{t.Name}, "muninndb")
 		toolNames = append(toolNames, t.Name)
 	}
@@ -430,7 +443,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	// Construct a reconnector that owns the vault MCP client lifecycle.
 	// cancel delegates to reconnector.Close() so existing defer vr.cancel() callers
 	// continue to work without modification.
-	reconnector := newVaultReconnector(buildFn, sessionReg, toolNames, cancelFn)
+	reconnector := newVaultReconnector(buildFn, sessionReg, toolNames, cancelFn, ag.VaultName)
 
 	// memoryBlock is only populated on successful connection.
 	block := agents.BuildMemoryBlock(ag)
@@ -441,4 +454,45 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 		reconnector: reconnector,
 		memoryBlock: block,
 	}
+}
+
+// vaultPinnedTool injects vault= on Muninn calls when the model or harness omits it.
+// Muninn treats a missing vault as `default` — never allow that.
+type vaultPinnedTool struct {
+	inner tools.Tool
+	vault string
+}
+
+func pinMuninnTool(inner tools.Tool, t mcp.MCPTool, vault string) tools.Tool {
+	if inner == nil {
+		return inner
+	}
+	if _, ok := t.InputSchema.Properties["vault"]; !ok {
+		return inner
+	}
+	return &vaultPinnedTool{inner: inner, vault: pinMuninnVault(vault)}
+}
+
+func (t *vaultPinnedTool) Name() string                      { return t.inner.Name() }
+func (t *vaultPinnedTool) Description() string               { return t.inner.Description() }
+func (t *vaultPinnedTool) Permission() tools.PermissionLevel { return t.inner.Permission() }
+func (t *vaultPinnedTool) Schema() backend.Tool              { return t.inner.Schema() }
+
+func (t *vaultPinnedTool) Execute(ctx context.Context, args map[string]any) tools.ToolResult {
+	if args == nil {
+		args = map[string]any{}
+	} else {
+		cp := make(map[string]any, len(args)+1)
+		for k, v := range args {
+			cp[k] = v
+		}
+		args = cp
+	}
+	raw, _ := args["vault"].(string)
+	if strings.TrimSpace(raw) == "" {
+		args["vault"] = pinMuninnVault(t.vault)
+	} else {
+		args["vault"] = pinMuninnVault(raw)
+	}
+	return t.inner.Execute(ctx, args)
 }

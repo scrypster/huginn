@@ -152,6 +152,7 @@ export interface SpaceMessage {
   session_id: string
   seq: number
   ts: string
+  created_at?: string
   role: 'user' | 'assistant'
   content: string
   agent: string
@@ -159,6 +160,12 @@ export interface SpaceMessage {
   // Used by the frontend to force header rendering even when the previous
   // message is from the same agent.
   parent_message_id?: string
+  // Slack-style space reply parent. Empty/absent = channel/DM root.
+  parent_id?: string
+  // Slack-style reply count for the "N replies" chip.
+  reply_count?: number
+  last_preview?: string
+  new_since?: number
   // Populated from WS tool_result events during streaming, or from the server on load.
   // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
   toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean }[]
@@ -403,11 +410,42 @@ export const api = {
     disconnect: () => apiFetch<{ status: string }>('/api/v1/cloud/connect', { method: 'DELETE' }),
   },
 
+  companies: {
+    // GET /api/v1/companies — fail-soft at the composable. Missing API → empty list = desk only.
+    list: () => apiFetch<unknown>('/api/v1/companies'),
+    create: (body: { name: string; vault?: string; members?: string[]; icon?: string; color?: string }) =>
+      apiFetch<unknown>('/api/v1/companies', { method: 'POST', body: JSON.stringify(body) }),
+    get: (id: string) => apiFetch<unknown>(`/api/v1/companies/${encodeURIComponent(id)}`),
+    update: (id: string, patch: { lead?: string; name?: string; vault?: string; icon?: string; color?: string }) =>
+      apiFetch<unknown>(`/api/v1/companies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    seat: (id: string, agent: string) =>
+      apiFetch<unknown>(`/api/v1/companies/${encodeURIComponent(id)}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ agent }),
+      }),
+    unseat: (id: string, agent: string) =>
+      apiFetch<unknown>(`/api/v1/companies/${encodeURIComponent(id)}/members/${encodeURIComponent(agent)}`, {
+        method: 'DELETE',
+      }),
+    remove: (id: string) =>
+      apiFetch<unknown>(`/api/v1/companies/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
+
   spaces: {
-    list: () => apiFetch<unknown[]>('/api/v1/spaces'),
+    list: (opts?: { company_id?: string }) => {
+      const params = new URLSearchParams()
+      if (opts?.company_id) params.set('company_id', opts.company_id)
+      const q = params.toString()
+      return apiFetch<unknown[]>(q ? `/api/v1/spaces?${q}` : '/api/v1/spaces')
+    },
     get: (id: string) => apiFetch<unknown>(`/api/v1/spaces/${id}`),
-    getDM: (agentName: string) => apiFetch<unknown>(`/api/v1/spaces/dm/${encodeURIComponent(agentName)}`),
-    createChannel: (opts: { name: string; lead_agent: string; member_agents: string[]; icon?: string; color?: string }) =>
+    getDM: (agentName: string, opts?: { company_id?: string }) => {
+      const params = new URLSearchParams()
+      if (opts?.company_id) params.set('company_id', opts.company_id)
+      const q = params.toString()
+      return apiFetch<unknown>(`/api/v1/spaces/dm/${encodeURIComponent(agentName)}${q ? `?${q}` : ''}`)
+    },
+    createChannel: (opts: { name: string; lead_agent: string; member_agents: string[]; icon?: string; color?: string; company_id?: string; kind?: string }) =>
       apiFetch<unknown>('/api/v1/spaces', { method: 'POST', body: JSON.stringify(opts) }),
     updateSpace: (id: string, patch: Record<string, unknown>) =>
       apiFetch<unknown>(`/api/v1/spaces/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
@@ -425,10 +463,27 @@ export const api = {
         { signal: opts?.signal },
       )
     },
+    replies: (spaceId: string, parentId: string, opts?: { signal?: AbortSignal }) => {
+      const params = new URLSearchParams({ parent_id: parentId })
+      return apiFetch<{ messages: SpaceMessage[]; participant?: boolean; unseen?: number }>(
+        `/api/v1/space-messages/${spaceId}/replies?${params}`,
+        { signal: opts?.signal },
+      )
+    },
+    postMessage: (spaceId: string, body: { content: string; parent_id?: string }) =>
+      apiFetch<SpaceMessage>(`/api/v1/space-messages/${spaceId}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    markThreadRead: (spaceId: string, parentId: string) =>
+      apiFetch<{ ok: boolean; unseen: number }>(`/api/v1/space-messages/${spaceId}/thread-read`, {
+        method: 'POST',
+        body: JSON.stringify({ parent_id: parentId }),
+      }),
   },
 
   muninn: {
-    status: () => apiFetch<{ connected: boolean; endpoint?: string; username?: string }>('/api/v1/muninn/status'),
+    status: () => apiFetch<{ connected: boolean; detected?: boolean; installed?: boolean; running?: boolean; endpoint?: string; username?: string }>('/api/v1/muninn/status'),
     test: (payload: Record<string, string>) =>
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/muninn/test', {
         method: 'POST',
@@ -438,6 +493,10 @@ export const api = {
       apiFetch<{ ok: boolean; error?: string }>('/api/v1/muninn/connect', {
         method: 'POST',
         body: JSON.stringify(payload),
+      }),
+    connectLocal: () =>
+      apiFetch<{ ok: boolean; connected: boolean; installed?: boolean; running?: boolean; detected?: boolean; endpoint?: string; vaults?: string[] }>('/api/v1/muninn/connect-local', {
+        method: 'POST',
       }),
     vaults: () => apiFetch<{ vaults: string[] }>('/api/v1/muninn/vaults'),
     remember: (vault: string, content: string) =>

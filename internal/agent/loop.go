@@ -71,6 +71,15 @@ type RunLoopConfig struct {
 	// by VaultReconnector.EmitWarnOnce (VaultWarnOnce is ignored).
 	// Nil = warn-once + degrade for the rest of the session (original behavior).
 	VaultReconnector *VaultReconnector
+
+	// MemoryMode / MemoryVault opt this loop into post-turn harness persist.
+	// Both empty = skip (loop used without a connected vault).
+	MemoryMode    string
+	MemoryVault   string
+	MemoryAgent   string
+	MemoryUserMsg string
+	MemorySession string
+	MemoryHome    string // ~/.huginn; MD fallback when Muninn is off
 }
 
 // LoopResult is the final state after the loop ends.
@@ -81,6 +90,8 @@ type LoopResult struct {
 	Messages         []backend.Message // full message history
 	PromptTokens     int               // cumulative prompt tokens across all turns
 	CompletionTokens int               // cumulative completion tokens across all turns
+	MemoryReceipt    bool              // model or harness wrote this turn
+	HoldClose        bool              // immersive fail-closed: do not emit assistant row
 }
 
 // executeSingle executes a single tool call and returns the result.
@@ -134,14 +145,14 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 
 	tool, ok := cfg.Tools.Get(toolName)
 	if !ok {
-		return makeResult(fmt.Sprintf("error: unknown tool %q", toolName))
+		return makeResult(fmt.Sprintf("I don't have %s.", toolName))
 	}
 
 	// Runtime enforcement: verify the tool was included in the schemas sent
 	// to the model. A tool may exist in the registry but not be permitted
 	// for this agent's toolbelt.
 	if !cfg.toolSchemaAllows(toolName) {
-		return makeResult(fmt.Sprintf("error: tool %q is not available", toolName))
+		return makeResult(fmt.Sprintf("I don't have %s.", toolName))
 	}
 
 	if cfg.Gate != nil {
@@ -249,6 +260,9 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 	} else if content == "" && toolResult.Error != "" {
 		content = toolResult.Error
 	}
+	// Mechanical rewrite at the tool-result boundary: keyring / API-key
+	// dumps never reach the 14b. Teammate deny, no secrets.
+	content = RewriteCredentialToolResult(content)
 
 	// Truncate large tool outputs to avoid overflowing the model's context window.
 	const maxToolOutputBytes = 100 * 1024 // 100 KB
@@ -398,14 +412,29 @@ func isIndependentTool(toolName string, args map[string]any, allCalls []backend.
 // RunLoop runs the agentic tool-calling loop.
 // It calls the model, executes any tool_calls, feeds results back, and repeats
 // until the model stops calling tools or MaxTurns is reached.
-func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
+func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err error) {
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = 50
 	}
 	messages := make([]backend.Message, len(cfg.Messages))
 	copy(messages, cfg.Messages)
 
-	result := &LoopResult{}
+	result = &LoopResult{}
+	if early := imageAskStop(messages, cfg.ToolSchemas); early != "" {
+		if cfg.OnToken != nil {
+			cfg.OnToken(early)
+		}
+		messages = append(messages, backend.Message{Role: "assistant", Content: early})
+		result.FinalContent = early
+		result.StopReason = "stop"
+		result.Messages = messages
+		return result, nil
+	}
+	defer func() {
+		if result != nil && err == nil {
+			applyLoopMemoryGate(ctx, cfg, result)
+		}
+	}()
 
 	var consecutiveParseFailures int
 	// Auto-wait: a lead that delegates and then stops without wait_for_threads
@@ -422,6 +451,8 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 	// dropped, residual stripped, run stops. Small leads otherwise re-run
 	// the playbook (recall / delegate again) against a task that is done.
 	var specialistResult bool
+	var workDone bool
+	var lastWorkSpeech string
 	var speechHinted bool
 	var contentBeforeAutoWait string
 	var denied atomic.Bool
@@ -447,15 +478,15 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		if tokenGate != nil {
 			onToken = tokenGate.OnToken
 		}
-		speechOnly := specialistResult
+		speechOnly := specialistResult || workDone
 		if speechOnly && !speechHinted {
-			// 14b otherwise answers the last leftover question (the math)
-			// and never says what the specialist reported.
 			speechHinted = true
-			messages = append(messages, backend.Message{
-				Role:    "user",
-				Content: "[system] Specialists already finished. Speak to the human: say what they reported, then finish any leftover question. No tools. No playbook. No templates.",
-			})
+			hint := "[system] Specialists already finished. Speak to the human: say what they reported, then finish any leftover question. No tools. No playbook. No templates."
+			if workDone && !specialistResult {
+				// 14b specialists otherwise re-fire the same bash until max turns.
+				hint = "[system] The tool already ran. Tell the human the result in one short sentence. No more tools."
+			}
+			messages = append(messages, backend.Message{Role: "user", Content: hint})
 		}
 		turnCtx := ctx
 		var cutter *speechTurnCutter
@@ -518,7 +549,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 					"tools", names, "turn", turn+1)
 				chatResult.ToolCalls = nil
 			}
-			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content)
+			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content, lastHumanUserText(messages))
 			if chatResult.Content == "" {
 				// Nothing sayable came back: keep the last real prose so the
 				// run does not end on a blank line.
@@ -526,7 +557,11 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 				if chatResult.Content == "" {
 					chatResult.Content = contentBeforeAutoWait
 				}
+				if chatResult.Content == "" {
+					chatResult.Content = lastWorkSpeech
+				}
 			}
+			chatResult.Content = applyTeammateSpeech(messages, cfg.ToolSchemas, chatResult.Content)
 			if cfg.OnToken != nil && chatResult.Content != "" && !cutter.Cut() {
 				// Emit the sayable remainder once (the turn was buffered).
 				cfg.OnToken(chatResult.Content)
@@ -548,7 +583,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			// content (not always leading). After tools ran, small models
 			// also echo wait placeholders, playbook glue, and the tool
 			// result as JSON next to the answer. None of that is speech.
-			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content)
+			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content, lastHumanUserText(messages))
 		}
 
 		// Append assistant response to history
@@ -602,9 +637,13 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 					Role:      "assistant",
 					ToolCalls: []backend.ToolCall{wc},
 				})
+				var waitAnswer string
 				for _, dr := range cfg.dispatchTools(ctx, []backend.ToolCall{wc}) {
 					if waitReturnedSpecialistResult(dr.content) {
 						specialistResult = true
+						if backend.WaitHasSpecialistAnswer(dr.content) {
+							waitAnswer = dr.content
+						}
 					}
 					messages = append(messages, backend.Message{
 						Role:       "tool",
@@ -618,12 +657,21 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 					result.Messages = messages
 					return result, fmt.Errorf("run loop cancelled: %w", ctxErr)
 				}
+				if waitAnswer != "" {
+					return stopTurnPersist(result, messages, cfg, result.FinalContent, waitAnswer, lastHumanUserText(messages))
+				}
 				continue
 			}
 			if autoWaited && result.FinalContent == "" {
 				// The post-wait turn produced nothing; keep the pre-wait prose
 				// rather than ending with an empty answer.
 				result.FinalContent = contentBeforeAutoWait
+			}
+			if speech := applyTeammateSpeech(messages, cfg.ToolSchemas, result.FinalContent); speech != result.FinalContent {
+				result.FinalContent = speech
+				if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
+					messages[n-1].Content = speech
+				}
 			}
 			result.StopReason = "stop"
 			result.Messages = messages
@@ -633,16 +681,35 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 		// Execute tool calls — independent ones in parallel, serial ones after
 		dispatched := cfg.dispatchTools(ctx, chatResult.ToolCalls)
 		toolsRan = true
+		var wallDeny, waitAnswer string
 		for _, dr := range dispatched {
 			switch dr.tc.Function.Name {
 			case "delegate_to_agent":
 				if !strings.HasPrefix(dr.content, "error:") {
 					delegated = true
+				} else if backend.IsCompanyWallDeny(dr.content) {
+					wallDeny = dr.content
+				}
+			case "consult_agent":
+				if backend.IsCompanyWallDeny(dr.content) {
+					wallDeny = dr.content
 				}
 			case "wait_for_threads":
 				waitedForThreads = true
 				if waitReturnedSpecialistResult(dr.content) {
 					specialistResult = true
+					if backend.WaitHasSpecialistAnswer(dr.content) {
+						waitAnswer = dr.content
+					}
+				}
+			case "recall_thread_result", "list_team_status":
+				// A2A glue — not specialist work of its own.
+			default:
+				if isTerminalWorkTool(dr.tc.Function.Name) &&
+					!strings.HasPrefix(dr.content, "error:") &&
+					strings.TrimSpace(dr.content) != "" {
+					workDone = true
+					lastWorkSpeech = dr.content
 				}
 			}
 			messages = append(messages, backend.Message{
@@ -660,11 +727,31 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			result.Messages = messages
 			return result, fmt.Errorf("run loop cancelled: %w", ctxErr)
 		}
+
+		ask := lastHumanUserText(messages)
+		if wallDeny != "" && !userAskedSam(ask) {
+			return stopTurnPersist(result, messages, cfg, result.FinalContent, wallDeny, ask)
+		}
+		if waitAnswer != "" {
+			return stopTurnPersist(result, messages, cfg, result.FinalContent, waitAnswer, ask)
+		}
 	}
 
 	result.StopReason = "max_turns"
 	result.Messages = messages
 	return result, nil
+}
+
+// isTerminalWorkTool is a specialist command that already did the job. After
+// one success, 14b otherwise re-fires the same bash until max turns and never
+// speaks. Plan/read/write stay multi-turn.
+func isTerminalWorkTool(name string) bool {
+	switch name {
+	case "bash", "shell", "exec":
+		return true
+	default:
+		return false
+	}
 }
 
 // waitReturnedSpecialistResult reports whether a wait_for_threads tool result
@@ -676,6 +763,31 @@ func waitReturnedSpecialistResult(content string) bool {
 		return false
 	}
 	return strings.Contains(content, "## Finished threads")
+}
+
+// userAskedSam is the only case where a company-wall deny may continue:
+// the human named Sam, so a re-delegate is their ask, not glue.
+func userAskedSam(ask string) bool {
+	return strings.Contains(strings.ToLower(ask), "ask sam")
+}
+
+// stopTurnPersist ends the run without another model completion and persists
+// the teammate wall / wait answer so leftover glue is never generated.
+func stopTurnPersist(result *LoopResult, messages []backend.Message, cfg RunLoopConfig, speech, blob, ask string) (*LoopResult, error) {
+	final := backend.PersistStopTurn(speech, blob, ask)
+	if final == "" {
+		final = strings.TrimSpace(speech)
+	}
+	if final != "" {
+		messages = append(messages, backend.Message{Role: "assistant", Content: final})
+		if cfg.OnToken != nil {
+			cfg.OnToken(final)
+		}
+	}
+	result.FinalContent = final
+	result.StopReason = "stop"
+	result.Messages = messages
+	return result, nil
 }
 
 // speechTurnCutter buffers the raw token stream of a speech-only turn. If

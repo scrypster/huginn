@@ -242,6 +242,14 @@ func (s *Satellite) ActiveHub() Hub {
 	return s.hub
 }
 
+// SetHub replaces the active hub. Tests inject a recording Hub so SendRelay
+// can be asserted without dialing HuginnCloud. Production uses Connect / ConnectHub.
+func (s *Satellite) SetHub(h Hub) {
+	s.mu.Lock()
+	s.hub = h
+	s.mu.Unlock()
+}
+
 // Reconnect closes the existing connection and immediately re-dials.
 // Used by the wake notifier to bypass reconnect backoff after OS sleep.
 func (s *Satellite) Reconnect(ctx context.Context) {

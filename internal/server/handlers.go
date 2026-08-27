@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/config"
@@ -363,126 +364,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	// Ensure the name matches the URL path
 	if incoming.Name == "" {
 		incoming.Name = name
 	}
-
-	// Load existing agent config once for use in multiple checks below.
-	existingCfg, _ := agents.LoadAgents()
-	if existingCfg == nil {
-		existingCfg = agents.DefaultAgentsConfig()
-	}
-
-	// Find the existing agent record (case-insensitive match on URL name).
-	var existingAgent *agents.AgentDef
-	for i := range existingCfg.Agents {
-		if strings.EqualFold(existingCfg.Agents[i].Name, name) {
-			existingAgent = &existingCfg.Agents[i]
-			break
-		}
-	}
-
-	// If the incoming APIKey is the [REDACTED] sentinel, preserve the real key
-	// from the existing agent record (GET → PUT round-trip safety).
-	if incoming.APIKey == "[REDACTED]" && existingAgent != nil {
-		incoming.APIKey = existingAgent.APIKey
-	}
-
-	// Optimistic locking: if the client sends Version > 0, it must match the
-	// stored version. Version == 0 means "skip check" (last-writer-wins).
-	if incoming.Version > 0 && existingAgent != nil && incoming.Version != existingAgent.Version {
-		jsonError(w, 409, fmt.Sprintf("agent version conflict: stored=%d, submitted=%d — reload and retry",
-			existingAgent.Version, incoming.Version))
+	if _, err := s.persistAgent(incoming, name); err != nil {
+		writePersistError(w, err)
 		return
 	}
-
-	// Guard against rename collisions: if the name is changing, reject if target already exists.
-	// Also guard against duplicate names when creating a NEW agent (existingAgent is nil).
-	isRename := !strings.EqualFold(incoming.Name, name)
-	isCreation := existingAgent == nil
-	if isRename || isCreation {
-		for _, a := range existingCfg.Agents {
-			if strings.EqualFold(a.Name, incoming.Name) {
-				// Skip self when checking for rename (allow non-changing saves).
-				if isRename && strings.EqualFold(a.Name, name) {
-					continue
-				}
-				jsonError(w, 409, fmt.Sprintf("agent %q already exists", incoming.Name))
-				return
-			}
-		}
-	}
-
-	// Vault name collision check: reject if the incoming VaultName is already
-	// claimed by a different agent. We skip the agent currently being updated
-	// (identified by the URL name) to allow non-changing saves.
-	if err := agents.CheckVaultNameCollision(incoming, name, "", existingCfg.Agents); err != nil {
-		jsonError(w, 422, err.Error())
-		return
-	}
-
-	// Infer provider from model name when the client doesn't supply one.
-	if incoming.Provider == "" && incoming.Model != "" {
-		incoming.Provider = agents.InferProvider(incoming.Model)
-	}
-
-	// Translate frontend memory_type enum to canonical fields before validation/save.
-	if err := incoming.ApplyMemoryType(); err != nil {
-		jsonError(w, 400, "invalid memory_type: "+err.Error())
-		return
-	}
-	// Persist a one-line description when the client omitted one so list rows
-	// never have to render a "No description" placeholder.
-	if incoming.Description == "" {
-		incoming.Description = agents.ExtractRoleBlurb(incoming.SystemPrompt, "")
-	}
-	if err := incoming.Validate(); err != nil {
-		jsonError(w, 422, "invalid agent: "+err.Error())
-		return
-	}
-	toolbeltResult, err := s.evaluateToolbelt(incoming.Toolbelt)
-	if err != nil {
-		jsonError(w, 500, "validate toolbelt: "+err.Error())
-		return
-	}
-	if !toolbeltResult.Valid {
-		if denied, ok := toolbeltResult.FirstDenied(); ok {
-			jsonError(w, 422, fmt.Sprintf("invalid toolbelt: %s (%s)", denied.Reason, denied.ReasonCode))
-			return
-		}
-		jsonError(w, 422, "invalid toolbelt")
-		return
-	}
-	if err := agents.SaveAgentDefault(incoming); err != nil {
-		jsonError(w, 500, "save agent: "+err.Error())
-		return
-	}
-	// If this was a rename, delete the old agent file.
-	if isRename {
-		_ = agents.DeleteAgentDefault(name) // best effort; ignore error
-	}
-	// Heartbeat lifecycle: sync or remove the managed workflow YAML.
-	if isRename {
-		_ = agents.RenameHeartbeatYAMLDefault(name, incoming) // best effort
-	} else {
-		_ = agents.SyncHeartbeatYAMLDefault(incoming) // best effort
-	}
-	// Refresh the live agent registry so the new/updated agent is immediately
-	// visible to delegation, mention parsing, and space rosters (issue #124).
-	s.notifyAgentsChanged()
-	// Broadcast so all connected frontends refresh their agent list.
-	action := "updated"
-	if existingAgent == nil {
-		action = "created"
-	}
-	s.BroadcastWS(WSMessage{
-		Type: "agent_changed",
-		Payload: map[string]any{
-			"name":   incoming.Name,
-			"action": action,
-		},
-	})
 	jsonOK(w, map[string]string{"saved": incoming.Name})
 }
 
@@ -764,6 +652,12 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 //	{"content": "your message"}
 //
 // Response: {"content": "<assistant reply>"}
+//
+// Session lookup uses the persisted store (hallway/space sessions live there).
+// Orchestrator.sessions is ephemeral and is not populated for store-backed
+// sessions after restart or Vue-created DMs. ChatForSession looks only at that
+// map and 500s; WS ChatWithAgent hydrates a missing in-memory session and runs
+// the full agent turn (tools / desk-mesh A2A). REST must do the same.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -786,14 +680,46 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.sessionKnown(id) {
+		jsonError(w, 404, "session not found")
+		return
+	}
+
+	ag := s.resolveAgentForMessage(id, body.Content)
+	if ag != nil && strings.TrimSpace(ag.Name) != "" {
+		spaceID := s.sessionSpaceID(id)
+		s.emitAgentThinking(spaceID, id, ag.Name, true)
+		defer s.emitAgentThinking(spaceID, id, ag.Name, false)
+	}
+
 	userMsgID := session.NewID()
 	userPersisted := s.persistInboundUserMessage(id, userMsgID, body.Content)
 
+	if s.mentionDelegate != nil {
+		spawnCtx := s.Context()
+		if spawnCtx == nil {
+			spawnCtx = r.Context()
+		}
+		s.spawnAdditionalUserMentions(spawnCtx, id, body.Content, userMsgID, ag)
+	}
+
+	chatCtx, run := s.beginChatRun(id)
+	defer s.endChatRun(id, run)
+	chatCtx = s.InjectSpaceContext(chatCtx, id, ag)
+	chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)
+	if ag != nil {
+		chatCtx = threadmgr.SetCallingAgent(chatCtx, ag.Name)
+	}
+
 	var buf strings.Builder
-	err := s.orch.ChatForSession(r.Context(), id, body.Content,
-		func(token string) { buf.WriteString(token) },
-		nil,
-	)
+	onToken := func(token string) { buf.WriteString(token) }
+	var err error
+	if ag != nil {
+		err = s.orch.ChatWithAgent(chatCtx, ag, body.Content, id, onToken, nil, nil)
+	} else {
+		// Same fallback as WS chat when no agents are configured.
+		err = s.orch.Chat(chatCtx, body.Content, onToken, nil)
+	}
 	if err != nil {
 		jsonError(w, 500, "chat error: "+err.Error())
 		return
@@ -814,9 +740,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
 				}
 			}
-			if buf.Len() > 0 {
+			// Turn is over. Leftover-only speech can strip to empty; if this
+			// turn involved Sam on a hostname-style ask, persist the teammate
+			// line. Never persist an empty assistant row.
+			visible := backend.PersistVisibleAssistantContent(buf.String(), body.Content)
+			if visible != "" {
 				assistantMsg := session.SessionMessage{
-					ID: session.NewID(), Role: "assistant", Content: backend.VisibleAssistantContent(buf.String()), Agent: agentName, Ts: time.Now().UTC(),
+					ID: session.NewID(), Role: "assistant", Content: visible, Agent: agentName, Ts: time.Now().UTC(),
 				}
 				s.applyKnownUsage(&assistantMsg, id, persistModelName(sess, ag))
 				if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
@@ -827,6 +757,22 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, map[string]string{"content": buf.String()})
+}
+
+// sessionKnown reports whether id is a real session the REST chat path may
+// run against. The persisted store is the source of truth for hallway/space
+// sessions; the orchestrator map only covers in-process (often orch-only)
+// sessions created via POST /sessions without a space_id.
+func (s *Server) sessionKnown(id string) bool {
+	if s.store != nil && s.store.Exists(id) {
+		return true
+	}
+	if s.orch != nil {
+		if _, ok := s.orch.GetSession(id); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {

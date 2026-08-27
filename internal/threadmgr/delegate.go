@@ -126,6 +126,12 @@ func (d *DelegateToAgentTool) Execute(ctx context.Context, args map[string]any) 
 
 	rationale, _ := args["rationale"].(string)
 
+	var hopErr error
+	ctx, hopErr = PushDelegateHop(ctx, agentName)
+	if hopErr != nil {
+		return tools.ToolResult{IsError: true, Error: fmt.Sprintf("delegate_to_agent: %v", hopErr)}
+	}
+
 	res := d.Fn(ctx, DelegateParams{
 		AgentName:   agentName,
 		Task:        task,

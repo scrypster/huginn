@@ -502,11 +502,41 @@ func VisibleAssistantContentAfterDeny(content string) string {
 // it also drops result-shaped JSON the model echoed next to its prose
 // ({"pong_response":"PONG","multiplication_result":"56"}), so the speech
 // channel reads like a teammate: "Reggie said PONG. 7 times 8 is 56."
-func VisibleAssistantContentAfterTools(content string) string {
+func VisibleAssistantContentAfterTools(content string, userAsk ...string) string {
 	visible := VisibleAssistantContent(content)
 	visible = stripEmbeddedHarnessToolJSON(visible)
 	visible = StripResidualSpeechAfterTools(visible)
-	return stripHarnessVisibleTokens(visible)
+	visible = stripHarnessVisibleTokens(visible)
+	visible = stripHarnessClockLabel(visible)
+	ask := ""
+	if len(userAsk) > 0 {
+		ask = userAsk[0]
+	}
+	if isTimeAsk(ask) {
+		visible = dropTimeExcuseSentences(visible)
+	}
+	if rewrite := teammateCompanyWallRewrite(visible, content, ask); rewrite != "" {
+		return stripHarnessClockLabel(rewrite)
+	}
+	if rewrite := teammateHostnameFailRewrite(visible, content, ask); rewrite != "" {
+		return stripHarnessClockLabel(rewrite)
+	}
+	if rewrite := teammateTimeFailRewrite(visible, content, ask); rewrite != "" {
+		return stripHarnessClockLabel(rewrite)
+	}
+	if rewrite := teammateInvalidToolPongRewrite(visible, content, ask); rewrite != "" {
+		return stripHarnessClockLabel(rewrite)
+	}
+	return stripHarnessClockLabel(visible)
+}
+
+// PersistVisibleAssistantContent is the hallway REST and WS persist filter.
+// The turn is over, so AfterTools/AfterDeny leftover speech is stripped even
+// when toolsCalled is empty — the live Lab Winston Steve-deny path miss.
+// userAsk is the human line for this turn so leftover-empty Sam hostname
+// fails still persist a teammate row instead of "".
+func PersistVisibleAssistantContent(content string, userAsk ...string) string {
+	return VisibleAssistantContentAfterTools(content, userAsk...)
 }
 
 // stripHarnessVisibleTokens removes leftover fail tokens and lines that are
@@ -554,7 +584,7 @@ func isFailSpeech(s string) bool {
 
 func isHarnessToolNameLine(s string) bool {
 	switch strings.TrimSpace(s) {
-	case "wait_for_threads", "delegate_to_agent", "recall_thread_result", "list_team_status", "bash":
+	case "wait_for_threads", "delegate_to_agent", "recall_thread_result", "list_team_status", "bash", "create_agent":
 		return true
 	default:
 		return false
