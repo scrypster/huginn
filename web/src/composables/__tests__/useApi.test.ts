@@ -461,6 +461,27 @@ describe('useApi — apiFetch (via api.*)', () => {
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/spaces')
   })
 
+  it('api.spaces.list appends company_id when provided', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok([]))
+    await api.spaces.list({ company_id: 'acme' })
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/spaces?company_id=acme')
+  })
+
+  it('api.companies.list calls GET /api/v1/companies', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok([]))
+    await api.companies.list()
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/companies')
+  })
+
+  it('api.companies.update sends PATCH with lead', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({}))
+    await api.companies.update('co-1', { lead: 'Steve' })
+    const [url, opts] = fetchSpy.mock.calls[0]
+    expect(url).toBe('/api/v1/companies/co-1')
+    expect(opts?.method).toBe('PATCH')
+    expect(JSON.parse(opts?.body as string)).toEqual({ lead: 'Steve' })
+  })
+
   it('api.spaces.get calls correct endpoint', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({}))
     await api.spaces.get('sp-1')
@@ -495,6 +516,19 @@ describe('useApi — apiFetch (via api.*)', () => {
     const [url, opts] = fetchSpy.mock.calls[0]
     expect(url).toBe('/api/v1/muninn/test')
     expect(opts?.method).toBe('POST')
+  })
+
+  it('api.muninn.connectLocal POSTs to /api/v1/muninn/connect-local without a body token', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ ok: true, connected: true, vaults: [] }))
+    await api.muninn.connectLocal()
+    const [url, opts] = fetchSpy.mock.calls[0]
+    expect(url).toBe('/api/v1/muninn/connect-local')
+    expect(opts?.method).toBe('POST')
+    const body = opts?.body
+    if (typeof body === 'string') {
+      expect(body).not.toContain('mcp_token')
+      expect(body).not.toContain('token')
+    }
   })
 
   it('api.muninn.vaults calls correct endpoint', async () => {

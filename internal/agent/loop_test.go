@@ -575,7 +575,7 @@ func TestRunLoop_UnknownToolName(t *testing.T) {
 	if result.StopReason != "stop" {
 		t.Errorf("StopReason = %q, want %q", result.StopReason, "stop")
 	}
-	// Verify the second backend call included an "unknown tool" error message.
+	// Verify the second backend call included a teammate deny, not a crash token.
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	if len(mb.lastRequests) < 2 {
@@ -584,13 +584,13 @@ func TestRunLoop_UnknownToolName(t *testing.T) {
 	secondReqMsgs := mb.lastRequests[1].Messages
 	found := false
 	for _, msg := range secondReqMsgs {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "unknown tool") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "I don't have nonexistent_tool.") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'unknown tool' error in second backend call messages")
+		t.Error("expected teammate deny I don't have nonexistent_tool. in second backend call messages")
 	}
 }
 
@@ -1133,16 +1133,16 @@ func TestRunLoop_ToolNotInSchemaBlocked(t *testing.T) {
 	if tool.callCount != 0 {
 		t.Errorf("expected tool NOT executed, got %d calls", tool.callCount)
 	}
-	// Verify the denial message is in the conversation history.
+	// Verify the denial message is a teammate no, not a crash token.
 	found := false
 	for _, msg := range result.Messages {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "not available") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "I don't have secret_tool.") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'not available' error in tool result message")
+		t.Error("expected teammate deny I don't have secret_tool. in tool result message")
 	}
 }
 
@@ -1401,5 +1401,33 @@ func TestRunLoop_PanicPath_OnToolDoneStillFires(t *testing.T) {
 	}
 	if !doneIsError {
 		t.Error("expected OnToolDone result.IsError=true after panic")
+	}
+}
+
+func TestRunLoop_ImageAskDoesNotCallCreateAgent(t *testing.T) {
+	var calls int
+	hire := &mockTool{name: "create_agent", result: tools.ToolResult{Output: "created"}}
+	mb := &mockBackend{responses: []*backend.ChatResponse{
+		toolCallResponse("create_agent", "call_1"),
+		stopResponse("created"),
+	}}
+	_ = calls
+	res, err := RunLoop(context.Background(), RunLoopConfig{
+		Backend:     mb,
+		Tools:       newRegistryWith(hire),
+		ToolSchemas: []backend.Tool{{Function: backend.ToolFunction{Name: "create_agent"}}},
+		Messages:    []backend.Message{{Role: "user", Content: "generate an image of a red cube"}},
+	})
+	if err != nil {
+		t.Fatalf("RunLoop error: %v", err)
+	}
+	if mb.callCount != 0 {
+		t.Fatalf("model completions = %d, want 0 (image deny before tools)", mb.callCount)
+	}
+	if hire.callCount != 0 {
+		t.Fatalf("create_agent ran %d times", hire.callCount)
+	}
+	if res.FinalContent != "I don't have image." {
+		t.Fatalf("final = %q", res.FinalContent)
 	}
 }

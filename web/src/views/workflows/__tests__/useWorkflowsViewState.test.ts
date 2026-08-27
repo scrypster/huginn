@@ -7,6 +7,8 @@ const mockWorkflows = ref<any[]>([])
 const mockLoading = ref(false)
 const mockLiveEvents = ref<Record<string, any[]>>({})
 const mockFetchWorkflows = vi.fn().mockResolvedValue(undefined)
+const mockDropWorkflow = vi.fn()
+
 
 vi.mock('../../../composables/useWorkflows', () => ({
   useWorkflows: () => ({
@@ -16,6 +18,7 @@ vi.mock('../../../composables/useWorkflows', () => ({
     fetchWorkflows: mockFetchWorkflows,
     fetchTemplates: vi.fn().mockResolvedValue([]),
     createWorkflow: vi.fn(),
+    dropWorkflow: (...args: unknown[]) => mockDropWorkflow(...args),
     updateWorkflow: vi.fn(),
     deleteWorkflow: vi.fn(),
     triggerWorkflow: vi.fn(),
@@ -75,6 +78,7 @@ beforeEach(() => {
   ]
   mockLiveEvents.value = {}
   mockFetchWorkflows.mockReset().mockResolvedValue(undefined)
+  mockDropWorkflow.mockReset().mockResolvedValue({ id: 'dropped', name: 'Dropped', enabled: false, schedule: '', steps: [] })
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => [] }))
 })
 
@@ -113,5 +117,37 @@ describe('useWorkflowsViewState', () => {
 
     expect(state.stepAgentDetails.value[0]).toMatchObject({ name: 'agent-1' })
     expect(router.push).toHaveBeenCalledWith('/workflows/wf-1')
+  })
+
+  it('addStep stacks a teammate and pipes the previous output', () => {
+    const { state } = mountHarness()
+    state.openWorkflow(mockWorkflows.value[0])
+    state.addStep()
+    const steps = state.editForm.value.steps
+    expect(steps).toHaveLength(2)
+    expect(steps[1].name).toBe('step-2')
+    expect(steps[1].inputs).toEqual([{ from_step: 'Step 1', as: 'prev' }])
+    expect(steps[1].prompt).toContain('{{inputs.prev}}')
+    expect(state.pipelinePreview.value[0]).toBe('@agent-1')
+    expect(state.pipelinePreview.value[1]).toBe('step-2')
+  })
+
+  it('scheduleMode once clears cron; repeat seeds a weekday default', () => {
+    const { state } = mountHarness()
+    state.openWorkflow(mockWorkflows.value[0])
+    state.scheduleMode.value = 'once'
+    expect(state.editForm.value.schedule).toBe('')
+    state.scheduleMode.value = 'repeat'
+    expect(state.editForm.value.schedule).toBe('0 8 * * 1-5')
+  })
+
+  it('onFileDrop imports yaml and opens the workflow', async () => {
+    const { state, router } = mountHarness()
+    const file = new File(['id: dropped\nname: Dropped\n'], 'dropped.yaml', { type: 'text/yaml' })
+    const ev = { dataTransfer: { files: [file], types: ['Files'] } } as unknown as DragEvent
+    await state.onFileDrop(ev)
+    expect(mockDropWorkflow).toHaveBeenCalledWith('dropped.yaml', expect.stringContaining('id: dropped'))
+    expect(router.push).toHaveBeenCalledWith('/workflows/dropped')
+    expect(state.dropError.value).toBe(false)
   })
 })

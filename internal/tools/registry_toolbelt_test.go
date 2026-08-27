@@ -10,10 +10,12 @@ import (
 // stubTool is a minimal Tool for registry tests.
 type stubTool struct{ name string }
 
-func (s *stubTool) Name() string             { return s.name }
-func (s *stubTool) Description() string      { return "" }
+func (s *stubTool) Name() string                { return s.name }
+func (s *stubTool) Description() string         { return "" }
 func (s *stubTool) Permission() PermissionLevel { return PermRead }
-func (s *stubTool) Schema() backend.Tool     { return backend.Tool{Function: backend.ToolFunction{Name: s.name}} }
+func (s *stubTool) Schema() backend.Tool {
+	return backend.Tool{Function: backend.ToolFunction{Name: s.name}}
+}
 func (s *stubTool) Execute(_ context.Context, _ map[string]any) ToolResult { return ToolResult{} }
 
 func TestTagTools_AndProviderFor(t *testing.T) {
@@ -110,5 +112,50 @@ func TestAllSchemasForProviders_MultipleProviders(t *testing.T) {
 	schemas := r.AllSchemasForProviders([]string{"github", "slack"})
 	if len(schemas) != 2 {
 		t.Fatalf("expected 2 schemas, got %d", len(schemas))
+	}
+}
+
+func TestGitHubCLIToolsNotTaggedBuiltin(t *testing.T) {
+	builtin := map[string]bool{}
+	for _, n := range BuiltinToolNames() {
+		builtin[n] = true
+	}
+	for _, n := range GitHubCLIToolNames() {
+		if builtin[n] {
+			t.Errorf("GitHub CLI tool %q must not be in BuiltinToolNames (that leaks them via LocalTools [*])", n)
+		}
+	}
+
+	r := NewRegistry()
+	for _, n := range GitHubCLIToolNames() {
+		r.Register(&stubTool{name: n})
+	}
+	r.TagTools(GitHubCLIToolNames(), "github_cli")
+	r.TagTools(BuiltinToolNames(), "builtin")
+	if p := r.ProviderFor("gh_issue_create"); p == "builtin" {
+		t.Fatal("gh_issue_create tagged builtin after production TagTools order")
+	}
+	if p := r.ProviderFor("gh_issue_create"); p != "github_cli" {
+		t.Fatalf("gh_issue_create provider = %q, want github_cli", p)
+	}
+}
+
+func TestAllSchemasForProviders_WildcardOmitsUntaggedCreateAgent(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&stubTool{name: "github_list_repos"})
+	r.Register(&stubTool{name: "create_agent"})
+	r.Register(&stubTool{name: "bash"})
+	r.TagTools([]string{"github_list_repos"}, "github")
+	r.TagTools([]string{"bash"}, "builtin")
+	// create_agent intentionally untagged
+
+	schemas := r.AllSchemasForProviders([]string{"*"})
+	for _, s := range schemas {
+		if s.Function.Name == "create_agent" || s.Function.Name == "bash" {
+			t.Fatalf("wildcard leaked %q", s.Function.Name)
+		}
+	}
+	if len(schemas) != 1 || schemas[0].Function.Name != "github_list_repos" {
+		t.Fatalf("want only github_list_repos, got %v", schemas)
 	}
 }

@@ -5,15 +5,19 @@ All notable changes to Huginn are documented here.
 ## [Unreleased]
 
 ### Added
+- Agents now see their own grants in the persona (local tools / no local tools, no image generation unless `generate_image` is granted, and “you cannot delegate” on TierLow). Team roster cards carry model-tier annotations in ChatWithAgent and space inject. TierLow no longer receives `delegate_to_agent`.
 - Space-routed DMs/channels now load REST threads after timeline hydrate (active session and every `session_id` on the timeline) so ThreadPanel, previews, and A2A strips use the same helpers as session mode
 - CLI `--print` / `--agent` oneshot now wires A2A delegation (`delegate_to_agent`, `wait_for_threads`, `list_team_status`, `recall_thread_result`) with an ephemeral session, ThreadManager, and SpawnThread. Preview is always auto-approved (`HUGINN_DELEGATION_PREVIEW=off`). Named agents resolve from `~/.huginn/agents/*.{yaml,json}`.
 - Model picker warns when the selected model cannot reliably use tools (7b / `supportsTools: false`)
 - User `@Name` in a channel or DM addresses that agent for the turn when they are on the space roster (stamped lead no longer swallows the mention). A leftover `@Name` of someone not in the roster still does not address them or extra-spawn a thread
 
 ### Changed
+- Composer no longer shows interrupt/route chrome on a normal send. Mid-turn send is a new hallway line (`new_request` / queue); `@` is the route. Diagnose Update-active-work / Route stays behind a quiet Send options details control
 - Fail UX reads as people in a room: **I couldn't do that.** / **I asked Tesla and they haven't come back yet.** / sidebar **Couldn't do that** or **Still waiting on Tesla** — never `TOOL_FAIL` or a debug panel; hover keeps the raw token, tool, and reason
 
 ### Fixed
+- A direct image ask to an agent with no image grant now teammate-denies (`I don't have image.`) before `create_agent` can hire a specialist, and thread persist applies the same rewrite
+- Persist leftover `create_agent` harness-name lines the same way as `bash` / `wait_for_threads` so a helpdesk + clock leftover row cannot keep the tool name in the bubble
 - `wait_for_threads` with no thread_ids now includes uncollected terminal threads (finished before wait was called) so a fast specialist that replies before wait runs is no longer lost to the race; immediately returns their result and never reports "No matching threads"
 - After a `wait_for_threads` (or auto-wait) returns a specialist result, the lead gets one speech-only turn and the run stops: a second `delegate_to_agent` / invented `recall_thread_result` is never executed, a turn that opens with tool JSON has its decode cut (model stays loaded), and "After X responds…:" glue, `//`-commented tool JSON, and echoed result fragments (`56."PONG"`, `56PONG`) are stripped from CLI `agentOutput` and the web bubble (Go + `honesty.ts`)
 - Residual playbook speech (`<wait for X to finish>`, "Once X has finished:", re-typed or invented tool JSON, echoed result objects) and generic LLM filler (`"How can I assist you further?"`, `"Not currently delegating…"`) are stripped from CLI `agentOutput` and the web assistant bubble after tools ran; invented names are never executed and non-tool code fences stay intact

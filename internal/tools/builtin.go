@@ -104,5 +104,7 @@ func BuiltinToolNames() []string {
 		"find_definition", "list_symbols",
 		// Notes tool
 		"update_memory",
+		// Workflow drop-dir writer (agents author pipelines as files)
+		"write_workflow",
 	}
 }

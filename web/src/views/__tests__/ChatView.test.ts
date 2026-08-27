@@ -73,17 +73,31 @@ vi.mock('../../composables/useSpaces', () => ({
 const mockApiAgentsList = vi.fn().mockResolvedValue([])
 const mockApiRuntimeStatus = vi.fn().mockResolvedValue({ state: 'idle' })
 const mockApiSessionsCreate = vi.fn()
+const mockApiMuninnStatus = vi.fn().mockResolvedValue({ connected: false, installed: false, running: false })
+const mockApiMuninnConnectLocal = vi.fn().mockResolvedValue({ ok: true, connected: true, running: true, vaults: [] })
+const mockApiMuninnVaults = vi.fn().mockResolvedValue({ vaults: [] })
+const mockApiMuninnCreateVault = vi.fn()
+const mockApiAgentsGet = vi.fn().mockResolvedValue({ name: 'Winston', vault_name: '' })
+const mockApiAgentsUpdate = vi.fn().mockResolvedValue({})
 
 vi.mock('../../composables/useApi', () => ({
   api: {
     agents: {
       list: (...args: unknown[]) => mockApiAgentsList(...args),
+      get: (...args: unknown[]) => mockApiAgentsGet(...args),
+      update: (...args: unknown[]) => mockApiAgentsUpdate(...args),
     },
     runtime: {
       status: () => mockApiRuntimeStatus(),
     },
     sessions: {
       create: (...args: unknown[]) => mockApiSessionsCreate(...args),
+    },
+    muninn: {
+      status: () => mockApiMuninnStatus(),
+      connectLocal: () => mockApiMuninnConnectLocal(),
+      vaults: () => mockApiMuninnVaults(),
+      createVault: (...args: unknown[]) => mockApiMuninnCreateVault(...args),
     },
   },
   getToken: vi.fn().mockReturnValue('test-token'),
@@ -229,6 +243,8 @@ function mountChatView(
       stubs: {
         Teleport: true,
         SystemFailLine: false,
+        MemoryVaultChip: false,
+        MsgTimeReveal: false,
         RouterLink: { template: '<a><slot /></a>' },
         ChatEditor: {
           name: 'ChatEditor',
@@ -248,6 +264,15 @@ function mountChatView(
   })
 }
 
+async function openComposerSendOptions(wrapper: ReturnType<typeof mountChatView>) {
+  const details = wrapper.find('[data-testid="composer-send-options"] details')
+  expect(details.exists()).toBe(true)
+  const el = details.element as HTMLDetailsElement
+  el.open = true
+  await details.trigger('toggle')
+  await wrapper.vm.$nextTick()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 describe('ChatView', () => {
   beforeEach(() => {
@@ -263,6 +288,7 @@ describe('ChatView', () => {
     mockGetSessionThreads.mockReturnValue([])
     mockGetActiveThreadCount.mockReturnValue(0)
     mockGetSessionPreviews.mockReturnValue([])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: false, running: false })
   })
 
   afterEach(() => {
@@ -796,8 +822,8 @@ describe('ChatView', () => {
     // Second message should be queued/sent (count increases)
     expect(sendCountAfterSecond).toBe(sendCountAfterFirst + 1)
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
-    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
-    expect(lastChatSend?.payload?.update_route).toBe('all_active')
+    expect(lastChatSend?.payload?.intent).toBe('new_request')
+    expect(lastChatSend?.payload?.update_route).toBeUndefined()
     expect(chatEditor.props('disabled')).toBeFalsy()
     const msgs = mockGetMessages('test-session-id')
     expect(msgs.some((m: any) => m.streaming)).toBe(true)
@@ -832,6 +858,16 @@ describe('ChatView', () => {
     await chatEditor.vm.$emit('send', 'First message')
     await nextTick()
 
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.html()).not.toContain('Update active work')
+    await openComposerSendOptions(wrapper)
+
+    const updateWorkBtn = wrapper.findAll('button').find(b => b.text() === 'Update active work')
+    expect(updateWorkBtn).toBeDefined()
+    await updateWorkBtn!.trigger('click')
+    await nextTick()
+
     const specificRouteBtn = wrapper.findAll('button').find(b => b.text() === 'Specific delegate')
     expect(specificRouteBtn).toBeDefined()
     await specificRouteBtn!.trigger('click')
@@ -844,6 +880,38 @@ describe('ChatView', () => {
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('specific_delegate')
     expect(lastChatSend?.payload?.target_agent).toBe('Researcher')
+  })
+
+  it('hides interrupt/route chrome on an idle composer', async () => {
+    const wrapper = mountChatView({}, createMockWs())
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.html()).not.toContain('Update active work')
+    expect(wrapper.html()).not.toContain('All active delegates')
+  })
+
+  it('hides interrupt/route chrome while streaming until Send options is opened', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello')
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-send-options-summary"]').text()).toContain('Send options')
+    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.html()).not.toContain('Update active work')
+    expect(wrapper.html()).not.toContain('All active delegates')
+
+    await openComposerSendOptions(wrapper)
+    expect(wrapper.html()).toContain('When you send now:')
+    expect(wrapper.html()).toContain('Update active work')
+    expect(wrapper.html()).toContain('Start new request')
+    expect(wrapper.html()).not.toContain('All active delegates')
   })
 
   it('handleEditorSend: auto-selects default agent on first send and sends chat', async () => {
@@ -2422,8 +2490,8 @@ describe('ChatView — space mode', () => {
 
     expect(chatSendsAfterSecond).toBe(chatSendsAfterFirst + 1)
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
-    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
-    expect(lastChatSend?.payload?.update_route).toBe('all_active')
+    expect(lastChatSend?.payload?.intent).toBe('new_request')
+    expect(lastChatSend?.payload?.update_route).toBeUndefined()
   })
 
   it('does not flash empty-state copy while the space timeline hydrates', async () => {
@@ -2577,7 +2645,8 @@ describe('ChatView — space mode', () => {
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
     expect(wrapper.html()).toContain('Tess is responding')
     expect(wrapper.html()).toContain('Preparing context and delegation plan')
-    expect(wrapper.html()).toContain('When you send now:')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('When you send now:')
 
     await openSpace(wrapper, SPACE_B)
 
@@ -2585,13 +2654,14 @@ describe('ChatView — space mode', () => {
     expect(wrapper.html()).not.toContain('Steve is responding')
     expect(wrapper.html()).not.toContain('Tess is responding')
     expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
-    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(false)
 
     await openSpace(wrapper, SPACE_A)
 
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
     expect(wrapper.html()).toContain('Tess is responding')
-    expect(wrapper.html()).toContain('When you send now:')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('When you send now:')
   })
 
   it('starts a new run in a quiet space instead of queueing against the other space\'s turn', async () => {
@@ -2634,7 +2704,7 @@ describe('ChatView — space mode', () => {
     await openSpace(wrapper, SPACE_A)
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
     expect(wrapper.html()).not.toContain('Tess is responding')
-    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(false)
   })
 
   function seedSpace(spaceId: string, sessionId: string) {
@@ -2710,7 +2780,8 @@ describe('ChatView — space mode', () => {
 
     expect(stateA.messages.some((m: any) => m.content === 'Tess follow-up for you')).toBe(true)
     expect(stateA.messages.some((m: any) => m.threadSummaryThreadId === 'thr-tess')).toBe(true)
-    expect(stateA.messages.some((m: any) => String(m.content).includes('Vault unavailable'))).toBe(true)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('Vault unavailable'))).toBe(false)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('Memory vault unavailable'))).toBe(false)
     expect(stateA.messages.some((m: any) => String(m.content).includes('auto-approved after 30s'))).toBe(true)
 
     mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
@@ -2721,7 +2792,80 @@ describe('ChatView — space mode', () => {
     expect(wrapper.html()).toContain('Permission required')
     expect(wrapper.html()).toContain('Tess follow-up for you')
     expect(wrapper.html()).toContain('Tess delegate finished')
-    expect(wrapper.html()).toContain('Vault unavailable')
+    expect(wrapper.html()).not.toContain('Vault unavailable')
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+  })
+
+  it('shows a memory chip — not a chat message — when muninn is installed and the agent has no vault', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58a6ff', icon: 'W', vault_name: '', memory_type: 'none' },
+    ])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: true, running: true, detected: true })
+    const state = seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Winston')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'warning',
+      session_id: SESS_A,
+      content: '⚠️ Memory vault unavailable: muninn config unavailable. Memory features are disabled for this session.',
+    })
+    await nextTick()
+
+    expect(state.messages.some((m: any) => String(m.content).includes('Memory vault unavailable'))).toBe(false)
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+    expect(wrapper.html()).not.toContain('Memory features are disabled')
+
+    const chip = wrapper.find('[data-testid="memory-vault-chip"]')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toContain("Winston isn't using a Muninn vault yet")
+    expect(chip.text()).toContain('Connect or create one')
+  })
+
+  it('memory chip first-click connects local Muninn instead of opening agent settings', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58a6ff', icon: 'W', vault_name: '', memory_type: 'none' },
+    ])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: true, running: true, detected: true })
+    seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Winston')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+    await nextTick()
+
+    await wrapper.find('[data-testid="memory-vault-chip-action"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(mockRouterPush).not.toHaveBeenCalled()
+    expect(mockApiMuninnConnectLocal).toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="memory-vault-modal"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+    expect(wrapper.html()).not.toContain('mdb_')
+  })
+
+  it('hides the memory chip when Muninn is not installed', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58a6ff', icon: 'W', vault_name: '', memory_type: 'none' },
+    ])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: false, running: false, detected: false })
+    seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Winston')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="memory-vault-chip"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain("Muninn isn't running")
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
   })
 
   it('still paints follow-up and permission on the owner space when that space is open', async () => {
@@ -2804,6 +2948,43 @@ describe('ChatView — space mode', () => {
     expect(banner.exists()).toBe(true)
     expect(banner.text()).toContain('Tess is responding')
     expect(banner.text()).not.toContain('Steve is responding')
+  })
+
+  it('clears hallway responding bar when the space stream ends', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58A6FF', icon: 'W', is_default: true },
+    ])
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'Huginn',
+      kind: 'channel',
+      leadAgent: 'Winston',
+      memberAgents: [],
+    }
+    mockSpaceState.activeSessionId = 'hall-sess'
+    mockSpaceState.sessionToSpaceMap.set('hall-sess', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Winston what time is it')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Winston is responding')
+    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+
+    const runId = mockWs.sentMessages.find((m: any) => m.type === 'chat')?.run_id
+    expect(runId).toBeTruthy()
+
+    mockWs.simulateMessage({ type: 'done', run_id: runId, session_id: 'hall-sess' })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Winston is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
   })
 })
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/glamour"
@@ -301,6 +302,25 @@ func (a *App) refreshViewport() {
 			lineSB.WriteString(renderSwarmBar(line, a.width))
 		}
 
+		if a.selectedHallwayID != "" && line.spaceMsgID == a.selectedHallwayID {
+			if rel := FormatRelativeTime(line.createdAt, time.Now()); rel != "" {
+				if lineSB.Len() > 0 {
+					lineSB.WriteString(StyleDim.Render("  " + rel))
+				} else {
+					lineSB.WriteString(StyleDim.Render(rel))
+				}
+			}
+		}
+
+		if line.isHallwayRoot {
+			if chip := formatReplyChip(line.replyCount, line.lastPreview, line.newSince); chip != "" {
+				if lineSB.Len() > 0 {
+					lineSB.WriteString("\n")
+				}
+				lineSB.WriteString(StyleAccent.Render(chip))
+			}
+		}
+
 		// If this is a standalone artifact line, append its render.
 		if line.isArtifactLine && line.role == "artifact" {
 			lineSB.WriteString(renderArtifactLine(line))
@@ -570,6 +590,8 @@ func (a *App) renderFooter() string {
 		planner := clipString(modelName, 20)
 		if !a.useAgentLoop {
 			right = fmt.Sprintf(" %s · chat only  / commands · # files · ! shell ", planner)
+		} else if a.activeSpaceID != "" {
+			right = fmt.Sprintf(" %s  t thread · ctrl+t diagnose · / commands ", planner)
 		} else {
 			right = fmt.Sprintf(" %s  / commands · # files · ! shell ", planner)
 		}
@@ -974,4 +996,3 @@ func renderProgressBar(pct, width int, filledStyle lipgloss.Style) string {
 	bar := filledStyle.Render(strings.Repeat("█", filled)) + StyleDim.Render(strings.Repeat("░", empty))
 	return bar
 }
-

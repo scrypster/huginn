@@ -166,6 +166,20 @@ type Server struct {
 
 	spaceStore spaces.StoreInterface // nil if spaces not configured
 
+	// spaceThreadRunner wakes a mentioned agent inside a Slack-style thread.
+	// New wires RunSpaceThreadAgent. Tests may inject a fake so they never
+	// hit live models.
+	spaceThreadRunner SpaceThreadRunner
+	// onSpaceWS captures space-scoped WS events in tests (nil in production).
+	onSpaceWS func(WSMessage)
+	// spaceThreadWG tracks in-flight @mention wakes so POST can return
+	// before the runner finishes. Tests wait via waitSpaceThreadWakes.
+	spaceThreadWG sync.WaitGroup
+	// spaceWakeMu / spaceWakeCounts cap bidirectional mesh recursion
+	// (Steve↔Winston) per parent thread.
+	spaceWakeMu     sync.Mutex
+	spaceWakeCounts map[string]int
+
 	// db is the SQLite database used by thread/message handlers. nil if not configured.
 	db *sqlitedb.DB
 
@@ -296,19 +310,20 @@ func New(
 		pm[p.Name()] = p
 	}
 	s := &Server{
-		cfg:            cfg,
-		orch:           orch,
-		store:          store,
-		token:          token,
-		huginnDir:      huginnDir,
-		wsHub:          newWSHub(),
-		connMgr:        connMgr,
-		connStore:      connStore,
-		connProviders:  pm,
-		oauthLimiter:   newFlowRateLimiter(),
-		authLimiter:    newAuthFailLimiter(),
-		credValidators: buildCredentialValidatorRegistry(),
-		relayKeys:      make(map[string]string),
+		cfg:             cfg,
+		orch:            orch,
+		store:           store,
+		token:           token,
+		huginnDir:       huginnDir,
+		wsHub:           newWSHub(),
+		connMgr:         connMgr,
+		connStore:       connStore,
+		connProviders:   pm,
+		oauthLimiter:    newFlowRateLimiter(),
+		authLimiter:     newAuthFailLimiter(),
+		credValidators:  buildCredentialValidatorRegistry(),
+		relayKeys:       make(map[string]string),
+		spaceWakeCounts: make(map[string]int),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
 		sessionCreateLimiter: newEndpointRateLimiter(10, time.Minute),
@@ -316,6 +331,8 @@ func New(
 		workflowRunLimiter:   newEndpointRateLimiter(30, time.Minute),
 		mutationLimiter:      newEndpointRateLimiter(60, time.Minute),
 	}
+	// In-thread @ wake uses the same ChatWithAgent loop as space chat.
+	s.spaceThreadRunner = s.RunSpaceThreadAgent
 	// Initialise the WebSocket upgrader using s.checkOrigin so AllowedOrigins
 	// config is honoured. Must happen after s is initialised (checkOrigin reads s.cfg).
 	s.upgrader = websocket.Upgrader{
@@ -593,6 +610,7 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	helpMsg, _ := payload["message"].(string)
 	summary, _ := payload["summary"].(string)
 	timeoutSeconds, _ := payload["timeout_seconds"].(int)
+	parentID := ""
 	if s.tm != nil {
 		if t, ok := s.tm.Get(threadID); ok {
 			if agentID == "" {
@@ -604,6 +622,7 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 			if summary == "" && t.Summary != nil {
 				summary = t.Summary.Summary
 			}
+			parentID = strings.TrimSpace(t.ParentMessageID)
 		}
 	}
 	agentLabel := strings.TrimSpace(agentID)
@@ -645,21 +664,38 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	if err != nil {
 		return
 	}
+	// Space-thread wakes set ParentMessageID on the A2A thread. Pin the
+	// harness announcement to that drawer (parent_id) so "Delegated to" /
+	// "completed delegated work" never land as a hallway root.
+	spaceID := strings.TrimSpace(sess.SpaceID())
+	if parentID != "" && spaceID != "" && s.spaceStore != nil {
+		inserted, insErr := s.spaceStore.InsertSpaceThreadMessage(spaceID, content, parentID, "assistant", agentID)
+		if insErr != nil {
+			slog.Warn("server: thread lifecycle off-hallway insert failed",
+				"session_id", sessionID, "type", msgType, "thread_id", threadID, "parent_id", parentID, "err", insErr)
+			return
+		}
+		replies, _ := s.spaceStore.ListSpaceReplies(spaceID, parentID)
+		s.emitSpaceReply(spaceID, parentID, inserted, len(replies), spaces.LastSpeechPreview(replies))
+		s.emitSpaceActivity(spaceID)
+		return
+	}
 	if appendErr := s.store.Append(sess, session.SessionMessage{
-		ID:         session.NewID(),
-		Role:       "assistant",
-		Content:    content,
-		Agent:      agentID,
-		ToolName:   msgType,
-		ToolCallID: threadID,
-		Type:       "thread_event",
-		Ts:         time.Now().UTC(),
+		ID:              session.NewID(),
+		Role:            "assistant",
+		Content:         content,
+		Agent:           agentID,
+		ToolName:        msgType,
+		ToolCallID:      threadID,
+		Type:            "thread_event",
+		ParentMessageID: parentID,
+		Ts:              time.Now().UTC(),
 	}); appendErr != nil {
 		slog.Warn("server: failed to persist thread lifecycle event",
 			"session_id", sessionID, "type", msgType, "thread_id", threadID, "err", appendErr)
 		return
 	}
-	s.emitSpaceActivity(sess.SpaceID())
+	s.emitSpaceActivity(spaceID)
 }
 
 // ResolveAgent returns the primary agent for the given session, delegating to
@@ -1144,6 +1180,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Workflows API
 	mux.HandleFunc("GET /api/v1/workflows", api(s.handleListWorkflows))
 	mux.HandleFunc("POST /api/v1/workflows", api(s.handleCreateWorkflow))
+	mux.HandleFunc("POST /api/v1/workflows/drop", api(s.handleDropWorkflow))
 	mux.HandleFunc("POST /api/v1/workflows/validate", api(s.handleValidateWorkflow))
 	mux.HandleFunc("GET /api/v1/workflows/templates", api(s.handleListWorkflowTemplates))
 	mux.HandleFunc("GET /api/v1/workflows/{id}", api(s.handleGetWorkflow))
@@ -1218,10 +1255,20 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/muninn/status", api(s.handleMuninnStatus))
 	mux.HandleFunc("POST /api/v1/muninn/test", api(s.handleMuninnTest))
 	mux.HandleFunc("POST /api/v1/muninn/connect", api(s.handleMuninnConnect))
+	mux.HandleFunc("POST /api/v1/muninn/connect-local", api(s.handleMuninnConnectLocal))
 	mux.HandleFunc("GET /api/v1/muninn/vaults", api(s.handleMuninnVaultsList))
 	mux.HandleFunc("POST /api/v1/muninn/vaults", api(s.handleMuninnVaultCreate))
 	mux.HandleFunc("GET /api/v1/memory/replication-status", api(s.handleMemoryReplicationStatus))
 	mux.HandleFunc("POST /api/v1/muninn/tool", api(s.handleMuninnTool))
+
+	// Companies API (authenticated)
+	mux.HandleFunc("GET /api/v1/companies", api(s.handleListCompanies))
+	mux.HandleFunc("POST /api/v1/companies", api(s.handleCreateCompany))
+	mux.HandleFunc("GET /api/v1/companies/{id}", api(s.handleGetCompany))
+	mux.HandleFunc("PATCH /api/v1/companies/{id}", api(s.handleUpdateCompany))
+	mux.HandleFunc("POST /api/v1/companies/{id}/members", api(s.handleSeatCompanyMember))
+	mux.HandleFunc("DELETE /api/v1/companies/{id}/members/{agent}", api(s.handleUnseatCompanyMember))
+	mux.HandleFunc("DELETE /api/v1/companies/{id}", api(s.handleDeleteCompany))
 
 	// Spaces API (authenticated)
 	// NOTE: route ordering matters in Go 1.22+ ServeMux.
@@ -1250,7 +1297,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// for the path /spaces/dm/messages (literal "dm" beats wildcard "{id}").
 	// We use the "space-messages" prefix to avoid the ambiguity, mirroring
 	// the "space-sessions" pattern used for the sessions endpoint above.
+	mux.HandleFunc("GET /api/v1/space-messages/{id}/replies", api(s.handleListSpaceReplies))
+	mux.HandleFunc("POST /api/v1/space-messages/{id}/thread-read", api(s.handleMarkSpaceThreadRead))
+	mux.HandleFunc("DELETE /api/v1/space-messages/{id}/{msgID}", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, s.handleDeleteSpaceMessage)))
 	mux.HandleFunc("GET /api/v1/space-messages/{id}", api(s.handleListSpaceMessages))
+	mux.HandleFunc("POST /api/v1/space-messages/{id}", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(70<<10, s.handlePostSpaceMessage))))
 
 	// Skills API (authenticated)
 	// Place specific literal routes before wildcard routes for clarity

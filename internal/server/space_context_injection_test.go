@@ -594,7 +594,7 @@ func TestExtractLeadMention(t *testing.T) {
 		{"@", ""},                        // bare @
 		{"@123invalid", ""},              // starts with digit
 		{"no mention here", ""},          // no @
-		{"", ""},                          // empty
+		{"", ""},                         // empty
 		{"  @Sam leading spaces", "Sam"}, // trimmed
 		{"alice@Bob", ""},                // email-style, not a mention
 	}
@@ -607,3 +607,80 @@ func TestExtractLeadMention(t *testing.T) {
 	}
 }
 
+func TestInjectSpaceContext_DeskDM_ListsDeskPeers(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	steveDM, err := spaceStore.OpenDM("Steve")
+	if err != nil {
+		t.Fatalf("OpenDM Steve: %v", err)
+	}
+	if _, err := spaceStore.OpenDM("Winston"); err != nil {
+		t.Fatalf("OpenDM Winston: %v", err)
+	}
+
+	sess := sessStore.New("steve-dm", "/workspace", "model")
+	sess.Manifest.SpaceID = steveDM.ID
+	sess.Manifest.Agent = "Steve"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	ag := &agents.Agent{Name: "Steve"}
+	enriched := srv.InjectSpaceContext(context.Background(), sess.ID, ag)
+	spaceCtx := workforce.GetSpaceContext(enriched)
+	if !strings.Contains(spaceCtx, "[Desk Floor]") {
+		t.Fatalf("expected desk floor context, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "Winston") {
+		t.Fatalf("expected Winston in desk floor context, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "delegate_to_agent") {
+		t.Fatalf("expected delegate_to_agent in desk floor context, got:\n%s", spaceCtx)
+	}
+}
+
+func TestInjectSpaceContext_CapabilityCardsIncludeTier(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	ch, err := spaceStore.CreateChannel("Engineering", "Tom", []string{"Sam"}, "", "")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sess := sessStore.New("tier-cards", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Tom"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{
+			Agents: []agents.AgentDef{
+				{Name: "Tom", Description: "Team lead.", Model: "claude-sonnet-4"},
+				{Name: "Sam", Description: "Backend engineer.", Model: "qwen2.5-coder:7b"},
+			},
+		}, nil
+	}
+
+	ag := &agents.Agent{Name: "Tom", ModelID: "claude-sonnet-4"}
+	spaceCtx := workforce.GetSpaceContext(srv.InjectSpaceContext(context.Background(), sess.ID, ag))
+	if spaceCtx == "" {
+		t.Fatal("expected space context")
+	}
+	if !strings.Contains(spaceCtx, "tools:") {
+		t.Fatalf("expected infoFn tools annotation on capability cards, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "low") {
+		t.Fatalf("expected 7b Sam card to show low tier, got:\n%s", spaceCtx)
+	}
+}

@@ -336,8 +336,8 @@ func (s *stubSpaceStore) GetSpace(id string) (*spaces.Space, error) { return nil
 func (s *stubSpaceStore) UpdateSpace(id string, updates spaces.SpaceUpdates) (*spaces.Space, error) {
 	return nil, nil
 }
-func (s *stubSpaceStore) ArchiveSpace(id string) error { return nil }
-func (s *stubSpaceStore) MarkRead(spaceID string) error { return nil }
+func (s *stubSpaceStore) ArchiveSpace(id string) error            { return nil }
+func (s *stubSpaceStore) MarkRead(spaceID string) error           { return nil }
 func (s *stubSpaceStore) UnseenCount(spaceID string) (int, error) { return 0, nil }
 func (s *stubSpaceStore) ListSessionsForSpace(spaceID string) ([]spaces.SessionRef, error) {
 	return nil, nil
@@ -355,3 +355,19 @@ func (s *stubSpaceStore) SpacesByLeadAgent(_ string) ([]*spaces.Space, error) {
 	return nil, nil
 }
 func (s *stubSpaceStore) FindChannelByName(_ string) (*spaces.Space, error) { return nil, nil }
+func (s *stubSpaceStore) PostSpaceMessage(_, _, _ string) (*spaces.SpaceMessage, error) {
+	return nil, nil
+}
+func (s *stubSpaceStore) ListSpaceReplies(_, _ string) ([]spaces.SpaceMessage, error) {
+	return nil, nil
+}
+func (s *stubSpaceStore) GetSpaceMessage(_, _ string) (*spaces.SpaceMessage, error) {
+	return nil, nil
+}
+func (s *stubSpaceStore) DeleteSpaceMessage(_, _ string) error { return nil }
+func (s *stubSpaceStore) InsertSpaceThreadMessage(_, _, _, _, _ string) (*spaces.SpaceMessage, error) {
+	return nil, nil
+}
+func (s *stubSpaceStore) HasThreadParticipation(_, _, _ string) (bool, error) { return false, nil }
+func (s *stubSpaceStore) MarkThreadRead(_, _, _ string) error                 { return nil }
+func (s *stubSpaceStore) ThreadUnseenForViewer(_, _, _ string) (int, error)   { return 0, nil }

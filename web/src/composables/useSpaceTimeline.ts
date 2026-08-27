@@ -3,6 +3,7 @@ import { api, type SpaceMessage } from './useApi'
 import { plaintextPreview } from '../utils/honesty'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 import { visibleAssistantContent } from '../utils/visibleAssistantContent'
+import { sortMessagesChronological } from './useMessageEnrichment'
 
 export type { SpaceMessage }
 
@@ -211,7 +212,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
                   ;(m as any).delegatedThreads = (old as any).delegatedThreads
                 }
                 st.messages.splice(doneIdx, 1, m)
-              } else {
+              } else if (!m.parent_id) {
                 st.messages.push(m)
               }
             }
@@ -232,11 +233,13 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
         id: (raw.id as string) || `ws-${Date.now()}`,
         session_id: sessionId,
         seq: (raw.seq as number) ?? -1,
-        ts: (raw.ts as string) || new Date().toISOString(),
+        ts: (raw.ts as string) || (raw.created_at as string) || new Date().toISOString(),
+        created_at: (raw.created_at as string) || (raw.ts as string) || new Date().toISOString(),
         role: (raw.role as 'user' | 'assistant') ?? 'user',
         content: msg.content ?? '',
         agent: (raw.agent as string) ?? '',
       }
+      if (newMsg.parent_id) break
       if (!st.messages.some(m => m.id === newMsg.id)) {
         st.messages.push(newMsg)
       }
@@ -293,12 +296,26 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     }
   }
 
+  const onSpaceReply = (msg: WSMessage): void => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const spaceId = typeof p.space_id === 'string' ? p.space_id : ''
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    if (!spaceId || !parentId) return
+    const st = stateMap.get(spaceId)
+    if (!st) return
+    const root = st.messages.find(m => m.id === parentId)
+    if (!root) return
+    if (typeof p.reply_count === 'number') root.reply_count = p.reply_count
+    if (typeof p.last_preview === 'string') root.last_preview = p.last_preview
+  }
+
   ws.on('status', onStatus)
   ws.on('token', onToken)
   ws.on('done', onDone)
   ws.on('chat', onChat)
   ws.on('tool_call', onToolCall)
   ws.on('tool_result', onToolResult)
+  ws.on('space_reply', onSpaceReply)
 
   _wsCleanup = () => {
     ws.off('status', onStatus)
@@ -307,6 +324,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
     ws.off('chat', onChat)
     ws.off('tool_call', onToolCall)
     ws.off('tool_result', onToolResult)
+    ws.off('space_reply', onSpaceReply)
   }
   return _wsCleanup
 }
@@ -333,7 +351,8 @@ export function useSpaceTimeline(spaceId: string) {
       ])
 
       // Replace messages in-place to preserve reactive array reference.
-      s.messages.splice(0, s.messages.length, ...msgResult.messages)
+      const roots = sortMessagesChronological(msgResult.messages.filter(m => !m.parent_id))
+      s.messages.splice(0, s.messages.length, ...roots)
       s.cursor = msgResult.next_cursor || null
       s.hasMore = !!msgResult.next_cursor
 
@@ -375,7 +394,7 @@ export function useSpaceTimeline(spaceId: string) {
 
     try {
       const result = await api.spaces.messages(spaceId, s.cursor, 20)
-      const merged = dedup(result.messages, s.messages)
+      const merged = sortMessagesChronological(dedup(result.messages, s.messages))
       s.messages.splice(0, s.messages.length, ...merged)
       s.cursor = result.next_cursor || null
       s.hasMore = !!result.next_cursor
@@ -407,9 +426,9 @@ export { plaintextPreview } from '../utils/honesty'
 
 function snippetFromMessages(messages: SpaceMessage[] | undefined): { text: string; relTime: string } | null {
   if (!messages?.length) return null
-  const last = [...messages].reverse().find(m =>
-    (m.role === 'user' || m.role === 'assistant') && !!m.content
-  )
+  const last = sortMessagesChronological(
+    messages.filter(m => (m.role === 'user' || m.role === 'assistant') && !!m.content),
+  ).at(-1)
   if (!last) return null
   const text = plaintextPreview(last.content)
   if (!text) return null

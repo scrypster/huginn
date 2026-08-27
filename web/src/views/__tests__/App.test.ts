@@ -73,6 +73,8 @@ vi.mock('../../composables/useSpaces', () => ({
     updateSpace: mockUpdateSpace,
     deleteSpace: mockDeleteSpace,
     clearSpaces: mockClearSpaces,
+    openDM: vi.fn().mockResolvedValue(null),
+    ensureCompanyDM: vi.fn().mockResolvedValue(null),
   }),
   wireSpaceWS: vi.fn().mockReturnValue(vi.fn()),
 }))
@@ -107,6 +109,36 @@ vi.mock('../../composables/useCloud', () => ({
     fetchStatus: vi.fn().mockResolvedValue(undefined),
     connect: vi.fn(),
     disconnect: vi.fn(),
+  }),
+}))
+
+vi.mock('../../composables/useCompanies', () => ({
+  useCompanies: () => ({
+    companies: ref([]),
+    selectedCompanyId: ref(null),
+    selectedCompany: ref(null),
+    effectiveCompanyId: ref(null),
+    isDesk: ref(true),
+    loading: ref(false),
+    fetchCompanies: vi.fn().mockResolvedValue(undefined),
+    selectCompany: vi.fn(),
+    clearCompanies: vi.fn(),
+    isCompanyCollapsed: () => false,
+    toggleCompanyCollapsed: vi.fn(),
+    companyFollowUnread: () => false,
+    noteFollowUnread: vi.fn(),
+    applyFollowUnreadFromSpaces: vi.fn(),
+    seatMember: vi.fn().mockResolvedValue(null),
+    unseatMember: vi.fn().mockResolvedValue(null),
+    agentSeatedIn: () => false,
+    setCompanyCollapsed: vi.fn(),
+  }),
+}))
+
+vi.mock('../../composables/useAgentActivity', () => ({
+  useAgentActivity: () => ({
+    isAgentPulsing: vi.fn().mockReturnValue(false),
+    wireActivityWS: vi.fn().mockReturnValue(vi.fn()),
   }),
 }))
 
@@ -157,6 +189,9 @@ vi.mock('../../composables/useApi', () => ({
     },
     health: vi.fn().mockResolvedValue({ status: 'ok', version: 'v0.0.0', stale: false }),
     restart: vi.fn().mockResolvedValue({ status: 'restarting' }),
+    companies: {
+      list: vi.fn().mockResolvedValue([]),
+    },
     spaces: {
       list: vi.fn().mockResolvedValue([]),
       sessions: vi.fn().mockResolvedValue([]),
@@ -199,6 +234,8 @@ function mountApp() {
         Teleport: true,
         RouterView: { template: '<div class="router-view-stub" />' },
         SpaceCreateModal: { template: '<div />' },
+        CompanySwitcher: { template: '<div data-testid="company-switcher-stub" />' },
+        CompanySeatPicker: { template: '<div data-testid="company-seat-picker-stub" />' },
       },
     },
   })
@@ -453,25 +490,28 @@ describe('App', () => {
       expect(html).toContain('Direct Messages')
     })
 
-    it('keeps Channels/DMs on /stats and /settings, and agent-list on /agents', async () => {
+    it('hides Channels/DMs and agent-list on top-level stats, settings, and people', async () => {
       mockRoute.path = '/stats'
       const wStats = mountApp()
       await flushPromises()
-      expect(wStats.html()).toContain('Channels')
-      expect(wStats.html()).toContain('Direct Messages')
+      expect(wStats.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(wStats.find('[data-testid="space-list"]').exists()).toBe(false)
       expect(wStats.find('[data-testid="agent-list"]').exists()).toBe(false)
+      expect(wStats.html()).not.toContain('Direct Messages')
 
       mockRoute.path = '/settings'
       const wSettings = mountApp()
       await flushPromises()
-      expect(wSettings.html()).toContain('Channels')
-      expect(wSettings.html()).toContain('Direct Messages')
+      expect(wSettings.find('[data-testid="space-list"]').exists()).toBe(false)
       expect(wSettings.find('[data-testid="agent-list"]').exists()).toBe(false)
+      expect(wSettings.html()).not.toContain('Direct Messages')
 
       mockRoute.path = '/agents'
       const wAgents = mountApp()
       await flushPromises()
-      expect(wAgents.find('[data-testid="agent-list"]').exists()).toBe(true)
+      expect(wAgents.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(wAgents.find('[data-testid="context-panel"]').exists()).toBe(false)
+      expect(wAgents.find('[data-testid="agent-list"]').exists()).toBe(false)
       expect(wAgents.html()).not.toContain('Direct Messages')
     })
 
@@ -708,6 +748,74 @@ describe('App', () => {
       await nextTick()
 
       expect(mockRouterPush).toHaveBeenCalledWith('/chat/sess-legacy')
+    })
+  })
+
+  // ── Chat-only company/channel/DM rail ─────────────────────────────────────
+
+  describe('chat-only context rail', () => {
+    async function mountAt(path: string, params: Record<string, string> = {}) {
+      mockRoute.path = path
+      mockRoute.params = params
+      const w = mountApp()
+      await flushPromises()
+      return w
+    }
+
+    it('keeps the company/channel/DM sidebar on /chat', async () => {
+      const w = await mountAt('/chat')
+      expect(w.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(w.find('[data-testid="context-panel"]').exists()).toBe(true)
+      expect(w.find('[data-testid="space-list"]').exists()).toBe(true)
+    })
+
+    it('keeps the company/channel/DM sidebar on /space/:id', async () => {
+      const w = await mountAt('/space/sp-1', { spaceId: 'sp-1' })
+      expect(w.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(w.find('[data-testid="context-panel"]').exists()).toBe(true)
+      expect(w.find('[data-testid="space-list"]').exists()).toBe(true)
+    })
+
+    it.each([
+      ['/stats', {}],
+      ['/logs', {}],
+      ['/settings', {}],
+      ['/agents', {}],
+      ['/agents/atlas', { agentName: 'atlas' }],
+      ['/connections', {}],
+      ['/skills/browse', { tab: 'browse' }],
+      ['/workflows', {}],
+      ['/inbox', {}],
+      ['/models', {}],
+      ['/memory', {}],
+      ['/cloud', {}],
+    ])('hides the company/channel/DM sidebar on %s (icon rail stays)', async (path, params) => {
+      const w = await mountAt(path, params as Record<string, string>)
+      expect(w.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(w.find('[data-testid="context-panel"]').exists()).toBe(false)
+      expect(w.find('[data-testid="space-list"]').exists()).toBe(false)
+      expect(w.find('[data-testid="create-channel-btn"]').exists()).toBe(false)
+    })
+  })
+
+  describe('icon rail Slack-class groups', () => {
+    it('renders chat / admin / logs section separators and keeps settings out of logs', async () => {
+      mockRoute.path = '/chat'
+      const w = mountApp()
+      await flushPromises()
+      const rail = w.find('[data-testid="icon-rail"]')
+      expect(rail.exists()).toBe(true)
+      expect(rail.find('[data-testid="rail-section-admin"]').exists()).toBe(true)
+      expect(rail.find('[data-testid="rail-section-logs"]').exists()).toBe(true)
+      expect(rail.find('[data-testid="rail-chat"]').attributes('title')).toBe('Chat')
+      expect(rail.find('[data-testid="rail-settings"]').attributes('title')).toBe('Settings')
+      const html = rail.html()
+      const settingsAt = html.indexOf('data-testid="rail-settings"')
+      const statsAt = html.indexOf('data-testid="rail-stats"')
+      const logsAt = html.indexOf('data-testid="rail-logs"')
+      expect(settingsAt).toBeGreaterThan(-1)
+      expect(statsAt).toBeGreaterThan(settingsAt)
+      expect(logsAt).toBeGreaterThan(statsAt)
     })
   })
 })

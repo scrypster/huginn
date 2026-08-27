@@ -55,8 +55,8 @@ func TestScheduler_RegisterWorkflow_EmptyScheduleError(t *testing.T) {
 	s.SetWorkflowRunner(func(ctx context.Context, w *Workflow) error { return nil })
 
 	w := &Workflow{ID: "no-sched", Enabled: true, Schedule: ""}
-	if err := s.RegisterWorkflow(w); err == nil {
-		t.Fatal("expected error for empty schedule")
+	if err := s.RegisterWorkflow(w); err != nil {
+		t.Fatalf("one-shot empty schedule should succeed, got %v", err)
 	}
 }
 

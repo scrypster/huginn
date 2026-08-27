@@ -150,6 +150,10 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 	if ag != nil && reg != nil {
 		recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
 		systemPrompt := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+		if agentReg := o.GetAgentRegistry(); agentReg != nil {
+			roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+			systemPrompt = agents.AppendTeamRoster(systemPrompt, roster, agents.AgentSupportsDelegation(ag))
+		}
 
 		msgs := []backend.Message{{Role: "system", Content: systemPrompt}}
 		msgs = append(msgs, history...)
@@ -157,11 +161,12 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 
 		vr := o.connectAgentVault(ctx, ag, reg)
 		defer vr.cancel()
-		if vr.warning != "" && onEvent != nil {
-			onEvent(backend.StreamEvent{
-				Type:    backend.StreamWarning,
-				Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-			})
+		if vr.warning != "" {
+			name := ""
+			if ag != nil {
+				name = ag.Name
+			}
+			logVaultUnavailable(name, "", vr.warning)
 		}
 		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
 			msgs[0].Content += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
@@ -177,11 +182,12 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
 			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
 		}
+		ctx = SetSessionID(ctx, sessionID)
+		ctx = WithMemoryGate(ctx, ag.MemoryMode, sessionID, ag.Name)
 		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, prefetchCallback); memCtx != "" {
 			msgs[0].Content += memCtx
 		}
 
-		ctx = SetSessionID(ctx, sessionID)
 		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
 
 		agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
@@ -204,6 +210,12 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			OnEvent:          onEvent,
 			VaultWarnOnce:    &sync.Once{},
 			VaultReconnector: vr.reconnector,
+			MemoryMode:       ag.MemoryMode,
+			MemoryVault:      pinMuninnVault(ag.VaultName),
+			MemoryAgent:      ag.Name,
+			MemoryUserMsg:    userMsg,
+			MemorySession:    sessionID,
+			MemoryHome:       o.huginnHome,
 			OnToolCall: func(callID string, name string, args map[string]any) {
 				if onToolEvent != nil {
 					onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
@@ -225,14 +237,11 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			// Preserve full tool-call/tool-result history so subsequent turns
 			// have accurate context. initialCount = system msg (1) + history + user msg (1).
 			initialCount := 1 + len(history) + 1
+			var newMsgs []backend.Message
 			if res.Messages != nil && len(res.Messages) > initialCount {
-				sess.appendHistory(res.Messages[initialCount:]...)
-			} else {
-				sess.appendHistory(
-					backend.Message{Role: "user", Content: userMsg},
-					backend.Message{Role: "assistant", Content: res.FinalContent},
-				)
+				newMsgs = res.Messages[initialCount:]
 			}
+			appendHistoryHonoringGate(sess, userMsg, res.FinalContent, newMsgs, res.HoldClose)
 			o.compactHistory(ctx, sess)
 			return nil
 		}

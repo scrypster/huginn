@@ -5,18 +5,19 @@ package tui
 type appState int
 
 const (
-	stateChat        appState = iota
+	stateChat appState = iota
 	stateWizard
 	stateFilePicker
 	stateStreaming
-	statePermAwait        // waiting for user to allow/deny a tool permission request
-	stateWriteAwait       // waiting for user to allow/deny a file write
-	stateSessionPicker    // session resume picker overlay
-	stateSwarm            // showing swarm agent progress view
-	stateAgentWizard      // agent creation wizard overlay
-	stateArtifactView     // full-screen artifact overlay (ctrl+o on artifact line)
-	stateThreadOverlay    // full-screen thread overlay (ctrl+t)
-	stateObservationDeck  // narrated walkthrough of a thread (ctrl+e)
+	statePermAwait       // waiting for user to allow/deny a tool permission request
+	stateWriteAwait      // waiting for user to allow/deny a file write
+	stateSessionPicker   // session resume picker overlay
+	stateSwarm           // showing swarm agent progress view
+	stateAgentWizard     // agent creation wizard overlay
+	stateArtifactView    // full-screen artifact overlay (ctrl+o on artifact line)
+	stateThreadOverlay   // full-screen thread overlay (ctrl+t)
+	stateObservationDeck // narrated walkthrough of a thread (ctrl+e)
+	stateReplyThread     // Slack-style space reply drawer (t) — not work-inspector
 )
 
 // Layout constants — every line must be accounted for.

@@ -82,26 +82,57 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		}
 	}
 
-	// 4. Always inject delegation tools when registered in the registry.
-	// Delegation tools (delegate_to_agent, list_team_status, recall_thread_result)
-	// are tagged "builtin" in main.go so agents with LocalTools:["*"] already get
-	// them via step 1. But agents with a named LocalTools list only get those
-	// explicit names — delegation is excluded, causing the LLM to never call
-	// delegate_to_agent and the loop to exit early (Bug 2 / Bug 1).
-	// reg.Get returns (nil, false) when a tool is not registered, making this
-	// a safe no-op in environments that don't register delegation tools.
+	// 4. Inject delegation tools when the agent's model supports delegation.
+	// TierLow (7b) must not see delegate_to_agent — InferCapabilities sets
+	// SupportsDelegation=false. Empty/unknown model IDs stay optimistic.
+	// LocalTools:["*"] would otherwise pull them via step 1; strip in that case.
 	{
 		delegationNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result", "wait_for_threads"}
-		seenDelegation := make(map[string]bool, len(schemas))
-		for _, s := range schemas {
-			seenDelegation[s.Function.Name] = true
-		}
-		for _, dname := range delegationNames {
-			if !seenDelegation[dname] {
-				if dt, ok := reg.Get(dname); ok {
-					schemas = append(schemas, dt.Schema())
+		if agents.AgentSupportsDelegation(ag) {
+			seenDelegation := make(map[string]bool, len(schemas))
+			for _, s := range schemas {
+				seenDelegation[s.Function.Name] = true
+			}
+			for _, dname := range delegationNames {
+				if !seenDelegation[dname] {
+					if dt, ok := reg.Get(dname); ok {
+						schemas = append(schemas, dt.Schema())
+					}
 				}
 			}
+		} else {
+			deny := make(map[string]bool, len(delegationNames))
+			for _, dname := range delegationNames {
+				deny[dname] = true
+			}
+			filtered := schemas[:0]
+			for _, s := range schemas {
+				if !deny[s.Function.Name] {
+					filtered = append(filtered, s)
+				}
+			}
+			schemas = filtered
+		}
+	}
+
+	// 4b. create_agent is never implied by God Mode or a toolbelt wildcard.
+	// Only an explicit local_tools: ["create_agent"] grant may keep the schema.
+	{
+		namedHire := false
+		for _, n := range ag.LocalTools {
+			if n == tools.CreateAgentName {
+				namedHire = true
+				break
+			}
+		}
+		if !namedHire {
+			filtered := schemas[:0]
+			for _, s := range schemas {
+				if s.Function.Name != tools.CreateAgentName {
+					filtered = append(filtered, s)
+				}
+			}
+			schemas = filtered
 		}
 	}
 
@@ -128,6 +159,7 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		)
 	}
 
+	schemas = filterMuninnSchemas(schemas, ag.MemoryMode)
 	return schemas, agentGate
 }
 
@@ -141,7 +173,10 @@ type toolGetter interface {
 // context carries a space context. It is a no-op when there is no space context
 // or when the tool is already present in schemas. The original slice is never
 // mutated if it is unchanged.
-func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg toolGetter) []backend.Tool {
+func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg toolGetter, ag *agents.Agent) []backend.Tool {
+	if !agents.AgentSupportsDelegation(ag) {
+		return schemas
+	}
 	if workforce.GetSpaceContext(ctx) == "" {
 		return schemas
 	}
@@ -543,17 +578,12 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	defer vr.cancel()
 
 	if vr.warning != "" {
-		slog.Warn("vault unavailable for agent session", "agent", ag.Name, "session_id", opts.sessionID, "warning", vr.warning)
-		if opts.onEvent != nil {
-			opts.onEvent(backend.StreamEvent{
-				Type:    backend.StreamWarning,
-				Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-			})
-		}
+		logVaultUnavailable(ag.Name, opts.sessionID, vr.warning)
 	}
 
 	// 2. Augment system prompt with memory-mode instructions and prefetched context.
 	systemPrompt := opts.systemPromptBase
+	ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
 	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
 		slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
 		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
@@ -570,7 +600,7 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 
 	// 4. Resolve tool schemas and permission gate for this agent run.
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
-	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg)
+	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg, ag)
 
 	// 5. Create isolated session environment (temp dir, env vars).
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
@@ -608,6 +638,12 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		OnEvent:            opts.onEvent,
 		VaultWarnOnce:      &sync.Once{},
 		VaultReconnector:   vr.reconnector,
+		MemoryMode:         ag.MemoryMode,
+		MemoryVault:        pinMuninnVault(ag.VaultName),
+		MemoryAgent:        ag.Name,
+		MemoryUserMsg:      opts.userMsg,
+		MemorySession:      opts.sessionID,
+		MemoryHome:         o.huginnHome,
 	}
 
 	start := time.Now().UnixNano()
@@ -622,16 +658,13 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
 	}
 
-	// 8. Persist new messages into session history.
+	// 8. Persist new messages into session history (after memory gate).
 	initialCount := 1 + len(opts.history) + 1 // system + history + user
+	var newMsgs []backend.Message
 	if loopResult.Messages != nil && len(loopResult.Messages) > initialCount {
-		opts.sess.appendHistory(loopResult.Messages[initialCount:]...)
-	} else {
-		opts.sess.appendHistory(
-			backend.Message{Role: "user", Content: opts.userMsg},
-			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
-		)
+		newMsgs = loopResult.Messages[initialCount:]
 	}
+	appendHistoryHonoringGate(opts.sess, opts.userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
 	o.compactHistory(ctx, opts.sess)
 	return nil
 }
@@ -654,6 +687,7 @@ func (o *Orchestrator) TaskWithAgent(
 	reg := o.toolRegistry
 	gate := o.permGate
 	sess := o.defaultSession()
+	agentReg := o.agentReg
 	o.mu.RUnlock()
 	sess.setState(StateAgentLoop)
 	defer sess.setState(StateIdle)
@@ -665,6 +699,10 @@ func (o *Orchestrator) TaskWithAgent(
 	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
 	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
 	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+	if agentReg != nil {
+		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+	}
 
 	history := sess.snapshotHistory()
 
@@ -735,6 +773,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	gate := o.permGate
 	maxTurns := o.defaultMaxTurns
 	memReplicator := o.optionalMemoryReplicatorLocked()
+	agentReg := o.agentReg
 	o.mu.RUnlock()
 	if maxTurns <= 0 {
 		maxTurns = 50
@@ -759,10 +798,11 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	// Guard against concurrent calls on the same session. Only one agentic loop
 	// may run at a time per session — concurrent calls would interleave history
 	// appends, producing garbled context for future turns.
-	// Uses a separate atomic flag (not the state machine) so outer callers like
-	// ReasonWithAgent can pre-set state to StateAgentLoop without conflict.
-	if !sess.tryBeginRun() {
-		return fmt.Errorf("chat(%s): session %s is already running; concurrent calls are not supported", ag.Name, sessionID)
+	// Queue behind the in-flight run (hallway @mentions share one space-chat
+	// session). Do not fail-closed with "already running" — that leaked into
+	// #Huginn as assistant speech.
+	if !sess.beginExclusiveRun(ctx) {
+		return fmt.Errorf("chat(%s): session %s still busy after queue wait", ag.Name, sessionID)
 	}
 	defer sess.endRun()
 	sess.setState(StateAgentLoop)
@@ -775,6 +815,10 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	ctxText := o.contextBuilder.Build(userMsg, ag.GetModelID())
 	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
 	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+	if agentReg != nil {
+		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+	}
 
 	// Per-agent skills fragment. Non-default agents (workflow steps, delegated
 	// workers) need their assigned skills appended just like the default agent
@@ -800,6 +844,10 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	if connHint := stepConnectionsAddendum(ctx); connHint != "" {
 		systemPromptBase += "\n\n" + connHint
 	}
+
+	// Machine local clock (America/New_York, labeled ET). One short line.
+	// Do not invent a vault — this is the wall clock at inject.
+	systemPromptBase = backend.AppendLocalClock(systemPromptBase, time.Now())
 
 	history := sess.snapshotHistory()
 
@@ -920,10 +968,22 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			// ctxSetup wires the session ID into ctx and establishes a delegation
 			// context so downstream code (e.g. threadmgr) can trace the lineage.
 			ctxSetup: func(c context.Context) context.Context {
-				c = SetSessionID(c, sessionID)
-				c = threadmgr.SetCallingAgent(c, ag.Name)
+				// Space-thread wakes use an ephemeral orch session so leftover
+				// speech cannot land as a hallway root. The runner pre-sets the
+				// real hallway / space session on ctx for delegate_to_agent —
+				// do not overwrite it.
+				if GetSessionID(c) == "" && sessionID != "" {
+					c = SetSessionID(c, sessionID)
+				}
+				if threadmgr.GetCallingAgent(c) == "" {
+					c = threadmgr.SetCallingAgent(c, ag.Name)
+				}
 				if GetDelegationContext(c) == nil {
-					dc := workforce.NewDelegationContext(sessionID, ag.Name, o.maxDelegationDepth())
+					dcSID := GetSessionID(c)
+					if dcSID == "" {
+						dcSID = sessionID
+					}
+					dc := workforce.NewDelegationContext(dcSID, ag.Name, o.maxDelegationDepth())
 					c = WithDelegationContext(c, &dc)
 				}
 				return c

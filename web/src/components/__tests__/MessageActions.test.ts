@@ -163,3 +163,29 @@ describe('MessageActions', () => {
     })
   })
 })
+
+  it('shows Reply when showReply is set', async () => {
+    const wrapper = mount(MessageActions, {
+      props: { msg: makeMsg({ role: 'user' }), agentVaultName: '', showReply: true },
+    })
+    expect(wrapper.find('[data-testid="msg-reply"]').exists()).toBe(true)
+    await wrapper.find('[data-testid="msg-reply"]').trigger('click')
+    expect(wrapper.emitted('reply')).toBeTruthy()
+  })
+
+  it('hides Reply by default so session chat is unchanged', () => {
+    const wrapper = mount(MessageActions, {
+      props: { msg: makeMsg({ role: 'user' }), agentVaultName: '' },
+    })
+    expect(wrapper.find('[data-testid="msg-reply"]').exists()).toBe(false)
+  })
+
+  it('shows Details diagnose only when asked', async () => {
+    const wrapper = mount(MessageActions, {
+      props: { msg: makeMsg(), agentVaultName: '', showDiagnose: true },
+    })
+    expect(wrapper.find('[data-testid="msg-diagnose"]').exists()).toBe(true)
+    await wrapper.find('[data-testid="msg-diagnose"]').trigger('click')
+    expect(wrapper.emitted('diagnose')).toBeTruthy()
+  })
+

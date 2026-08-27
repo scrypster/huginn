@@ -69,11 +69,11 @@ func TestRunLoop_FencedGrantedPlaybookExecutes(t *testing.T) {
 	if want := []string{"delegate_to_agent", "wait_for_threads"}; strings.Join(log, ",") != strings.Join(want, ",") {
 		t.Fatalf("execution order = %v, want %v", log, want)
 	}
-	if res.StopReason != "stop" || res.TurnCount != 2 {
-		t.Errorf("stop=%q turns=%d, want stop/2", res.StopReason, res.TurnCount)
+	if res.StopReason != "stop" || mb.callCount != 1 {
+		t.Errorf("stop=%q completions=%d, want stop/1 (PONG wait ends the turn)", res.StopReason, mb.callCount)
 	}
-	if res.FinalContent != "Reggie says PONG." {
-		t.Errorf("final = %q", res.FinalContent)
+	if res.FinalContent != "PONG" {
+		t.Errorf("final = %q, want PONG", res.FinalContent)
 	}
 	// The promoted assistant message keeps the glue prose, never the fences.
 	for _, m := range res.Messages {
@@ -141,8 +141,11 @@ func TestRunLoop_AutoWaitAfterDelegateWithoutWait(t *testing.T) {
 	if want := []string{"delegate_to_agent", "wait_for_threads"}; strings.Join(log, ",") != strings.Join(want, ",") {
 		t.Fatalf("execution order = %v, want %v", log, want)
 	}
-	if res.FinalContent != "Reggie reported: PONG." {
-		t.Errorf("final = %q", res.FinalContent)
+	if res.FinalContent != "PONG" {
+		t.Errorf("final = %q, want PONG (stop after auto-wait)", res.FinalContent)
+	}
+	if mb.callCount != 2 {
+		t.Errorf("completions=%d, want 2 (delegate + stop, no recap)", mb.callCount)
 	}
 	// The synthetic barrier's tool result must be in history for the model.
 	found := false

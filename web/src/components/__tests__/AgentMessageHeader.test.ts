@@ -82,24 +82,26 @@ describe('AgentMessageHeader', () => {
     expect(wrapper.html()).toContain('just now')
   })
 
-  it('shows "Xm ago" when createdAt is 2 minutes ago', () => {
+  it('shows "2m" when createdAt is 2 minutes ago', () => {
     const now = new Date('2024-06-01T12:00:00.000Z')
     vi.setSystemTime(now)
     const twoMinsAgo = new Date(now.getTime() - 2 * 60 * 1000).toISOString()
     const wrapper = mount(AgentMessageHeader, {
       props: { agentName: 'ares', createdAt: twoMinsAgo },
     })
-    expect(wrapper.html()).toContain('2m ago')
+    expect(wrapper.html()).toContain('2m')
+    expect(wrapper.html()).not.toContain('2m ago')
   })
 
-  it('shows "Xh ago" when createdAt is 3 hours ago', () => {
+  it('shows "3h" when createdAt is 3 hours ago', () => {
     const now = new Date('2024-06-01T12:00:00.000Z')
     vi.setSystemTime(now)
     const threeHoursAgo = new Date(now.getTime() - 3 * 60 * 60 * 1000).toISOString()
     const wrapper = mount(AgentMessageHeader, {
       props: { agentName: 'ares', createdAt: threeHoursAgo },
     })
-    expect(wrapper.html()).toContain('3h ago')
+    expect(wrapper.html()).toContain('3h')
+    expect(wrapper.html()).not.toContain('3h ago')
   })
 
   it('shows a locale date when createdAt is over 24 hours ago', () => {
@@ -109,7 +111,7 @@ describe('AgentMessageHeader', () => {
     const wrapper = mount(AgentMessageHeader, {
       props: { agentName: 'poseidon', createdAt: twoDaysAgo },
     })
-    // Should show a date string, not "just now" or "Xm ago"
+    // Should show a weekday or date, not "just now"
     expect(wrapper.html()).not.toContain('just now')
     expect(wrapper.html()).not.toContain('m ago')
     expect(wrapper.html()).not.toContain('h ago')

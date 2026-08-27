@@ -281,3 +281,32 @@ func TestWaitForThreads_PlaceholderIDsFallBackToUncollected(t *testing.T) {
 		t.Fatalf("placeholder wait should fall back to uncollected, got completed=%d pending=%d", len(report.Completed), len(report.Pending))
 	}
 }
+
+func TestWaitForThreads_SkipsStaleUncollected(t *testing.T) {
+	tm := New()
+	oldTh, err := tm.Create(CreateParams{SessionID: "s1", AgentID: "Winston", Task: "old time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.Complete(oldTh.ID, FinishSummary{Summary: "Local time now: Thursday, August 27, 2026, 9:11 AM ET", Status: "completed"})
+	tm.mu.Lock()
+	if live, ok := tm.threads[oldTh.ID]; ok {
+		live.CompletedAt = time.Now().Add(-3 * time.Hour)
+		live.CollectedAt = time.Time{}
+	}
+	tm.mu.Unlock()
+
+	fresh, err := tm.Create(CreateParams{SessionID: "s1", AgentID: "Winston", Task: "current time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.Complete(fresh.ID, FinishSummary{Summary: "Local time now: Thursday, August 27, 2026, 2:23 PM ET", Status: "completed"})
+
+	report := tm.WaitForThreads(context.Background(), "s1", nil, 2*time.Second)
+	if len(report.Completed) != 1 {
+		t.Fatalf("want only the fresh thread, got %d", len(report.Completed))
+	}
+	if report.Completed[0].ID != fresh.ID {
+		t.Fatalf("got %s, want fresh %s", report.Completed[0].ID, fresh.ID)
+	}
+}

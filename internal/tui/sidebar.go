@@ -13,6 +13,9 @@ import (
 const (
 	sidebarWidth    = 22  // columns for the sidebar panel
 	sidebarMinTotal = 100 // terminal must be at least this wide to show sidebar
+	// forYouGlyph is the follow/@me rail badge (Vue company-rail blue dot).
+	// Distinct from the "●● working" activity indicator.
+	forYouGlyph = "•"
 )
 
 // sidebarSection is a navigation group in the sidebar.
@@ -21,25 +24,52 @@ type sidebarSection int
 const (
 	sidebarSectionChannels sidebarSection = iota // channels render first (top)
 	sidebarSectionDMs                            // DMs render second (below channels)
+	sidebarSectionCompany                        // collapsed company rail
 )
+
+// SidebarSpace is one GET /spaces row mapped into the TUI rail.
+// ForYou is the mention/@me badge. Unseen is the spectator quiet count.
+type SidebarSpace struct {
+	ID        string
+	Name      string
+	Kind      string
+	LeadAgent string
+	CompanyID string
+	Unseen    int
+	ForYou    bool
+}
+
+// SidebarCompany is one company row on the TUI rail.
+type SidebarCompany struct {
+	ID   string
+	Name string
+}
 
 // sidebarItem represents one row in the sidebar.
 type sidebarItem struct {
-	kind   sidebarSection
-	name   string // agent name or channel name
-	color  string // for agents
-	unread int    // unread count (0 = none)
-	active bool   // true when agent has an in-flight task
+	kind      sidebarSection
+	name      string // agent name, channel name, or company name
+	color     string // for agents
+	unread    int    // spectator unseen count (0 = none); not the for-you badge
+	forYou    bool   // mention/@me rail badge
+	active    bool   // true when agent has an in-flight task
+	companyID string
+	spaceID   string
+	collapsed bool // company rows only
 }
 
 // sidebarModel is the Slack-style left navigation panel.
 type sidebarModel struct {
-	visible bool
-	focused bool   // true when keyboard focus is in sidebar (vs. chat)
-	items   []sidebarItem
-	cursor  int    // currently highlighted item index
-	active  string // currently active DM / channel
-	width   int
+	visible   bool
+	focused   bool // true when keyboard focus is in sidebar (vs. chat)
+	items     []sidebarItem
+	cursor    int    // currently highlighted item index
+	active    string // currently active DM / channel
+	width     int
+	spaces    []SidebarSpace
+	companies []SidebarCompany
+	collapsed map[string]bool
+	dmAgents  []sidebarItem
 }
 
 // SidebarSelectMsg is dispatched when the user picks an item in the sidebar.
@@ -55,7 +85,7 @@ type SidebarFocusMsg struct{}
 type SidebarBlurMsg struct{}
 
 func newSidebarModel() sidebarModel {
-	return sidebarModel{visible: false}
+	return sidebarModel{visible: false, collapsed: map[string]bool{}}
 }
 
 // IsVisible reports whether the sidebar should be rendered.
@@ -66,60 +96,155 @@ func (s *sidebarModel) AutoShow(termWidth int) {
 	s.visible = termWidth >= sidebarMinTotal
 }
 
+// companyRailForYou reports the collapsed-company badge: follow/@me only.
+// Spectator unseen_count must not light the rail (same as Vue forYou).
+func companyRailForYou(companyID string, spaces []SidebarSpace) bool {
+	if companyID == "" {
+		return false
+	}
+	for _, sp := range spaces {
+		if sp.CompanyID == companyID && sp.ForYou {
+			return true
+		}
+	}
+	return false
+}
+
+func spaceItem(sp SidebarSpace, kind sidebarSection) sidebarItem {
+	name := sp.Name
+	if kind == sidebarSectionDMs && name == "" {
+		name = sp.LeadAgent
+	}
+	return sidebarItem{
+		kind:      kind,
+		name:      name,
+		unread:    sp.Unseen,
+		forYou:    sp.ForYou,
+		companyID: sp.CompanyID,
+		spaceID:   sp.ID,
+	}
+}
+
+func findDMSpace(spaces []SidebarSpace, name string) (SidebarSpace, bool) {
+	for _, sp := range spaces {
+		if sp.Kind != "dm" {
+			continue
+		}
+		if strings.EqualFold(sp.LeadAgent, name) || strings.EqualFold(sp.Name, name) {
+			return sp, true
+		}
+	}
+	return SidebarSpace{}, false
+}
+
+func (s *sidebarModel) rebuildRail() {
+	if s.collapsed == nil {
+		s.collapsed = map[string]bool{}
+	}
+	items := make([]sidebarItem, 0, len(s.spaces)+len(s.dmAgents)+len(s.companies))
+
+	for _, sp := range s.spaces {
+		if sp.Kind == "dm" {
+			continue
+		}
+		if sp.CompanyID != "" {
+			continue
+		}
+		items = append(items, spaceItem(sp, sidebarSectionChannels))
+	}
+
+	for _, dm := range s.dmAgents {
+		if sp, ok := findDMSpace(s.spaces, dm.name); ok && sp.CompanyID != "" {
+			continue
+		}
+		if sp, ok := findDMSpace(s.spaces, dm.name); ok {
+			dm.unread = sp.Unseen
+			dm.forYou = sp.ForYou
+			dm.companyID = sp.CompanyID
+			dm.spaceID = sp.ID
+		}
+		items = append(items, dm)
+	}
+
+	for _, c := range s.companies {
+		collapsed := s.collapsed[c.ID]
+		items = append(items, sidebarItem{
+			kind:      sidebarSectionCompany,
+			name:      c.Name,
+			companyID: c.ID,
+			collapsed: collapsed,
+			forYou:    companyRailForYou(c.ID, s.spaces),
+		})
+		if collapsed {
+			continue
+		}
+		for _, sp := range s.spaces {
+			if sp.CompanyID != c.ID {
+				continue
+			}
+			kind := sidebarSectionChannels
+			if sp.Kind == "dm" {
+				kind = sidebarSectionDMs
+			}
+			items = append(items, spaceItem(sp, kind))
+		}
+	}
+	s.items = items
+	s.clampCursor()
+}
+
 // SetAgents rebuilds the DM items from the agent registry.
 // Channels are preserved at the FRONT so items[] matches visual render order
 // (channels on top, DMs below), keeping cursor navigation visually consistent.
 func (s *sidebarModel) SetAgents(reg *agents.AgentRegistry) {
 	if reg == nil {
+		s.dmAgents = nil
 		s.items = nil
 		return
 	}
-	// Preserve existing channel items at front.
-	var items []sidebarItem
-	for _, existing := range s.items {
-		if existing.kind == sidebarSectionChannels {
-			items = append(items, existing)
-		}
-	}
-	// Append DMs sorted alphabetically.
 	all := reg.All()
 	sort.Slice(all, func(i, j int) bool {
 		return strings.ToLower(all[i].Name) < strings.ToLower(all[j].Name)
 	})
+	dms := make([]sidebarItem, 0, len(all))
 	for _, ag := range all {
-		items = append(items, sidebarItem{
+		dms = append(dms, sidebarItem{
 			kind:  sidebarSectionDMs,
 			name:  ag.Name,
 			color: ag.Color,
 		})
 	}
-	s.items = items
-	s.clampCursor()
+	s.dmAgents = dms
+	s.rebuildRail()
 }
 
 // SetChannels replaces channel items. Channels are stored at the FRONT of
 // items[] so cursor index 0 maps to the topmost visual row.
 func (s *sidebarModel) SetChannels(names []string) {
-	// Keep existing DM items.
-	var dms []sidebarItem
-	for _, it := range s.items {
-		if it.kind != sidebarSectionChannels {
-			dms = append(dms, it)
-		}
-	}
-	// Build: channels first, then DMs.
-	items := make([]sidebarItem, 0, len(names)+len(dms))
+	next := make([]SidebarSpace, 0, len(names))
 	for _, ch := range names {
-		items = append(items, sidebarItem{kind: sidebarSectionChannels, name: ch})
+		next = append(next, SidebarSpace{Name: ch, Kind: "channel"})
 	}
-	items = append(items, dms...)
-	s.items = items
-	s.clampCursor()
+	s.spaces = next
+	s.rebuildRail()
+}
+
+// SetSpaceRail maps GET /spaces (+ companies) onto the sidebar/company rail.
+// Badge (forYou) is independent of Unseen — spectator chatter stays a count.
+func (s *sidebarModel) SetSpaceRail(spaces []SidebarSpace, companies []SidebarCompany) {
+	s.spaces = append([]SidebarSpace(nil), spaces...)
+	s.companies = append([]SidebarCompany(nil), companies...)
+	s.rebuildRail()
 }
 
 // SetAgentActive marks or clears the "active/working" indicator for a DM agent.
 // When active=true, the agent shows "●● working" in the sidebar.
 func (s *sidebarModel) SetAgentActive(name string, active bool) {
+	for i := range s.dmAgents {
+		if s.dmAgents[i].name == name {
+			s.dmAgents[i].active = active
+		}
+	}
 	for i := range s.items {
 		if s.items[i].kind == sidebarSectionDMs && s.items[i].name == name {
 			s.items[i].active = active
@@ -176,6 +301,14 @@ func (s sidebarModel) Update(msg tea.Msg) (sidebarModel, tea.Cmd) {
 	case "enter", " ":
 		if len(s.items) > 0 && s.cursor < len(s.items) {
 			it := s.items[s.cursor]
+			if it.kind == sidebarSectionCompany {
+				if s.collapsed == nil {
+					s.collapsed = map[string]bool{}
+				}
+				s.collapsed[it.companyID] = !s.collapsed[it.companyID]
+				s.rebuildRail()
+				return s, nil
+			}
 			s.focused = false
 			return s, func() tea.Msg {
 				return SidebarSelectMsg{Kind: it.kind, Name: it.name}
@@ -188,6 +321,31 @@ func (s sidebarModel) Update(msg tea.Msg) (sidebarModel, tea.Cmd) {
 	return s, nil
 }
 
+// spaceLine is the label for a channel/DM row: for-you badge, then quiet count.
+func spaceLine(it sidebarItem, prefix string, w int) string {
+	nameStr := prefix + it.name
+	budget := w - 4
+	if budget < 6 {
+		budget = 6
+	}
+	if lipgloss.Width(nameStr) > budget {
+		if budget > 3 {
+			nameStr = nameStr[:budget-3] + "…"
+		}
+	}
+	line := "  " + nameStr
+	if it.kind == sidebarSectionDMs && it.active {
+		line += "  ●● working"
+	}
+	if it.forYou {
+		line += " " + forYouGlyph
+	}
+	if it.unread > 0 {
+		line += fmt.Sprintf(" (%d)", it.unread)
+	}
+	return line
+}
+
 // View renders the sidebar panel. Returns an empty string when not visible.
 func (s sidebarModel) View(height int) string {
 	if !s.visible {
@@ -197,9 +355,10 @@ func (s sidebarModel) View(height int) string {
 	w := sidebarWidth
 
 	accentSB := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	dimSB    := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	dimSB := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	activeSB := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
 	normalSB := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	forYouSB := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true) // Vue huginn-blue
 
 	var rows []string
 
@@ -212,19 +371,11 @@ func (s sidebarModel) View(height int) string {
 
 	chCount := 0
 	for i, it := range s.items {
-		if it.kind != sidebarSectionChannels {
+		if it.kind != sidebarSectionChannels || it.companyID != "" {
 			continue
 		}
 		chCount++
-		nameStr := "# " + it.name
-		if lipgloss.Width(nameStr) > w-4 {
-			nameStr = nameStr[:w-7] + "…"
-		}
-		line := "  " + nameStr
-		if it.unread > 0 {
-			line += fmt.Sprintf(" (%d)", it.unread)
-		}
-		rows = append(rows, s.renderItem(i, line, it, activeSB, normalSB, w))
+		rows = append(rows, s.renderItem(i, spaceLine(it, "# ", w), it, activeSB, normalSB, w))
 	}
 	if chCount == 0 {
 		rows = append(rows, dimSB.Render(padRight("  (none)", w)))
@@ -236,25 +387,46 @@ func (s sidebarModel) View(height int) string {
 
 	dmCount := 0
 	for i, it := range s.items {
-		if it.kind != sidebarSectionDMs {
+		if it.kind != sidebarSectionDMs || it.companyID != "" {
 			continue
 		}
 		dmCount++
-		nameStr := it.name
-		if lipgloss.Width(nameStr) > w-6 {
-			nameStr = nameStr[:w-9] + "…"
-		}
-		line := "  @ " + nameStr
-		if it.active {
-			line += "  ●● working"
-		}
-		if it.unread > 0 {
-			line += fmt.Sprintf(" (%d)", it.unread)
-		}
-		rows = append(rows, s.renderItem(i, line, it, activeSB, normalSB, w))
+		rows = append(rows, s.renderItem(i, spaceLine(it, "@ ", w), it, activeSB, normalSB, w))
 	}
 	if dmCount == 0 {
 		rows = append(rows, dimSB.Render(padRight("  (none)", w)))
+	}
+
+	// ── Company rail ──────────────────────────────────────────────────────────
+	if len(s.companies) > 0 {
+		rows = append(rows, dimSB.Render(padRight("", w)))
+		rows = append(rows, dimSB.Render(padRight("  Companies", w)))
+		for i, it := range s.items {
+			if it.kind == sidebarSectionCompany {
+				mark := "▸"
+				if !it.collapsed {
+					mark = "▾"
+				}
+				name := it.name
+				if lipgloss.Width(name) > w-8 {
+					name = name[:w-11] + "…"
+				}
+				line := "  " + mark + " " + name
+				if it.collapsed && it.forYou {
+					line += " " + forYouSB.Render(forYouGlyph)
+				}
+				rows = append(rows, s.renderItem(i, line, it, activeSB, normalSB, w))
+				continue
+			}
+			if it.companyID == "" {
+				continue
+			}
+			prefix := "# "
+			if it.kind == sidebarSectionDMs {
+				prefix = "@ "
+			}
+			rows = append(rows, s.renderItem(i, spaceLine(it, "  "+prefix, w), it, activeSB, normalSB, w))
+		}
 	}
 
 	// ── Footer hint ───────────────────────────────────────────────────────────
@@ -285,8 +457,8 @@ func (s sidebarModel) View(height int) string {
 // renderItem renders a single sidebar item with correct highlighting.
 func (s sidebarModel) renderItem(idx int, line string, it sidebarItem,
 	activeSB, normalSB lipgloss.Style, w int) string {
-	isActive  := it.name == s.active
-	isCursor  := s.focused && idx == s.cursor
+	isActive := it.name == s.active
+	isCursor := s.focused && idx == s.cursor
 
 	switch {
 	case isCursor:

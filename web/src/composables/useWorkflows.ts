@@ -126,6 +126,7 @@ export interface Workflow {
   description?: string
   enabled: boolean
   schedule: string
+  company_id?: string
   tags?: string[]
   steps: WorkflowStep[]
   notification?: WorkflowNotification
@@ -207,6 +208,20 @@ export function useWorkflows() {
       body: JSON.stringify(data),
     })
     if (created.id) workflows.value.unshift(created)
+    return created
+  }
+
+  async function dropWorkflow(filename: string, content: string): Promise<Workflow> {
+    const created = await apiFetch<Workflow>('/api/v1/workflows/drop', {
+      method: 'POST',
+      body: JSON.stringify({ filename, content }),
+    })
+    if (created.id) {
+      const idx = workflows.value.findIndex(w => w.id === created.id)
+      if (idx >= 0) workflows.value[idx] = created
+      else workflows.value.unshift(created)
+    }
+
     return created
   }
 
@@ -369,6 +384,7 @@ export function useWorkflows() {
     fetchWorkflows,
     fetchTemplates,
     createWorkflow,
+    dropWorkflow,
     updateWorkflow,
     deleteWorkflow,
     triggerWorkflow,

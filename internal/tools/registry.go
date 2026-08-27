@@ -233,10 +233,12 @@ func (r *Registry) AllSchemasForProviders(providers []string) []backend.Tool {
 			continue
 		}
 		provider := r.providerByTool[t.Name()]
-		if provider == "builtin" {
-			continue // builtin tools are resolved by applyToolbelt separately
+		if provider == "builtin" || provider == "" {
+			// Untagged tools (create_agent) are grant-gated via named local_tools.
+			// Wildcard toolbelt is "all externally-tagged tools", not the whole registry.
+			continue
 		}
-		if allowAll || (provider != "" && allowed[provider]) {
+		if allowAll || allowed[provider] {
 			schemas = append(schemas, t.Schema())
 		}
 	}

@@ -16,19 +16,19 @@ type VaultStrategy string
 
 const (
 	StrategyTwoTier      VaultStrategy = "two-tier"      // default: personal + project
-	StrategySingle       VaultStrategy = "single"         // everything in personal vault
-	StrategyProjectOnly  VaultStrategy = "project-only"   // skip personal vault
-	StrategyPersonalOnly VaultStrategy = "personal-only"  // skip project vault
+	StrategySingle       VaultStrategy = "single"        // everything in personal vault
+	StrategyProjectOnly  VaultStrategy = "project-only"  // skip personal vault
+	StrategyPersonalOnly VaultStrategy = "personal-only" // skip project vault
 )
 
 // GlobalConfig is loaded from ~/.config/huginn/muninn.json.
 type GlobalConfig struct {
-	Endpoint        string            `json:"endpoint"`                   // MuninnDB server URL
-	Username        string            `json:"username"`                   // MuninnDB username; default "root"
-	UserVault       string            `json:"user_vault"`                 // overrides username resolution
-	Strategy        VaultStrategy     `json:"strategy"`                   // default: two-tier
-	ActivationLimit int               `json:"activation_limit"`           // max results per activation call; default 10
-	VaultTokens     map[string]string `json:"vault_tokens,omitempty"`     // per-vault REST API tokens (mk_...)
+	Endpoint        string            `json:"endpoint"`               // MuninnDB server URL
+	Username        string            `json:"username"`               // MuninnDB username; default "root"
+	UserVault       string            `json:"user_vault"`             // overrides username resolution
+	Strategy        VaultStrategy     `json:"strategy"`               // default: two-tier
+	ActivationLimit int               `json:"activation_limit"`       // max results per activation call; default 10
+	VaultTokens     map[string]string `json:"vault_tokens,omitempty"` // per-vault REST API tokens (mk_...)
 	// MCPToken is the daemon token for authenticating to the MuninnDB MCP server (mdb_...).
 	// This is distinct from per-vault API keys. If set, it takes precedence over VaultTokens
 	// for all MCP transport connections. Run `muninn --mcp-token <value>` to find the value.
@@ -55,6 +55,7 @@ func LoadGlobalConfig(path string) (*GlobalConfig, error) {
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		maybeDiscoverLocalDaemon(cfg, path)
 		return cfg, nil
 	}
 	if err != nil {

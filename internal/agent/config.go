@@ -265,6 +265,14 @@ func (o *Orchestrator) ModelRegistry() *modelconfig.ModelRegistry {
 	return o.registry
 }
 
+// ModelInfoFn resolves a model ID to capability info for roster cards.
+func (o *Orchestrator) ModelInfoFn() agents.ModelInfoFn {
+	if o == nil {
+		return agents.InferModelInfo
+	}
+	return agents.RegistryModelInfoFn(o.ModelRegistry())
+}
+
 // SetSkillsFragment injects workspace rule content into the ContextBuilder.
 // Called after any skill mutation (e.g., install, delete, enable/disable).
 func (o *Orchestrator) SetSkillsFragment(fragment string) {

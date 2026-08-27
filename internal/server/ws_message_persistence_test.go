@@ -385,6 +385,75 @@ func TestBroadcastToSession_PersistsThreadLifecycleEvent(t *testing.T) {
 	if !strings.Contains(msgs[0].Content, "completed delegated work") {
 		t.Errorf("unexpected lifecycle content: %q", msgs[0].Content)
 	}
+	if msgs[0].ParentMessageID != "parent-1" {
+		t.Errorf("lifecycle ParentMessageID=%q, want parent-1", msgs[0].ParentMessageID)
+	}
+}
+
+func TestBroadcastToSession_SpaceThreadLifecycleStaysOffHallway(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openTestSQLiteDB(t)
+	if err := db.Migrate(spaces.Migrations()); err != nil {
+		t.Fatalf("migrate spaces: %v", err)
+	}
+	store := spaces.NewSQLiteSpaceStore(db)
+	srv.SetSpaceStore(store)
+	ch, err := store.CreateChannel("Huginn", "Winston", []string{"Steve"}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.PostSpaceMessage(ch.ID, "wringer mesh root", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sess := srv.store.New("space-lifecycle-persist", "/workspace", "test-model")
+	sess.SetSpaceID(ch.ID)
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	tm := threadmgr.New()
+	srv.SetThreadManager(tm)
+	thread, err := tm.Create(threadmgr.CreateParams{
+		SessionID:       sess.ID,
+		AgentID:         "Steve",
+		Task:            "Reply with only the word PONG",
+		ParentMessageID: root.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create thread: %v", err)
+	}
+
+	srv.BroadcastToSession(sess.ID, "thread_started", map[string]any{"thread_id": thread.ID})
+	srv.BroadcastToSession(sess.ID, "delegation_preview_timeout", map[string]any{
+		"thread_id": thread.ID, "timeout_seconds": 30,
+	})
+	srv.BroadcastToSession(sess.ID, "thread_done", map[string]any{
+		"thread_id": thread.ID, "summary": "PONG",
+	})
+
+	hall, err := store.ListSpaceMessages(ch.ID, nil, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range hall.Messages {
+		c := m.Content
+		if strings.Contains(c, "Delegated to") || strings.Contains(c, "completed delegated work") || strings.Contains(c, "auto-approved") {
+			t.Fatalf("lifecycle leaked to hallway: %q", c)
+		}
+	}
+	replies, err := store.ListSpaceReplies(ch.ID, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, m := range replies {
+		joined += m.Content + "\n"
+	}
+	if !strings.Contains(joined, "Delegated to @Steve") || !strings.Contains(joined, "completed delegated work") || !strings.Contains(joined, "auto-approved") {
+		t.Fatalf("want all three announcements in the drawer, got %q", joined)
+	}
 }
 
 func TestBroadcastToSession_DoesNotPersistNonLifecycleEvent(t *testing.T) {

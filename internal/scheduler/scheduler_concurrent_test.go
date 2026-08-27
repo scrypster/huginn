@@ -176,8 +176,8 @@ func TestScheduler_RegisterWorkflow_NoRunner(t *testing.T) {
 	}
 }
 
-// TestScheduler_RegisterWorkflow_EmptySchedule verifies that RegisterWorkflow
-// returns an error for an enabled workflow with an empty schedule.
+// TestScheduler_RegisterWorkflow_EmptySchedule verifies that an enabled
+// workflow with an empty schedule is a one-shot (no cron entry, no error).
 func TestScheduler_RegisterWorkflow_EmptySchedule(t *testing.T) {
 	sched := New()
 	sched.SetWorkflowRunner(func(ctx context.Context, w *Workflow) error { return nil })
@@ -187,9 +187,14 @@ func TestScheduler_RegisterWorkflow_EmptySchedule(t *testing.T) {
 		Schedule: "",
 		Enabled:  true,
 	}
-	err := sched.RegisterWorkflow(wf)
-	if err == nil {
-		t.Fatal("expected error for empty schedule")
+	if err := sched.RegisterWorkflow(wf); err != nil {
+		t.Fatalf("one-shot empty schedule should succeed: %v", err)
+	}
+	sched.mu.Lock()
+	_, ok := sched.workflowEntries[wf.ID]
+	sched.mu.Unlock()
+	if ok {
+		t.Fatal("one-shot must not create a cron entry")
 	}
 }
 

@@ -53,6 +53,20 @@ func GetParentMessageID(ctx context.Context) string {
 	return v
 }
 
+type spaceIDCtxKey struct{}
+
+// SetSpaceID attaches the space ID so delegate_to_agent can bind Create
+// to desk-mesh / roster membership even when the orch session is ephemeral.
+func SetSpaceID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, spaceIDCtxKey{}, id)
+}
+
+// GetSpaceID retrieves the space ID set by SetSpaceID. Returns "" if not set.
+func GetSpaceID(ctx context.Context) string {
+	v, _ := ctx.Value(spaceIDCtxKey{}).(string)
+	return v
+}
+
 // State represents the orchestrator's current phase.
 type State int
 
@@ -117,6 +131,13 @@ type Orchestrator struct {
 
 	// semanticPrefetchCache caches semantic search results per query key.
 	semanticPrefetchCache *prefetchCache
+
+	// memoryGuided records immersive muninn_guide session keys (once per session).
+	memoryGuided sync.Map
+
+	// memoryPulled tracks session-start / last-topic pull so conversational
+	// and passive modes do not MCP-call every sentence.
+	memoryPulled sync.Map
 
 	// optionals groups optional integrations so future wiring can evolve without
 	// expanding the top-level mutable surface area.
@@ -315,11 +336,8 @@ func (o *Orchestrator) CodeWithAgent(
 	vr := o.connectAgentVault(ctx, ag, reg)
 	defer vr.cancel()
 
-	if vr.warning != "" && onEvent != nil {
-		onEvent(backend.StreamEvent{
-			Type:    backend.StreamWarning,
-			Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-		})
+	if vr.warning != "" {
+		logVaultUnavailable(ag.Name, "", vr.warning)
 	}
 
 	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
