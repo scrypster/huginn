@@ -58,7 +58,7 @@ export function resolveMemoryChip(opts: {
   // No chip / no modal connect path when Muninn is not on the machine.
   if (!isMuninnAvailable(opts.muninn)) return null
 
-  if (hasVault && connected) return null
+  if (connected) return null
 
   if (legacy && !hasVault) {
     return {

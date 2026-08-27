@@ -83,3 +83,13 @@ describe('muninnSettingsHint', () => {
     expect(muninnSettingsHint({ connected: true })).toBeNull()
   })
 })
+
+  it('hides the connect nag when Muninn is already connected', () => {
+    const chip = resolveMemoryChip({
+      agentName: 'Winston',
+      vaultName: '',
+      muninn: { installed: true, running: true, connected: true, detected: true },
+      inChat: true,
+    })
+    expect(chip).toBeNull()
+  })

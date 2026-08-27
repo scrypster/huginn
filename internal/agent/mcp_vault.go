@@ -266,12 +266,12 @@ func ProbeVaultConnectivity(ctx context.Context, cfgPath, vaultName string) (int
 	}
 	vaultHealthCacheMu.Unlock()
 
-	muninnCfg, err := mem.LoadGlobalConfig(cfgPath)
-	if err != nil || muninnCfg.Endpoint == "" {
-		if err != nil {
-			return 0, "", fmt.Errorf("muninn config load: %w", err)
-		}
-		return 0, "", fmt.Errorf("muninn endpoint not configured")
+	muninnCfg, _, err := mem.LoadAndPinGlobalConfig(cfgPath)
+	if err != nil {
+		return 0, "", fmt.Errorf("muninn config load: %w", err)
+	}
+	if muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
+		return 0, "", fmt.Errorf("muninn config load: %w", mem.ErrEmptyMuninnEndpoint)
 	}
 
 	token, err := mem.MCPTokenFor(muninnCfg, vaultName)
@@ -365,37 +365,43 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	// Always fork the shared registry — per-session tools go into the fork only.
 	sessionReg := sharedReg.Fork()
 
-	if ag == nil || !ag.MemoryEnabled || ag.VaultName == "" {
-		logger.Warn("muninn mcp: skipping vault connect", "agent_nil", ag == nil,
-			"memory_enabled", ag != nil && ag.MemoryEnabled, "vault_name", func() string {
-				if ag != nil {
-					return ag.VaultName
-				}
-				return ""
-			}())
+	if ag == nil || !ag.MemoryEnabled {
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}}
 	}
-
-	logger.Info("muninn mcp: connecting vault", "agent", ag.Name, "vault", ag.VaultName)
 
 	o.mu.Lock()
 	cfgPath := o.muninnCfgPath
 	o.mu.Unlock()
+
+	// Harness default: pin huginn only. Do not invent winston-huginn.
+	if strings.TrimSpace(ag.VaultName) == "" {
+		if strings.TrimSpace(cfgPath) == "" {
+			return vaultResult{sessionReg: sessionReg, cancel: func() {}}
+		}
+		ag.VaultName = "huginn"
+	}
+
+	logger.Info("muninn mcp: connecting vault", "agent", ag.Name, "vault", ag.VaultName)
 
 	if cfgPath == "" {
 		logger.Warn("muninn mcp: config path not set", "agent", ag.Name)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: "muninn config path not set"}
 	}
 
-	muninnCfg, err := mem.LoadGlobalConfig(cfgPath)
-	if err != nil || muninnCfg.Endpoint == "" {
+	muninnCfg, usedPath, err := mem.LoadAndPinGlobalConfig(cfgPath)
+	if err != nil {
 		warn := "muninn config unavailable"
 		if err != nil {
 			warn = fmt.Sprintf("muninn config load: %v", err)
 		}
-		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", cfgPath, "err", err, "endpoint", muninnCfg.Endpoint)
+		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", usedPath, "err", err)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
+	if muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
+		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", usedPath, "err", mem.ErrEmptyMuninnEndpoint)
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: "muninn config load: " + mem.ErrEmptyMuninnEndpoint.Error()}
+	}
+	logger.Info("muninn mcp: config loaded", "agent", ag.Name, "endpoint_set", strings.TrimSpace(muninnCfg.Endpoint) != "")
 
 	token, err := mem.MCPTokenFor(muninnCfg, ag.VaultName)
 	if err != nil {

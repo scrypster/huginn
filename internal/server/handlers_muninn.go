@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -231,12 +232,13 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	muninnCfg, err := memory.LoadGlobalConfig(cfgPath)
-	if err != nil || muninnCfg.Endpoint == "" {
+	muninnCfg, usedPath, err := memory.LoadAndPinGlobalConfig(cfgPath)
+	if err != nil || muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
 		warn := "muninn config unavailable"
 		if err != nil {
 			warn = "muninn config load: " + err.Error()
 		}
+		slog.Warn("muninn vault test: config unavailable", "cfg_path", usedPath, "err", err)
 		jsonOK(w, map[string]any{
 			"status":      "unavailable",
 			"tools_count": 0,
@@ -245,6 +247,7 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+	slog.Info("muninn vault test: config loaded", "endpoint_set", strings.TrimSpace(muninnCfg.Endpoint) != "")
 
 	// Find the agent's vault name.
 	agentLoader := s.agentLoader
@@ -269,13 +272,7 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if vaultName == "" {
-		jsonOK(w, map[string]any{
-			"status":      "unavailable",
-			"tools_count": 0,
-			"warning":     "agent has no vault configured",
-			"latency_ms":  time.Since(start).Milliseconds(),
-		})
-		return
+		vaultName = "huginn"
 	}
 
 	token, err := memory.MCPTokenFor(muninnCfg, vaultName)
