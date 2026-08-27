@@ -30,6 +30,11 @@ func (a *App) handleKeyMsg(msg tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 		return a, nil
 	}
 
+	// Slack-style reply drawer (space-messages). Work-inspector stays on ctrl+t.
+	if a.state == stateReplyThread {
+		return a.handleReplyThreadKey(msg, cmds)
+	}
+
 	// Thread overlay intercepts all keys.
 	if a.state == stateThreadOverlay {
 		switch msg.String() {
@@ -245,6 +250,14 @@ func (a *App) handleKeyMsg(msg tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			}
 		}
 
+	case "t":
+		// Slack reply thread on the most recent hallway root (input must be empty).
+		if a.state == stateChat && a.input.Value() == "" {
+			if a.openReplyThreadAtCursor() {
+				return a, nil
+			}
+		}
+
 	case "]":
 		// Jump to next thread header — only when input is empty.
 		if a.state == stateChat && a.input.Value() == "" {
@@ -261,13 +274,21 @@ func (a *App) handleKeyMsg(msg tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 
 	case "j":
 		if (a.state == stateChat || a.state == stateStreaming) && a.input.Value() == "" {
-			a.scrollDown(1)
+			if a.activeSpaceID != "" {
+				a.moveHallwayCursor(1)
+			} else {
+				a.scrollDown(1)
+			}
 			return a, nil
 		}
 
 	case "k":
 		if (a.state == stateChat || a.state == stateStreaming) && a.input.Value() == "" {
-			a.scrollUp(1)
+			if a.activeSpaceID != "" {
+				a.moveHallwayCursor(-1)
+			} else {
+				a.scrollUp(1)
+			}
 			return a, nil
 		}
 

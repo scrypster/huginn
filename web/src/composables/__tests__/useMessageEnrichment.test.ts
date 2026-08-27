@@ -4,6 +4,7 @@ import {
   dateLabelFor,
   enrichMessages,
   isSameDay,
+  sortMessagesChronological,
 } from '../useMessageEnrichment'
 
 describe('useMessageEnrichment utilities', () => {
@@ -17,13 +18,14 @@ describe('useMessageEnrichment utilities', () => {
     expect(isSameDay('2026-05-01T00:00:00Z', '2026-05-03T00:00:00Z')).toBe(false)
   })
 
-  it('adaptSpaceMessages maps ts→createdAt and infers streaming/tool-call done', () => {
+  it('adaptSpaceMessages maps created_at/ts→createdAt and infers streaming/tool-call done', () => {
     const out = adaptSpaceMessages([{
       id: 'stream-1',
       role: 'assistant',
       content: 'hello',
       agent: 'Mark',
-      ts: '2026-05-01T10:00:00Z',
+      ts: '2026-05-01T09:00:00Z',
+      created_at: '2026-05-01T10:00:00Z',
       toolCalls: [{ id: 'tc-1', name: 'read_file', args: {} } as any],
     } as any])
 
@@ -138,5 +140,44 @@ describe('useMessageEnrichment utilities', () => {
     ] as any)
 
     expect(msgs[1]!.showHeader).toBe(true)
+  })
+})
+
+describe('hallway chronology (Slack oldest→newest)', () => {
+  const now = new Date('2026-08-27T16:00:00Z') // noon ET
+
+  it('treats 02:15Z as yesterday in America/New_York', () => {
+    // 2026-08-27T02:15:23Z = 10:15 PM ET on Aug 26
+    expect(dateLabelFor('2026-08-27T02:15:23Z', now)).toBe('Yesterday')
+    expect(dateLabelFor('2026-08-27T16:00:11Z', now)).toBe('Today')
+    expect(isSameDay('2026-08-27T02:15:23Z', '2026-08-26T22:00:00-04:00')).toBe(true)
+    expect(isSameDay('2026-08-27T02:15:23Z', '2026-08-27T16:00:00Z')).toBe(false)
+  })
+
+  it('sorts newest-first leftovers so Today never sits above Yesterday', () => {
+    const msgs = enrichMessages([
+      { id: 'today-user', role: 'user', content: '@Winston what time is it?', createdAt: '2026-08-27T16:00:11Z' },
+      { id: 'today-win', role: 'assistant', content: '12:00 PM ET', agent: 'Winston', createdAt: '2026-08-27T16:01:38Z' },
+      { id: 'pong', role: 'assistant', content: 'PONG', agent: 'Steve', createdAt: '2026-08-27T02:15:23Z' },
+    ] as any, now)
+
+    expect(msgs.map(m => m.id)).toEqual(['pong', 'today-user', 'today-win'])
+    expect(msgs.map(m => m.dateLabel).filter(Boolean)).toEqual(['Yesterday', 'Today'])
+    const yesterdayAt = msgs.findIndex(m => m.dateLabel === 'Yesterday')
+    const todayAt = msgs.findIndex(m => m.dateLabel === 'Today')
+    expect(yesterdayAt).toBeGreaterThanOrEqual(0)
+    expect(todayAt).toBeGreaterThan(yesterdayAt)
+    expect(msgs[0]!.content).toBe('PONG')
+    expect(msgs[todayAt]!.content).toContain('@Winston')
+  })
+
+  it('sortMessagesChronological keeps streaming placeholders last when ts ties', () => {
+    const ts = '2026-08-27T16:00:11Z'
+    const out = sortMessagesChronological([
+      { id: 'stream-1', seq: -1, ts },
+      { id: 'real-2', seq: 2, ts },
+      { id: 'real-1', seq: 1, ts },
+    ])
+    expect(out.map(m => m.id)).toEqual(['real-1', 'real-2', 'stream-1'])
   })
 })

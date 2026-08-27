@@ -187,7 +187,15 @@ func (s *Scheduler) RegisterWorkflow(w *Workflow) error {
 		return nil
 	}
 	if w.Schedule == "" {
-		return fmt.Errorf("scheduler: workflow %q has empty schedule", w.ID)
+		// One-shot / manual: enabled but no cron. Remove any leftover entry
+		// so flipping from repeating → run-once actually unschedules.
+		s.mu.Lock()
+		if id, ok := s.workflowEntries[w.ID]; ok {
+			s.cron.Remove(id)
+			delete(s.workflowEntries, w.ID)
+		}
+		s.mu.Unlock()
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

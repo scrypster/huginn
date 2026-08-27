@@ -50,3 +50,19 @@ func MCPTokenFor(cfg *GlobalConfig, vaultName string) (string, error) {
 	}
 	return VaultTokenFor(cfg, vaultName)
 }
+
+// HuginnMCPURL returns the MCP URL Huginn should call.
+// If endpoint already ends in /mcp (tests / explicit daemon URL), keep host:port.
+// Otherwise remap via MCPURLFromEndpoint (REST :8475 → :8750/mcp).
+func HuginnMCPURL(endpoint string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid muninn endpoint")
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if path == "/mcp" || strings.HasSuffix(path, "/mcp") {
+		return u.String(), nil
+	}
+	return MCPURLFromEndpoint(endpoint)
+}
+

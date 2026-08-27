@@ -254,9 +254,9 @@ func main() {
 	if migrateErr := agentslib.MigrateAgents(huginnHome); migrateErr != nil {
 		appLog.Info("agents migration skipped", "err", migrateErr)
 	}
-	if err := agentslib.MigrateEmptyToolbeltToWildcard(huginnHome); err != nil {
-		appLog.Info("migrate toolbelt: non-fatal", "err", err)
-	}
+	// Empty toolbelt is default-deny for external providers (github_cli, aws, …).
+	// Do not backfill provider:"*" — that leaked gh_* schemas into oneshot/serve
+	// for agents whose yaml was toolbelt [] (Reggie). Explicit toolbelt * remains.
 
 	// 2. Determine working directory
 	cwd, err := os.Getwd()
@@ -654,6 +654,7 @@ func main() {
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, cwd)
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+		tools.RegisterWriteWorkflowTool(toolReg, huginnHome)
 
 		// Register integration (OAuth) tools for all configured connections.
 		{
@@ -2405,6 +2406,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		} else {
 			spaceStore = spaces.NewSQLiteSpaceStore(sqlDB)
 			srv.SetSpaceStore(spaceStore)
+			// New already wires this; set again so huginn serve is explicit.
+			srv.SetSpaceThreadRunner(srv.RunSpaceThreadAgent)
 			autoCreateDMSpaces(spaceStore)
 			// Create() already denies non-members when a SpaceID is set, but
 			// the checker was never wired — so delegate_to_agent could spawn
@@ -2412,6 +2415,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// and keep the all-agents path.
 			if checker, ok := spaceStore.(threadmgr.SpaceMembershipChecker); ok {
 				tm.SetMembershipChecker(checker)
+			}
+			if gate, ok := spaceStore.(threadmgr.CompanyGate); ok {
+				tm.SetCompanyGate(gate)
 			}
 		}
 	}
@@ -2501,8 +2507,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			logger.Warn("huginn: create workflows dir", "err", err)
 		}
 		sched.SetWorkflowsDir(workflowsDir)
-		sched.Start(context.Background())
-		cleanupFns = append(cleanupFns, func() { sched.Stop(context.Background()) })
+		// Start is deferred until the runner and delivery queue are wired —
+		// otherwise the watcher initial sync fails (runner nil) and the
+		// queue worker never starts.
 		srv.SetScheduler(sched)
 		workflowRunsDir := filepath.Join(huginnHome, "workflow-runs")
 
@@ -2742,9 +2749,36 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return run.Steps[len(run.Steps)-1].Output, nil
 			}),
 			scheduler.WithDeliveryQueue(deliveryQueue),
+			scheduler.WithCompanyGate(func(companyID, agentName string) error {
+				if strings.TrimSpace(companyID) == "" || strings.TrimSpace(agentName) == "" {
+					return nil
+				}
+				type companyWallStore interface {
+					AgentInCompany(agent, companyID string) (bool, error)
+					GetCompany(id string) (*spaces.Company, error)
+				}
+				wall, ok := spaceStore.(companyWallStore)
+				if !ok {
+					return nil
+				}
+				seated, err := wall.AgentInCompany(agentName, companyID)
+				if err != nil {
+					return err
+				}
+				if seated {
+					return nil
+				}
+				name := companyID
+				if co, gerr := wall.GetCompany(companyID); gerr == nil && co != nil && co.Name != "" {
+					name = co.Name
+				}
+				return scheduler.ErrCompanyWall(name, agentName)
+			}),
 		)
 		sched.SetWorkflowRunner(wfRunner)
 		sched.SetWorkflowRunStore(workflowRunStore)
+		sched.Start(context.Background())
+		cleanupFns = append(cleanupFns, func() { sched.Stop(context.Background()) })
 		if err := sched.LoadWorkflows(workflowsDir); err != nil {
 			logger.Warn("huginn: load workflows", "err", err)
 		}
@@ -2796,6 +2830,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, srvCWD)
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+		// create_agent is grant-gated (named local_tools only). Do not tag
+		// builtin — God Mode ["*"] must not receive it.
+		toolReg.Register(srv.NewCreateAgentTool())
 		// Honor AllowedTools/DisallowedTools config filters (parity with TUI mode).
 		if len(cfg.AllowedTools) > 0 {
 			toolReg.SetAllowed(cfg.AllowedTools)
@@ -2823,14 +2860,14 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				}
 				logger.Info("delegate_to_agent: agent validated", "agent", p.AgentName)
 
-				// Load the session for SpawnThread (may be a stub if not yet persisted).
+				// Load the real session. Never silently stub — empty session ID
+				// already returned above; missing rows are persisted with SpaceID
+				// from context so desk-mesh Create can run.
 				var warnings []string
-				sess, loadErr := sessStore.Load(sessionID)
+				sess, loadErr := session.LoadForDelegate(sessStore, sessionID, agent.GetSpaceID(ctx))
 				if loadErr != nil {
-					logger.Warn("delegate_to_agent: session load failed, using stub", "err", loadErr)
-					sess = &session.Session{ID: sessionID}
-					warnings = append(warnings,
-						"session history could not be loaded — the delegated agent will start WITHOUT prior chat context; include all necessary context in the task description")
+					logger.Error("delegate_to_agent: session load failed", "err", loadErr, "session_id", sessionID)
+					return threadmgr.DelegateResult{Err: loadErr}
 				}
 				logger.Info("delegate_to_agent: session loaded", "space_id", sess.SpaceID())
 
@@ -2851,14 +2888,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				if createErr != nil {
 					logger.Error("delegate_to_agent: thread create failed", "agent", p.AgentName, "err", createErr)
 					reason := "create_failed"
+					errText := createErr.Error()
 					if errors.Is(createErr, threadmgr.ErrAgentNotSpaceMember) {
 						reason = "not_in_roster"
+					} else if errors.Is(createErr, threadmgr.ErrAgentNotInCompany) {
+						reason = "not_in_company"
+						// Hover/diagnose keeps the existing fail token;
+						// tool Error (and speech) stay the teammate sentence.
+						errText = "DELEGATE_FAIL: " + errText
 					}
 					srv.BroadcastToSession(sessionID, "delegation_error", map[string]any{
 						"session_id":    sessionID,
 						"parent_msg_id": parentMsgID,
 						"agent":         p.AgentName,
-						"error":         createErr.Error(),
+						"error":         errText,
 						"reason":        reason,
 					})
 					return threadmgr.DelegateResult{Err: createErr}
@@ -2925,6 +2968,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					logger.Error("delegate_to_agent: server context is nil, falling back to request ctx")
 					spawnCtx = ctx
 				}
+				if sid := agent.GetSessionID(ctx); sid != "" {
+					spawnCtx = agent.SetSessionID(spawnCtx, sid)
+				}
+				if sp := agent.GetSpaceID(ctx); sp != "" {
+					spawnCtx = agent.SetSpaceID(spawnCtx, sp)
+				}
+				spawnCtx = threadmgr.CarryDelegationContext(spawnCtx, ctx)
 
 				// Check if context is already cancelled before spawning.
 				if spawnCtx.Err() != nil {

@@ -589,8 +589,9 @@ func (tm *ThreadManager) runOnce(
 				tm.mu.Unlock()
 				return loopResult{kind: loopDone}
 			}
-			// Permanent LLM error — complete thread with error status.
-			autoSummary := FinishSummary{Summary: "LLM API error: " + err.Error(), Status: "error"}
+			// Permanent LLM error — complete thread with teammate speech on
+			// key-miss; never persist a raw Go keyring dump.
+			autoSummary := finishSummaryForLLMError(agentID, err)
 			tm.Complete(threadID, autoSummary)
 			broadcast(sess.ID, "thread_done", map[string]any{
 				"thread_id":  threadID,
@@ -648,10 +649,14 @@ func (tm *ThreadManager) runOnce(
 		history = append(history, assistantMsg)
 		tm.PublishSiblingContext(threadID, resp.Content)
 
-		// Persist the assistant message.
+		// Persist the assistant message. Same leftover/clock strip as hallway.
+		persistContent := backend.PersistVisibleAssistantContent(resp.Content)
+		if persistContent == "" {
+			persistContent = resp.Content
+		}
 		if err := store.AppendToThread(sess.ID, threadID, session.SessionMessage{
 			Role:    "assistant",
-			Content: resp.Content,
+			Content: persistContent,
 			Agent:   agentID,
 		}); err != nil {
 			slog.Warn("threadmgr: failed to append to thread", "thread_id", threadID, "err", err)
@@ -904,6 +909,14 @@ func (tm *ThreadManager) resolveModelID(threadID string, reg *agents.AgentRegist
 		}
 	}
 	return sess.Manifest.Model
+}
+
+func finishSummaryForLLMError(agent string, err error) FinishSummary {
+	if backend.IsKeyMiss(err) {
+		backend.LogKeyMissOnce(agent, err)
+		return FinishSummary{Summary: backend.TeammateKeyMissSpeech(agent), Status: "error"}
+	}
+	return FinishSummary{Summary: "LLM API error: " + err.Error(), Status: "error"}
 }
 
 // summariseFromHistory generates a FinishSummary from the last few assistant

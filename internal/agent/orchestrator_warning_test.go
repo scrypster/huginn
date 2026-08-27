@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -74,16 +73,10 @@ func TestConnectAgentVault_NilAgent_NoWarning(t *testing.T) {
 	}
 }
 
-// TestStreamWarning_EmissionGuard_FiresOnVaultFailure documents and verifies
-// the emission guard pattern used in CodeWithAgent, ChatWithAgent, and AgentChat:
-//
-//	if vr.warning != "" && onEvent != nil {
-//	    onEvent(StreamEvent{Type: StreamWarning, Content: "⚠️ ..."})
-//	}
-//
-// This test confirms the full path: vault failure → non-empty warning → onEvent
-// called with StreamWarning type and content that includes the failure reason.
-func TestStreamWarning_EmissionGuard_FiresOnVaultFailure(t *testing.T) {
+// TestStreamWarning_EmissionGuard_DoesNotFireOnVaultFailure verifies that vault
+// setup failures stay in slog / vr.warning and are NOT dumped into the chat
+// transcript as StreamWarning agent speech.
+func TestStreamWarning_EmissionGuard_DoesNotFireOnVaultFailure(t *testing.T) {
 	o := &Orchestrator{}
 	sharedReg := tools.NewRegistry()
 	ag := &agents.Agent{Name: "test-agent", MemoryEnabled: true, VaultName: "test-vault"}
@@ -92,7 +85,7 @@ func TestStreamWarning_EmissionGuard_FiresOnVaultFailure(t *testing.T) {
 	defer vr.cancel()
 
 	if vr.warning == "" {
-		t.Fatal("precondition failed: expected non-empty warning")
+		t.Fatal("precondition failed: expected non-empty warning for diagnose")
 	}
 
 	var received []backend.StreamEvent
@@ -100,25 +93,36 @@ func TestStreamWarning_EmissionGuard_FiresOnVaultFailure(t *testing.T) {
 		received = append(received, ev)
 	}
 
-	// Reproduce the guard that CodeWithAgent / ChatWithAgent / AgentChat use.
-	if vr.warning != "" && onEvent != nil {
-		onEvent(backend.StreamEvent{
-			Type:    backend.StreamWarning,
-			Content: fmt.Sprintf("⚠️ Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-		})
+	// Production sites now log only — they must not emit StreamWarning.
+	if vr.warning != "" {
+		logVaultUnavailable(ag.Name, "", vr.warning)
 	}
+	_ = onEvent
 
-	if len(received) != 1 {
-		t.Fatalf("expected 1 StreamWarning event, got %d", len(received))
+	if len(received) != 0 {
+		t.Fatalf("StreamWarning must not be emitted into the transcript, got %#v", received)
 	}
-	if received[0].Type != backend.StreamWarning {
-		t.Errorf("event type = %v, want backend.StreamWarning", received[0].Type)
+	if strings.Contains(vr.warning, "Memory features are disabled") {
+		t.Errorf("vr.warning should stay a diagnose string, got %q", vr.warning)
 	}
-	if !strings.Contains(received[0].Content, "muninn config path not set") {
-		t.Errorf("event content = %q, want to contain vault failure reason", received[0].Content)
+}
+
+// TestStreamWarning_MuninnInstalledNoVault_NotInTranscript is the backend half
+// of "muninn installed + no vault → chip, not chat message".
+func TestStreamWarning_MuninnInstalledNoVault_NotInTranscript(t *testing.T) {
+	o := &Orchestrator{}
+	sharedReg := tools.NewRegistry()
+	ag := &agents.Agent{Name: "Winston", MemoryEnabled: true, VaultName: ""}
+
+	vr := o.connectAgentVault(context.Background(), ag, sharedReg)
+	defer vr.cancel()
+
+	var received []backend.StreamEvent
+	if vr.warning != "" {
+		logVaultUnavailable(ag.Name, "sess-winston", vr.warning)
 	}
-	if !strings.Contains(received[0].Content, "Memory features are disabled") {
-		t.Errorf("event content = %q, want to contain degraded-mode message", received[0].Content)
+	if len(received) != 0 {
+		t.Fatalf("expected no StreamWarning when agent has no vault, got %#v", received)
 	}
 }
 

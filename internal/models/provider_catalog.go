@@ -30,7 +30,7 @@ type ProviderModelEntry struct {
 }
 
 type providerCatalogFile struct {
-	CatalogVersion string                                 `json:"catalog_version"`
+	CatalogVersion string                                   `json:"catalog_version"`
 	Providers      map[string]map[string]ProviderModelEntry `json:"providers"` // provider → modelID → info
 }
 
@@ -38,8 +38,8 @@ type providerCatalogFile struct {
 // The zero value is safe (empty catalog). Use GlobalProviderCatalog() for the singleton.
 type ProviderCatalog struct {
 	mu      sync.RWMutex
-	byAlias map[string]map[string]string              // provider → alias → real model ID
-	byID    map[string]map[string]ProviderModelEntry  // provider → modelID → info
+	byAlias map[string]map[string]string             // provider → alias → real model ID
+	byID    map[string]map[string]ProviderModelEntry // provider → modelID → info
 	version string
 }
 
@@ -251,69 +251,114 @@ func defaultProviderCatalogPath() string {
 	return filepath.Join(home, ".huginn", "provider_catalog.json")
 }
 
-// TryRefreshProviderCatalog fetches the CDN catalog if the local cache is older
-// than maxAge (or missing). Runs non-blocking in a background goroutine.
-// Call once at startup from main.go.
+// defaultProviderCatalogStampPath is the last-attempt stamp. Written on
+// non-200 CDN responses so the 7-day freshness gate still applies when the
+// catalog cache itself was not updated. The bundled catalog is unchanged.
+func defaultProviderCatalogStampPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".huginn", "provider_catalog.last_attempt")
+}
+
+func providerCatalogFreshEnough(catalogPath, stampPath string, maxAge time.Duration) bool {
+	for _, p := range []string{stampPath, catalogPath} {
+		if p == "" {
+			continue
+		}
+		if fi, err := os.Stat(p); err == nil && time.Since(fi.ModTime()) < maxAge {
+			return true
+		}
+	}
+	return false
+}
+
+func writeProviderCatalogAttemptStamp(stampPath string, status int) {
+	if stampPath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(stampPath), 0755); err != nil {
+		return
+	}
+	payload, err := json.Marshal(struct {
+		AttemptedAt time.Time `json:"attempted_at"`
+		Status      int       `json:"status"`
+	}{AttemptedAt: time.Now().UTC(), Status: status})
+	if err != nil {
+		return
+	}
+	_ = atomicWriteFile(stampPath, payload, 0644)
+}
+
+// TryRefreshProviderCatalog fetches the CDN catalog if the local cache (or the
+// last-attempt stamp) is older than maxAge, or missing. Runs non-blocking in a
+// background goroutine. Call once at startup from main.go.
+//
+// A non-200 from the CDN does not replace the bundled/cached catalog. It only
+// writes a last-attempt stamp so subsequent startServer calls skip the GET
+// until maxAge elapses (no WARN on every boot).
 func TryRefreshProviderCatalog(cdnURL string, maxAge time.Duration) {
-	go func() {
-		path := defaultProviderCatalogPath()
-		if path == "" {
-			return
-		}
-		// Check age of the cached file.
-		if fi, err := os.Stat(path); err == nil {
-			if time.Since(fi.ModTime()) < maxAge {
-				return // fresh enough
-			}
-		}
+	go refreshProviderCatalog(cdnURL, maxAge)
+}
 
-		logger.Info("provider catalog: checking for updates", "url", cdnURL)
-		ctx := &http.Client{Timeout: 10 * time.Second}
-		resp, err := ctx.Get(cdnURL)
+func refreshProviderCatalog(cdnURL string, maxAge time.Duration) {
+	path := defaultProviderCatalogPath()
+	if path == "" {
+		return
+	}
+	stampPath := defaultProviderCatalogStampPath()
+	if providerCatalogFreshEnough(path, stampPath, maxAge) {
+		return
+	}
+
+	logger.Info("provider catalog: checking for updates", "url", cdnURL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(cdnURL)
+	if err != nil {
+		logger.Warn("provider catalog: CDN fetch failed", "url", cdnURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		logger.Warn("provider catalog: CDN returned non-200", "status", resp.StatusCode)
+		writeProviderCatalogAttemptStamp(stampPath, resp.StatusCode)
+		return
+	}
+
+	var buf []byte
+	buf = make([]byte, 0, 64*1024)
+	tmp := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
 		if err != nil {
-			logger.Warn("provider catalog: CDN fetch failed", "url", cdnURL, "err", err)
+			break
+		}
+		if len(buf) > 512*1024 {
+			logger.Warn("provider catalog: CDN response too large, ignoring")
 			return
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Warn("provider catalog: CDN returned non-200", "status", resp.StatusCode)
-			return
-		}
+	}
 
-		var buf []byte
-		buf = make([]byte, 0, 64*1024)
-		tmp := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(tmp)
-			if n > 0 {
-				buf = append(buf, tmp[:n]...)
-			}
-			if err != nil {
-				break
-			}
-			if len(buf) > 512*1024 {
-				logger.Warn("provider catalog: CDN response too large, ignoring")
-				return
-			}
-		}
+	// Validate JSON before saving.
+	var check providerCatalogFile
+	if err := json.Unmarshal(buf, &check); err != nil {
+		logger.Warn("provider catalog: CDN returned invalid JSON", "err", err)
+		return
+	}
 
-		// Validate JSON before saving.
-		var check providerCatalogFile
-		if err := json.Unmarshal(buf, &check); err != nil {
-			logger.Warn("provider catalog: CDN returned invalid JSON", "err", err)
-			return
-		}
+	if err := atomicWriteFile(path, buf, 0644); err != nil {
+		logger.Warn("provider catalog: failed to save CDN catalog", "err", err)
+		return
+	}
 
-		if err := atomicWriteFile(path, buf, 0644); err != nil {
-			logger.Warn("provider catalog: failed to save CDN catalog", "err", err)
-			return
-		}
-
-		// Apply to the live singleton.
-		if err := GlobalProviderCatalog().overlay(buf); err != nil {
-			logger.Warn("provider catalog: failed to apply CDN update", "err", err)
-			return
-		}
-		logger.Info("provider catalog: updated from CDN", "version", check.CatalogVersion)
-	}()
+	// Apply to the live singleton.
+	if err := GlobalProviderCatalog().overlay(buf); err != nil {
+		logger.Warn("provider catalog: failed to apply CDN update", "err", err)
+		return
+	}
+	logger.Info("provider catalog: updated from CDN", "version", check.CatalogVersion)
 }

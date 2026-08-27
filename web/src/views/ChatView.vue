@@ -36,6 +36,16 @@
       </div>
     </TransitionGroup>
 
+    <Transition name="ws-banner">
+      <div v-if="spaceMentionToast"
+        data-testid="space-reply-mention-toast"
+        class="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs font-medium"
+        style="background:rgba(88,166,255,0.12);border-bottom:1px solid rgba(88,166,255,0.25);color:rgba(88,166,255,0.96)">
+        <span>You were mentioned in a thread — {{ spaceMentionToast }}</span>
+        <button type="button" class="px-2 py-0.5 rounded border border-huginn-blue/40 text-[11px]" @click="spaceMentionToast = null">Dismiss</button>
+      </div>
+    </Transition>
+
     <!-- ── No session/space selected ──────────────────────────────── -->
     <div v-if="!sessionId && !spaceId" class="flex flex-col items-center justify-center h-full gap-6 pb-16">
       <div class="w-20 h-20 rounded-3xl flex items-center justify-center select-none"
@@ -259,6 +269,18 @@
         <p class="text-[11px] text-huginn-yellow leading-snug">{{ MODEL_TOOL_WARNING }}</p>
       </div>
 
+      <MemoryVaultChip
+        v-if="memoryChip"
+        :chip="memoryChip"
+        :agent-name="memoryChip.agentName"
+        :agent-vault-name="(memoryChipAgent as { vault_name?: string } | null)?.vault_name || ''"
+        :agent-memory-mode="(memoryChipAgent as { memory_mode?: string } | null)?.memory_mode || ''"
+        :known-agents="agentsList"
+        @dismiss="dismissMemoryChip"
+        @connected="onMemoryVaultConnected"
+        @status="onMuninnChipStatus"
+      />
+
       <!-- ── In-chat search bar (Ctrl+F) ────────────────────────── -->
       <Transition
         enter-active-class="transition-all duration-150 ease-out"
@@ -305,7 +327,8 @@
       </Transition>
 
       <!-- Messages scroll area (position:relative for unread pill) -->
-      <div ref="messagesEl" class="flex-1 overflow-y-auto relative" @click="handleMessagesClick" @scroll="onMessagesScroll">
+      <div ref="messagesEl" class="flex-1 overflow-y-auto relative" @click="handleMessagesClick" @scroll="onMessagesScroll"
+        @touchstart.passive="onHallwayTouchStart" @touchmove.passive="onHallwayTouchMove" @touchend="onHallwayTouchEnd">
 
         <!-- Infinite scroll sentinel — observed by IntersectionObserver to load older space messages -->
         <div v-if="spaceId" ref="topSentinelEl" class="h-1 w-full" />
@@ -375,7 +398,7 @@
             <div :data-msg-id="msg.id" style="position:relative;height:0" />
 
             <!-- Date divider -->
-            <div v-if="msg.dateLabel" class="flex items-center gap-3 my-4">
+            <div v-if="msg.dateLabel" class="flex items-center gap-3 my-4" data-testid="hallway-day-sep">
               <div class="flex-1 h-px bg-huginn-border/40" />
               <span class="text-[11px] text-huginn-muted/50 font-medium select-none">{{ msg.dateLabel }}</span>
               <div class="flex-1 h-px bg-huginn-border/40" />
@@ -411,9 +434,13 @@
 
             <!-- User message (right-aligned bubble) -->
             <div v-else-if="msg.role === 'user'" class="group flex flex-col items-end" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
-              <div class="md-content max-w-[75%] px-4 py-3 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words"
-                style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
-                v-html="renderWithMentions(msg.content)" />
+              <MsgTimeReveal :created-at="msg.createdAt" :revealed="hallwayTimesRevealed" align="end">
+                <div class="md-content max-w-[75%] px-4 py-3 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words cursor-pointer"
+                  style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
+                  data-testid="space-root-bubble"
+                  @click="spaceId && openReplyThread(msg)"
+                  v-html="renderWithMentions(msg.content)" />
+              </MsgTimeReveal>
               <p v-if="msg.id === lastSeenMessageId"
                  class="text-[10px] text-right pr-3 -mt-1"
                  style="color:#8b949e">
@@ -423,7 +450,20 @@
                 class="opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
                 :agent-vault-name="''"
+                :show-reply="!!spaceId"
+                :show-diagnose="!!spaceId && !!msg.delegatedThreads?.length"
                 @retry="handleRetry"
+                @reply="openReplyThread(msg)"
+                @diagnose="diagnoseMessage(msg)"
+              />
+              <SpaceReplyChip
+                v-if="spaceId && !msg.parent_id"
+                :count="msg.spaceReplyCount ?? 0"
+                :preview="msg.lastPreview"
+                :typing-agent="spaceReplyTyping[msg.id]"
+                :participant="!!msg.spaceReplyParticipant || (msg.role === 'user')"
+                :new-since="msg.newSince ?? 0"
+                @open="openReplyThread(msg)"
               />
               <!-- Delegated thread activity rows (also shown for user-parented threads) -->
               <div v-if="msg.delegatedThreads?.length" class="mt-1.5 space-y-1 w-full max-w-[75%]">
@@ -549,8 +589,17 @@
                   :content="visibleAssistantText(msg) || msg.content"
                   :tool-name="failDisplayFor(msg.content, msg.toolCalls)?.toolName"
                 />
-                <div v-else-if="visibleAssistantText(msg) && !msg.hideFailSpeech" class="md-content text-sm text-huginn-text leading-relaxed break-words"
-                  v-html="renderWithMentions(visibleAssistantText(msg))" />
+                <MsgTimeReveal
+                  v-else-if="visibleAssistantText(msg) && !msg.hideFailSpeech"
+                  :created-at="msg.createdAt"
+                  :revealed="hallwayTimesRevealed"
+                  align="start"
+                >
+                  <div class="md-content text-sm text-huginn-text leading-relaxed break-words cursor-pointer"
+                    data-testid="space-root-bubble"
+                    @click="spaceId && openReplyThread(msg)"
+                    v-html="renderWithMentions(visibleAssistantText(msg))" />
+                </MsgTimeReveal>
                 <!-- Active (in-flight) tool calls — anchored inside this message bubble so
                      it always appears below the content, never floating above it. -->
                 <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2">
@@ -576,6 +625,16 @@
                   <span class="w-1.5 h-1.5 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:150ms" />
                   <span class="w-1.5 h-1.5 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:300ms" />
                 </div>
+
+                <SpaceReplyChip
+                  v-if="spaceId && !msg.parent_id"
+                  :count="msg.spaceReplyCount ?? 0"
+                  :preview="msg.lastPreview"
+                  :typing-agent="spaceReplyTyping[msg.id]"
+                  :participant="!!msg.spaceReplyParticipant"
+                  :new-since="msg.newSince ?? 0"
+                  @open="openReplyThread(msg)"
+                />
 
                 <!-- Delegated thread reply strips (Slack-style compact) -->
                 <div v-if="msg.delegatedThreads?.length" class="mt-1.5 space-y-1">
@@ -791,6 +850,10 @@
                 class="mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
                 :agent-vault-name="activeAgentVaultName"
+                :show-reply="!!spaceId"
+                :show-diagnose="!!spaceId && !!msg.delegatedThreads?.length"
+                @reply="openReplyThread(msg)"
+                @diagnose="diagnoseMessage(msg)"
               />
               </div>
             </div>
@@ -920,85 +983,100 @@
       </Transition>
 
       <Transition name="ws-banner">
-        <div v-if="prestreamThinking"
+        <div v-if="prestreamThinking && !trivialAskPending"
           class="flex-shrink-0 text-xs px-4 py-1.5"
           style="background:rgba(88,166,255,0.06);border-top:1px solid rgba(88,166,255,0.14);color:rgba(139,148,158,0.95)">
           Preparing context and delegation plan…
         </div>
       </Transition>
 
-      <div v-if="streaming || queuedRunIds.length > 0" class="px-4 pb-2 flex-shrink-0">
-        <div class="flex items-center gap-2 text-[11px]">
-          <span class="text-huginn-muted/80">When you send now:</span>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="chatIntent === 'update_active_work'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="chatIntent = 'update_active_work'"
+      <!-- Interrupt / route diagnose stays offstage. @ is the room route.
+           Mid-turn send defaults to a new hallway line (new_request / queue). -->
+      <div
+        v-if="streaming || queuedRunIds.length > 0"
+        data-testid="composer-send-options"
+        class="px-4 pb-1 flex-shrink-0"
+      >
+        <details
+          class="text-[11px] text-huginn-muted/55"
+          :open="sendOptionsOpen"
+          @toggle="onSendOptionsToggle"
+        >
+          <summary
+            data-testid="composer-send-options-summary"
+            class="cursor-pointer select-none text-huginn-muted/45 hover:text-huginn-muted/80 list-none [&::-webkit-details-marker]:hidden"
           >
-            Update active work
-          </button>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="chatIntent === 'new_request'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="chatIntent = 'new_request'"
-          >
-            Start new request
-          </button>
-          <span v-if="queuedRunIds.length > 0" class="ml-auto text-huginn-yellow/90">
-            {{ queuedRunIds.length }} queued
-          </span>
-        </div>
-        <div v-if="chatIntent === 'update_active_work'" class="mt-1.5 flex items-center gap-2 text-[11px]">
-          <span class="text-huginn-muted/70">Route:</span>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="updateRoute === 'all_active'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="updateRoute = 'all_active'"
-          >
-            All active delegates
-          </button>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="updateRoute === 'lead_only'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="updateRoute = 'lead_only'"
-          >
-            Lead only
-          </button>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="updateRoute === 'specific_delegate'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="updateRoute = 'specific_delegate'"
-          >
-            Specific delegate
-          </button>
-          <select
-            v-if="updateRoute === 'specific_delegate' && activeDelegateAgents.length > 0"
-            v-model="updateTargetAgent"
-            class="ml-1 bg-huginn-surface/50 border border-huginn-border rounded px-2 py-1 text-[11px] text-huginn-text"
-          >
-            <option v-for="agent in activeDelegateAgents" :key="agent" :value="agent">
-              {{ agent }}
-            </option>
-          </select>
-          <span v-else-if="updateRoute === 'specific_delegate'" class="text-huginn-muted/60">
-            no active delegates
-          </span>
-        </div>
+            <span v-if="queuedRunIds.length > 0">{{ queuedRunIds.length }} queued · </span>Send options
+          </summary>
+          <div v-if="sendOptionsOpen" class="mt-1.5 flex items-center gap-2">
+            <span class="text-huginn-muted/80">When you send now:</span>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="chatIntent === 'update_active_work'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="chatIntent = 'update_active_work'"
+            >
+              Update active work
+            </button>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="chatIntent === 'new_request'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="chatIntent = 'new_request'"
+            >
+              Start new request
+            </button>
+          </div>
+          <div v-if="sendOptionsOpen && chatIntent === 'update_active_work'" class="mt-1.5 flex items-center gap-2">
+            <span class="text-huginn-muted/70">Route:</span>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="updateRoute === 'all_active'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="updateRoute = 'all_active'"
+            >
+              All active delegates
+            </button>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="updateRoute === 'lead_only'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="updateRoute = 'lead_only'"
+            >
+              Lead only
+            </button>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="updateRoute === 'specific_delegate'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="updateRoute = 'specific_delegate'"
+            >
+              Specific delegate
+            </button>
+            <select
+              v-if="updateRoute === 'specific_delegate' && activeDelegateAgents.length > 0"
+              v-model="updateTargetAgent"
+              class="ml-1 bg-huginn-surface/50 border border-huginn-border rounded px-2 py-1 text-[11px] text-huginn-text"
+            >
+              <option v-for="agent in activeDelegateAgents" :key="agent" :value="agent">
+                {{ agent }}
+              </option>
+            </select>
+            <span v-else-if="updateRoute === 'specific_delegate'" class="text-huginn-muted/60">
+              no active delegates
+            </span>
+          </div>
+        </details>
       </div>
 
       <!-- ── Input area ──────────────────────────────────────────── -->
@@ -1043,6 +1121,22 @@
         @reject-artifact="threadDetail.handleRejectArtifact"
         @inject="handleThreadDetailInject"
         @start-follow-up="handleThreadFollowUp"
+      />
+
+      <ReplyThread
+        :visible="!!replyThreadParent && !!spaceId"
+        :space-id="spaceId || ''"
+        :parent="replyThreadParent"
+        :incoming="spaceReplyIncoming"
+        :typing-agent="replyThreadParent ? spaceReplyTyping[replyThreadParent.id] : ''"
+        :stream-agent="replyThreadParent ? spaceReplyStream[replyThreadParent.id]?.agent : ''"
+        :stream-text="replyThreadParent ? spaceReplyStream[replyThreadParent.id]?.text : ''"
+        :member-names="mentionMemberNames"
+        :snag-agent="replyThreadParent ? spaceReplySnag[replyThreadParent.id]?.agent : ''"
+        :snag-reason="replyThreadParent ? spaceReplySnag[replyThreadParent.id]?.reason : ''"
+        @close="closeReplyThread"
+        @posted="onSpaceReplyPosted"
+        @seen="onSpaceThreadSeen"
       />
 
       <!-- Member panel (channel view only, right side) -->
@@ -1117,26 +1211,32 @@
 </template>
 
 <script setup lang="ts">
-import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
+import { reactive, ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSpaceTimeline, getSessionSpaceId, getSpaceTimelineState } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
-import { spaceRosterNames } from '../components/ChatEditor/mentionSuggestions'
+import { mentionableNames, spaceRosterNames } from '../components/ChatEditor/mentionSuggestions'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
 import ThreadDetail from '../components/ThreadDetail.vue'
+import ReplyThread from '../components/ReplyThread.vue'
+import SpaceReplyChip from '../components/SpaceReplyChip.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
+import MsgTimeReveal from '../components/MsgTimeReveal.vue'
 import MessageActions from '../components/MessageActions.vue'
 import SystemFailLine from '../components/SystemFailLine.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
+import MemoryVaultChip from '../components/MemoryVaultChip.vue'
+import { isVaultMemoryWarning, resolveMemoryChip, type MuninnPresence } from '../utils/memoryChip'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
 import { useThreads, isRunning } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
+import { useCompanies } from '../composables/useCompanies'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
 import { adaptSpaceMessages, useMessageEnrichment } from '../composables/useMessageEnrichment'
 import { useMarkdownRenderer } from '../composables/useMarkdownRenderer'
@@ -1147,6 +1247,7 @@ import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import { visibleAssistantContent } from '../utils/visibleAssistantContent'
+import { isTrivialAsk } from '../utils/trivialAsk'
 import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, visibleToolCalls } from '../utils/honesty'
@@ -1232,7 +1333,16 @@ watch(() => props.spaceId, async (newId) => {
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
   getLastSeenMessageId, setLastSeenMessageId } = useSessions()
 const { activeSpace, dms, openDM } = useSpaces()
-const mentionMemberNames = computed(() => spaceRosterNames(activeSpace.value))
+const { companies } = useCompanies()
+const mentionMemberNames = computed(() => {
+  const space = activeSpace.value
+  const roster = spaceRosterNames(space)
+  if (roster === undefined) return undefined
+  const companyId = space?.companyId?.trim()
+  if (!companyId) return roster
+  const seated = companies.value.find(c => c.id === companyId)?.members ?? []
+  return mentionableNames(space, seated)
+})
 
 function isKnownSession(id: string): boolean {
   return sessions.value.some(s => s.id === id)
@@ -1350,6 +1460,8 @@ const {
   resetStreaming,
 } = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
+const hallwayTimesRevealed = ref(false)
+let hallwayTouchX = 0
 const pendingPermission = ref<WSMessage | null>(null)
 const pendingPermissionBySpace = new Map<string, WSMessage>()
 
@@ -1438,6 +1550,8 @@ const agentsList        = ref<Agent[]>([])
 const selectedAgentName = ref('')
 const agentDropdownOpen = ref(false)
 const rosterOpen        = ref(false)
+const muninnStatus = ref<MuninnPresence>({})
+const memoryChipDismissed = ref(false)
 
 function agentDMNeedle(id: string): string {
   return id.toLowerCase()
@@ -1506,10 +1620,62 @@ const threadPanelPinned = ref(false) // true = don't auto-close when threads fin
 // ── Thread detail (per-message thread slide-in) ───────────────────────
 const threadDetail = useThreadDetail()
 const threadDetailRef = ref<InstanceType<typeof ThreadDetail> | null>(null)
+const replyThreadParent = ref<any>(null)
+const spaceReplyIncoming = ref<any>(null)
+const spaceReplyTyping = reactive<Record<string, string>>({})
+const spaceReplyStream = reactive<Record<string, { agent: string; text: string }>>({})
+const spaceReplySnag = reactive<Record<string, { agent: string; reason?: string }>>({})
+const spaceMentionToast = ref<string | null>(null)
+
+function diagnoseMessage(msg: any) {
+  const d = msg?.delegatedThreads?.[0]
+  if (d) openThreadDetail(d)
+}
+
+function openReplyThread(msg: any) {
+  if (!props.spaceId || !msg?.id) return
+  closeThreadDetail()
+  replyThreadParent.value = msg
+}
+
+function closeReplyThread() {
+  replyThreadParent.value = null
+}
+
+function onSpaceReplyPosted(count: number, parentId: string) {
+  applySpaceReplyMeta(parentId, { reply_count: count })
+}
+
+function onSpaceThreadSeen(parentId: string) {
+  applySpaceReplyMeta(parentId, { new_since: 0 })
+}
+
+function applySpaceReplyMeta(parentId: string, patch: { reply_count?: number; last_preview?: string; new_since?: number }) {
+  const tl = currentSpaceTimeline.value?.getState()
+  const target = tl?.messages.find((m: any) => m.id === parentId)
+  if (target) {
+    if (patch.reply_count != null) {
+      (target as any).reply_count = patch.reply_count
+      ;(target as any).spaceReplyCount = patch.reply_count
+    }
+    if (patch.last_preview != null) (target as any).last_preview = patch.last_preview
+    if (patch.new_since != null) (target as any).new_since = patch.new_since
+  }
+  if (replyThreadParent.value?.id === parentId) {
+    replyThreadParent.value = {
+      ...replyThreadParent.value,
+      spaceReplyCount: patch.reply_count ?? replyThreadParent.value.spaceReplyCount,
+      reply_count: patch.reply_count ?? replyThreadParent.value.reply_count,
+      lastPreview: patch.last_preview ?? replyThreadParent.value.lastPreview,
+      newSince: patch.new_since ?? replyThreadParent.value.newSince,
+    }
+  }
+}
 // Track live thread info for the currently-open ThreadDetail
 const openThreadLiveId = ref<string>('')
 
 function openThreadDetail(d: { threadId: string; agentId: string; msgId?: string }) {
+  closeReplyThread()
   // msgId is the parent message ID for the API call (GET /api/v1/messages/{id}/thread).
   // Try badge's msgId first, then fall back to live thread state for older sessions.
   const msgId = d.msgId || getThreadById(d.threadId)?.parentMessageId
@@ -1810,6 +1976,49 @@ const displayAgentUnreliableTools = computed(() =>
   }),
 )
 
+const memoryChipAgent = computed(() => {
+  const shown = displayAgent.value
+  const name = shown?.name || selectedAgentName.value || activeSpace.value?.leadAgent || ''
+  if (!name) return null
+  return agentsList.value.find(a => a.name === name) ?? shown ?? { name }
+})
+
+const memoryChip = computed(() => {
+  const agent = memoryChipAgent.value
+  return resolveMemoryChip({
+    agentName: agent?.name,
+    vaultName: (agent as { vault_name?: string } | null)?.vault_name,
+    memoryType: (agent as { memory_type?: string } | null)?.memory_type,
+    contextNotesEnabled: !!(agent as { context_notes_enabled?: boolean } | null)?.context_notes_enabled,
+    muninn: muninnStatus.value,
+    dismissed: memoryChipDismissed.value,
+    inChat: !!(props.sessionId || props.spaceId),
+  })
+})
+
+function dismissMemoryChip() {
+  memoryChipDismissed.value = true
+}
+
+function onMuninnChipStatus(status: MuninnPresence) {
+  muninnStatus.value = { ...muninnStatus.value, ...status }
+}
+
+async function onMemoryVaultConnected() {
+  await Promise.all([loadMuninnStatus(), loadAgents()])
+}
+
+async function loadMuninnStatus() {
+  try {
+    const data = await api.muninn?.status?.()
+    if (data) muninnStatus.value = data
+  } catch { /* ignore */ }
+}
+
+watch(() => memoryChipAgent.value?.name, () => {
+  memoryChipDismissed.value = false
+})
+
 function exportSession() {
   if (!messages.value.length) return
   const label = sessionLabel.value
@@ -2016,11 +2225,33 @@ watch(() => activeSpace.value?.id, (_newId, _oldId) => {
 })
 type ChatIntent = 'update_active_work' | 'new_request'
 type UpdateRoute = 'all_active' | 'lead_only' | 'specific_delegate'
-const chatIntent = ref<ChatIntent>('update_active_work')
+const chatIntent = ref<ChatIntent>('new_request')
 const updateRoute = ref<UpdateRoute>('all_active')
 const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
+const trivialAskPending = ref(false)
+const sendOptionsOpen = ref(false)
+
+function armTrivialAskPending(markdown: string) {
+  trivialAskPending.value = isTrivialAsk(markdown)
+}
+
+function rearmDelegationPlanFromLiveWork() {
+  if (!trivialAskPending.value) return
+  trivialAskPending.value = false
+  if (streaming.value) prestreamThinking.value = true
+}
+
+function onSendOptionsToggle(e: Event) {
+  sendOptionsOpen.value = (e.target as HTMLDetailsElement).open
+}
+
+function resetComposerSendOptions() {
+  sendOptionsOpen.value = false
+  chatIntent.value = 'new_request'
+  updateRoute.value = 'all_active'
+}
 
 // Per-space run chrome. ChatView is reused across /space/:id, so a single
 // streaming / currentRunId / queuedRunIds / prestreamThinking would paint
@@ -2029,6 +2260,7 @@ const prestreamThinking = ref(false)
 type OwnerRunState = {
   streaming: boolean
   prestreamThinking: boolean
+  trivialAskPending: boolean
   currentRunId: string
   queuedRunIds: string[]
 }
@@ -2038,6 +2270,7 @@ function snapshotOwnerRun(): OwnerRunState {
   return {
     streaming: streaming.value,
     prestreamThinking: prestreamThinking.value,
+    trivialAskPending: trivialAskPending.value,
     currentRunId: currentRunId.value,
     queuedRunIds: [...queuedRunIds.value],
   }
@@ -2051,6 +2284,7 @@ function persistOwnerRun(key: string) {
 function applyOwnerRun(state: OwnerRunState) {
   streaming.value = state.streaming
   prestreamThinking.value = state.prestreamThinking
+  trivialAskPending.value = state.trivialAskPending
   currentRunId.value = state.currentRunId
   queuedRunIds.value = [...state.queuedRunIds]
   if (state.streaming) {
@@ -2065,7 +2299,7 @@ function applyOwnerRun(state: OwnerRunState) {
 function restoreOwnerRun(key: string) {
   if (!key) return
   const saved = runByOwner.value[key]
-  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] })
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] })
 }
 
 function finishStoredOwnerRun(key: string) {
@@ -2076,13 +2310,13 @@ function finishStoredOwnerRun(key: string) {
     const rest = saved.queuedRunIds.slice(1)
     runByOwner.value = {
       ...runByOwner.value,
-      [key]: { streaming: true, prestreamThinking: true, currentRunId: next, queuedRunIds: rest },
+      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest },
     }
     return
   }
   runByOwner.value = {
     ...runByOwner.value,
-    [key]: { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] },
+    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] },
   }
 }
 
@@ -2096,6 +2330,11 @@ function finishBackgroundOwnerRun(runId: string): boolean {
 watch(() => props.spaceId, (newId, oldId) => {
   if (oldId && oldId !== newId) persistOwnerRun(oldId)
   if (newId) restoreOwnerRun(newId)
+  sendOptionsOpen.value = false
+})
+
+watch([streaming, queuedRunIds], ([isStreaming, queued]) => {
+  if (!isStreaming && queued.length === 0) resetComposerSendOptions()
 })
 
 const activeDelegateAgents = computed(() => {
@@ -2135,6 +2374,7 @@ function promoteNextQueuedRun() {
   currentRunId.value = next
   streaming.value = true
   prestreamThinking.value = true
+  trivialAskPending.value = false
   startStreamingWatchdog()
   startElapsedTimer()
   pendingToolResults.value = []
@@ -2155,7 +2395,10 @@ async function handleEditorSend(markdown: string) {
   const ws = wsRef.value
   if (!ws) return
   const runId = nextRunId()
-  const intent = chatIntent.value
+  const sendingWhileStreaming = streaming.value
+  // Idle send is just a hallway line. Mid-turn send defaults to a new
+  // request (Slack-like queue) unless diagnose Send options picked interrupt.
+  const intent = sendingWhileStreaming ? chatIntent.value : 'new_request'
   const payload: Record<string, unknown> = { intent }
   if (intent === 'update_active_work') {
     payload.update_route = updateRoute.value
@@ -2164,7 +2407,6 @@ async function handleEditorSend(markdown: string) {
       if (target) payload.target_agent = target
     }
   }
-  const sendingWhileStreaming = streaming.value
 
   // ── Space mode ─────────────────────────────────────────────────────
   if (props.spaceId) {
@@ -2188,6 +2430,7 @@ async function handleEditorSend(markdown: string) {
       currentRunId.value = runId
       streaming.value = true
       prestreamThinking.value = true
+      armTrivialAskPending(markdown)
       startStreamingWatchdog()
       startElapsedTimer()
     } else {
@@ -2195,11 +2438,13 @@ async function handleEditorSend(markdown: string) {
     }
 
     // Optimistic user message into the space timeline.
+    const sentAt = new Date().toISOString()
     tl.getState().messages.push({
       id: `u-${Date.now()}`,
       session_id: targetSessionId,
       seq: -1,
-      ts: new Date().toISOString(),
+      ts: sentAt,
+      created_at: sentAt,
       role: 'user',
       content: markdown,
       agent: '',
@@ -2227,11 +2472,12 @@ async function handleEditorSend(markdown: string) {
   }
 
   const msgs = getMessages(props.sessionId)
-  msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown })
+  msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown, createdAt: new Date().toISOString() })
   if (!sendingWhileStreaming) {
     currentRunId.value = runId
     streaming.value = true
     prestreamThinking.value = true
+    armTrivialAskPending(markdown)
     startStreamingWatchdog()
     startElapsedTimer()
     pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
@@ -2261,7 +2507,7 @@ function handleRetry(content: string) {
   startStreamingWatchdog()
   startElapsedTimer()
   const msgs = getMessages(props.sessionId)
-  msgs.push({ id: `u-${Date.now()}`, role: 'user', content })
+  msgs.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: new Date().toISOString() })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true,
     agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
   setLastSeenMessageId(props.sessionId, null)
@@ -2365,6 +2611,13 @@ watch(wsRef, (ws) => {
         scrollToBottom()
         return
       }
+      // Resume replay of a finished hire must not mint a ghost bubble
+      // ("They're here.") for an already-persisted assistant row.
+      const lastPersisted = [...msgs].reverse().find(m => m.role === 'assistant' && !m.streaming)
+      const incoming = (msg.content ?? '').trim()
+      if (incoming && lastPersisted && typeof lastPersisted.content === 'string' && lastPersisted.content.includes(incoming)) {
+        return
+      }
       // If a queued run starts after the previous one completed, tokens can
       // arrive before any optimistic streaming bubble exists. Create one lazily.
       msgs.push({
@@ -2383,6 +2636,7 @@ watch(wsRef, (ws) => {
 
 registerWS(ws, 'tool_call', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
+    rearmDelegationPlanFromLiveWork()
     const p = msg.payload as Record<string, unknown>
     activeToolCalls.value.push({
       id: (p?.id as string) ?? Date.now().toString(),
@@ -2447,6 +2701,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     stopElapsedTimer()
     streaming.value = false
     prestreamThinking.value = false
+    trivialAskPending.value = false
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
     // streaming but whose results haven't been attached yet (e.g. timing edge cases).
@@ -2511,6 +2766,7 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     stopElapsedTimer()
     streaming.value = false
     prestreamThinking.value = false
+    trivialAskPending.value = false
     activeToolCalls.value = []
     if (props.sessionId) {
       const streamMsg = [...getMessages(props.sessionId)].reverse().find(m => m.streaming)
@@ -2522,11 +2778,12 @@ registerWS(ws, 'error', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'warning', (msg: WSMessage) => {
+    if (isVaultMemoryWarning(msg.content ?? '')) {
+      // Vault setup is a chip, not agent speech.
+      return
+    }
     if (props.sessionId) {
       if (!isForActiveSession(msg)) return
-      // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
-      // Surface it inline so the user knows memory tools are disabled rather
-      // than silently missing tool calls.
       const msgs = getMessages(props.sessionId)
       const warningForQueuedRun = !!msg.run_id && msg.run_id !== currentRunId.value
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
@@ -2898,6 +3155,73 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
   // thread_reply_updated: parent message reply count changed in persistence.
   // This event is message-scoped, so only apply the count when there is a
   // single delegated thread anchored to that parent message.
+registerWS(ws, 'space_reply', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    if (!parentId) return
+    const count = typeof p.reply_count === 'number' ? p.reply_count : undefined
+    const preview = typeof p.last_preview === 'string' ? p.last_preview : undefined
+    applySpaceReplyMeta(parentId, { reply_count: count, last_preview: preview })
+    const raw = p.message as any
+    if (raw && raw.id && replyThreadParent.value?.id === parentId) {
+      spaceReplyIncoming.value = raw
+    }
+    delete spaceReplyStream[parentId]
+  })
+
+registerWS(ws, 'space_reply_typing', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    const agent = typeof p.agent === 'string' ? p.agent : ''
+    if (!parentId || !agent) return
+    spaceReplyTyping[parentId] = agent
+    delete spaceReplySnag[parentId]
+  })
+
+registerWS(ws, 'space_reply_token', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    const agent = typeof p.agent === 'string' ? p.agent : ''
+    const token = typeof p.token === 'string' ? p.token : ''
+    if (!parentId || !token) return
+    const prev = spaceReplyStream[parentId]
+    spaceReplyStream[parentId] = {
+      agent: agent || prev?.agent || '',
+      text: (prev?.text ?? '') + token,
+    }
+  })
+
+registerWS(ws, 'space_reply_typing_done', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    if (!parentId) return
+    delete spaceReplyTyping[parentId]
+    delete spaceReplyStream[parentId]
+    const agent = typeof p.agent === 'string' ? p.agent : ''
+    const err = typeof p.error === 'string' ? p.error : ''
+    if (err && agent) {
+      spaceReplySnag[parentId] = { agent, reason: err }
+    }
+  })
+
+registerWS(ws, 'space_reply_mention', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!sid) return
+    if (props.spaceId === sid && replyThreadParent.value) return
+    const preview = typeof p.preview === 'string' && p.preview ? p.preview : 'You were mentioned in a thread'
+    spaceMentionToast.value = preview
+    setTimeout(() => { if (spaceMentionToast.value === preview) spaceMentionToast.value = null }, 6000)
+  })
+
 registerWS(ws, 'thread_reply_updated', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && msg.session_id !== props.sessionId) return
@@ -3017,6 +3341,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   if (!newSessionId) return
   resetStreaming()
   prestreamThinking.value = false
+  trivialAskPending.value = false
   queuedRunIds.value = []
   dismissAllBlockedThreadToasts()
   pendingPermission.value = null
@@ -3047,6 +3372,19 @@ function handleOutsideClick(e: MouseEvent) {
     const target = e.target as HTMLElement
     if (!target.closest('.relative')) agentDropdownOpen.value = false
   }
+}
+
+function onHallwayTouchStart(e: TouchEvent) {
+  hallwayTouchX = e.touches[0]?.clientX ?? 0
+}
+function onHallwayTouchMove(e: TouchEvent) {
+  const x = e.touches[0]?.clientX ?? hallwayTouchX
+  const dx = x - hallwayTouchX
+  if (dx < -36) hallwayTimesRevealed.value = true
+  if (dx > 36) hallwayTimesRevealed.value = false
+}
+function onHallwayTouchEnd() {
+  // reveal persists until swipe-right
 }
 
 // Handle clicks on @agent-mention spans rendered inside v-html markdown.
@@ -3086,6 +3424,7 @@ onMounted(async () => {
   await loadAgents()
   syncSessionAgent()
   fetchStatus()
+  void loadMuninnStatus()
   if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     await fetchMessages(props.sessionId)
     hydrateThreadBadges(props.sessionId)

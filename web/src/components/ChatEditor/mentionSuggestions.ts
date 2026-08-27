@@ -14,6 +14,7 @@ export type MentionSpace = {
   kind?: string
   leadAgent?: string
   memberAgents?: string[]
+  companyId?: string
 } | null | undefined
 
 function namesEqual(a: string, b: string): boolean {
@@ -36,6 +37,20 @@ export function spaceRosterNames(space: MentionSpace): string[] | undefined {
     names.push(n)
   }
   return names
+}
+
+/**
+ * People the human can actually @ in this space.
+ * Desk (empty company_id): space-member picker (PR 148).
+ * Company space: company roster ∩ space members. Never the on-disk catalog.
+ */
+export function mentionableNames(space: MentionSpace, companyMembers?: string[] | null): string[] | undefined {
+  const roster = spaceRosterNames(space)
+  if (roster === undefined) return undefined
+  const companyId = typeof space?.companyId === 'string' ? space.companyId.trim() : ''
+  if (!companyId) return roster
+  const seated = new Set((companyMembers ?? []).map(n => n.toLowerCase()))
+  return roster.filter(n => seated.has(n.toLowerCase()))
 }
 
 export function isSpaceMember(memberNames: string[] | undefined, name: string): boolean {

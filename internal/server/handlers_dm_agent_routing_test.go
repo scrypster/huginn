@@ -50,9 +50,9 @@ func (e *errSpaceStore) ListSpaces(_ spaces.ListOpts) (spaces.ListSpacesResult, 
 func (e *errSpaceStore) UpdateSpace(_ string, _ spaces.SpaceUpdates) (*spaces.Space, error) {
 	return nil, fmt.Errorf("err")
 }
-func (e *errSpaceStore) ArchiveSpace(_ string) error                    { return fmt.Errorf("err") }
-func (e *errSpaceStore) MarkRead(_ string) error                        { return fmt.Errorf("err") }
-func (e *errSpaceStore) UnseenCount(_ string) (int, error)              { return 0, fmt.Errorf("err") }
+func (e *errSpaceStore) ArchiveSpace(_ string) error       { return fmt.Errorf("err") }
+func (e *errSpaceStore) MarkRead(_ string) error           { return fmt.Errorf("err") }
+func (e *errSpaceStore) UnseenCount(_ string) (int, error) { return 0, fmt.Errorf("err") }
 func (e *errSpaceStore) ListSessionsForSpace(_ string) ([]spaces.SessionRef, error) {
 	return nil, fmt.Errorf("err")
 }
@@ -70,6 +70,26 @@ func (e *errSpaceStore) SpacesByLeadAgent(_ string) ([]*spaces.Space, error) {
 }
 func (e *errSpaceStore) FindChannelByName(_ string) (*spaces.Space, error) {
 	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) PostSpaceMessage(_, _, _ string) (*spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) ListSpaceReplies(_, _ string) ([]spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) GetSpaceMessage(_, _ string) (*spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) DeleteSpaceMessage(_, _ string) error { return fmt.Errorf("err") }
+func (e *errSpaceStore) InsertSpaceThreadMessage(_, _, _, _, _ string) (*spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) HasThreadParticipation(_, _, _ string) (bool, error) {
+	return false, fmt.Errorf("err")
+}
+func (e *errSpaceStore) MarkThreadRead(_, _, _ string) error { return fmt.Errorf("err") }
+func (e *errSpaceStore) ThreadUnseenForViewer(_, _, _ string) (int, error) {
+	return 0, fmt.Errorf("err")
 }
 
 // openSpaceDB creates a fresh in-memory SQLite DB with both session and space
@@ -495,8 +515,8 @@ func TestResolveAgentForMessage_ChannelMention_RoutesToMember(t *testing.T) {
 		testAgent("Kimi", "model-b", "#000", "K", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -536,8 +556,8 @@ func TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough(t *t
 		testAgent("Kimi", "model-b", "#000", "K", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -586,8 +606,8 @@ func TestResolveAgentForMessage_DMMention_NonMember_DoesNotAddress(t *testing.T)
 		testAgent("Steve", "model-s", "#000", "S", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -643,8 +663,8 @@ func TestResolveAgentForMessage_LeadStamped_UserAtSteve_RoutesToSteve(t *testing
 		testAgent("Sam", "model-a", "#000", "A", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -691,8 +711,8 @@ func TestResolveAgentForMessage_FirstMentionIsAddressee(t *testing.T) {
 		testAgent("Sam", "model-a", "#000", "A", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -733,8 +753,8 @@ func TestResolveAgentForMessage_UnknownMention_UsesStampedLead(t *testing.T) {
 		testAgent("Steve", "model-s", "#3FB950", "S", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -795,7 +815,7 @@ func TestResolveAgentForMessage_Standalone_KnownAgentStillWins(t *testing.T) {
 		testAgent("Steve", "model-s", "#000", "S", false),
 	)
 	s := &Server{
-		store: sessStore,
+		store:       sessStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -854,8 +874,8 @@ func TestSpawnAdditionalUserMentions_SkipsNonMembersWhenSpaceHasRoster(t *testin
 		testAgent("Steve", "m", "#fff", "S", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 	s.SetMentionDelegate(func(context.Context, string, string, string, string) {
@@ -891,5 +911,28 @@ func TestSpawnAdditionalUserMentions_CallsDelegateWithExtrasOnly(t *testing.T) {
 	}
 	if strings.HasPrefix(strings.TrimSpace(gotAssistant), "@Steve") {
 		t.Errorf("addressee @Steve should not be the first leftover mention, got %q", gotAssistant)
+	}
+}
+
+func TestAdditionalMentionNames_BareSteveAfterWinston(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Winston", "m", "#fff", "W", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Reggie", "m", "#fff", "R", false),
+	)
+	extras := additionalMentionNames("@Winston Ask Steve hostname + 7*8.", "Winston", cfg, []string{"Winston", "Steve", "Reggie"})
+	if len(extras) != 1 || extras[0] != "Steve" {
+		t.Errorf("got %v, want [Steve]", extras)
+	}
+}
+
+func TestAdditionalMentionNames_BareNameStandaloneStaysAtOnly(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Winston", "m", "#fff", "W", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+	)
+	extras := additionalMentionNames("@Winston Ask Steve hostname", "Winston", cfg, nil)
+	if len(extras) != 0 {
+		t.Errorf("standalone has no roster — bare Steve must not extra-spawn, got %v", extras)
 	}
 }

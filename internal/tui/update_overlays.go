@@ -46,7 +46,7 @@ func (a *App) handleDMSwitchMsg(msg DMSwitchMsg) (tea.Model, tea.Cmd) {
 	a.primaryAgent = msg.Agent
 	a.activeChannel = "" // clear any active channel
 	a.input.Placeholder = "Message " + msg.Agent + "…"
-	a.addLine("system", fmt.Sprintf("Switched to @%s", msg.Agent))
+	a.enterDMSpace(msg.Agent)
 	a.recalcViewportHeight()
 	a.refreshViewport()
 	return a, nil
@@ -58,7 +58,7 @@ func (a *App) handleChannelSwitchMsg(msg ChannelSwitchMsg) (tea.Model, tea.Cmd) 
 	a.activeChannel = msg.Name
 	a.sidebar.SetActive(msg.Name)
 	a.input.Placeholder = a.channelPlaceholder(msg.Name)
-	a.addLine("system", fmt.Sprintf("Switched to #%s", msg.Name))
+	a.enterChannelSpace(msg.Name)
 	a.recalcViewportHeight()
 	a.refreshViewport()
 	return a, nil
@@ -84,12 +84,12 @@ func (a *App) handleSidebarSelectMsg(msg SidebarSelectMsg) (tea.Model, tea.Cmd) 
 		if a.agentReg != nil {
 			a.agentReg.SetDefault(msg.Name)
 		}
-		a.addLine("system", fmt.Sprintf("Switched to @%s", msg.Name))
+		a.enterDMSpace(msg.Name)
 	case sidebarSectionChannels:
 		a.activeChannel = msg.Name
 		a.sidebar.SetActive(msg.Name)
 		a.input.Placeholder = a.channelPlaceholder(msg.Name)
-		a.addLine("system", fmt.Sprintf("Switched to #%s", msg.Name))
+		a.enterChannelSpace(msg.Name)
 	}
 	a.sidebar.focused = false
 	a.refreshViewport()

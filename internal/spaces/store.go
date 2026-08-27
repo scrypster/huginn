@@ -83,11 +83,23 @@ func (s *SQLiteSpaceStore) OpenDM(agentName string) (*Space, error) {
 // The entire operation (space row + member rows) is wrapped in a transaction so a
 // partial failure never leaves an orphaned channel with missing members.
 func (s *SQLiteSpaceStore) CreateChannel(name, leadAgent string, members []string, icon, color string) (*Space, error) {
+	return s.CreateChannelForCompany(name, leadAgent, members, icon, color, "")
+}
+
+// CreateChannelForCompany creates a channel attached to companyID (empty = desk).
+// Name uniqueness is per-company so two companies may both have "#eng".
+func (s *SQLiteSpaceStore) CreateChannelForCompany(name, leadAgent string, members []string, icon, color, companyID string) (*Space, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, fmt.Errorf("spaces: channel name cannot be empty or whitespace-only")
 	}
 	if len(name) > 80 {
 		return nil, fmt.Errorf("spaces: channel name exceeds 80-character limit")
+	}
+	companyID = strings.TrimSpace(companyID)
+	if companyID != "" {
+		if _, err := s.loadCompany(companyID); err != nil {
+			return nil, err
+		}
 	}
 	id := newID()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -98,11 +110,18 @@ func (s *SQLiteSpaceStore) CreateChannel(name, leadAgent string, members []strin
 	}
 	defer tx.Rollback() // noop if committed
 
+	var companyVal any
+	if companyID != "" {
+		companyVal = companyID
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO spaces(id, name, kind, lead_agent, icon, color, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		id, name, KindChannel, leadAgent, icon, color, now, now,
+		`INSERT INTO spaces(id, name, kind, lead_agent, icon, color, company_id, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		id, name, KindChannel, leadAgent, icon, color, companyVal, now, now,
 	); err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, ErrChannelNameTaken
+		}
 		return nil, fmt.Errorf("spaces: create channel: %w", err)
 	}
 	for _, m := range members {
@@ -150,6 +169,10 @@ func (s *SQLiteSpaceStore) ListSpaces(opts ListOpts) (ListSpacesResult, error) {
 	if opts.Kind != "" {
 		query += ` AND kind = ?`
 		args = append(args, opts.Kind)
+	}
+	if opts.CompanyID != "" {
+		query += ` AND COALESCE(company_id, '') = ?`
+		args = append(args, opts.CompanyID)
 	}
 
 	// Apply keyset pagination when a cursor is provided.
@@ -241,8 +264,13 @@ func (s *SQLiteSpaceStore) UpdateSpace(id string, updates SpaceUpdates) (*Space,
 	}
 
 	// Nothing to do.
-	if updates.Name == nil && updates.Icon == nil && updates.Color == nil && updates.Members == nil && updates.LeadAgent == nil {
+	if updates.Name == nil && updates.Icon == nil && updates.Color == nil && updates.Members == nil && updates.LeadAgent == nil && updates.CompanyID == nil {
 		return s.loadSpace(id)
+	}
+	if updates.CompanyID != nil && *updates.CompanyID != "" {
+		if _, err := s.loadCompany(*updates.CompanyID); err != nil {
+			return nil, err
+		}
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -271,6 +299,16 @@ func (s *SQLiteSpaceStore) UpdateSpace(id string, updates SpaceUpdates) (*Space,
 	if updates.LeadAgent != nil {
 		if _, err := tx.Exec(`UPDATE spaces SET lead_agent=?, updated_at=? WHERE id=?`, *updates.LeadAgent, now, id); err != nil {
 			return nil, fmt.Errorf("spaces: update lead_agent: %w", err)
+		}
+	}
+	if updates.CompanyID != nil {
+		// Empty company_id is desk-level (NULL). Do not write TeamID.
+		var companyVal any
+		if *updates.CompanyID != "" {
+			companyVal = *updates.CompanyID
+		}
+		if _, err := tx.Exec(`UPDATE spaces SET company_id=?, updated_at=? WHERE id=?`, companyVal, now, id); err != nil {
+			return nil, fmt.Errorf("spaces: update company_id: %w", err)
 		}
 	}
 	if updates.Members != nil {
@@ -325,6 +363,10 @@ func (s *SQLiteSpaceStore) MarkRead(spaceID string) error {
 	); err != nil {
 		return fmt.Errorf("spaces: mark read: %w", err)
 	}
+	// Viewing the space clears the follow/@me rail flag (same as Vue noteFollowUnread false).
+	if err := s.ClearForYou(spaceID, LocalViewer); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -357,17 +399,21 @@ func (s *SQLiteSpaceStore) loadSpace(id string) (*Space, error) {
 	var createdAt, updatedAt string
 	var archivedAt sql.NullString
 
+	var companyID sql.NullString
 	err := s.db.Read().QueryRow(
-		`SELECT id, name, kind, lead_agent, icon, color, created_at, updated_at, archived_at
+		`SELECT id, name, kind, lead_agent, icon, color, company_id, created_at, updated_at, archived_at
 		 FROM spaces WHERE id=?`, id,
 	).Scan(&sp.ID, &sp.Name, &sp.Kind, &sp.LeadAgent, &sp.Icon, &sp.Color,
-		&createdAt, &updatedAt, &archivedAt)
+		&companyID, &createdAt, &updatedAt, &archivedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, &SpaceError{Code: "space_not_found", Message: "space not found"}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("spaces: load space %q: %w", id, err)
+	}
+	if companyID.Valid {
+		sp.CompanyID = companyID.String
 	}
 
 	var parseErr error
@@ -399,6 +445,8 @@ func (s *SQLiteSpaceStore) loadSpace(id string) (*Space, error) {
 
 	unseenCount, _ := s.UnseenCount(id) // non-fatal
 	sp.UnseenCount = unseenCount
+	forYou, _ := s.HasForYou(id, LocalViewer) // non-fatal
+	sp.ForYou = forYou
 	return &sp, nil
 }
 
@@ -474,16 +522,21 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	// id is retained as final tie-break for deterministic ordering across
 	// sessions in the same space when ts and seq somehow collide.
 	query := fmt.Sprintf(`
-		SELECT id, session_id, seq, ts, role, content, agent, tool_calls_json FROM (
+		SELECT id, session_id, seq, ts, role, content, agent, tool_calls_json, parent_id, reply_count FROM (
 			SELECT m.id, m.container_id AS session_id, m.seq, m.ts,
 			       m.role, m.content, COALESCE(m.agent, '') AS agent,
-			       m.tool_calls_json
+			       m.tool_calls_json,
+			       COALESCE(m.parent_id, '') AS parent_id,
+			       (SELECT COUNT(*) FROM messages r
+			         WHERE r.parent_id = m.id
+			           AND r.role IN ('user', 'assistant')) AS reply_count
 			FROM messages m
 			JOIN sessions s ON s.id = m.container_id
 			WHERE s.space_id = ?
 			  AND m.container_type = 'session'
 			  AND m.role IN ('user', 'assistant')
-			  AND (m.parent_message_id IS NULL OR m.parent_message_id = '')%s
+			  AND (m.parent_message_id IS NULL OR m.parent_message_id = '')
+			  AND (m.parent_id IS NULL OR m.parent_id = '')%s
 			ORDER BY m.ts DESC, m.seq DESC, m.id DESC
 			LIMIT ?
 		) sub
@@ -498,7 +551,7 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 			// query cannot filter out thread replies. Space timelines on pre-thread-feature
 			// databases may include thread replies in the main view.
 			query = fmt.Sprintf(`
-				SELECT id, session_id, seq, ts, role, content, agent, NULL FROM (
+				SELECT id, session_id, seq, ts, role, content, agent, NULL, '', 0 FROM (
 					SELECT m.id, m.container_id AS session_id, m.seq, m.ts,
 					       m.role, m.content, COALESCE(m.agent, '') AS agent
 					FROM messages m
@@ -523,12 +576,19 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	for rows.Next() {
 		var m SpaceMessage
 		var toolCallsJSON sql.NullString
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Seq, &m.Ts, &m.Role, &m.Content, &m.Agent, &toolCallsJSON); err != nil {
+		var parentID sql.NullString
+		var replyCount int
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Seq, &m.Ts, &m.Role, &m.Content, &m.Agent, &toolCallsJSON, &parentID, &replyCount); err != nil {
 			return SpaceMessagesResult{}, fmt.Errorf("spaces: scan message: %w", err)
 		}
+		if parentID.Valid {
+			m.ParentID = parentID.String
+		}
+		m.ReplyCount = replyCount
 		if toolCallsJSON.Valid && toolCallsJSON.String != "" {
 			_ = json.Unmarshal([]byte(toolCallsJSON.String), &m.ToolCalls)
 		}
+		m.EnsureCreatedAt()
 		msgs = append(msgs, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -554,9 +614,37 @@ func (s *SQLiteSpaceStore) ListSpaceMessages(spaceID string, before *SpaceMsgCur
 	if msgs == nil {
 		msgs = []SpaceMessage{}
 	}
+	s.attachReplyMeta(spaceID, msgs)
 	return SpaceMessagesResult{Messages: msgs, NextCursor: nextCursor}, nil
 }
 
+// attachReplyMeta fills last_preview (honesty-stripped) and participant-only
+// new_since on hallway roots. Spectators keep new_since=0.
+func (s *SQLiteSpaceStore) attachReplyMeta(spaceID string, msgs []SpaceMessage) {
+	ids := make([]string, 0, len(msgs))
+	idx := map[string]int{}
+	for i, m := range msgs {
+		if m.ReplyCount > 0 {
+			ids = append(ids, m.ID)
+			idx[m.ID] = i
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	for _, id := range ids {
+		replies, err := s.ListSpaceReplies(spaceID, id)
+		if err != nil {
+			continue
+		}
+		if p := LastSpeechPreview(replies); p != "" {
+			msgs[idx[id]].LastPreview = p
+		}
+		if n, err := s.ThreadUnseenForViewer(spaceID, id, LocalViewer); err == nil {
+			msgs[idx[id]].NewSince = n
+		}
+	}
+}
 
 // RemoveAgentFromAllSpaces removes an agent from all space membership lists,
 // archives any spaces where the agent is the lead, and returns a
@@ -673,6 +761,61 @@ func (s *SQLiteSpaceStore) SpaceMembers(spaceID string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// DeskPeerNames lists lead agents of unarchived desk DMs (empty company_id).
+// These are the Direct Messages floor — anyone here can A2A anyone else here.
+func (s *SQLiteSpaceStore) DeskPeerNames() ([]string, error) {
+	rows, err := s.db.Read().Query(
+		`SELECT DISTINCT lead_agent FROM spaces
+		 WHERE kind = 'dm'
+		   AND archived_at IS NULL
+		   AND COALESCE(company_id, '') = ''
+		   AND TRIM(lead_agent) != ''
+		 ORDER BY lead_agent`)
+	if err != nil {
+		return nil, fmt.Errorf("spaces: desk peer names: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("spaces: scan desk peer: %w", err)
+		}
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		key := strings.ToLower(n)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("spaces: desk peer rows: %w", err)
+	}
+	return names, nil
+}
+
+// SpaceIsDeskDM reports whether spaceID is an unarchived desk DM.
+// Unknown or archived spaces return (false, nil) so callers do not widen.
+func (s *SQLiteSpaceStore) SpaceIsDeskDM(spaceID string) (bool, error) {
+	sp, err := s.GetSpace(spaceID)
+	if err != nil {
+		var se *SpaceError
+		if errors.As(err, &se) && se.Code == "space_not_found" {
+			return false, nil
+		}
+		return false, err
+	}
+	if sp.ArchivedAt != nil {
+		return false, nil
+	}
+	return IsDeskDM(sp), nil
 }
 
 // loadMembers returns the agent names for a channel space.

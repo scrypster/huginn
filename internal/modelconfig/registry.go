@@ -107,6 +107,22 @@ func (r *ModelRegistry) ModelContextWindow(modelName string) int {
 	return 0
 }
 
+// Lookup returns a copy of the named model's info, or nil if unknown.
+func (r *ModelRegistry) Lookup(modelName string) *ModelInfo {
+	if r == nil || modelName == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, m := range r.Available {
+		if m.Name == modelName {
+			cp := m
+			return &cp
+		}
+	}
+	return nil
+}
+
 // ModelSupportsTools returns true if the named model supports tool calling.
 // Defaults to true when unknown.
 func (r *ModelRegistry) ModelSupportsTools(modelName string) bool {

@@ -951,6 +951,24 @@ func additionalMentionNames(content, addressee string, cfg *agents.AgentsConfig,
 			extra = append(extra, ag.Name)
 		}
 	}
+	// Hallway "@Winston Ask Steve hostname": Steve has no @, but he is
+	// named on the roster. Extra-spawn him so the CoS is not the one
+	// who runs bash. Standalone (no roster) stays @-only.
+	if restrictToRoster {
+		for _, name := range memberNames {
+			key := strings.ToLower(name)
+			if seen[key] {
+				continue
+			}
+			if !spaces.NameAppears(content, name) {
+				continue
+			}
+			if ag := agentFromConfig(cfg, name); ag != nil {
+				seen[key] = true
+				extra = append(extra, ag.Name)
+			}
+		}
+	}
 	return extra
 }
 
@@ -1067,6 +1085,73 @@ func isAgentNameChar(c byte) bool {
 //
 // For non-space sessions or when the space store is not configured, the original
 // context is returned unchanged.
+
+// modelInfoFn resolves model IDs to capability info for roster cards.
+func (s *Server) modelInfoFn() agents.ModelInfoFn {
+	if s != nil && s.orch != nil {
+		return s.orch.ModelInfoFn()
+	}
+	return agents.InferModelInfo
+}
+
+func (s *Server) capabilityCardMap(cfg *agents.AgentsConfig) map[string]string {
+	cardMap := make(map[string]string)
+	if cfg == nil {
+		return cardMap
+	}
+	infoFn := s.modelInfoFn()
+	for _, def := range cfg.Agents {
+		cardMap[def.Name] = agents.BuildCapabilityCard(agents.CapabilityCardInput{
+			Name:         def.Name,
+			SystemPrompt: def.SystemPrompt,
+			Description:  def.Description,
+			ModelID:      def.Model,
+			LocalTools:   def.LocalTools,
+			Toolbelt:     def.Toolbelt,
+			Skills:       def.Skills,
+			MemoryMode:   def.MemoryMode,
+		}, infoFn)
+	}
+	return cardMap
+}
+
+func (s *Server) appendDeskFloorContext(ctx context.Context, selfName string) context.Context {
+	type deskFloor interface {
+		DeskPeerNames() ([]string, error)
+	}
+	floor, ok := s.spaceStore.(deskFloor)
+	if !ok {
+		return ctx
+	}
+	peers, err := floor.DeskPeerNames()
+	if err != nil || len(peers) == 0 {
+		return ctx
+	}
+	loader := s.agentLoader
+	if loader == nil {
+		loader = agents.LoadAgents
+	}
+	cfg, cfgErr := loader()
+	var cardMap map[string]string
+	if cfgErr == nil {
+		cardMap = s.capabilityCardMap(cfg)
+	} else {
+		cardMap = map[string]string{}
+	}
+	members := make([]agent.SpaceMember, 0, len(peers))
+	for _, name := range peers {
+		members = append(members, agent.SpaceMember{Name: name, Description: cardMap[name]})
+	}
+	block := agent.BuildDeskFloorContextBlock(selfName, members)
+	if block == "" {
+		return ctx
+	}
+	if existing := workforce.GetSpaceContext(ctx); existing != "" {
+		block = existing + block
+	}
+	return workforce.WithSpaceContext(ctx, block)
+}
+
 func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *agents.Agent) context.Context {
 	if s.spaceStore == nil || s.store == nil || sessionID == "" {
 		return ctx
@@ -1075,6 +1160,7 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	if loadErr != nil || sess.SpaceID() == "" {
 		return ctx
 	}
+	ctx = agent.SetSpaceID(ctx, sess.SpaceID())
 	sp, spErr := s.spaceStore.GetSpace(sess.SpaceID())
 	if spErr != nil || sp == nil {
 		return ctx
@@ -1096,24 +1182,11 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 					loader = agents.LoadAgents
 				}
 				cfg, cfgErr := loader()
-				cardMap := make(map[string]string)
+				var cardMap map[string]string
 				if cfgErr == nil {
-					for _, def := range cfg.Agents {
-						cardMap[def.Name] = agents.BuildCapabilityCard(agents.CapabilityCardInput{
-							Name:         def.Name,
-							SystemPrompt: def.SystemPrompt,
-							Description:  def.Description,
-							ModelID:      def.Model,
-							LocalTools:   def.LocalTools,
-							Toolbelt:     def.Toolbelt,
-							Skills:       def.Skills,
-							MemoryMode:   def.MemoryMode,
-						}, nil) // intentional: no ModelInfoFn at this call site. Tier/tools annotations
-						// are omitted from DM and channel context cards. The roster (BuildRoster)
-						// still includes tier annotations because it has the full Agent registry +
-						// infoFn. This is an acceptable gap — the lead agent sees tier info in its
-						// own session prompt via BuildRoster, which is the primary delegation path.
-					}
+					cardMap = s.capabilityCardMap(cfg)
+				} else {
+					cardMap = map[string]string{}
 				}
 				var rosters []agent.ChannelRoster
 				for _, ch := range channels {
@@ -1139,6 +1212,9 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 				}
 			}
 		}
+		if spaces.IsDeskDM(sp) {
+			ctx = s.appendDeskFloorContext(ctx, selfName)
+		}
 		return ctx
 	}
 
@@ -1153,24 +1229,11 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 		loader = agents.LoadAgents
 	}
 	cfg, cfgErr := loader()
-	cardMap := make(map[string]string)
+	var cardMap map[string]string
 	if cfgErr == nil {
-		for _, def := range cfg.Agents {
-			cardMap[def.Name] = agents.BuildCapabilityCard(agents.CapabilityCardInput{
-				Name:         def.Name,
-				SystemPrompt: def.SystemPrompt,
-				Description:  def.Description,
-				ModelID:      def.Model,
-				LocalTools:   def.LocalTools,
-				Toolbelt:     def.Toolbelt,
-				Skills:       def.Skills,
-				MemoryMode:   def.MemoryMode,
-			}, nil) // intentional: no ModelInfoFn at this call site. Tier/tools annotations
-			// are omitted from DM and channel context cards. The roster (BuildRoster)
-			// still includes tier annotations because it has the full Agent registry +
-			// infoFn. This is an acceptable gap — the lead agent sees tier info in its
-			// own session prompt via BuildRoster, which is the primary delegation path.
-		}
+		cardMap = s.capabilityCardMap(cfg)
+	} else {
+		cardMap = map[string]string{}
 	}
 
 	// Build SpaceMember list with descriptions.
@@ -1274,6 +1337,9 @@ func (s *Server) beginChatRun(sessionID string) (context.Context, *chatRunHandle
 	s.chatRunsMu.Lock()
 	if s.chatRunCancels == nil {
 		s.chatRunCancels = make(map[string]*chatRunHandle)
+	}
+	if prev := s.chatRunCancels[sessionID]; prev != nil && prev != run {
+		prev.cancel()
 	}
 	s.chatRunCancels[sessionID] = run
 	s.chatRunsMu.Unlock()
@@ -1560,9 +1626,29 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	emit := func(msg WSMessage) {
 		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
 	}
+	var lastVisible string
 	onToken := func(token string) {
 		assistantBuf.WriteString(token)
-		emit(WSMessage{Type: "token", Content: token})
+		raw := assistantBuf.String()
+		if backend.PendingHarnessClockPrefix(raw) {
+			return
+		}
+		visible := backend.VisibleAssistantContent(raw)
+		if !backend.IsTimeAsk(userMsg) && backend.IsLeftoverClockSpeech(visible) {
+			visible = ""
+		}
+		if visible == lastVisible {
+			return
+		}
+		if lastVisible == "" || strings.HasPrefix(visible, lastVisible) {
+			delta := strings.TrimPrefix(visible, lastVisible)
+			lastVisible = visible
+			if delta != "" {
+				emit(WSMessage{Type: "token", Content: delta})
+			}
+			return
+		}
+		lastVisible = visible
 	}
 	onEvent := func(ev backend.StreamEvent) {
 		// StreamDone is an internal backend signal. parseSSE emits it at the
@@ -1588,7 +1674,19 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 	}
 
+	// Emit thinking immediately so the 60s client watchdog does not fire
+	// during context prep / model load (before the first token).
+	emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
+
 	ag := s.resolveAgentForMessage(sessionID, userMsg)
+	// Hallway / desk-DM ChatWithAgent never went through wakeSpaceThreadAgent,
+	// so space_reply_typing never fired and left-nav rows stayed still during
+	// "Winston is responding… Preparing context…". Put thinking on the wire.
+	if ag != nil && strings.TrimSpace(ag.Name) != "" {
+		spaceID := s.sessionSpaceID(sessionID)
+		s.emitAgentThinking(spaceID, sessionID, ag.Name, true)
+		defer s.emitAgentThinking(spaceID, sessionID, ag.Name, false)
+	}
 
 	// Pre-generate the user message ID so the delegate_to_agent tool can
 	// thread replies under it. Persist at accept so mid-turn Appends cannot
@@ -1683,9 +1781,28 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if s.store == nil || sessionID == "" {
 			return
 		}
+		s.chatRunsMu.Lock()
+		current := s.chatRunCancels[sessionID]
+		superseded := current != nil && current != run
+		s.chatRunsMu.Unlock()
 		sess, loadErr := s.store.Load(sessionID)
 		if loadErr != nil {
 			return
+		}
+		// Compute persist first so a superseded ping/headcount still keeps
+		// its harness fill. Leftover-clock-only stays empty and is skipped.
+		early := backend.PersistVisibleAssistantContent(assistantBuf.String(), userMsg)
+		if early == "" && s.spaceStore != nil {
+			if spaceID := sess.SpaceID(); spaceID != "" {
+				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
+					early = backend.FillTrivialHeadcountPersist(early, userMsg, sp.Members)
+				}
+			}
+		}
+		if superseded && errContent == "" {
+			if !backend.IsHarnessFillAsk(userMsg) || early == "" {
+				return
+			}
 		}
 		agentName := ""
 		if ag != nil {
@@ -1700,14 +1817,19 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 				userPersisted = true
 			}
 		}
-		// When we have accumulated response content or tool calls, persist them.
-		if assistantBuf.Len() > 0 || len(collectedToolCalls) > 0 {
-			persistedContent := backend.VisibleAssistantContent(assistantBuf.String())
-			if len(collectedToolCalls) > 0 {
-				// Tools ran this turn: leftover tool JSON and echoed result
-				// objects are residue, not speech. toolCalls keeps the facts.
-				persistedContent = backend.VisibleAssistantContentAfterTools(assistantBuf.String())
+		// When we have sayable leftover (or leftover-empty teammate rewrite)
+		// or tool calls, persist them. Never persist an empty leftover-only row.
+		persistedContent := backend.PersistVisibleAssistantContent(assistantBuf.String(), userMsg)
+		if persistedContent == "" && s.spaceStore != nil {
+			if spaceID := sess.SpaceID(); spaceID != "" {
+				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
+					persistedContent = backend.FillTrivialHeadcountPersist(persistedContent, userMsg, sp.Members)
+				}
 			}
+		}
+		if persistedContent != "" || len(collectedToolCalls) > 0 {
+			// Turn is over: leftover deny/helpdesk speech is residue even
+			// when toolsCalled is empty (live Lab Winston Steve-deny).
 			assistantMsg := session.SessionMessage{
 				ID:        assistantMsgID,
 				Role:      "assistant",
@@ -1722,7 +1844,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			}
 		} else if errContent != "" {
 			// No accumulated content but there was an error — persist
-			// an error placeholder so the conversation log is complete.
+			// teammate speech, never a raw Go keyring dump.
 			_ = s.store.Append(sess, session.SessionMessage{
 				ID: session.NewID(), Role: "assistant",
 				Content: errContent,
@@ -1752,8 +1874,18 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			persistAccumulated("")
 		} else {
 			logger.Error("chat completion", "session_id", sessionID, "err", err)
-			emit(WSMessage{Type: "error", Content: err.Error(), RunID: runID})
-			persistAccumulated("⚠️ " + err.Error())
+			agentName := ""
+			if ag != nil {
+				agentName = ag.Name
+			}
+			errSpeech := err.Error()
+			if backend.IsKeyMiss(err) {
+				errSpeech = backend.PersistKeyMissSpeech(agentName, "", err)
+			} else {
+				errSpeech = "⚠️ " + err.Error()
+			}
+			emit(WSMessage{Type: "error", Content: errSpeech, RunID: runID})
+			persistAccumulated(errSpeech)
 		}
 	} else {
 		emit(WSMessage{Type: "done", RunID: runID, Payload: map[string]any{

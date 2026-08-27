@@ -83,6 +83,12 @@ export interface ChatMessage {
   session_id?: string
   seq?: number
   ts?: string
+  parent_id?: string
+  spaceReplyCount?: number  // Slack-style reply chip (not work-inspector replyCount)
+  lastPreview?: string
+  newSince?: number
+  spaceReplyTyping?: string
+  spaceReplyParticipant?: boolean
 }
 
 // Module-level shared state (singleton across all component instances)
@@ -268,7 +274,7 @@ export function useSessions() {
             role: r.role as 'user' | 'assistant',
             content: r.content as string,
             agent: (r.agent as string | undefined) || undefined,
-            createdAt: (r.ts as string | undefined) || undefined,
+            createdAt: (r.created_at as string | undefined) || (r.ts as string | undefined) || undefined,
             toolCalls,
             threadSummary: (r.type === 'thread_event' && r.tool_name === 'thread_done') || undefined,
             threadSummaryThreadId: (r.type === 'thread_event' && typeof r.tool_call_id === 'string')

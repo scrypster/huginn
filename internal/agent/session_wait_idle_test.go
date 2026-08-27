@@ -108,3 +108,48 @@ func TestSession_ConcurrentRunDone(t *testing.T) {
 
 // TestAppendToThread_UpdatesReplyCount verifies that Append with a ParentMessageID
 // increments thread_reply_count on the parent message in the same transaction.
+
+func TestSession_BeginExclusiveRun_Queues(t *testing.T) {
+	sess := newSession("test-queue")
+	if !sess.tryBeginRun() {
+		t.Fatal("tryBeginRun: expected true")
+	}
+
+	got := make(chan bool, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		ok := sess.beginExclusiveRun(ctx)
+		got <- ok
+		if ok {
+			sess.endRun()
+		}
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sess.endRun()
+
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatal("beginExclusiveRun should claim the slot after the first run ends")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("beginExclusiveRun timed out")
+	}
+}
+
+func TestSession_BeginExclusiveRun_Timeout(t *testing.T) {
+	sess := newSession("test-queue-timeout")
+	if !sess.tryBeginRun() {
+		t.Fatal("tryBeginRun: expected true")
+	}
+	defer sess.endRun()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if sess.beginExclusiveRun(ctx) {
+		sess.endRun()
+		t.Fatal("beginExclusiveRun should fail when the holder never releases")
+	}
+}

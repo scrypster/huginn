@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -383,10 +384,12 @@ func LoadAgentsFromBase(baseDir string) (*AgentsConfig, error) {
 			switch filepath.Ext(path) {
 			case ".json":
 				if err := json.Unmarshal(data, &agent); err != nil {
+					slog.Warn("agents: skip unreadable agent file", "path", path, "err", err)
 					continue
 				}
 			case ".yaml", ".yml":
 				if err := yaml.Unmarshal(data, &agent); err != nil {
+					slog.Warn("agents: skip unreadable agent file", "path", path, "err", err)
 					continue
 				}
 			default:

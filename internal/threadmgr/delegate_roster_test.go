@@ -39,10 +39,14 @@ func tessSteveChrisRegistry() *agents.AgentRegistry {
 	return reg
 }
 
-func TestDelegateToAgentTool_TessDM_SteveDoesNotSpawn(t *testing.T) {
+func TestDelegateToAgentTool_TessDM_SteveDeskPeerSpawns(t *testing.T) {
 	tm := New()
-	// Tess-only DM roster — the same set SpaceMembers returns for OpenDM("Tess").
-	tm.SetMembershipChecker(&stubChecker{members: []string{"Tess"}})
+	// Desk mesh: Tess's DM is 1:1 for the human, but Steve also has a desk DM.
+	tm.SetMembershipChecker(&stubChecker{
+		members:   []string{"Tess"},
+		deskPeers: []string{"Tess", "Steve"},
+		deskDM:    true,
+	})
 	reg := tessSteveChrisRegistry()
 	tool := &DelegateToAgentTool{
 		Fn: rosterAwareDelegateFn("tess-dm", "dm-tess", tm, reg),
@@ -52,20 +56,40 @@ func TestDelegateToAgentTool_TessDM_SteveDoesNotSpawn(t *testing.T) {
 		"agent": "Steve",
 		"task":  "pong",
 	})
+	if result.IsError {
+		t.Fatalf("desk DM Tess must be able to delegate to desk-peer Steve, got: %s", result.Error)
+	}
+	threads := tm.ListBySession("tess-dm")
+	if len(threads) != 1 || threads[0].AgentID != "Steve" {
+		t.Fatalf("expected a Steve thread, got %+v", threads)
+	}
+}
+
+func TestDelegateToAgentTool_TessDM_StrangerNoDeskDM_Fails(t *testing.T) {
+	tm := New()
+	// Chris is registered but has no desk DM — not on the desk floor.
+	tm.SetMembershipChecker(&stubChecker{
+		members:   []string{"Tess"},
+		deskPeers: []string{"Tess", "Steve"},
+		deskDM:    true,
+	})
+	reg := tessSteveChrisRegistry()
+	tool := &DelegateToAgentTool{
+		Fn: rosterAwareDelegateFn("tess-dm", "dm-tess", tm, reg),
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"agent": "Chris",
+		"task":  "pong",
+	})
 	if !result.IsError {
-		t.Fatal("expected Tess-only DM delegate_to_agent targeting Steve to fail visibly")
+		t.Fatal("expected stranger with no desk DM to fail visibly")
 	}
 	if !strings.Contains(result.Error, "DELEGATE_FAIL") {
-		t.Errorf("expected DELEGATE_FAIL in tool error the agent can see, got: %s", result.Error)
-	}
-	if !strings.Contains(result.Error, "Steve") {
-		t.Errorf("expected Steve in tool error, got: %s", result.Error)
-	}
-	if !strings.Contains(result.Error, ErrAgentNotSpaceMember.Error()) {
-		t.Errorf("expected not-a-member error, got: %s", result.Error)
+		t.Errorf("expected DELEGATE_FAIL, got: %s", result.Error)
 	}
 	if threads := tm.ListBySession("tess-dm"); len(threads) != 0 {
-		t.Fatalf("Tess-only DM must not spawn Steve, got %d threads", len(threads))
+		t.Fatalf("stranger must not spawn, got %d threads", len(threads))
 	}
 }
 
@@ -156,13 +180,23 @@ func TestDelegateToAgentTool_LiveSpaceStore_TessDMChannelStandalone(t *testing.T
 	tm.SetMembershipChecker(store)
 	reg := tessSteveChrisRegistry()
 
-	tessDM := &DelegateToAgentTool{Fn: rosterAwareDelegateFn("tess-dm", dm.ID, tm, reg)}
-	denied := tessDM.Execute(context.Background(), map[string]any{"agent": "Steve", "task": "pong"})
-	if !denied.IsError || !strings.Contains(denied.Error, "DELEGATE_FAIL") {
-		t.Fatalf("Tess-only DM must DELEGATE_FAIL Steve, got isError=%v err=%q", denied.IsError, denied.Error)
+	if _, err := store.OpenDM("Steve"); err != nil {
+		t.Fatalf("OpenDM Steve: %v", err)
 	}
-	if n := len(tm.ListBySession("tess-dm")); n != 0 {
-		t.Fatalf("Tess-only DM spawned %d threads", n)
+
+	tessDM := &DelegateToAgentTool{Fn: rosterAwareDelegateFn("tess-dm", dm.ID, tm, reg)}
+	okSteve := tessDM.Execute(context.Background(), map[string]any{"agent": "Steve", "task": "pong"})
+	if okSteve.IsError {
+		t.Fatalf("desk DM Tess must delegate to desk-peer Steve, got: %s", okSteve.Error)
+	}
+	if threads := tm.ListBySession("tess-dm"); len(threads) != 1 || threads[0].AgentID != "Steve" {
+		t.Fatalf("expected Steve thread in Tess DM, got %+v", threads)
+	}
+
+	// Chris is registered but has no desk DM — still denied.
+	deniedChris := tessDM.Execute(context.Background(), map[string]any{"agent": "Chris", "task": "nope"})
+	if !deniedChris.IsError || !strings.Contains(deniedChris.Error, "DELEGATE_FAIL") {
+		t.Fatalf("stranger with no desk DM must DELEGATE_FAIL, got isError=%v err=%q", deniedChris.IsError, deniedChris.Error)
 	}
 
 	channel := &DelegateToAgentTool{Fn: rosterAwareDelegateFn("mention-proof", ch.ID, tm, reg)}

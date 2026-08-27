@@ -87,6 +87,15 @@ func (s *Session) SpaceID() string {
 	return s.Manifest.SpaceID
 }
 
+// SetSpaceID binds the session to a space. Used when a real session exists
+// but was persisted before space_id was stamped (or when first binding a
+// space-thread session).
+func (s *Session) SetSpaceID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Manifest.SpaceID = id
+}
+
 // Touch bumps the session's UpdatedAt to now under the manifest lock.
 // Call this after each agent reply so the SQLite sessions table reflects
 // the time of the last activity — required for accurate UnseenCount queries.

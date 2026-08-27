@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/workforce"
 )
 
 type callingAgentKey struct{}
@@ -25,6 +27,47 @@ func GetCallingAgent(ctx context.Context) string {
 	return name
 }
 
+// PushDelegateHop records toAgent on the A2A hop stack. A missing context
+// starts a root chain from the calling agent (default max 5). Cycles and
+// depth overflow fail closed so A2A cannot recurse forever.
+func PushDelegateHop(ctx context.Context, toAgent string) (context.Context, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	toAgent = strings.TrimSpace(toAgent)
+	if toAgent == "" {
+		return ctx, nil
+	}
+	dc := workforce.GetDelegationContext(ctx)
+	if dc == nil {
+		caller := strings.TrimSpace(GetCallingAgent(ctx))
+		if caller == "" {
+			caller = "unknown"
+		}
+		fresh := workforce.NewDelegationContext("", caller, 0)
+		dc = &fresh
+	}
+	next, err := dc.WithDelegate(toAgent)
+	if err != nil {
+		return ctx, err
+	}
+	return workforce.WithDelegationContext(ctx, &next), nil
+}
+
+// CarryDelegationContext copies an A2A hop stack onto dst (spawn ctx).
+func CarryDelegationContext(dst, src context.Context) context.Context {
+	if dst == nil {
+		dst = context.Background()
+	}
+	if src == nil {
+		return dst
+	}
+	if dc := workforce.GetDelegationContext(src); dc != nil {
+		return workforce.WithDelegationContext(dst, dc)
+	}
+	return dst
+}
+
 // ContextBudget controls how many tokens each section of the prompt may use.
 type ContextBudget struct {
 	Total     int // from ModelInfo.PromptBudget
@@ -35,8 +78,8 @@ type ContextBudget struct {
 
 // NewContextBudget derives a ContextBudget from a raw prompt budget.
 func NewContextBudget(promptBudget int) ContextBudget {
-	persona := promptBudget / 5        // 20%
-	artifacts := promptBudget * 2 / 5  // 40%
+	persona := promptBudget / 5                    // 20%
+	artifacts := promptBudget * 2 / 5              // 40%
 	snapshot := promptBudget - persona - artifacts // remainder
 	return ContextBudget{
 		Total:     promptBudget,
@@ -97,6 +140,15 @@ func buildContextWithBudget(
 			Content: t.Task,
 		})
 	}
+	// Recency beat: leftover hallway clocks in the snapshot are historical.
+	// Put today's inject last so 14b cannot copy 9:11 AM at 2pm.
+	if len(msgs) > 0 {
+		clock := backend.LocalClockLine(time.Now())
+		last := &msgs[len(msgs)-1]
+		if last.Role == "user" && !strings.Contains(last.Content, clock) {
+			last.Content = strings.TrimRight(last.Content, "\n") + "\n" + clock
+		}
+	}
 
 	return msgs
 }
@@ -127,7 +179,9 @@ func buildPersonaContent(t *Thread, reg *agents.AgentRegistry) string {
 	if t.Rationale != "" {
 		base += "\n\n## Why You Were Chosen\n" + t.Rationale
 	}
-	return base
+	// Same wall clock hallway ChatWithAgent injects. Child turns must
+	// see it or 14b invents "no real-time data."
+	return backend.AppendLocalClock(base, time.Now())
 }
 
 func buildArtifactMessages(t *Thread, tm *ThreadManager, budgetTokens int) []backend.Message {

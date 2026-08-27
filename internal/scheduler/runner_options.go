@@ -9,6 +9,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type runnerConfig struct {
 	metrics       MetricsCollector
 	deliveryQueue *DeliveryQueue
 	proactivity   ProactivityGateFunc
+	companyGate   CompanyGateFunc
 }
 
 // MetricsCollector is the minimal contract the runner needs to emit
@@ -145,5 +147,31 @@ func WithDeliveryQueue(q *DeliveryQueue) RunnerOption {
 func WithProactivityGate(fn ProactivityGateFunc) RunnerOption {
 	return func(c *runnerConfig) {
 		c.proactivity = fn
+	}
+}
+
+// CompanyGateFunc is the company wall for a workflow step. companyID is the
+// workflow's CompanyID (empty = desk-level, gate is not called). Return a
+// non-nil error to refuse waking that agent (step fails, agent is not called).
+type CompanyGateFunc func(companyID, agentName string) error
+
+// ErrCompanyWall is returned when a company-scoped workflow tries to wake
+// an agent who is not seated in that company (e.g. Lab → Huginn-only Reggie).
+func ErrCompanyWall(companyName, agentName string) error {
+	return errCompanyWall(companyName, agentName)
+}
+
+func errCompanyWall(companyName, agentName string) error {
+	if companyName == "" {
+		companyName = "this company"
+	}
+	return fmt.Errorf("company wall: %s workflow cannot wake %s (not seated in that company)", companyName, agentName)
+}
+
+// WithCompanyGate wires the company-wall check used before each agent step.
+// Nil (default) disables the check — tests and desk-only installs stay open.
+func WithCompanyGate(fn CompanyGateFunc) RunnerOption {
+	return func(c *runnerConfig) {
+		c.companyGate = fn
 	}
 }

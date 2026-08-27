@@ -14,6 +14,7 @@ import { getToken } from '../../composables/useApi'
 import { useAgents } from '../../composables/useAgents'
 import { useDeliveryQueue } from '../../composables/useDeliveryQueue'
 import { remapIndex } from '../../utils/remapIndex'
+import { isWorkflowDropFilename, readWorkflowDropFile } from '../../utils/workflowDrop'
 
 type RouteParams = {
   id: Ref<string | undefined>
@@ -28,6 +29,7 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     fetchWorkflows,
     fetchTemplates,
     createWorkflow,
+    dropWorkflow,
     updateWorkflow,
     deleteWorkflow,
     triggerWorkflow,
@@ -83,6 +85,7 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
 
   const stepAgentDetails = ref<Record<number, Record<string, unknown>>>({})
   const availableSpaces = ref<Array<{ id: string; name: string; kind: string }>>([])
+  const availableCompanies = ref<Array<{ id: string; name: string; members: string[] }>>([])
   const showWorkflowAdvanced = ref(false)
   const stepOutputModal = ref<{ title: string; body: string } | null>(null)
   const expandedTokenBatchIndex = ref<number | null>(null)
@@ -107,6 +110,7 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     description: string
     enabled: boolean
     schedule: string
+    company_id: string
     timeout_minutes: number
     tags: string[]
     steps: WorkflowStep[]
@@ -123,6 +127,7 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     description: '',
     enabled: false,
     schedule: '',
+    company_id: '',
     timeout_minutes: 0,
     tags: [],
     steps: [],
@@ -187,6 +192,7 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
   onMounted(async () => {
     await fetchWorkflows()
     fetchSpaces()
+    fetchCompanies()
     if (routeParams.id.value) openById(routeParams.id.value)
   })
 
@@ -270,6 +276,19 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     }
   }
 
+  async function fetchCompanies() {
+    try {
+      const token = getToken()
+      const data = await fetch('/api/v1/companies', {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then(r => r.json())
+      const list = data?.companies
+      availableCompanies.value = Array.isArray(list) ? list : []
+    } catch {
+      availableCompanies.value = []
+    }
+  }
+
   function onAgentSelected(stepIdx: number, agent: Record<string, unknown>) {
     stepAgentDetails.value[stepIdx] = agent
   }
@@ -331,6 +350,7 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
       description: wf.description || '',
       enabled: wf.enabled,
       schedule: wf.schedule || '',
+      company_id: wf.company_id || '',
       timeout_minutes: wf.timeout_minutes ?? 0,
       tags: [...(wf.tags || [])],
       retry: rt
@@ -540,20 +560,54 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
 
   function addStep() {
     const pos = editForm.value.steps.length
+    const prev = editForm.value.steps[pos - 1]
+    const name = `step-${pos + 1}`
+    const inputs: Array<{ from_step: string; as: string }> = []
+    if (prev?.name?.trim()) {
+      inputs.push({ from_step: prev.name.trim(), as: 'prev' })
+    }
+    const prompt = prev
+      ? 'Using {{inputs.prev}} (also {{prev.output}}), continue the work.'
+      : ''
     editForm.value.steps.push({
-      name: '',
+      name,
       agent: '',
-      prompt: '',
+      prompt,
       connections: {},
       vars: {},
       position: pos,
       on_failure: 'stop',
-      inputs: [],
+      inputs,
       model_override: undefined,
       when: undefined,
       sub_workflow: undefined,
     })
     expandedSteps.value = new Set([...expandedSteps.value, pos])
+  }
+
+  const pipelinePreview = computed(() => {
+    return editForm.value.steps.map((s, i) => {
+      if (s.sub_workflow?.trim()) return s.sub_workflow.trim()
+      return s.agent?.trim() ? `@${s.agent.trim()}` : (s.name?.trim() || `Step ${i + 1}`)
+    })
+  })
+
+  const scheduleMode = computed({
+    get: () => (editForm.value.schedule?.trim() ? 'repeat' : 'once'),
+    set: (mode: 'once' | 'repeat') => {
+      if (mode === 'once') {
+        editForm.value.schedule = ''
+      } else if (!editForm.value.schedule?.trim()) {
+        editForm.value.schedule = '0 8 * * 1-5'
+      }
+    },
+  })
+
+  function companyAgentsForPicker(): string[] | null {
+    const id = editForm.value.company_id
+    if (!id) return null
+    const co = availableCompanies.value.find(c => c.id === id)
+    return co ? co.members || [] : []
   }
 
   function removeStep(idx: number) {
@@ -640,6 +694,9 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
         ...selectedWorkflow.value,
         ...editForm.value,
         steps,
+      }
+      if (!editForm.value.company_id?.trim()) {
+        delete wf.company_id
       }
       const c = editForm.value.chain
       if (!c.next?.trim()) {
@@ -804,6 +861,45 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     }
   }
 
+  const fileDropActive = ref(false)
+  const dropMsg = ref('')
+  const dropError = ref(false)
+  let fileDragDepth = 0
+
+  function onFileDragEnter(e: DragEvent) {
+    if (![...(e.dataTransfer?.types ?? [])].includes('Files')) return
+    fileDragDepth++
+    fileDropActive.value = true
+  }
+
+  function onFileDragOver(e: DragEvent) {
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+  }
+
+  function onFileDragLeave() {
+    fileDragDepth = Math.max(0, fileDragDepth - 1)
+    if (fileDragDepth === 0) fileDropActive.value = false
+  }
+
+  async function onFileDrop(e: DragEvent) {
+    fileDragDepth = 0
+    fileDropActive.value = false
+    const files = [...(e.dataTransfer?.files ?? [])]
+    const file = files.find(f => isWorkflowDropFilename(f.name)) ?? files[0]
+    if (!file) return
+    dropMsg.value = ''
+    dropError.value = false
+    try {
+      const { filename, content } = await readWorkflowDropFile(file)
+      const wf = await dropWorkflow(filename, content)
+      dropMsg.value = `Imported ${wf.name || filename}`
+      openWorkflow(wf)
+    } catch (err) {
+      dropError.value = true
+      dropMsg.value = err instanceof Error ? err.message : 'Could not import that file.'
+    }
+  }
+
   return {
     workflows,
     loading,
@@ -846,6 +942,10 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     eventsRef,
     stepAgentDetails,
     availableSpaces,
+    availableCompanies,
+    pipelinePreview,
+    scheduleMode,
+    companyAgentsForPicker,
     showWorkflowAdvanced,
     stepOutputModal,
     expandedTokenBatchIndex,
@@ -895,6 +995,13 @@ export function useWorkflowsViewState(routeParams: RouteParams, router: Router) 
     doDeleteWorkflow,
     clearRunEvents,
     createBlank,
+    fileDropActive,
+    dropMsg,
+    dropError,
+    onFileDragEnter,
+    onFileDragOver,
+    onFileDragLeave,
+    onFileDrop,
     createFromTemplate,
     isPlaceholderError,
     eventIcon,

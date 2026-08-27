@@ -206,7 +206,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// Always the deny-strength filter: leftover harness JSON, TOOL_FAIL /
 	// DELEGATE_FAIL tokens, and bare tool-name lines must never be agentOutput.
 	// Structured toolsCalled keeps the real names and results.
-	result.AgentOutput = backend.VisibleAssistantContentAfterDeny(buf.String())
+	out := buf.String()
+	// If the loop already ran tools, the buffer is the post-loop answer.
+	// Do not stomp it because the prompt mentioned an ungranted tool name
+	// (e.g. "ask Steve to run hostname with bash").
+	if len(pending) == 0 {
+		if speech := agent.TeammateMissingToolFromAgent(ag, cfg.Prompt, out); speech != "" {
+			out = speech
+		}
+	}
+	result.AgentOutput = backend.VisibleAssistantContentAfterDeny(out)
 	result.ToolsCalled = pending
 	if result.ToolsCalled == nil {
 		result.ToolsCalled = []ToolCall{}

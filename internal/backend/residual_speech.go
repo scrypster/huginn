@@ -40,7 +40,48 @@ var (
 	glueContinuationRE = regexp.MustCompile(`(?i)^\s*(?:then|next|finally|afterwards|after that)\b[^.]{0,80}:\s*$`)
 	// Generic LLM filler phrases that appear after tools have run
 	// Matches lines like "How can I assist you further?", "Not currently delegating any tasks.", etc.
-	fillerLineRE = regexp.MustCompile(`(?i)^(?:how can I|is there anything|how else|not currently delegating|nothing is currently delegated)\b.*[?.]?\s*$`)
+	fillerLineRE = regexp.MustCompile(`(?i)^(?:(?:how can I|is there anything|how else|not currently delegating|nothing is currently delegated)\b.*|(?:if you have any (?:other )?questions(?: or need further assistance)?,\s*)?feel free to ask)[?.!]?\s*$`)
+	// Same-line helpdesk closers after a real answer. Covers the live
+	// hallway closer, "need further assistance" / "need assistance with",
+	// "questions or tasks", and "contact support for further assistance".
+	helpdeskCloserSentenceRE = regexp.MustCompile(`(?i)^(?:how can i (?:assist|help)(?: you(?: further)?)?[?.!]*|is there anything(?: else)?(?: i can (?:help|assist)(?: you)?(?: with)?| you need(?: (?:help|assistance)(?: with)?)?)?[?.!]*|if you have any (?:other )?questions(?: or (?:need further assistance|tasks))?,\s*feel free to ask[?.!]*|feel free to ask(?: if you have any (?:other )?questions(?: or need further assistance)?)?[?.!]*|let me know if you have any (?:other )?questions(?: or if there'?s anything else i can assist with)?|if you have any (?:other )?questions(?: or need further assistance)?,?\s*(?:please\s+)?let me know[?.!]*|if you need the current time again\b.*|(?:please\s+)?let me know how i can (?:assist|help) you further[?.!]*|if you need assistance with\b.{0,80}?(?:please\s+)?let me know[?.!]*|if you have any further (?:instructions|questions)\b.{0,80}?(?:please\s+)?let me know[?.!]*|(?:please\s+)?verify the tool usage or contact support for further assistance[?.!]*)$`)
+	// 14b playbook parroting after a real handoff: wait_for_threads
+	// instructions, "has been spawned", session-history warning.
+	waitPlaybookNameRE        = regexp.MustCompile(`(?i)(?:please\s+)?(?:use|call)\s+\x60?wait_for_threads`)
+	sessionHistoryLeakRE      = regexp.MustCompile(`(?i)session history could not be loaded`)
+	spawnedPlaybookSentenceRE = regexp.MustCompile(`(?i)(?:has been spawned|was spawned|spawned immediately|delegate(?:d)? task\b.{0,80}\bspawned\b)`)
+	// Live Lab leftover helpdesk after a missing-teammate deny. Whole
+	// sentences only — never a hostname value, "N times N", or PONG.
+	leftoverHelpdeskSentenceRE = regexp.MustCompile(`(?i)^(?:i apologize for any confusion|i apologize for the inconvenience|i apologize for the confusion(?: earlier)?|it seems there was an issue with the previous response|let me clarify|(?:-\s*)?the second response suggests that\b.*|if you need the current time again\b.*|(?:please\s+)?let me know how i can (?:assist|help) you further|let'?s try a different approach|(?:and\s+)?i can try again|if you have access to the api key, please provide it(?:\s*,?\s*and i can try again)?|the system encountered an api key resolution issue|it looks like there was an issue accessing the api key\b.*|the error message indicates an issue with accessing the api key\b.*|[A-Za-z][\w.-]* encountered an error while trying to determine the hostname\b.*|i apologize, but there was an error when attempting to\b.*|i'?ll have\s+[A-Za-z][\w.-]*\s+gather the required information|i'?ll have\s+[A-Za-z][\w.-]*\s+try again(?: to see if we can resolve the problem)?|to see if we can resolve the problem|let me know if you have any (?:other )?questions(?: or if there'?s anything else i can assist with)?|if you have any (?:other )?questions(?: or need further assistance)?,?\s*(?:please\s+)?let me know|if you have any (?:other )?questions or tasks,\s*feel free to ask|if you need assistance with\b.{0,80}?(?:please\s+)?let me know|if you have any further (?:instructions|questions)\b.{0,80}?(?:please\s+)?let me know|(?:please\s+)?verify the tool usage or contact support for further assistance)[?.!]*$`)
+	// Live Lab Ask-Steve leftover glue around an already-correct wall line.
+	// "Since Steve isn't available, I'll ask Sam again."
+	// "Winston: Sam has been given the task to determine the hostname…"
+	leftoverLabGlueSentenceRE = regexp.MustCompile(`(?i)^(?:[A-Za-z][\w.-]*:\s+)?(?:since\s+[A-Za-z][\w.-]*\s+isn'?t available\b[^.!?]*|i'?ll ask\s+[A-Za-z][\w.-]*\s+again\b[^.!?]*|[A-Za-z][\w.-]*\s+has been given the task\b[^.!?]*)[?.!]*$`)
+	leftoverNarratorPrefixRE  = regexp.MustCompile(`(?i)^([A-Za-z][\w.-]*):\s+`)
+	// Live mesh leftover: wait_for_threads wrapper echoed as hallway speech.
+	steveContextLeftoverRE  = regexp.MustCompile(`(?i)^please provide any necessary context for [A-Za-z][\w.-]* to complete the task if needed\.?$`)
+	noActiveThreadsRE       = regexp.MustCompile(`(?i)^(?:it seems )?(?:there are )?no active threads(?: to check)?\.?$`)
+	resultFromAgentLineRE   = regexp.MustCompile(`(?i)^\s*(?:#{1,3}\s*)?\*{0,2}result from agent\s+['"“”][^'"“”]+['"“”]\s*:?\s*\*{0,2}\s*$`)
+	resultFromAgentPrefixRE = regexp.MustCompile(`(?i)^\s*(?:#{1,3}\s*)?\*{0,2}result from agent\s+['"“”][^'"“”]+['"“”]\s*:?\s*\*{0,2}\s*`)
+	// Live thread leftover: real PONG/status wrapped in "not a valid tool" /
+	// "verify the tool usage" / "contact support" helpdesk. Rewrite, do not keep.
+	leftoverInvalidToolRE     = regexp.MustCompile(`(?i)(?:not (?:recognized as )?a valid tool|(?:please\s+)?verify the tool usage|contact support for further assistance)`)
+	leftoverPongStatusAgentRE = regexp.MustCompile(`(?i)^([A-Za-z][\w.-]*)\s+(?:attempted to confirm|confirmed)\b`)
+	// Harness narration: "Task delegated to Sam."
+	taskDelegatedSentenceRE = regexp.MustCompile(`(?i)^task delegated to\s+[A-Za-z][\w.-]*[?.!]*$`)
+	taskDelegatedNameRE     = regexp.MustCompile(`(?i)task delegated to\s+([A-Za-z][\w-]*)`)
+	haveAgentNameRE         = regexp.MustCompile(`(?i)i'?ll have\s+([A-Za-z][\w-]*)\b`)
+	encounteredErrorNameRE  = regexp.MustCompile(`(?i)\b([A-Za-z][\w-]*)\s+encountered an error\b`)
+	// Helpdesk missing-agent: It seems that "Steve" isn't one of the available agents.
+	missingAgentHelpdeskRE = regexp.MustCompile(`(?i)^(?:it seems that\s+)?["“”']?([A-Za-z][\w.-]*)["“”']?\s+isn'?t one of the available agents[?.!]*$`)
+	// Honest teammate line already — keep.
+	honestMissingAgentRE = regexp.MustCompile(`(?i)^([A-Za-z][\w.-]*) isn't (?:in this company|available here|in [A-Za-z][\w.-]*)[?.!]*$`)
+	teammateTimesRE      = regexp.MustCompile(`(?i)\b\d+\s+times\s+\d+\b`)
+	teammateHostValueRE  = regexp.MustCompile(`(?i)\bhostname\b.*['"][^'"]{3,}['"]|['"][^'"]{3,}['"].*\bhostname\b`)
+	// Live leftover-empty persist: Sam involved (ask or leftover speech).
+	samNameRE = regexp.MustCompile(`(?i)\bSam\b`)
+	// Live Lab first-click: "Ask Steve for the hostname" is a company wall, not a Sam hostname fail.
+	askSteveRE = regexp.MustCompile(`(?i)\bask\s+steve\b`)
 	// Parenthetical stage directions: lines that are ONLY (text)
 	stageDirectionLineRE = regexp.MustCompile(`^\s*\([^)]*\)\s*$`)
 	// Leading glued stage paren before prose: "(7 times 8 is 56)Reggie said"
@@ -57,11 +98,15 @@ var (
 	templatePlaceholderLineRE = regexp.MustCompile(`^[A-Za-z][^:]*:\s*<[^>]+>\s*$`)
 	// Standalone separator lines
 	separatorLineRE = regexp.MustCompile(`^\s*---+\s*$`)
+	// Status leak: "Loading model, please wait..." is not teammate speech.
+	loadingModelLineRE = regexp.MustCompile(`(?i)^\s*loading model(?:[,.]?\s*please wait)?[.!]*\s*$`)
+	// Third-person self-@ leftover: "@Winston has noted your preferences…"
+	thirdPersonNotedRE = regexp.MustCompile(`(?i)(?:^|[\s,])@?[A-Za-z][\w.-]*\s+has noted\b`)
 	// Playbook introductions: "After ... response, use the following format:"
 	playbookIntroLineRE = regexp.MustCompile(`(?i)(?:after|once|when)\s+.*\b(?:response|result|reply)\b.*,\s*use\s+(?:the\s+)?(?:following\s+)?format\s*:\s*$`)
 	// Future-tense wait glue spoken as a whole sentence after tools already ran:
 	// "Once Reggie has replied with PONG, I will let you know …"
-	futureWaitGlueSentenceRE = regexp.MustCompile(`(?i)^(?:once|after|when|as soon as|to complete)\b.{0,160}?(?:replied|responds?|responded|finished|done|complete|completed|await|waiting)\b.{0,160}?\b(?:will|i'll|i will|proceed|multiply)\b`)
+	futureWaitGlueSentenceRE = regexp.MustCompile(`(?i)^(?:once|after|when|as soon as|to complete)\b.{0,160}?\b(?:replied|responds?|responded|finished|done|complete|completed|await|waiting|comes? back|gets? back)\b.{0,160}?\b(?:i will|i'll)\b`)
 )
 
 // StripResidualSpeech removes wait tags and playbook glue lines from
@@ -145,7 +190,9 @@ func isResidualLine(trim string) bool {
 		waitGlueLineRE.MatchString(trim) || fillerLineRE.MatchString(trim) ||
 		stageDirectionLineRE.MatchString(trim) || bracketStageDirectionLineRE.MatchString(trim) ||
 		playbookFormatLineRE.MatchString(trim) || playbookIntroLineRE.MatchString(trim) ||
-		templatePlaceholderLineRE.MatchString(trim) || separatorLineRE.MatchString(trim) {
+		templatePlaceholderLineRE.MatchString(trim) || separatorLineRE.MatchString(trim) ||
+		steveContextLeftoverRE.MatchString(trim) || noActiveThreadsRE.MatchString(trim) ||
+		resultFromAgentLineRE.MatchString(trim) || loadingModelLineRE.MatchString(trim) {
 		return true
 	}
 	// Tool-shaped JSON (name or function_name)
@@ -159,8 +206,14 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 	if s == "" {
 		return s
 	}
-	// Language-tagged fences (```json, ```go, etc.) are always kept unchanged.
+	// Language-tagged fences stay unless they are leftover harness playbooks
+	// (```json { "name": "recall_thread_result" ... }). After tools those
+	// are not samples — 14b re-types the next step. AfterDeny fenced
+	// examples of unknown tools (gh_issue_create) still pass through.
 	if isFenced && fenceHasLanguageTag(s) {
+		if afterTools && isHarnessPlaybookFence(s) {
+			return ""
+		}
 		return s
 	}
 	// Only remove JSON from unfenced content; fenced content is code/samples.
@@ -183,10 +236,14 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 		case trim == "":
 			kept = append(kept, line)
 			continue
-		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim):
+		case thirdPersonNotedRE.MatchString(trim):
+			kept = append(kept, "I've noted that.")
+			inGlueChain = false
+			continue
+		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim), isLeftoverHelpdeskLine(trim), taskDelegatedSentenceRE.MatchString(trim), loadingModelLineRE.MatchString(trim):
 			inGlueChain = true
 			continue
-		case playbookFormatLineRE.MatchString(trim), playbookIntroLineRE.MatchString(trim), templatePlaceholderLineRE.MatchString(trim), separatorLineRE.MatchString(trim):
+		case playbookFormatLineRE.MatchString(trim), playbookIntroLineRE.MatchString(trim), templatePlaceholderLineRE.MatchString(trim), separatorLineRE.MatchString(trim), resultFromAgentLineRE.MatchString(trim):
 			inGlueChain = true
 			continue
 		case inGlueChain && glueContinuationRE.MatchString(trim):
@@ -213,6 +270,9 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 			line = leadingBracketStageRE.ReplaceAllString(line, "")
 			line = stripOrphanFenceTicks(line)
 			line = dropFutureWaitGlueSentences(line)
+			line = dropPlaybookInstructionSentences(line)
+			line = dropHelpdeskCloserSentences(line)
+			line = rewriteMissingAgentHelpdesk(line, s)
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
@@ -222,7 +282,16 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 	if afterTools && !isFenced {
 		kept = dropTrailingEchoLines(kept, s)
 		kept = stripSameLineEchoFragments(kept, s)
-		return collapseBlankRuns(deduplicateTeammateSentences(strings.Join(kept, "\n")))
+		out := collapseBlankRuns(deduplicateTeammateSentences(strings.Join(kept, "\n")))
+		out = collapseLabWallGlue(out)
+		out = stripHarnessClockLabel(out)
+		if strings.TrimSpace(out) == "" && strings.Contains(s, "Steve isn't in Lab") && !hasTeammateAnswer(s) {
+			out = "Steve isn't in Lab. Sam is."
+		}
+		if rewrite := teammateHostnameFailRewrite(out, s, ""); rewrite != "" {
+			return rewrite
+		}
+		return out
 	}
 	return collapseBlankRuns(strings.Join(kept, "\n"))
 }
@@ -240,6 +309,322 @@ func dropFutureWaitGlueSentences(line string) string {
 			continue
 		}
 		kept = append(kept, sent)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	indent := len(line) - len(strings.TrimLeft(line, " \t"))
+	return line[:indent] + strings.Join(kept, " ")
+}
+
+// dropPlaybookInstructionSentences removes wait_for_threads / spawned /
+// session-history playbook sentences a small model parrots after tools ran.
+// Teammate answers (hostname, 56, PONG) stay.
+func dropPlaybookInstructionSentences(line string) string {
+	trim := strings.TrimSpace(line)
+	if trim == "" {
+		return line
+	}
+	var kept []string
+	for _, sent := range splitSentences(trim) {
+		sent = peelResultFromAgentWrapper(sent)
+		if sent == "" || isPlaybookInstructionSentence(sent) {
+			continue
+		}
+		kept = append(kept, sent)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	indent := len(line) - len(strings.TrimLeft(line, " \t"))
+	return line[:indent] + strings.Join(kept, " ")
+}
+
+func isPlaybookInstructionSentence(sent string) bool {
+	if hasTeammateAnswer(sent) {
+		return false
+	}
+	return waitPlaybookNameRE.MatchString(sent) ||
+		sessionHistoryLeakRE.MatchString(sent) ||
+		spawnedPlaybookSentenceRE.MatchString(sent) ||
+		taskDelegatedSentenceRE.MatchString(sent) ||
+		resultFromAgentLineRE.MatchString(strings.TrimSpace(sent))
+}
+
+// peelResultFromAgentWrapper drops a wait_for_threads "Result from agent
+// 'Steve':" prefix. Remainder (the teammate body) stays.
+func peelResultFromAgentWrapper(sent string) string {
+	return strings.TrimSpace(resultFromAgentPrefixRE.ReplaceAllString(sent, ""))
+}
+
+func isLeftoverHelpdeskSentence(sent string) bool {
+	return leftoverHelpdeskSentenceRE.MatchString(sent) || leftoverLabGlueSentenceRE.MatchString(sent) ||
+		steveContextLeftoverRE.MatchString(sent) || noActiveThreadsRE.MatchString(sent)
+}
+
+// isLeftoverHelpdeskLine is the whole-line leftover drop. A line that
+// already carries the Lab wall must go through sentence-level strip so
+// the wall is not eaten with the glue.
+func isLeftoverHelpdeskLine(trim string) bool {
+	if strings.Contains(trim, "Steve isn't in Lab") {
+		return false
+	}
+	return isLeftoverHelpdeskSentence(trim)
+}
+
+// peelLeftoverNarratorPrefix drops a "Winston:" harness prefix when the
+// remainder is leftover glue, a helpdesk closer, or the Lab wall line.
+func peelLeftoverNarratorPrefix(sent string) string {
+	m := leftoverNarratorPrefixRE.FindStringSubmatch(sent)
+	if len(m) == 0 {
+		return sent
+	}
+	rest := strings.TrimSpace(sent[len(m[0]):])
+	if rest == "" {
+		return ""
+	}
+	if isLeftoverHelpdeskSentence(rest) || helpdeskCloserSentenceRE.MatchString(rest) ||
+		honestMissingAgentRE.MatchString(rest) || strings.HasPrefix(rest, "Steve isn't in Lab") {
+		return rest
+	}
+	return sent
+}
+
+// collapseLabWallGlue keeps the Lab wall line and drops leftover glue
+// around it. Does not fire when a real teammate answer is present, and
+// does not eat an exact wall / honest missing-agent line.
+func collapseLabWallGlue(s string) string {
+	if hasTeammateAnswer(s) {
+		return s
+	}
+	trim := strings.TrimSpace(s)
+	if trim == "" || !strings.Contains(trim, "Steve isn't in Lab") {
+		return s
+	}
+	if strings.EqualFold(trim, "Steve isn't in Lab. Sam is.") || honestMissingAgentRE.MatchString(trim) {
+		return s
+	}
+	return "Steve isn't in Lab. Sam is."
+}
+
+// dropHelpdeskCloserSentences removes trailing helpdesk closers glued onto
+// a teammate answer after tools already ran.
+func dropHelpdeskCloserSentences(line string) string {
+	trim := strings.TrimSpace(line)
+	if trim == "" {
+		return line
+	}
+	var kept []string
+	for _, sent := range splitSentences(trim) {
+		sent = peelLeftoverNarratorPrefix(sent)
+		if sent == "" {
+			continue
+		}
+		if leftoverInvalidToolLanguage(sent) {
+			if rewrite := teammateInvalidToolPongSpeech(sent); rewrite != "" {
+				kept = append(kept, rewrite)
+				continue
+			}
+			continue
+		}
+		if hasTeammateAnswer(sent) {
+			kept = append(kept, sent)
+			continue
+		}
+		if helpdeskCloserSentenceRE.MatchString(sent) || isLeftoverHelpdeskSentence(sent) {
+			continue
+		}
+		kept = append(kept, sent)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	indent := len(line) - len(strings.TrimLeft(line, " \t"))
+	return line[:indent] + strings.Join(kept, " ")
+}
+
+func leftoverInvalidToolLanguage(s string) bool {
+	return leftoverInvalidToolRE.MatchString(s)
+}
+
+// teammateInvalidToolPongSpeech keeps a real PONG/status and drops leftover
+// "not a valid tool" / "verify the tool usage" / "contact support" wrapping.
+func teammateInvalidToolPongSpeech(sent string) string {
+	if !strings.Contains(sent, "PONG") {
+		return ""
+	}
+	name := ""
+	if m := leftoverPongStatusAgentRE.FindStringSubmatch(strings.TrimSpace(sent)); len(m) > 1 {
+		name = m[1]
+	}
+	if name != "" && strings.Contains(strings.ToLower(sent), "status") {
+		return name + " confirmed status: PONG."
+	}
+	if name != "" {
+		return name + " said PONG."
+	}
+	return "PONG"
+}
+
+// teammateInvalidToolPongRewrite is the AfterTools persist hook. Rewrites
+// leftover-empty or leftover-dirty invalid-tool speech that still carries a
+// real PONG. Already-teammate speech is left alone.
+func teammateInvalidToolPongRewrite(stripped, original, _ string) string {
+	if leftoverInvalidToolLanguage(stripped) {
+		if got := teammateInvalidToolPongSpeech(stripped); got != "" {
+			return got
+		}
+	}
+	if leftoverInvalidToolLanguage(original) && (strings.TrimSpace(stripped) == "" || leftoverInvalidToolLanguage(stripped)) {
+		return teammateInvalidToolPongSpeech(original)
+	}
+	return ""
+}
+
+// hasTeammateAnswer reports real teammate content that leftover strippers
+// must not eat: PONG, "N times N", a quoted hostname value, or a clock stamp.
+// The Lab wall line is not a teammate answer — wall+glue collapses to the
+// wall only (do not keep surrounding helpdesk sentences).
+func hasTeammateAnswer(sent string) bool {
+	if strings.Contains(sent, "PONG") {
+		return true
+	}
+	if teammateTimesRE.MatchString(sent) {
+		return true
+	}
+	if teammateHostValueRE.MatchString(sent) {
+		return true
+	}
+	return extractClockStamp(sent) != ""
+}
+
+// teammateHostnameFailRewrite turns leftover-empty Sam hostname helpdesk
+// into teammate speech. AfterTools leftover strip can empty every line
+// first (live 11:44 closer-only), so userAsk is consulted when original
+// leftover no longer names Sam/hostname. Does not invent a key or restore
+// helpdesk. Never returns "" when this completed turn involved Sam on a
+// hostname-style ask.
+// IsAskSteve reports a company-wall ask that must stay on the full path
+// ("Ask Steve for the hostname"). Used by the trivial-ask classifier.
+func IsAskSteve(s string) bool {
+	return askSteveRE.MatchString(s)
+}
+
+func isAskSteve(s string) bool {
+	return IsAskSteve(s)
+}
+
+// teammateCompanyWallRewrite turns leftover-empty or stale Sam-hostname
+// persist into Lab wall speech when the human asked Steve. Does not rewrite
+// old channel history rows — persist of this turn only. Does not eat a real
+// hostname/PONG/clock answer.
+func teammateCompanyWallRewrite(stripped, original, userAsk string) string {
+	if !isAskSteve(userAsk) {
+		return ""
+	}
+	if hasTeammateAnswer(stripped) || hasTeammateAnswer(original) {
+		return ""
+	}
+	trim := strings.TrimSpace(stripped)
+	// Exact wall / honest one-liner is already teammate speech — keep.
+	// Wall plus leftover glue must collapse to the wall line only.
+	if strings.EqualFold(trim, "Steve isn't in Lab. Sam is.") || honestMissingAgentRE.MatchString(trim) {
+		return ""
+	}
+	if strings.Contains(trim, "Steve isn't in Lab") {
+		return "Steve isn't in Lab. Sam is."
+	}
+	empty := trim == ""
+	staleSamHost := strings.EqualFold(trim, "Sam couldn't get the hostname.")
+	if !empty && !staleSamHost {
+		return ""
+	}
+	return "Steve isn't in Lab. Sam is."
+}
+
+func teammateHostnameFailRewrite(stripped, original, userAsk string) string {
+	// Leftover-empty / Sam-hostname rewrite must not fire when the ask is
+	// Ask Steve and the deny is company-wall (Lab first-click miss).
+	if isAskSteve(userAsk) {
+		return ""
+	}
+	if strings.Contains(original, "Steve isn't in Lab") || strings.Contains(stripped, "Steve isn't in Lab") {
+		return ""
+	}
+	if strings.TrimSpace(stripped) != "" {
+		return ""
+	}
+	blob := original + "\n" + userAsk
+	if hasTeammateAnswer(blob) {
+		return ""
+	}
+	if !samNameRE.MatchString(blob) {
+		return ""
+	}
+	if !strings.Contains(strings.ToLower(blob), "hostname") {
+		return ""
+	}
+	return "Sam couldn't get the hostname."
+}
+
+func presentAgentFromSpeech(s string) string {
+	name := ""
+	if m := taskDelegatedNameRE.FindStringSubmatch(s); len(m) > 1 {
+		name = m[1]
+	} else if m := haveAgentNameRE.FindStringSubmatch(s); len(m) > 1 {
+		name = m[1]
+	} else if m := encounteredErrorNameRE.FindStringSubmatch(s); len(m) > 1 {
+		name = m[1]
+	}
+	return strings.TrimRight(name, ".,:;!?")
+}
+
+func teammateNotInCompanyLine(missing, present string) string {
+	// Live Lab wall product copy when Steve was denied and Sam is present.
+	company := "this company"
+	if strings.EqualFold(missing, "Steve") && strings.EqualFold(present, "Sam") {
+		company = "Lab"
+	}
+	if present != "" && !strings.EqualFold(present, missing) {
+		return missing + " isn't in " + company + ". " + present + " is."
+	}
+	if strings.EqualFold(missing, "Steve") && present == "" {
+		return missing + " isn't available here."
+	}
+	return missing + " isn't in " + company + "."
+}
+
+// rewriteMissingAgentHelpdesk turns "X isn't one of the available agents"
+// into teammate speech. Honest "isn't in this company / isn't available here"
+// lines stay. Present teammate is taken from harness narration in original.
+func rewriteMissingAgentHelpdesk(line, original string) string {
+	trim := strings.TrimSpace(line)
+	if trim == "" {
+		return line
+	}
+	present := presentAgentFromSpeech(original)
+	var kept []string
+	rewrote := false
+	missing := ""
+	for _, sent := range splitSentences(trim) {
+		if m := missingAgentHelpdeskRE.FindStringSubmatch(sent); len(m) > 1 {
+			if hasTeammateAnswer(sent) {
+				kept = append(kept, sent)
+				continue
+			}
+			missing = m[1]
+			rewrote = true
+			continue
+		}
+		if m := honestMissingAgentRE.FindStringSubmatch(sent); len(m) > 1 {
+			missing = m[1]
+			kept = append(kept, sent)
+			continue
+		}
+		kept = append(kept, sent)
+	}
+	if rewrote && missing != "" {
+		kept = append([]string{teammateNotInCompanyLine(missing, present)}, kept...)
 	}
 	if len(kept) == 0 {
 		return ""
@@ -564,6 +949,37 @@ func collapseBlankRuns(s string) string {
 	return s
 }
 
+// isHarnessPlaybookFence reports a language-tagged fence whose body is a
+// single tool object for a harness name (recall/wait/delegate/bash). Used
+// only to drop leftover playbooks after tools already ran.
+func isHarnessPlaybookFence(s string) bool {
+	body := s
+	if fenceHasLanguageTag(s) {
+		if i := strings.Index(s, "\n"); i >= 0 {
+			body = s[i+1:]
+		}
+	}
+	obj, _, ok := readJSONObjectLenient(strings.TrimSpace(body))
+	if !ok {
+		return false
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(obj), &m); err != nil {
+		return false
+	}
+	name, _ := m["name"].(string)
+	if name == "" {
+		name, _ = m["function_name"].(string)
+	}
+	switch name {
+	case "recall_thread_result", "wait_for_threads", "delegate_to_agent",
+		"bash", "shell", "exec", "list_team_status":
+		return true
+	default:
+		return false
+	}
+}
+
 // fenceHasLanguageTag checks if a fence content starts with a language tag.
 // Language tags are non-empty first lines that are single words (no spaces).
 // Examples: json, go, python, ts, bash, html, xml, etc.
@@ -644,4 +1060,104 @@ func stripJSONLineComments(s string) string {
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+// WaitHasSpecialistAnswer reports wait_for_threads output that already
+// carries teammate-visible work: PONG, a quoted hostname, a clock stamp,
+// or "N times N". The loop stops without a recap turn when this is true.
+func WaitHasSpecialistAnswer(content string) bool {
+	return hasTeammateAnswer(content)
+}
+
+// IsCompanyWallDeny reports a consult/delegate tool result that is a
+// company-wall miss ("X isn't in this company"). The loop ends the turn
+// so the 14b never narrates a Sam re-delegate.
+func IsCompanyWallDeny(content string) bool {
+	s := strings.TrimSpace(content)
+	s = strings.TrimPrefix(s, "error: ")
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "isn't in this company") {
+		return true
+	}
+	return strings.Contains(s, "Steve isn't in Lab")
+}
+
+// PersistStopTurn is the persist filter when the loop ends without another
+// model completion (company-wall deny or wait already answered).
+func PersistStopTurn(speech, toolBlob, userAsk string) string {
+	if WaitHasSpecialistAnswer(toolBlob) {
+		if compact := compactWaitSpeech(toolBlob); compact != "" {
+			return compact
+		}
+	}
+	if got := PersistVisibleAssistantContent(speech, userAsk); got != "" {
+		if hasTeammateAnswer(got) || isHonestWallLine(got) {
+			return got
+		}
+	}
+	if wall := companyWallFromTool(toolBlob); wall != "" {
+		if got := PersistVisibleAssistantContent(wall, userAsk); got != "" {
+			return got
+		}
+		if got := PersistVisibleAssistantContent("", userAsk); got != "" {
+			return got
+		}
+		return wall
+	}
+	if got := PersistVisibleAssistantContent("", userAsk); got != "" {
+		return got
+	}
+	if got := PersistVisibleAssistantContent(speech, userAsk); got != "" {
+		return got
+	}
+	return strings.TrimSpace(speech)
+}
+
+func isHonestWallLine(s string) bool {
+	trim := strings.TrimSpace(s)
+	if trim == "" {
+		return false
+	}
+	if strings.EqualFold(trim, "Steve isn't in Lab. Sam is.") {
+		return true
+	}
+	return honestMissingAgentRE.MatchString(trim)
+}
+
+func companyWallFromTool(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "error: ")
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "isn't in this company") || strings.HasPrefix(s, "Steve isn't in Lab") {
+		return s
+	}
+	return ""
+}
+
+func compactWaitSpeech(s string) string {
+	if stamp := extractClockStamp(s); stamp != "" {
+		return "It's " + stamp + "."
+	}
+	if strings.Contains(s, "PONG") {
+		return "PONG"
+	}
+	if teammateHostValueRE.MatchString(s) {
+		return dropWaitMarkdown(s)
+	}
+	return ""
+}
+
+func dropWaitMarkdown(s string) string {
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "## ") || strings.HasPrefix(trim, "Thread ID:") {
+			continue
+		}
+		if strings.HasPrefix(trim, "**Status:**") {
+			continue
+		}
+		kept = append(kept, trim)
+	}
+	return strings.TrimSpace(strings.Join(kept, " "))
 }

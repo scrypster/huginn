@@ -55,6 +55,15 @@ func TestStripResidualSpeech_WaitGlueVariants(t *testing.T) {
 			t.Errorf("prose %q rewritten to %q", keep, got)
 		}
 	}
+
+	live := "After these tasks complete, I will report back with Steve's response and the result of the multiplication. Steve reported that the hostname is MJs-MacBook-Pro."
+	got := StripResidualSpeechAfterTools(live)
+	if strings.Contains(got, "I will report") || strings.Contains(got, "After these tasks") {
+		t.Errorf("future-wait glue leaked: %q", got)
+	}
+	if !strings.Contains(got, "MJs-MacBook-Pro") {
+		t.Errorf("answer stripped: %q", got)
+	}
 }
 
 func TestStripResidualSpeechAfterTools_EchoFragments(t *testing.T) {

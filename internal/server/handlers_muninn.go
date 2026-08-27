@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
@@ -116,11 +118,10 @@ func (s *Server) handleMuninnVaultsList(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleMuninnVaultCreate creates a vault in MuninnDB, generates a mk_... key,
-// stores the token in muninn.json, and returns the vault name.
+// handleMuninnVaultCreate registers a vault on the local Muninn daemon via MCP.
 // POST /api/v1/muninn/vaults
-// Body: {"vault_name":"huginn-steve","agent_label":"huginn-agent"}
-// Response: {"vault_name":"huginn-steve","token":"mk_..."}
+// Body: {"vault_name":"morgan-huginn","agent_label":"huginn-morgan"}
+// Response: {"vault_name":"morgan-huginn","ok":true} — never includes tokens.
 func (s *Server) handleMuninnVaultCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		VaultName  string `json:"vault_name"`
@@ -130,58 +131,74 @@ func (s *Server) handleMuninnVaultCreate(w http.ResponseWriter, r *http.Request)
 		jsonError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if req.VaultName == "" || req.AgentLabel == "" {
-		jsonError(w, http.StatusBadRequest, "vault_name and agent_label required")
+	token, err := s.createMuninnVault(req.VaultName, req.AgentLabel)
+	if err != nil {
+		if pe, ok := err.(*persistAgentError); ok {
+			jsonError(w, pe.status, pe.msg)
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	_ = token
+	jsonOK(w, map[string]any{
+		"vault_name": req.VaultName,
+		"ok":         true,
+	})
+}
+
+// createMuninnVault is the shared path for POST /api/v1/muninn/vaults and hire.
+// Pins the same daemon token path the rest of Huginn uses (muninn.json mcp_token,
+// then ~/.muninn/mcp.token) and registers {name}-huginn via MCP on :8750.
+// The hire tool treats any error as skip. Never writes reserved vaults.
+func (s *Server) createMuninnVault(vaultName, agentLabel string) (string, error) {
+	vaultName = strings.TrimSpace(vaultName)
+	if vaultName == "" {
+		return "", persistErr(http.StatusBadRequest, "vault_name required")
+	}
+	if memory.IsReservedVaultName(vaultName) {
+		return "", persistErr(http.StatusBadRequest, "reserved vault name")
+	}
+	if strings.TrimSpace(agentLabel) == "" {
+		agentLabel = "huginn-hire"
 	}
 
 	cfg, err := memory.LoadGlobalConfig(s.muninnCfgPath)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "load config: "+err.Error())
-		return
+		return "", persistErr(http.StatusInternalServerError, "load config: "+err.Error())
 	}
-	if cfg.Endpoint == "" {
-		jsonError(w, http.StatusBadRequest, "MuninnDB not configured")
-		return
+	memory.PinDaemonAuth(cfg)
+	token, err := memory.MCPTokenFor(cfg, vaultName)
+	if err != nil || strings.TrimSpace(token) == "" || strings.TrimSpace(cfg.Endpoint) == "" {
+		return "", persistErr(http.StatusBadRequest, "MuninnDB not configured")
 	}
 
-	// Load root password from keychain.
-	ps := memory.NewKeychainPasswordStore()
-	password, err := ps.GetPassword()
+	mcpURL, err := memory.HuginnMCPURL(cfg.Endpoint)
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, "MuninnDB password not stored — re-connect in Connections")
-		return
+		return "", persistErr(http.StatusBadRequest, "invalid muninn endpoint: "+err.Error())
 	}
 
-	// Login.
-	client := memory.NewMuninnSetupClient(cfg.Endpoint)
-	sessionCookie, err := client.Login(cfg.Username, password)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "login failed: "+err.Error())
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	tr := mcp.NewHTTPTransport(mcpURL, token)
+	client := mcp.NewMCPClient(tr)
+	if err := client.Initialize(ctx); err != nil {
+		return "", persistErr(http.StatusBadGateway, "connect: "+err.Error())
 	}
+	defer client.Close()
 
-	// Create vault + key.
-	token, err := client.CreateVaultAndKey(sessionCookie, req.VaultName, req.AgentLabel)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "create vault: "+err.Error())
-		return
-	}
-
-	// Store token in muninn.json.
-	if cfg.VaultTokens == nil {
-		cfg.VaultTokens = make(map[string]string)
-	}
-	cfg.VaultTokens[req.VaultName] = token
-	if err := memory.SaveGlobalConfig(s.muninnCfgPath, cfg); err != nil {
-		jsonError(w, http.StatusInternalServerError, "save config: "+err.Error())
-		return
-	}
-
-	jsonOK(w, map[string]any{
-		"vault_name": req.VaultName,
-		"token":      token,
+	res, err := client.CallTool(ctx, "muninn_remember", map[string]any{
+		"vault":   vaultName,
+		"content": "Huginn hire: vault opened for " + agentLabel + ".",
+		"concept": "hire",
 	})
+	if err != nil {
+		return "", persistErr(http.StatusBadGateway, "create vault: "+err.Error())
+	}
+	if res != nil && res.IsError {
+		return "", persistErr(http.StatusBadGateway, "create vault: tool error")
+	}
+	return "", nil
 }
 
 // handleAgentVaultHealth probes the vault connectivity for a named agent and returns a
@@ -207,28 +224,30 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 
 	if cfgPath == "" {
 		jsonOK(w, map[string]any{
-			"status":     "unavailable",
+			"status":      "unavailable",
 			"tools_count": 0,
-			"warning":    "muninn config path not set",
-			"latency_ms": time.Since(start).Milliseconds(),
+			"warning":     "muninn config path not set",
+			"latency_ms":  time.Since(start).Milliseconds(),
 		})
 		return
 	}
 
-	muninnCfg, err := memory.LoadGlobalConfig(cfgPath)
-	if err != nil || muninnCfg.Endpoint == "" {
+	muninnCfg, usedPath, err := memory.LoadAndPinGlobalConfig(cfgPath)
+	if err != nil || muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
 		warn := "muninn config unavailable"
 		if err != nil {
 			warn = "muninn config load: " + err.Error()
 		}
+		slog.Warn("muninn vault test: config unavailable", "cfg_path", usedPath, "err", err)
 		jsonOK(w, map[string]any{
-			"status":     "unavailable",
+			"status":      "unavailable",
 			"tools_count": 0,
-			"warning":    warn,
-			"latency_ms": time.Since(start).Milliseconds(),
+			"warning":     warn,
+			"latency_ms":  time.Since(start).Milliseconds(),
 		})
 		return
 	}
+	slog.Info("muninn vault test: config loaded", "endpoint_set", strings.TrimSpace(muninnCfg.Endpoint) != "")
 
 	// Find the agent's vault name.
 	agentLoader := s.agentLoader
@@ -253,22 +272,16 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if vaultName == "" {
-		jsonOK(w, map[string]any{
-			"status":     "unavailable",
-			"tools_count": 0,
-			"warning":    "agent has no vault configured",
-			"latency_ms": time.Since(start).Milliseconds(),
-		})
-		return
+		vaultName = "huginn"
 	}
 
 	token, err := memory.MCPTokenFor(muninnCfg, vaultName)
 	if err != nil {
 		jsonOK(w, map[string]any{
-			"status":     "degraded",
+			"status":      "degraded",
 			"tools_count": 0,
-			"warning":    "no MCP token configured (set mcp_token in muninn.json): " + err.Error(),
-			"latency_ms": time.Since(start).Milliseconds(),
+			"warning":     "no MCP token configured (set mcp_token in muninn.json): " + err.Error(),
+			"latency_ms":  time.Since(start).Milliseconds(),
 		})
 		return
 	}
@@ -276,10 +289,10 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 	mcpURL, err := memory.MCPURLFromEndpoint(muninnCfg.Endpoint)
 	if err != nil {
 		jsonOK(w, map[string]any{
-			"status":     "unavailable",
+			"status":      "unavailable",
 			"tools_count": 0,
-			"warning":    "invalid muninn endpoint: " + err.Error(),
-			"latency_ms": time.Since(start).Milliseconds(),
+			"warning":     "invalid muninn endpoint: " + err.Error(),
+			"latency_ms":  time.Since(start).Milliseconds(),
 		})
 		return
 	}
@@ -291,10 +304,10 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 	defer cancel()
 	if err := client.Initialize(connectCtx); err != nil {
 		jsonOK(w, map[string]any{
-			"status":     "unavailable",
+			"status":      "unavailable",
 			"tools_count": 0,
-			"warning":    "connect failed: " + err.Error(),
-			"latency_ms": time.Since(start).Milliseconds(),
+			"warning":     "connect failed: " + err.Error(),
+			"latency_ms":  time.Since(start).Milliseconds(),
 		})
 		return
 	}
@@ -303,19 +316,47 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 	mcpTools, err := client.ListTools(connectCtx)
 	if err != nil {
 		jsonOK(w, map[string]any{
-			"status":     "degraded",
+			"status":      "degraded",
 			"tools_count": 0,
-			"warning":    "list tools failed: " + err.Error(),
-			"latency_ms": time.Since(start).Milliseconds(),
+			"warning":     "list tools failed: " + err.Error(),
+			"latency_ms":  time.Since(start).Milliseconds(),
 		})
 		return
 	}
 
 	jsonOK(w, map[string]any{
-		"status":     "ok",
+		"status":      "ok",
 		"tools_count": len(mcpTools),
-		"warning":    "",
-		"latency_ms": time.Since(start).Milliseconds(),
+		"warning":     "",
+		"latency_ms":  time.Since(start).Milliseconds(),
+	})
+}
+
+// handleMuninnConnectLocal persists a running local Muninn daemon into
+// huginn muninn.json (discover ~/.muninn/mcp.token). Does not invent a
+// vault name. Response never includes tokens.
+// POST /api/v1/muninn/connect-local
+func (s *Server) handleMuninnConnectLocal(w http.ResponseWriter, r *http.Request) {
+	cfg, _, err := memory.PersistLocalDaemonDiscovery(s.muninnCfgPath)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "save config: "+err.Error())
+		return
+	}
+	installed, running := memory.DetectMuninnPresence()
+	if cfg == nil || strings.TrimSpace(cfg.Endpoint) == "" {
+		jsonError(w, http.StatusBadRequest, "local Muninn is not available")
+		return
+	}
+	vaults := memory.VaultNames(cfg)
+	sort.Strings(vaults)
+	jsonOK(w, map[string]any{
+		"ok":        true,
+		"connected": true,
+		"installed": installed,
+		"running":   running,
+		"detected":  running || installed,
+		"endpoint":  cfg.Endpoint,
+		"vaults":    vaults,
 	})
 }
 
@@ -326,12 +367,15 @@ func (s *Server) handleAgentVaultHealth(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleMuninnStatus(w http.ResponseWriter, r *http.Request) {
 	const defaultEndpoint = "http://localhost:8475"
 
+	installed, running := memory.DetectMuninnPresence()
 	cfg, err := memory.LoadGlobalConfig(s.muninnCfgPath)
 	if err != nil || cfg.Endpoint == "" {
-		detected := memory.Probe(defaultEndpoint)
+		detected := memory.Probe(defaultEndpoint) || running
 		resp := map[string]any{
 			"connected": false,
 			"detected":  detected,
+			"installed": installed,
+			"running":   running,
 		}
 		if detected {
 			resp["endpoint"] = defaultEndpoint
@@ -343,6 +387,8 @@ func (s *Server) handleMuninnStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{
 		"connected": true,
 		"detected":  true,
+		"installed": installed,
+		"running":   running,
 		"endpoint":  cfg.Endpoint,
 		"username":  cfg.Username,
 	})
