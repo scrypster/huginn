@@ -736,7 +736,11 @@ func (tm *ThreadManager) Complete(id string, summary FinishSummary) {
 		return
 	}
 	sessionID := t.SessionID
-	t.Status = StatusDone
+	status := StatusDone
+	if summary.Status == "error" {
+		status = StatusError
+	}
+	t.Status = status
 	t.CompletedAt = time.Now()
 	t.Summary = &summary
 	tm.mu.Unlock()
@@ -772,7 +776,7 @@ func (tm *ThreadManager) Complete(id string, summary FinishSummary) {
 		}(liveCopy)
 	}
 
-	tm.fireStatusChange(id, StatusDone)
+	tm.fireStatusChange(id, status)
 	// Release file leases now that the thread has finished writing.
 	tm.ReleaseLeases(id)
 }
@@ -1126,7 +1130,6 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 		}
 	}
 }
-
 
 // staleUncollectedWindow is how long a finished thread may still be
 // collected by a session-wide wait. After a bounce CollectedAt is empty,

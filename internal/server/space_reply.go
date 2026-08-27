@@ -29,7 +29,6 @@ func (s *Server) SetSpaceThreadRunner(fn SpaceThreadRunner) {
 	s.spaceThreadRunner = fn
 }
 
-
 func teammateMissingFromAgent(ag *agents.Agent, task, speech string) string {
 	return agent.TeammateMissingToolFromAgent(ag, task, speech)
 }
@@ -584,7 +583,22 @@ func (s *Server) finishSpaceThreadWake(spaceID, parentID, agent, task string, ru
 	speech, err := runner(context.Background(), spaceID, parentID, agent, task)
 	if err != nil {
 		slog.Warn("space thread wake failed", "agent", agent, "err", err)
-		s.emitSpaceReplyTypingDone(spaceID, parentID, agent, err.Error())
+		if backend.IsKeyMiss(err) {
+			speech = backend.PersistKeyMissSpeech(agent, "", err)
+			if speech != "" && s.spaceStore != nil {
+				inserted, insErr := s.spaceStore.InsertSpaceThreadMessage(spaceID, speech, parentID, "assistant", agent)
+				if insErr != nil {
+					slog.Warn("space thread key-miss insert failed", "agent", agent, "err", insErr)
+					s.emitSpaceReplyTypingDone(spaceID, parentID, agent, "")
+					return
+				}
+				replies, _ := s.spaceStore.ListSpaceReplies(spaceID, parentID)
+				s.emitSpaceReply(spaceID, parentID, inserted, len(replies), spaces.LastSpeechPreview(replies))
+				s.emitSpaceReplyTypingDone(spaceID, parentID, agent, "")
+				return
+			}
+		}
+		s.emitSpaceReplyTypingDone(spaceID, parentID, agent, "")
 		return
 	}
 	// Same AfterTools leftover strip as hallway REST/WS persist.
