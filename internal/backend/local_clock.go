@@ -18,7 +18,7 @@ var (
 	// leftover time-ask speech to teammate "It's {clock}." without eating
 	// the stamp. "contains Winston" is not enough — the post-bounce
 	// one-liner still names Winston while recapping.
-	leftoverTimeRecapRE = regexp.MustCompile(`(?i)i apologize(?: for the (?:confusion|inconvenience))?(?: earlier)?|it seems there was an issue with the previous response|let me clarify|the (?:first|second) response(?: from \S+)?|indicates that it is currently|cannot directly provide|real-time data|if you need the current time again|(?:assist|help) you further|winston reported`)
+	leftoverTimeRecapRE = regexp.MustCompile(`(?i)i apologize(?: for the (?:confusion|inconvenience))?(?: earlier)?|it seems there was an issue with the previous response|let me clarify|the (?:first|second) response(?: from \S+)?|indicates that it is currently|cannot directly provide|real-time data|if you need the current time again|(?:assist|help) you further|winston reported|i'?ll wait for the task to complete|then provide the result|understood\.?\s+i'?ll wait`)
 	// Injected LocalClockLine prefix. Never teammate speech.
 	localTimeNowLabelRE = regexp.MustCompile(`(?i)\s*local time now:\s*`)
 )
