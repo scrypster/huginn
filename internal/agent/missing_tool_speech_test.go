@@ -170,15 +170,15 @@ func TestTeammateMissingToolFromAgent_UseTheBashTool_EmptyBelt(t *testing.T) {
 func TestTeammateMissingToolSpeech_ImageAsk_EmptySchemas(t *testing.T) {
 	msgs := []backend.Message{{Role: "user", Content: "Generate an image of a cat."}}
 	got := TeammateMissingToolSpeech(msgs, nil, "I'm sorry, I can't create images.")
-	if got != "I don't have image." {
-		t.Fatalf("got %q, want I don't have image.", got)
+	if got != "I can't make images." {
+		t.Fatalf("got %q, want I can't make images.", got)
 	}
 }
 
 func TestTeammateMissingToolSpeech_DrawAPicture_NoTools(t *testing.T) {
 	msgs := []backend.Message{{Role: "user", Content: "Draw a picture of the office."}}
 	got := TeammateMissingToolSpeech(msgs, nil, "PONG")
-	if got != "I don't have image." {
+	if got != "I can't make images." {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -202,7 +202,7 @@ func TestTeammateMissingToolSpeech_ImageAsk_GrantedImage_NoRewrite(t *testing.T)
 func TestTeammateMissingToolFromAgent_EmptyBelt_ImageAsk(t *testing.T) {
 	ag := &agents.Agent{Name: "Reggie", LocalTools: nil, Toolbelt: nil}
 	got := TeammateMissingToolFromAgent(ag, "Create an image of a sunset.", "PONG")
-	if got != "I don't have image." {
+	if got != "I can't make images." {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -414,7 +414,7 @@ func TestRunLoop_PermissionDeniedNotCredentialDeny(t *testing.T) {
 func TestTeammateMissingToolFromAgent_WinstonCreateAgentStillDeniesImage(t *testing.T) {
 	ag := &agents.Agent{Name: "Winston", LocalTools: []string{"create_agent"}}
 	got := TeammateMissingToolFromAgent(ag, "@Winston generate an image of a red cube", "created")
-	if got != "I don't have image." {
+	if got != "I can't make images." {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -422,7 +422,7 @@ func TestTeammateMissingToolFromAgent_WinstonCreateAgentStillDeniesImage(t *test
 func TestImageAskStop_DirectAsk(t *testing.T) {
 	msgs := []backend.Message{{Role: "user", Content: "@Winston generate an image of a red cube"}}
 	schemas := []backend.Tool{{Function: backend.ToolFunction{Name: "create_agent"}}}
-	if got := imageAskStop(msgs, schemas); got != "I don't have image." {
+	if got := imageAskStop(msgs, schemas); got != "I can't make images." {
 		t.Fatalf("got %q", got)
 	}
 }

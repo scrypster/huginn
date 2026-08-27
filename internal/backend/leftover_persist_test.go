@@ -163,3 +163,13 @@ func TestDropLeftoverDelegatedHireOnHireTurn(t *testing.T) {
 		t.Fatal("non-hire delegated speech should not use hire drop")
 	}
 }
+
+func TestRewriteThirdPersonNotedToFirstPerson(t *testing.T) {
+	got := PersistVisibleAssistantContent("@Winston has noted your preferences for your dog Odin and your dietary choice of oat-milk lattes.", "heads up: my dog is named Odin")
+	if got != "I've noted that." {
+		t.Fatalf("got %q", got)
+	}
+	if strings.Contains(got, "@Winston") || strings.Contains(strings.ToLower(got), "has noted") {
+		t.Fatalf("third person leaked: %q", got)
+	}
+}

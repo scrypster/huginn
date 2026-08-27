@@ -192,8 +192,7 @@ func isResidualLine(trim string) bool {
 		playbookFormatLineRE.MatchString(trim) || playbookIntroLineRE.MatchString(trim) ||
 		templatePlaceholderLineRE.MatchString(trim) || separatorLineRE.MatchString(trim) ||
 		steveContextLeftoverRE.MatchString(trim) || noActiveThreadsRE.MatchString(trim) ||
-		resultFromAgentLineRE.MatchString(trim) || loadingModelLineRE.MatchString(trim) ||
-		thirdPersonNotedRE.MatchString(trim) {
+		resultFromAgentLineRE.MatchString(trim) || loadingModelLineRE.MatchString(trim) {
 		return true
 	}
 	// Tool-shaped JSON (name or function_name)
@@ -237,7 +236,11 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 		case trim == "":
 			kept = append(kept, line)
 			continue
-		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim), isLeftoverHelpdeskLine(trim), taskDelegatedSentenceRE.MatchString(trim), loadingModelLineRE.MatchString(trim), thirdPersonNotedRE.MatchString(trim):
+		case thirdPersonNotedRE.MatchString(trim):
+			kept = append(kept, "I've noted that.")
+			inGlueChain = false
+			continue
+		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim), isLeftoverHelpdeskLine(trim), taskDelegatedSentenceRE.MatchString(trim), loadingModelLineRE.MatchString(trim):
 			inGlueChain = true
 			continue
 		case playbookFormatLineRE.MatchString(trim), playbookIntroLineRE.MatchString(trim), templatePlaceholderLineRE.MatchString(trim), separatorLineRE.MatchString(trim), resultFromAgentLineRE.MatchString(trim):

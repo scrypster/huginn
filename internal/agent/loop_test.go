@@ -1427,7 +1427,7 @@ func TestRunLoop_ImageAskDoesNotCallCreateAgent(t *testing.T) {
 	if hire.callCount != 0 {
 		t.Fatalf("create_agent ran %d times", hire.callCount)
 	}
-	if res.FinalContent != "I don't have image." {
+	if res.FinalContent != "I can't make images." {
 		t.Fatalf("final = %q", res.FinalContent)
 	}
 }

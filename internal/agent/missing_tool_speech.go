@@ -50,6 +50,9 @@ func TeammateMissingToolSpeech(msgs []backend.Message, schemas []backend.Tool, s
 		return ""
 	}
 	want := fmt.Sprintf("I don't have %s.", asked)
+	if asked == "image" {
+		want = "I can't make images."
+	}
 	if strings.TrimSpace(speech) == want {
 		return ""
 	}
@@ -123,7 +126,7 @@ func imageAskStop(msgs []backend.Message, schemas []backend.Tool) string {
 		strings.Contains(low, "add a teammate") {
 		return ""
 	}
-	return "I don't have image."
+	return "I can't make images."
 }
 
 func userAskedMissingImage(low string, granted map[string]bool) string {
