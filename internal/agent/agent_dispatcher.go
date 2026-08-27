@@ -571,10 +571,17 @@ type agentTurnOpts struct {
 // error prefix, latency slot, maxTurns) are captured in opts.
 func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) error {
 	ag := opts.ag
+	trivial := IsTrivialAsk(opts.userMsg)
 
 	// 1. Connect vault — forks the shared registry; safe to call even when vault
 	// is unconfigured (returns a no-op registry fork with cancel=func(){}).
-	vr := o.connectAgentVault(ctx, ag, opts.reg)
+	// Trivial asks skip vault MCP so 14b never sees muninn / hire tools.
+	var vr vaultResult
+	if trivial {
+		vr = vaultResult{sessionReg: opts.reg, cancel: func() {}}
+	} else {
+		vr = o.connectAgentVault(ctx, ag, opts.reg)
+	}
 	defer vr.cancel()
 
 	if vr.warning != "" {
@@ -582,14 +589,17 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	}
 
 	// 2. Augment system prompt with memory-mode instructions and prefetched context.
+	// Keep persona / roster / space / clock (already in systemPromptBase).
 	systemPrompt := opts.systemPromptBase
-	ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
-	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
-		slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
-		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
-	}
-	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
-		systemPrompt += memCtx
+	if !trivial {
+		ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
+		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+			slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
+			systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
+			systemPrompt += memCtx
+		}
 	}
 
 	// 3. Build message list: system + history snapshot + user turn.
@@ -597,6 +607,16 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	messages = append(messages, backend.Message{Role: "system", Content: systemPrompt})
 	messages = append(messages, opts.history...)
 	messages = append(messages, backend.Message{Role: "user", Content: opts.userMsg})
+
+	// Trivial: tools-free completion. Empty ToolSchemas means "all tools
+	// allowed" in RunLoop, so we must not enter the tool loop with a nil belt.
+	// Last-chance strip keeps wait/delegate/consult off if schemas are rebuilt.
+	if trivial {
+		if opts.ctxSetup != nil {
+			ctx = opts.ctxSetup(ctx)
+		}
+		return o.completeTrivialAsk(ctx, opts, messages)
+	}
 
 	// 4. Resolve tool schemas and permission gate for this agent run.
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
@@ -665,6 +685,61 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		newMsgs = loopResult.Messages[initialCount:]
 	}
 	appendHistoryHonoringGate(opts.sess, opts.userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
+	o.compactHistory(ctx, opts.sess)
+	return nil
+}
+
+// completeTrivialAsk is the tools-free hallway path: persona/roster/space/clock
+// stay, but 14b never sees wait_for_threads / delegate_to_agent / consult_agent.
+func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpts, messages []backend.Message) error {
+	if opts.onEvent != nil {
+		opts.onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
+	}
+	if len(messages) > 0 && messages[0].Role == "system" {
+		messages[0].Content += "\n\nAnswer the current user message only. If they asked who is here or how many people are in this channel, name the teammates from the roster. Do not repeat the local clock unless they asked the time."
+	}
+	if !backend.IsTimeAsk(opts.userMsg) {
+		kept := messages[:0]
+		for _, m := range messages {
+			if m.Role == "assistant" && backend.IsLeftoverClockSpeech(m.Content) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		messages = kept
+	}
+	ag := opts.ag
+	if isTrivialPing(normalizeTrivialAsk(opts.userMsg)) {
+		const pong = "Pong."
+		if opts.onToken != nil {
+			opts.onToken(pong)
+		}
+		appendHistoryHonoringGate(opts.sess, opts.userMsg, pong, nil, false)
+		o.compactHistory(ctx, opts.sess)
+		return nil
+	}
+	b, backendErr := o.backendFor(ag)
+	if backendErr != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, backendErr)
+	}
+	var buf strings.Builder
+	start := time.Now().UnixNano()
+	_, err := b.ChatCompletion(ctx, backend.ChatRequest{
+		Model:    ag.GetModelID(),
+		Messages: messages,
+		OnToken: func(token string) {
+			buf.WriteString(token)
+			if opts.onToken != nil {
+				opts.onToken(token)
+			}
+		},
+		OnEvent: opts.onEvent,
+	})
+	o.recordLLMLatency(start, opts.latencySlot)
+	if err != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
+	}
+	appendHistoryHonoringGate(opts.sess, opts.userMsg, buf.String(), nil, false)
 	o.compactHistory(ctx, opts.sess)
 	return nil
 }
@@ -812,8 +887,29 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		return fmt.Errorf("agent %q has no model configured — open Agent settings to assign a model", ag.Name)
 	}
 
-	ctxText := o.contextBuilder.Build(userMsg, ag.GetModelID())
-	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
+	// Trivial asks (time/clock/date, ping, thanks, who-is-here) skip repo
+	// search, memory summaries, and skills so the 14b sees the message in
+	// seconds — not after 60s of orchestration. Clock + roster stay.
+	trivial := IsTrivialAsk(userMsg)
+	if onEvent != nil {
+		onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
+	}
+	if isTrivialPing(normalizeTrivialAsk(userMsg)) {
+		const pong = "Pong."
+		if onToken != nil {
+			onToken(pong)
+		}
+		appendHistoryHonoringGate(sess, userMsg, pong, nil, false)
+		o.compactHistory(ctx, sess)
+		return nil
+	}
+
+	var ctxText string
+	var recentSummaries []agents.SessionSummary
+	if !trivial {
+		ctxText = o.contextBuilder.Build(userMsg, ag.GetModelID())
+		recentSummaries = o.loadAgentSummaries(ctx, ag.Name)
+	}
 	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
 	if agentReg != nil {
 		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
@@ -824,8 +920,10 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	// workers) need their assigned skills appended just like the default agent
 	// does in mcp_agent_chat.go. Without this they execute with no skills,
 	// which is a major parity gap for scheduled workflows.
-	if skillsFrag := o.SkillsFragmentForAgent(ag); skillsFrag != "" {
-		systemPromptBase += "\n\n" + skillsFrag
+	if !trivial {
+		if skillsFrag := o.SkillsFragmentForAgent(ag); skillsFrag != "" {
+			systemPromptBase += "\n\n" + skillsFrag
+		}
 	}
 
 	// Inject space context (channel/DM metadata) if available.

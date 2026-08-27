@@ -1338,6 +1338,9 @@ func (s *Server) beginChatRun(sessionID string) (context.Context, *chatRunHandle
 	if s.chatRunCancels == nil {
 		s.chatRunCancels = make(map[string]*chatRunHandle)
 	}
+	if prev := s.chatRunCancels[sessionID]; prev != nil && prev != run {
+		prev.cancel()
+	}
 	s.chatRunCancels[sessionID] = run
 	s.chatRunsMu.Unlock()
 	return ctx, run
@@ -1623,9 +1626,29 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	emit := func(msg WSMessage) {
 		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
 	}
+	var lastVisible string
 	onToken := func(token string) {
 		assistantBuf.WriteString(token)
-		emit(WSMessage{Type: "token", Content: token})
+		raw := assistantBuf.String()
+		if backend.PendingHarnessClockPrefix(raw) {
+			return
+		}
+		visible := backend.VisibleAssistantContent(raw)
+		if !backend.IsTimeAsk(userMsg) && backend.IsLeftoverClockSpeech(visible) {
+			visible = ""
+		}
+		if visible == lastVisible {
+			return
+		}
+		if lastVisible == "" || strings.HasPrefix(visible, lastVisible) {
+			delta := strings.TrimPrefix(visible, lastVisible)
+			lastVisible = visible
+			if delta != "" {
+				emit(WSMessage{Type: "token", Content: delta})
+			}
+			return
+		}
+		lastVisible = visible
 	}
 	onEvent := func(ev backend.StreamEvent) {
 		// StreamDone is an internal backend signal. parseSSE emits it at the
@@ -1650,6 +1673,10 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			logToolPermissionAudit(s.auditLog, ev.Payload)
 		}
 	}
+
+	// Emit thinking immediately so the 60s client watchdog does not fire
+	// during context prep / model load (before the first token).
+	emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
 
 	ag := s.resolveAgentForMessage(sessionID, userMsg)
 	// Hallway / desk-DM ChatWithAgent never went through wakeSpaceThreadAgent,
@@ -1754,9 +1781,28 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if s.store == nil || sessionID == "" {
 			return
 		}
+		s.chatRunsMu.Lock()
+		current := s.chatRunCancels[sessionID]
+		superseded := current != nil && current != run
+		s.chatRunsMu.Unlock()
 		sess, loadErr := s.store.Load(sessionID)
 		if loadErr != nil {
 			return
+		}
+		// Compute persist first so a superseded ping/headcount still keeps
+		// its harness fill. Leftover-clock-only stays empty and is skipped.
+		early := backend.PersistVisibleAssistantContent(assistantBuf.String(), userMsg)
+		if early == "" && s.spaceStore != nil {
+			if spaceID := sess.SpaceID(); spaceID != "" {
+				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
+					early = backend.FillTrivialHeadcountPersist(early, userMsg, sp.Members)
+				}
+			}
+		}
+		if superseded && errContent == "" {
+			if !backend.IsHarnessFillAsk(userMsg) || early == "" {
+				return
+			}
 		}
 		agentName := ""
 		if ag != nil {
@@ -1774,6 +1820,13 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		// When we have sayable leftover (or leftover-empty teammate rewrite)
 		// or tool calls, persist them. Never persist an empty leftover-only row.
 		persistedContent := backend.PersistVisibleAssistantContent(assistantBuf.String(), userMsg)
+		if persistedContent == "" && s.spaceStore != nil {
+			if spaceID := sess.SpaceID(); spaceID != "" {
+				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
+					persistedContent = backend.FillTrivialHeadcountPersist(persistedContent, userMsg, sp.Members)
+				}
+			}
+		}
 		if persistedContent != "" || len(collectedToolCalls) > 0 {
 			// Turn is over: leftover deny/helpdesk speech is residue even
 			// when toolsCalled is empty (live Lab Winston Steve-deny).
@@ -1791,7 +1844,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			}
 		} else if errContent != "" {
 			// No accumulated content but there was an error — persist
-			// an error placeholder so the conversation log is complete.
+			// teammate speech, never a raw Go keyring dump.
 			_ = s.store.Append(sess, session.SessionMessage{
 				ID: session.NewID(), Role: "assistant",
 				Content: errContent,
@@ -1821,8 +1874,18 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			persistAccumulated("")
 		} else {
 			logger.Error("chat completion", "session_id", sessionID, "err", err)
-			emit(WSMessage{Type: "error", Content: err.Error(), RunID: runID})
-			persistAccumulated("⚠️ " + err.Error())
+			agentName := ""
+			if ag != nil {
+				agentName = ag.Name
+			}
+			errSpeech := err.Error()
+			if backend.IsKeyMiss(err) {
+				errSpeech = backend.PersistKeyMissSpeech(agentName, "", err)
+			} else {
+				errSpeech = "⚠️ " + err.Error()
+			}
+			emit(WSMessage{Type: "error", Content: errSpeech, RunID: runID})
+			persistAccumulated(errSpeech)
 		}
 	} else {
 		emit(WSMessage{Type: "done", RunID: runID, Payload: map[string]any{

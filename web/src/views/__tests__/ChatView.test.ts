@@ -843,6 +843,20 @@ describe('ChatView', () => {
     expect(wrapper.html()).toContain('Preparing context and delegation plan')
   })
 
+  it('hides delegation-plan banner on a trivial ping', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Winston ping')
+    await nextTick()
+
+    expect(wrapper.html()).toContain('is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+  })
+
   it('handleEditorSend: supports specific delegate routing for queued updates', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = [
@@ -2974,7 +2988,7 @@ describe('ChatView — space mode', () => {
 
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
     expect(wrapper.html()).toContain('Winston is responding')
-    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
 
     const runId = mockWs.sentMessages.find((m: any) => m.type === 'chat')?.run_id
     expect(runId).toBeTruthy()

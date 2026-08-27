@@ -98,6 +98,10 @@ var (
 	templatePlaceholderLineRE = regexp.MustCompile(`^[A-Za-z][^:]*:\s*<[^>]+>\s*$`)
 	// Standalone separator lines
 	separatorLineRE = regexp.MustCompile(`^\s*---+\s*$`)
+	// Status leak: "Loading model, please wait..." is not teammate speech.
+	loadingModelLineRE = regexp.MustCompile(`(?i)^\s*loading model(?:[,.]?\s*please wait)?[.!]*\s*$`)
+	// Third-person self-@ leftover: "@Winston has noted your preferences…"
+	thirdPersonNotedRE = regexp.MustCompile(`(?i)(?:^|[\s,])@?[A-Za-z][\w.-]*\s+has noted\b`)
 	// Playbook introductions: "After ... response, use the following format:"
 	playbookIntroLineRE = regexp.MustCompile(`(?i)(?:after|once|when)\s+.*\b(?:response|result|reply)\b.*,\s*use\s+(?:the\s+)?(?:following\s+)?format\s*:\s*$`)
 	// Future-tense wait glue spoken as a whole sentence after tools already ran:
@@ -188,7 +192,8 @@ func isResidualLine(trim string) bool {
 		playbookFormatLineRE.MatchString(trim) || playbookIntroLineRE.MatchString(trim) ||
 		templatePlaceholderLineRE.MatchString(trim) || separatorLineRE.MatchString(trim) ||
 		steveContextLeftoverRE.MatchString(trim) || noActiveThreadsRE.MatchString(trim) ||
-		resultFromAgentLineRE.MatchString(trim) {
+		resultFromAgentLineRE.MatchString(trim) || loadingModelLineRE.MatchString(trim) ||
+		thirdPersonNotedRE.MatchString(trim) {
 		return true
 	}
 	// Tool-shaped JSON (name or function_name)
@@ -232,7 +237,7 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 		case trim == "":
 			kept = append(kept, line)
 			continue
-		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim), isLeftoverHelpdeskLine(trim), taskDelegatedSentenceRE.MatchString(trim):
+		case waitTokenLineRE.MatchString(trim), glueLineRE.MatchString(trim), waitGlueLineRE.MatchString(trim), fillerLineRE.MatchString(trim), isLeftoverHelpdeskLine(trim), taskDelegatedSentenceRE.MatchString(trim), loadingModelLineRE.MatchString(trim), thirdPersonNotedRE.MatchString(trim):
 			inGlueChain = true
 			continue
 		case playbookFormatLineRE.MatchString(trim), playbookIntroLineRE.MatchString(trim), templatePlaceholderLineRE.MatchString(trim), separatorLineRE.MatchString(trim), resultFromAgentLineRE.MatchString(trim):
@@ -496,8 +501,14 @@ func hasTeammateAnswer(sent string) bool {
 // leftover no longer names Sam/hostname. Does not invent a key or restore
 // helpdesk. Never returns "" when this completed turn involved Sam on a
 // hostname-style ask.
-func isAskSteve(s string) bool {
+// IsAskSteve reports a company-wall ask that must stay on the full path
+// ("Ask Steve for the hostname"). Used by the trivial-ask classifier.
+func IsAskSteve(s string) bool {
 	return askSteveRE.MatchString(s)
+}
+
+func isAskSteve(s string) bool {
+	return IsAskSteve(s)
 }
 
 // teammateCompanyWallRewrite turns leftover-empty or stale Sam-hostname

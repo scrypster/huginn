@@ -466,7 +466,8 @@ func VisibleAssistantContent(content string) string {
 	if residual := StripResidualSpeech(content); residual != content {
 		content = stripHarnessVisibleTokens(residual)
 	}
-	return content
+	// Same rewrite persist already applies: never stream the harness label.
+	return stripHarnessClockLabel(content)
 }
 
 // RevealContentToolCalls replaces Content with its user-visible remainder so
@@ -536,7 +537,14 @@ func VisibleAssistantContentAfterTools(content string, userAsk ...string) string
 // userAsk is the human line for this turn so leftover-empty Sam hostname
 // fails still persist a teammate row instead of "".
 func PersistVisibleAssistantContent(content string, userAsk ...string) string {
-	return VisibleAssistantContentAfterTools(content, userAsk...)
+	ask := ""
+	if len(userAsk) > 0 {
+		ask = userAsk[0]
+	}
+	visible := VisibleAssistantContentAfterTools(content, ask)
+	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
+	visible = dropLeftoverHireGhost(visible, ask)
+	return fillTrivialPingPersist(visible, ask)
 }
 
 // stripHarnessVisibleTokens removes leftover fail tokens and lines that are
