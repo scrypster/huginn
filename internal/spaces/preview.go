@@ -32,6 +32,9 @@ func ReplySpeech(content string) string {
 	if raw == "" {
 		return ""
 	}
+	if strings.HasPrefix(strings.ToLower(raw), "loading model") {
+		return ""
+	}
 	if isHarnessOrFail(raw) {
 		return ""
 	}

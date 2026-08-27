@@ -144,3 +144,25 @@ func TestSpeechPreview_LiveBullet5DropsWaitPlaybookKeepsHostname(t *testing.T) {
 		t.Fatalf("ReplySpeech got %q", p)
 	}
 }
+
+func TestSpeechPreview_DropsLoadingModelStatus(t *testing.T) {
+	for _, in := range []string{
+		"Loading model, please wait...",
+		"Loading model, pleas",
+		"Loading model, pleas…",
+	} {
+		if p := spaces.SpeechPreview(in); p != "" {
+			t.Fatalf("loading model leaked onto last_preview: %q -> %q", in, p)
+		}
+		if p := spaces.ReplySpeech(in); p != "" {
+			t.Fatalf("loading model leaked into ReplySpeech: %q -> %q", in, p)
+		}
+	}
+	got := spaces.LastSpeechPreview([]spaces.SpaceMessage{
+		{Content: "Pong."},
+		{Content: "Loading model, please wait..."},
+	})
+	if got != "Pong." {
+		t.Fatalf("walk-back past loading model: %q", got)
+	}
+}

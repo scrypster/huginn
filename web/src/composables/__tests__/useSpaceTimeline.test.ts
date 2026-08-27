@@ -915,3 +915,68 @@ describe('getSpaceTimelineState', () => {
     expect(getSpaceTimelineState(SPACE_B)).not.toBe(viaLookup)
   })
 })
+
+describe('stale turn / loading model', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    clearSpaceTimeline(SPACE_ID)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+
+  it('does not paint Loading model as hallway speech', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    ws.emit('status', { type: 'status', session_id: SESSION_ID, content: 'Loading model, please wait...' })
+    await nextTick()
+    expect(state.messages.filter(m => /loading model/i.test(m.content))).toHaveLength(0)
+  })
+
+  it('does not emit a ghost They\'re here. for an already-persisted hire', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    state.messages.push({
+      id: 'persisted-hire',
+      session_id: SESSION_ID,
+      seq: 4,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: "They're here.",
+      agent: 'Winston',
+    })
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: "They're here." })
+    await nextTick()
+    const ghosts = state.messages.filter(m => m.id.startsWith('stream-') && m.content.includes("They're here."))
+    expect(ghosts).toHaveLength(0)
+    expect(state.messages.filter(m => m.content.includes("They're here."))).toHaveLength(1)
+  })
+})
+
+describe('rail preview never Loading model', () => {
+  beforeEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+  afterEach(() => {
+    clearSpaceTimeline(SPACE_ID)
+  })
+
+  it('walks back past Loading model status for getSpaceLastMessage', () => {
+    const { state } = setupSpace()
+    state.messages.push({
+      id: 'pong', session_id: SESSION_ID, seq: 1, ts: new Date().toISOString(),
+      role: 'assistant', content: 'Pong.', agent: 'Winston',
+    })
+    state.messages.push({
+      id: 'load', session_id: SESSION_ID, seq: 2, ts: new Date().toISOString(),
+      role: 'assistant', content: 'Loading model, pleas…', agent: 'Winston',
+    })
+    const snippet = getSpaceLastMessage(SPACE_ID)
+    expect(snippet?.text ?? '').not.toMatch(/loading model/i)
+    expect(snippet?.text).toContain('Pong.')
+  })
+})

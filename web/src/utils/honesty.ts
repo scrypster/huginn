@@ -227,6 +227,9 @@ const SEPARATOR_LINE_RE = /^\s*---+\s*$/
 const PLAYBOOK_INTRO_RE = /^\s*(?:after|once|when)\s+.*\b(?:response|result|reply)\b.*,\s*use\s+(?:the\s+)?(?:following\s+)?format\s*:\s*$/i
 // Whole-line helpdesk filler
 const FILLER_LINE_RE = /^(?:(?:how can I|is there anything|how else|not currently delegating|nothing is currently delegated)\b.*|(?:if you have any (?:other )?questions(?: or need further assistance)?,\s*)?feel free to ask)[?.!]?\s*$/i
+const LOADING_MODEL_LINE_RE = /^\s*loading model\b/i
+const THIRD_PERSON_NOTED_RE = /(?:^|[\s,])@?[A-Za-z][\w.-]*\s+has noted\b/i
+const LOCAL_TIME_NOW_RE = /\s*local time now:\s*/gi
 // Same-line helpdesk closer after a real answer. Covers "need further assistance".
 const HELPDESK_CLOSER_SENTENCE_RE = /^(?:how can i (?:assist|help)(?: you(?: further)?)?[?.!]*|is there anything(?: else)?(?: i can (?:help|assist)(?: you)?(?: with)?| you need(?: (?:help|assistance)(?: with)?)?)?[?.!]*|if you have any (?:other )?questions(?: or need further assistance)?,\s*feel free to ask[?.!]*|feel free to ask(?: if you have any (?:other )?questions(?: or need further assistance)?)?[?.!]*)$/i
 const WAIT_PLAYBOOK_NAME_RE = /(?:please\s+)?(?:use|call)\s+`?wait_for_threads/i
@@ -299,7 +302,7 @@ function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean
     const trim = line.trim()
     if (trim === '' && hadText) { inGlueChain = true; continue }
     if (trim === '') { kept.push(line); continue }
-    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim) || WAIT_GLUE_LINE_RE.test(trim) || FILLER_LINE_RE.test(trim) || LEFTOVER_HELPDESK_SENTENCE_RE.test(trim) || TASK_DELEGATED_SENTENCE_RE.test(trim)) { inGlueChain = true; continue }
+    if (WAIT_TOKEN_LINE_RE.test(trim) || GLUE_LINE_RE.test(trim) || WAIT_GLUE_LINE_RE.test(trim) || FILLER_LINE_RE.test(trim) || LEFTOVER_HELPDESK_SENTENCE_RE.test(trim) || TASK_DELEGATED_SENTENCE_RE.test(trim) || LOADING_MODEL_LINE_RE.test(trim) || THIRD_PERSON_NOTED_RE.test(trim)) { inGlueChain = true; continue }
     if (PLAYBOOK_FORMAT_RE.test(trim) || PLAYBOOK_INTRO_RE.test(trim) || TEMPLATE_PLACEHOLDER_RE.test(trim) || SEPARATOR_LINE_RE.test(trim)) { inGlueChain = true; continue }
     if (inGlueChain && GLUE_CONTINUATION_RE.test(trim)) continue
     if ((BRACKET_STAGE_DIRECTION_RE.test(trim) && afterTools)) { continue }
@@ -318,7 +321,11 @@ function stripResidualUnfenced(s: string, afterTools: boolean, isFenced: boolean
   let lines = afterTools ? dropTrailingEchoLines(kept, s) : kept
   if (afterTools) lines = stripSameLineEchoFragments(lines, s)
   if (afterTools) lines = deduplicateSentencesInLastLine(lines, s)
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n')
+  let out = lines.join('\n').replace(/\n{3,}/g, '\n\n')
+  if (LOCAL_TIME_NOW_RE.test(out)) {
+    out = out.replace(LOCAL_TIME_NOW_RE, ' ').replace(/  +/g, ' ').trim()
+  }
+  return out
 }
 
 /**

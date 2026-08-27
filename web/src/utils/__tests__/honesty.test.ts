@@ -19,6 +19,7 @@ import {
   failDiagnostic,
   failChipLabel,
   failDisplayFor,
+  stripResidualSpeech,
 } from '../honesty'
 
 describe('parseSystemFailSpeech', () => {
@@ -414,5 +415,32 @@ describe('stripResidualSpeech', () => {
     expect(isResultShapedObject({ pong_response: 'PONG', multiplication_result: '56' })).toBe(true)
     expect(isResultShapedObject({ server: { port: 8080 } })).toBe(false)
     expect(isResultShapedObject({})).toBe(false)
+  })
+})
+
+describe('stripResidualSpeech — loading model / third-person / clock', () => {
+  it('drops Loading model status', () => {
+    expect(stripResidualSpeech('Loading model, please wait...')).toBe('')
+  })
+  it('drops truncated rail Loading model, pleas', () => {
+    expect(stripResidualSpeech('Loading model, pleas')).toBe('')
+    expect(stripResidualSpeech('Loading model, pleas…')).toBe('')
+  })
+  it('drops third-person @Winston has noted', () => {
+    const got = stripResidualSpeech('Understood, @Winston has noted your preferences for your dog Odin.')
+    expect(got).not.toMatch(/has noted/)
+    expect(got).not.toMatch(/@Winston/)
+  })
+  it('strips Local time now: label', () => {
+    const got = stripResidualSpeech('Local time now: Thursday, August 27, 2026, 2:28 PM ET')
+    expect(got.toLowerCase()).not.toContain('local time now')
+  })
+})
+
+describe('plaintextPreview never Loading model', () => {
+  it('drops full and truncated status', () => {
+    expect(plaintextPreview('Loading model, please wait...')).toBe('')
+    expect(plaintextPreview('Loading model, pleas')).toBe('')
+    expect(plaintextPreview('Loading model, pleas…')).toBe('')
   })
 })

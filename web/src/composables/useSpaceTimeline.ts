@@ -83,6 +83,11 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   const onStatus = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
+    const statusText = (msg.content ?? '').trim()
+    // "Loading model, please wait..." is a status, not Winston speech.
+    if (/^loading model/i.test(statusText)) {
+      return
+    }
     for (const [, st] of stateMap.entries()) {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       // Find an existing streaming placeholder — a prior *persisted* assistant
@@ -132,6 +137,15 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             existing.content = visibleAssistantContent(existing.content + msg.content)
           }
         } else {
+          // Resume/replay of an already-persisted hire ("They're here.")
+          // must not mint a second hallway bubble.
+          const incoming = (msg.content ?? '').trim()
+          const lastPersisted = [...st.messages].reverse().find(
+            (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && !m.id.startsWith('stream-'),
+          )
+          if (incoming && lastPersisted && lastPersisted.content.includes(incoming)) {
+            break
+          }
           // Start a new streaming message placeholder, flushing any tool
           // results that arrived as prefetch (before this first token).
           const pending = pendingToolResults.get(sessionId) ?? []
@@ -426,14 +440,19 @@ export { plaintextPreview } from '../utils/honesty'
 
 function snippetFromMessages(messages: SpaceMessage[] | undefined): { text: string; relTime: string } | null {
   if (!messages?.length) return null
-  const last = sortMessagesChronological(
+  const ordered = sortMessagesChronological(
     messages.filter(m => (m.role === 'user' || m.role === 'assistant') && !!m.content),
-  ).at(-1)
-  if (!last) return null
-  const text = plaintextPreview(last.content)
-  if (!text) return null
-  const prefix = last.role === 'user' ? 'You: ' : (last.agent ? `${last.agent}: ` : '')
-  return { text: prefix + text, relTime: relativeTime(last.ts) }
+  )
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const last = ordered[i]
+    if (!last) continue
+    if (/^\s*loading model\b/i.test(last.content)) continue
+    const text = plaintextPreview(last.content)
+    if (!text || /^\s*loading model\b/i.test(text)) continue
+    const prefix = last.role === 'user' ? 'You: ' : (last.agent ? `${last.agent}: ` : '')
+    return { text: prefix + text, relTime: relativeTime(last.ts) }
+  }
+  return null
 }
 
 function rememberSpaceSessions(spaceId: string, sessions: Array<{ id: string }>): void {
