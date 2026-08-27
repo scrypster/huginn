@@ -173,3 +173,21 @@ func TestRewriteThirdPersonNotedToFirstPerson(t *testing.T) {
 		t.Fatalf("third person leaked: %q", got)
 	}
 }
+
+func TestPersistVisibleAssistantContent_ClosesMidClause(t *testing.T) {
+	got := PersistVisibleAssistantContent("I'm unable to recall your dog's name from the available")
+	if !strings.HasSuffix(got, ".") {
+		t.Fatalf("mid-clause persist not closed: %q", got)
+	}
+	if strings.HasSuffix(got, "..") {
+		t.Fatalf("double period: %q", got)
+	}
+	keep := PersistVisibleAssistantContent("I can't make images.")
+	if keep != "I can't make images." {
+		t.Fatalf("complete sentence changed: %q", keep)
+	}
+	q := PersistVisibleAssistantContent("Could you please provide more context or ask a different question?")
+	if q != "Could you please provide more context or ask a different question?" {
+		t.Fatalf("question closer changed: %q", q)
+	}
+}

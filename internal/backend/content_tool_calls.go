@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // contentToolCallID is the synthetic id assigned to a tool call recovered from
@@ -545,8 +546,24 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
 	visible = dropLeftoverHireGhost(visible, ask)
 	visible = dropLeftoverDelegatedHire(visible, ask)
-	return fillTrivialPingPersist(visible, ask)
+	return closeIncompletePersist(fillTrivialPingPersist(visible, ask))
 }
+
+// closeIncompletePersist adds a period when persist would otherwise stop
+// mid-clause (SNAP-7b: "from the available"). Already-terminated speech is left alone.
+func closeIncompletePersist(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	r, _ := utf8.DecodeLastRuneInString(s)
+	switch r {
+	case '.', '!', '?', '…', '"', '\'', '”', '’', ')', ']':
+		return s
+	}
+	return s + "."
+}
+
 
 // stripHarnessVisibleTokens removes leftover fail tokens and lines that are
 // only a harness tool name. Ordinary prose that happens to mention "bash"
