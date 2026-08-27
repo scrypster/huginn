@@ -496,8 +496,14 @@ func hasTeammateAnswer(sent string) bool {
 // leftover no longer names Sam/hostname. Does not invent a key or restore
 // helpdesk. Never returns "" when this completed turn involved Sam on a
 // hostname-style ask.
-func isAskSteve(s string) bool {
+// IsAskSteve reports a company-wall ask that must stay on the full path
+// ("Ask Steve for the hostname"). Used by the trivial-ask classifier.
+func IsAskSteve(s string) bool {
 	return askSteveRE.MatchString(s)
+}
+
+func isAskSteve(s string) bool {
+	return IsAskSteve(s)
 }
 
 // teammateCompanyWallRewrite turns leftover-empty or stale Sam-hostname

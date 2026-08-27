@@ -776,11 +776,8 @@ func TestPersistVisibleAssistantContent_LiveWinstonLocalTimeNow1200(t *testing.T
 		t.Fatalf("harness clock label leaked: %q", got)
 	}
 	hello := PersistVisibleAssistantContent(liveWinstonLocalTimeNow1200, "hello")
-	if hello != want {
-		t.Fatalf("non-time-ask leftover: %q, want %q", hello, want)
-	}
-	if strings.Contains(hello, "Local time now") || strings.Contains(hello, "local time now") {
-		t.Fatalf("non-time-ask leaked clock label: %q", hello)
+	if hello != "" {
+		t.Fatalf("non-time-ask leftover-clock-only: %q, want empty", hello)
 	}
 }
 
@@ -979,7 +976,6 @@ func TestPersistVisibleAssistantContent_LiveWinstonLocalTimeNowBare(t *testing.T
 	for _, ask := range []string{
 		"@Winston what time is it?",
 		"@Winston what day is it?",
-		"hello",
 	} {
 		got := PersistVisibleAssistantContent(liveWinstonLocalTimeNowBare, ask)
 		if strings.Contains(got, "Local time now") || strings.Contains(got, "local time now") {
@@ -988,6 +984,10 @@ func TestPersistVisibleAssistantContent_LiveWinstonLocalTimeNowBare(t *testing.T
 		if got != want {
 			t.Fatalf("ask %q got %q, want %q", ask, got, want)
 		}
+	}
+	hello := PersistVisibleAssistantContent(liveWinstonLocalTimeNowBare, "hello")
+	if hello != "" {
+		t.Fatalf("non-time-ask leftover-clock-only: %q, want empty", hello)
 	}
 	if got := StripResidualSpeechAfterTools(liveWinstonLocalTimeNowBare); strings.Contains(got, "Local time now") {
 		t.Fatalf("AfterTools leftover strip leaked clock label: %q", got)

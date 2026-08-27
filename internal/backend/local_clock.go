@@ -13,7 +13,7 @@ var (
 	// Speech clock as spoken by Winston/Steve, including optional "at" and **wrap**.
 	speechClockStampRE = regexp.MustCompile(`(?i)\*{0,2}((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4},(?:\s+at)?\s+\d{1,2}:\d{2}\s+(?:AM|PM)\s+ET)\*{0,2}`)
 	timeExcuseRE       = regexp.MustCompile(`(?i)cannot directly provide the current time|cannot directly provide real-time|not having access to real-time data|i don'?t have access to real-time|i do not have access to real-time`)
-	timeAskRE          = regexp.MustCompile(`(?i)\b(?:what time|current time|time is it|time it is)\b`)
+	timeAskRE          = regexp.MustCompile(`(?i)\b(?:what time|current time|time is it|time it is|what day|current date|what(?:'s| is) the date|date is it)\b`)
 	// Live Steve hallway recap around a real clock stamp. Used to rewrite
 	// leftover time-ask speech to teammate "It's {clock}." without eating
 	// the stamp. "contains Winston" is not enough — the post-bounce

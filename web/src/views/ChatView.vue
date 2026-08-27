@@ -983,7 +983,7 @@
       </Transition>
 
       <Transition name="ws-banner">
-        <div v-if="prestreamThinking"
+        <div v-if="prestreamThinking && !trivialAskPending"
           class="flex-shrink-0 text-xs px-4 py-1.5"
           style="background:rgba(88,166,255,0.06);border-top:1px solid rgba(88,166,255,0.14);color:rgba(139,148,158,0.95)">
           Preparing context and delegation plan…
@@ -1247,6 +1247,7 @@ import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
 import { visibleAssistantContent } from '../utils/visibleAssistantContent'
+import { isTrivialAsk } from '../utils/trivialAsk'
 import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, visibleToolCalls } from '../utils/honesty'
@@ -2229,7 +2230,18 @@ const updateRoute = ref<UpdateRoute>('all_active')
 const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
+const trivialAskPending = ref(false)
 const sendOptionsOpen = ref(false)
+
+function armTrivialAskPending(markdown: string) {
+  trivialAskPending.value = isTrivialAsk(markdown)
+}
+
+function rearmDelegationPlanFromLiveWork() {
+  if (!trivialAskPending.value) return
+  trivialAskPending.value = false
+  if (streaming.value) prestreamThinking.value = true
+}
 
 function onSendOptionsToggle(e: Event) {
   sendOptionsOpen.value = (e.target as HTMLDetailsElement).open
@@ -2248,6 +2260,7 @@ function resetComposerSendOptions() {
 type OwnerRunState = {
   streaming: boolean
   prestreamThinking: boolean
+  trivialAskPending: boolean
   currentRunId: string
   queuedRunIds: string[]
 }
@@ -2257,6 +2270,7 @@ function snapshotOwnerRun(): OwnerRunState {
   return {
     streaming: streaming.value,
     prestreamThinking: prestreamThinking.value,
+    trivialAskPending: trivialAskPending.value,
     currentRunId: currentRunId.value,
     queuedRunIds: [...queuedRunIds.value],
   }
@@ -2270,6 +2284,7 @@ function persistOwnerRun(key: string) {
 function applyOwnerRun(state: OwnerRunState) {
   streaming.value = state.streaming
   prestreamThinking.value = state.prestreamThinking
+  trivialAskPending.value = state.trivialAskPending
   currentRunId.value = state.currentRunId
   queuedRunIds.value = [...state.queuedRunIds]
   if (state.streaming) {
@@ -2284,7 +2299,7 @@ function applyOwnerRun(state: OwnerRunState) {
 function restoreOwnerRun(key: string) {
   if (!key) return
   const saved = runByOwner.value[key]
-  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] })
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] })
 }
 
 function finishStoredOwnerRun(key: string) {
@@ -2295,13 +2310,13 @@ function finishStoredOwnerRun(key: string) {
     const rest = saved.queuedRunIds.slice(1)
     runByOwner.value = {
       ...runByOwner.value,
-      [key]: { streaming: true, prestreamThinking: true, currentRunId: next, queuedRunIds: rest },
+      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest },
     }
     return
   }
   runByOwner.value = {
     ...runByOwner.value,
-    [key]: { streaming: false, prestreamThinking: false, currentRunId: '', queuedRunIds: [] },
+    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] },
   }
 }
 
@@ -2359,6 +2374,7 @@ function promoteNextQueuedRun() {
   currentRunId.value = next
   streaming.value = true
   prestreamThinking.value = true
+  trivialAskPending.value = false
   startStreamingWatchdog()
   startElapsedTimer()
   pendingToolResults.value = []
@@ -2414,6 +2430,7 @@ async function handleEditorSend(markdown: string) {
       currentRunId.value = runId
       streaming.value = true
       prestreamThinking.value = true
+      armTrivialAskPending(markdown)
       startStreamingWatchdog()
       startElapsedTimer()
     } else {
@@ -2460,6 +2477,7 @@ async function handleEditorSend(markdown: string) {
     currentRunId.value = runId
     streaming.value = true
     prestreamThinking.value = true
+    armTrivialAskPending(markdown)
     startStreamingWatchdog()
     startElapsedTimer()
     pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
@@ -2611,6 +2629,7 @@ watch(wsRef, (ws) => {
 
 registerWS(ws, 'tool_call', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
+    rearmDelegationPlanFromLiveWork()
     const p = msg.payload as Record<string, unknown>
     activeToolCalls.value.push({
       id: (p?.id as string) ?? Date.now().toString(),
@@ -2675,6 +2694,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     stopElapsedTimer()
     streaming.value = false
     prestreamThinking.value = false
+    trivialAskPending.value = false
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
     // streaming but whose results haven't been attached yet (e.g. timing edge cases).
@@ -2739,6 +2759,7 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     stopElapsedTimer()
     streaming.value = false
     prestreamThinking.value = false
+    trivialAskPending.value = false
     activeToolCalls.value = []
     if (props.sessionId) {
       const streamMsg = [...getMessages(props.sessionId)].reverse().find(m => m.streaming)
@@ -3313,6 +3334,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   if (!newSessionId) return
   resetStreaming()
   prestreamThinking.value = false
+  trivialAskPending.value = false
   queuedRunIds.value = []
   dismissAllBlockedThreadToasts()
   pendingPermission.value = null

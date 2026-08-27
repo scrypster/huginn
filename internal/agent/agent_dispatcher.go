@@ -571,10 +571,17 @@ type agentTurnOpts struct {
 // error prefix, latency slot, maxTurns) are captured in opts.
 func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) error {
 	ag := opts.ag
+	trivial := IsTrivialAsk(opts.userMsg)
 
 	// 1. Connect vault — forks the shared registry; safe to call even when vault
 	// is unconfigured (returns a no-op registry fork with cancel=func(){}).
-	vr := o.connectAgentVault(ctx, ag, opts.reg)
+	// Trivial asks skip vault MCP so 14b never sees muninn / hire tools.
+	var vr vaultResult
+	if trivial {
+		vr = vaultResult{sessionReg: opts.reg, cancel: func() {}}
+	} else {
+		vr = o.connectAgentVault(ctx, ag, opts.reg)
+	}
 	defer vr.cancel()
 
 	if vr.warning != "" {
@@ -582,14 +589,17 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	}
 
 	// 2. Augment system prompt with memory-mode instructions and prefetched context.
+	// Keep persona / roster / space / clock (already in systemPromptBase).
 	systemPrompt := opts.systemPromptBase
-	ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
-	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
-		slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
-		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
-	}
-	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
-		systemPrompt += memCtx
+	if !trivial {
+		ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
+		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+			slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
+			systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
+			systemPrompt += memCtx
+		}
 	}
 
 	// 3. Build message list: system + history snapshot + user turn.
@@ -597,6 +607,16 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	messages = append(messages, backend.Message{Role: "system", Content: systemPrompt})
 	messages = append(messages, opts.history...)
 	messages = append(messages, backend.Message{Role: "user", Content: opts.userMsg})
+
+	// Trivial: tools-free completion. Empty ToolSchemas means "all tools
+	// allowed" in RunLoop, so we must not enter the tool loop with a nil belt.
+	// Last-chance strip keeps wait/delegate/consult off if schemas are rebuilt.
+	if trivial {
+		if opts.ctxSetup != nil {
+			ctx = opts.ctxSetup(ctx)
+		}
+		return o.completeTrivialAsk(ctx, opts, messages)
+	}
 
 	// 4. Resolve tool schemas and permission gate for this agent run.
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
@@ -665,6 +685,36 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		newMsgs = loopResult.Messages[initialCount:]
 	}
 	appendHistoryHonoringGate(opts.sess, opts.userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
+	o.compactHistory(ctx, opts.sess)
+	return nil
+}
+
+// completeTrivialAsk is the tools-free hallway path: persona/roster/space/clock
+// stay, but 14b never sees wait_for_threads / delegate_to_agent / consult_agent.
+func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpts, messages []backend.Message) error {
+	ag := opts.ag
+	b, backendErr := o.backendFor(ag)
+	if backendErr != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, backendErr)
+	}
+	var buf strings.Builder
+	start := time.Now().UnixNano()
+	_, err := b.ChatCompletion(ctx, backend.ChatRequest{
+		Model:    ag.GetModelID(),
+		Messages: messages,
+		OnToken: func(token string) {
+			buf.WriteString(token)
+			if opts.onToken != nil {
+				opts.onToken(token)
+			}
+		},
+		OnEvent: opts.onEvent,
+	})
+	o.recordLLMLatency(start, opts.latencySlot)
+	if err != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
+	}
+	appendHistoryHonoringGate(opts.sess, opts.userMsg, buf.String(), nil, false)
 	o.compactHistory(ctx, opts.sess)
 	return nil
 }
