@@ -89,3 +89,16 @@ func TestPersistStopTurn_WaitClockLatestOfMany(t *testing.T) {
 		t.Fatalf("got %q, want afternoon stamp", got)
 	}
 }
+
+func TestPersistVisible_WaitGlueAroundFreshClock(t *testing.T) {
+	// Afternoon drive clockfix prove: Steve persist kept wait-playbook
+	// glue around a correct stamp. Collapse to teammate clock speech.
+	speech := "Understood. I'll wait for the task to complete and then provide the result. It's Thursday, August 27, 2026, 2:54 PM ET."
+	got := PersistVisibleAssistantContent(speech, "Can you ask Winston what time it is")
+	if got != "It's Thursday, August 27, 2026, 2:54 PM ET." {
+		t.Fatalf("got %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "wait for the task") {
+		t.Fatalf("wait glue leaked: %q", got)
+	}
+}
