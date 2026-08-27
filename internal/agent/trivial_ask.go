@@ -71,7 +71,20 @@ func isTrivialTimeAsk(raw, norm string) bool {
 }
 
 func isTrivialPing(norm string) bool {
-	return norm == "ping" || norm == "pong"
+	if norm == "ping" || norm == "pong" {
+		return true
+	}
+	// Burst prove: "@Winston ping one" is still a ping (SNAP-0.8).
+	if strings.HasPrefix(norm, "ping ") {
+		rest := strings.TrimSpace(strings.TrimPrefix(norm, "ping "))
+		return rest == "one" || rest == "two" || rest == "three" || (len(rest) <= 2 && rest != "")
+	}
+	return false
+}
+
+// IsTrivialPingAsk is ping/pong including burst "ping one".
+func IsTrivialPingAsk(s string) bool {
+	return isTrivialPing(normalizeTrivialAsk(s))
 }
 
 func isTrivialAck(norm string) bool {

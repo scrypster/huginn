@@ -227,7 +227,7 @@ func (s *Session) WaitForIdle(ctx context.Context) bool {
 // defaultRunQueueWait is how long ChatWithAgent waits for a busy session
 // before giving up. Hallway @mentions share one space-chat session; a
 // fail-closed "already running" SNAP leaked into #Huginn as assistant speech.
-const defaultRunQueueWait = 30 * time.Second
+const defaultRunQueueWait = 120 * time.Second
 
 // beginExclusiveRun claims the exclusive run slot, waiting if another run
 // is in progress. Returns true if this caller now owns the slot (caller

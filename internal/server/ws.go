@@ -1320,6 +1320,7 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 // that replaced it for the same session.
 type chatRunHandle struct {
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // beginChatRun derives a connection-independent context for a chat run from
@@ -1327,22 +1328,33 @@ type chatRunHandle struct {
 // context), so a client disconnect or tab close no longer cancels an in-flight
 // LLM run mid-stream. The returned handle is registered as the session's
 // active run; cancel it via cancelChatRun and release it via endChatRun.
-func (s *Server) beginChatRun(sessionID string) (context.Context, *chatRunHandle) {
+func (s *Server) beginChatRun(sessionID, userMsg string) (context.Context, *chatRunHandle) {
 	base := s.ctx
 	if base == nil {
 		base = context.Background()
 	}
 	ctx, cancel := context.WithCancel(base)
-	run := &chatRunHandle{cancel: cancel}
+	run := &chatRunHandle{cancel: cancel, done: make(chan struct{})}
 	s.chatRunsMu.Lock()
 	if s.chatRunCancels == nil {
 		s.chatRunCancels = make(map[string]*chatRunHandle)
 	}
-	if prev := s.chatRunCancels[sessionID]; prev != nil && prev != run {
+	prev := s.chatRunCancels[sessionID]
+	queue := prev != nil && prev != run && agent.IsTrivialPingAsk(userMsg)
+	if prev != nil && prev != run && !queue {
+		// Non-trivial new_request still supersedes leftover hire/clock (SNAP-0).
 		prev.cancel()
 	}
 	s.chatRunCancels[sessionID] = run
 	s.chatRunsMu.Unlock()
+	if queue {
+		// Burst "@Winston ping one/two/three" FIFO so all three persist (SNAP-0.8).
+		select {
+		case <-prev.done:
+		case <-time.After(120 * time.Second):
+		case <-ctx.Done():
+		}
+	}
 	return ctx, run
 }
 
@@ -1354,6 +1366,13 @@ func (s *Server) endChatRun(sessionID string, run *chatRunHandle) {
 		delete(s.chatRunCancels, sessionID)
 	}
 	s.chatRunsMu.Unlock()
+	if run.done != nil {
+		select {
+		case <-run.done:
+		default:
+			close(run.done)
+		}
+	}
 	run.cancel()
 }
 
@@ -1706,7 +1725,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 
 	// Derive the run context from the server lifetime and register it as the
 	// session's active run so a "chat_cancel" message can stop it explicitly.
-	chatCtx, run := s.beginChatRun(sessionID)
+	chatCtx, run := s.beginChatRun(sessionID, userMsg)
 	defer s.endChatRun(sessionID, run)
 
 	// Build space context (channel team roster + descriptions) and inject
@@ -1729,7 +1748,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	}
 
 	err := runChat()
-	if err != nil && strings.Contains(err.Error(), "already running") {
+	if err != nil && (strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "still busy after queue wait")) {
 		warnContent := "Another response is still finishing — queued your message and retrying."
 		if intent == "update_active_work" && s.tm != nil {
 			switch updateRoute {
