@@ -32,20 +32,20 @@ type CreateAgentBeltEntry struct {
 // CreateAgentDeps is wired by the live server. Callbacks keep this package
 // free of server/agents import cycles.
 type CreateAgentDeps struct {
-	Persist        func(CreateAgentRequest) error
-	AgentExists    func(name string) bool
-	TryVault       func(vaultName, label string) bool
-	SpaceCompanyID func(spaceID string) (string, error)
-	AgentInCompany func(agent, companyID string) (bool, error)
-	CompanyName    func(id string) (string, error)
+	Persist         func(CreateAgentRequest) error
+	AgentExists     func(name string) bool
+	TryVault        func(vaultName, label string) bool
+	SpaceCompanyID  func(spaceID string) (string, error)
+	AgentInCompany  func(agent, companyID string) (bool, error)
+	CompanyName     func(id string) (string, error)
 	SeatMember      func(companyID, agentName string) error
 	SeatSpaceMember func(spaceID, agentName string) error
-	ResolveConn    func(id string) (provider string, ok bool)
-	ValidateName   func(name string) error
-	CallerFromCtx  func(ctx context.Context) string
-	SpaceFromCtx   func(ctx context.Context) string
-	CallerModel    func(ctx context.Context) string
-	MachineModel   string
+	ResolveConn     func(id string) (provider string, ok bool)
+	ValidateName    func(name string) error
+	CallerFromCtx   func(ctx context.Context) string
+	SpaceFromCtx    func(ctx context.Context) string
+	CallerModel     func(ctx context.Context) string
+	MachineModel    string
 }
 
 // CreateAgentTool is grant-gated: register it, do not tag "builtin", do not
@@ -57,7 +57,7 @@ type CreateAgentTool struct {
 func (t *CreateAgentTool) Name() string { return CreateAgentName }
 
 func (t *CreateAgentTool) Description() string {
-	return "This is how you hire, create an agent, add a teammate, or make a bot. One tool. Persist their profile onto this machine, optionally open a memory vault, and seat them in the current company. Interview first. Only offer connections that exist here. Memory is optional."
+	return "This is how you hire, create an agent, add a teammate, or make a bot. One tool. Persist their profile onto this machine, optionally open a memory vault, and seat them in the current company. If the human already gave a name and a role, call this immediately — do not interview, do not delegate. Only ask if name or role is missing. Only offer connections that exist here. Memory is optional."
 }
 
 func (t *CreateAgentTool) Permission() PermissionLevel { return PermWrite }
@@ -206,14 +206,17 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) Tool
 		systemPrompt = fmt.Sprintf("You are %s, %s.", name, role)
 	}
 
-	vaultName := strings.TrimSpace(asToolString(args["vault_name"]))
-	if vaultName == "" {
-		vaultName = hireVaultName(name)
-	}
-
 	memory := true
 	if raw, ok := args["memory"]; ok {
 		memory = asToolBool(raw)
+	}
+
+	vaultName := strings.TrimSpace(asToolString(args["vault_name"]))
+	if memory && vaultName == "" {
+		vaultName = hireVaultName(name)
+	}
+	if !memory {
+		vaultName = ""
 	}
 
 	req := CreateAgentRequest{

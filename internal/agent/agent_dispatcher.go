@@ -621,6 +621,12 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	// 4. Resolve tool schemas and permission gate for this agent run.
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
 	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg, ag)
+	if IsHireAsk(opts.userMsg) {
+		schemas = stripHireDelegationTools(schemas)
+		if len(messages) > 0 && messages[0].Role == "system" {
+			messages[0].Content += "\n\nHiring is your job via create_agent. If the human already gave a name and a role, call create_agent now. Do not dump a form. Do not delegate hiring."
+		}
+	}
 
 	// 5. Create isolated session environment (temp dir, env vars).
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
@@ -901,6 +907,9 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		}
 		appendHistoryHonoringGate(sess, userMsg, pong, nil, false)
 		o.compactHistory(ctx, sess)
+		return nil
+	}
+	if o.tryNamedHireFastPath(ctx, ag, userMsg, sess, reg, onToken, onEvent) {
 		return nil
 	}
 

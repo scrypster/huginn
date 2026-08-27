@@ -70,8 +70,12 @@ func TestChatWithAgent_TrivialAskSkipsDelegationPlan(t *testing.T) {
 }
 
 func TestChatWithAgent_HireStillGetsDelegationTools(t *testing.T) {
+	// Named hire with a create_agent grant is the fast path (no 14b).
+	// Ambiguous hire still reaches the model, but without the 14b
+	// delegate/wait belt that used to hand the hire to Reggie.
 	o, mb, ag := leadWithDelegationTools(t)
-	if err := o.ChatWithAgent(context.Background(), ag, "hire a teammate named Nova who researches", "sess-hire", nil, nil, nil); err != nil {
+	ag.LocalTools = []string{"create_agent"}
+	if err := o.ChatWithAgent(context.Background(), ag, "hire someone", "sess-hire", nil, nil, nil); err != nil {
 		t.Fatalf("ChatWithAgent: %v", err)
 	}
 	mb.mu.Lock()
@@ -83,8 +87,11 @@ func TestChatWithAgent_HireStillGetsDelegationTools(t *testing.T) {
 	for _, n := range toolNames(mb.lastRequests[0]) {
 		names[n] = true
 	}
-	if !names["delegate_to_agent"] && !names["create_agent"] && !names["wait_for_threads"] {
-		t.Fatalf("hire ask must keep the toolbelt / delegation plan; got %v", toolNames(mb.lastRequests[0]))
+	if names["delegate_to_agent"] || names["wait_for_threads"] {
+		t.Fatalf("hire must not see 14b delegation tools; got %v", toolNames(mb.lastRequests[0]))
+	}
+	if !names["create_agent"] {
+		t.Fatalf("hire must keep create_agent; got %v", toolNames(mb.lastRequests[0]))
 	}
 }
 

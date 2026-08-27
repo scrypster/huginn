@@ -148,3 +148,18 @@ func TestDropLeftoverTimeLeadOnHeadcount(t *testing.T) {
 		t.Fatalf("lost headcount: %q", got)
 	}
 }
+
+func TestDropLeftoverDelegatedHireOnHireTurn(t *testing.T) {
+	got := PersistVisibleAssistantContent("Delegated to @Reggie: Create an agent named driveprobe who researches.", "hire a teammate named driveprobe who researches the web")
+	if got != "" {
+		t.Fatalf("delegated leftover on hire: %q", got)
+	}
+	keep := PersistVisibleAssistantContent("driveprobe is on the roster as researches. No vault yet. They're seated in Huginn.", "create an agent named driveprobe who researches")
+	if !strings.Contains(keep, "driveprobe is on the roster") {
+		t.Fatalf("lost hire speech: %q", keep)
+	}
+	keep2 := PersistVisibleAssistantContent("Delegated to @Steve: ping", "what time is it")
+	if keep2 == "" {
+		t.Fatal("non-hire delegated speech should not use hire drop")
+	}
+}

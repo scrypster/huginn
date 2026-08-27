@@ -67,12 +67,14 @@ func TestChatWithAgent_TrivialAsk_NoDelegationSchemas(t *testing.T) {
 func TestChatWithAgent_HireStaysFullPath(t *testing.T) {
 	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("ok")}}
 	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
-	o.SetTools(delegationTestRegistry(), permissions.NewGate(true, nil))
+	reg := delegationTestRegistry()
+	reg.Register(&mockTool{name: "create_agent"})
+	o.SetTools(reg, permissions.NewGate(true, nil))
 	ag := &agents.Agent{
 		Name:         "Winston",
 		ModelID:      "claude-sonnet-4",
 		SystemPrompt: "You are Winston.",
-		LocalTools:   []string{"*"},
+		LocalTools:   []string{"create_agent"},
 	}
 	if err := o.ChatWithAgent(context.Background(), ag, "hire Steve", "", nil, nil, nil); err != nil {
 		t.Fatalf("ChatWithAgent: %v", err)
@@ -87,9 +89,12 @@ func TestChatWithAgent_HireStaysFullPath(t *testing.T) {
 		found[schema.Function.Name] = true
 	}
 	for _, name := range []string{"delegate_to_agent", "wait_for_threads"} {
-		if !found[name] {
-			t.Errorf("hire ask missing %s on full path", name)
+		if found[name] {
+			t.Errorf("hire ask must not offer 14b %s", name)
 		}
+	}
+	if !found["create_agent"] {
+		t.Errorf("hire ask missing create_agent")
 	}
 }
 

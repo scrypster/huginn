@@ -544,6 +544,7 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 	visible := VisibleAssistantContentAfterTools(content, ask)
 	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
 	visible = dropLeftoverHireGhost(visible, ask)
+	visible = dropLeftoverDelegatedHire(visible, ask)
 	return fillTrivialPingPersist(visible, ask)
 }
 

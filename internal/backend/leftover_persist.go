@@ -6,12 +6,13 @@ import (
 )
 
 var (
-	hireGhostRE   = regexp.MustCompile(`(?i)^they'?re here\.?$`)
-	hireTurnRE    = regexp.MustCompile(`(?i)\b(?:hire|create(?:\s+an)?\s+agent|add(?:\s+a)?\s+teammate|create(?:\s+a)?\s+teammate|create_agent)\b`)
-	mentionOnlyRE = regexp.MustCompile(`(?i)@[\p{L}\p{N}_.-]+`)
-	trivialPingRE = regexp.MustCompile(`(?i)^(ping|pong)[.!?…]*$`)
-	leftoverDateLeadRE = regexp.MustCompile(`(?i)^it'?s\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4},(?:\s+and\s+)?`)
-	leftoverTimeLeadRE = regexp.MustCompile(`(?i)^(?:it'?s\s+)?\d{1,2}:\d{2}(?:\s*[ap]m)?(?:\s+et)?\.?\s+`)
+	hireGhostRE             = regexp.MustCompile(`(?i)^they'?re here\.?$`)
+	leftoverDelegatedHireRE = regexp.MustCompile(`(?i)^delegated to @?[A-Za-z][\w.-]*(:|$)`)
+	hireTurnRE              = regexp.MustCompile(`(?i)\b(?:hire|create(?:\s+an)?\s+agent|add(?:\s+a)?\s+teammate|create(?:\s+a)?\s+teammate|create_agent)\b`)
+	mentionOnlyRE           = regexp.MustCompile(`(?i)@[\p{L}\p{N}_.-]+`)
+	trivialPingRE           = regexp.MustCompile(`(?i)^(ping|pong)[.!?…]*$`)
+	leftoverDateLeadRE      = regexp.MustCompile(`(?i)^it'?s\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4},(?:\s+and\s+)?`)
+	leftoverTimeLeadRE      = regexp.MustCompile(`(?i)^(?:it'?s\s+)?\d{1,2}:\d{2}(?:\s*[ap]m)?(?:\s+et)?\.?\s+`)
 )
 
 // dropLeftoverClockWhenNotTimeAsk drops persist when the only sayable
@@ -90,6 +91,29 @@ func isLeftoverClockOnly(s string) bool {
 
 // dropLeftoverHireGhost drops leftover hire-ghost "They're here." on
 // turns that are not a hire/create/add-teammate ask.
+
+// dropLeftoverDelegatedHire drops 14b hire handoff speech
+// ("Delegated to @Reggie: Create an agent…") on a hire turn.
+func dropLeftoverDelegatedHire(visible, userAsk string) string {
+	if !hireTurnRE.MatchString(userAsk) {
+		return visible
+	}
+	var kept []string
+	dropped := false
+	for _, line := range strings.Split(visible, "\n") {
+		trim := strings.TrimSpace(line)
+		if leftoverDelegatedHireRE.MatchString(trim) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !dropped {
+		return visible
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
 func dropLeftoverHireGhost(visible, userAsk string) string {
 	if hireTurnRE.MatchString(userAsk) {
 		return visible
