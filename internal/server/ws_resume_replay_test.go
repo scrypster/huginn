@@ -531,7 +531,7 @@ func TestBeginChatRun_IndependentOfClientContext(t *testing.T) {
 	srv := &Server{}
 
 	clientCtx, clientCancel := context.WithCancel(context.Background())
-	runCtx, run := srv.beginChatRun("s1")
+	runCtx, run := srv.beginChatRun("s1", "")
 	defer srv.endChatRun("s1", run)
 
 	clientCancel() // simulated disconnect
@@ -560,8 +560,8 @@ func TestBeginChatRun_IndependentOfClientContext(t *testing.T) {
 // guard: an older run finishing must not remove a newer run's cancel handle.
 func TestEndChatRun_DoesNotDeregisterSuccessor(t *testing.T) {
 	srv := &Server{}
-	_, run1 := srv.beginChatRun("s1")
-	ctx2, run2 := srv.beginChatRun("s1") // replaces run1 as the active run
+	_, run1 := srv.beginChatRun("s1", "")
+	ctx2, run2 := srv.beginChatRun("s1", "") // replaces run1 as the active run
 
 	srv.endChatRun("s1", run1) // old run finishes late
 
@@ -574,4 +574,41 @@ func TestEndChatRun_DoesNotDeregisterSuccessor(t *testing.T) {
 		t.Fatal("newer run context was not cancelled")
 	}
 	_ = run2
+}
+
+func TestBeginChatRun_TrivialPingQueues(t *testing.T) {
+	srv := &Server{}
+	ctx1, run1 := srv.beginChatRun("s1", "@Winston ping one")
+	started := make(chan struct{})
+	var run2 *chatRunHandle
+	var ctx2 context.Context
+	go func() {
+		ctx2, run2 = srv.beginChatRun("s1", "@Winston ping two")
+		close(started)
+	}()
+	select {
+	case <-started:
+		t.Fatal("ping two must queue behind ping one")
+	case <-time.After(80 * time.Millisecond):
+	}
+	select {
+	case <-ctx1.Done():
+		t.Fatal("queued ping must not cancel the in-flight ping")
+	default:
+	}
+	srv.endChatRun("s1", run1)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("ping two did not start after ping one ended")
+	}
+	if run2 == nil {
+		t.Fatal("ping two handle missing")
+	}
+	select {
+	case <-ctx2.Done():
+		t.Fatal("ping two context cancelled at start")
+	default:
+	}
+	srv.endChatRun("s1", run2)
 }

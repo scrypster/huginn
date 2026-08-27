@@ -197,3 +197,19 @@ func TestChatWithAgent_PingShortCircuitNoLLM(t *testing.T) {
 		t.Fatalf("ping tokens %q, want Pong.", tokens.String())
 	}
 }
+
+func TestIsTrivialPingAsk(t *testing.T) {
+	for _, ask := range []string{"ping", "pong", "@Winston ping", "@Winston ping one", "ping two", "ping three", "ping 2"} {
+		if !IsTrivialPingAsk(ask) {
+			t.Errorf("IsTrivialPingAsk(%q) = false, want true", ask)
+		}
+		if !IsTrivialAsk(ask) {
+			t.Errorf("IsTrivialAsk(%q) = false, want true", ask)
+		}
+	}
+	for _, ask := range []string{"how many people", "what time is it", "hire Steve", "thanks", "hello"} {
+		if IsTrivialPingAsk(ask) {
+			t.Errorf("IsTrivialPingAsk(%q) = true, want false", ask)
+		}
+	}
+}
