@@ -939,16 +939,17 @@ func summarizeToolInput(toolName string, in map[string]any) (summary, excerpt st
 	case "Bash":
 		return clip(inputString(in, "command"), maxCommandBytes), ""
 	case "Write":
-		return inputString(in, "file_path"), clip(inputString(in, "content"), maxExcerptBytes)
+		return clip(inputString(in, "file_path"), maxCommandBytes), clip(inputString(in, "content"), maxExcerptBytes)
 	case "Edit", "NotebookEdit":
-		return inputString(in, "file_path"), clip(inputString(in, "new_string"), maxExcerptBytes)
+		return clip(inputString(in, "file_path"), maxCommandBytes), clip(inputString(in, "new_string"), maxExcerptBytes)
 	case "WebFetch":
-		return inputString(in, "url"), ""
+		return clip(inputString(in, "url"), maxCommandBytes), ""
 	}
 	summary = inputString(in, "file_path")
 	if summary == "" {
 		summary = inputString(in, "url")
 	}
+	summary = clip(summary, maxCommandBytes)
 	b, err := json.Marshal(in)
 	if err != nil {
 		return summary, ""
@@ -957,11 +958,18 @@ func summarizeToolInput(toolName string, in map[string]any) (summary, excerpt st
 }
 ```
 
-In the `hook` struct in `runClaudeApprove`, add the field:
+In the `hook` struct in `runClaudeApprove`, add the field as RAW JSON:
 
 ```go
-		ToolInput map[string]any `json:"tool_input"`
+		ToolInput json.RawMessage `json:"tool_input"`
 ```
+
+It must be `json.RawMessage`, not `map[string]any`. Decoding it into a typed map
+folds it into the main unmarshal, so a `tool_input` that is present but not an
+object fails the WHOLE decode and denies. That fails safe for one call, but it
+would deny every gated call forever if the CLI ever changed the field's shape —
+a silent outage of the approval feature. A malformed input should cost the
+summary, not the gate.
 
 Replace the `body, err := json.Marshal(...)` block and the comment above it with:
 
@@ -969,7 +977,11 @@ Replace the `body, err := json.Marshal(...)` block and the comment above it with
 	// tool_input is forwarded as a BOUNDED SUMMARY, never raw. See
 	// summarizeToolInput for why the truncation lives here rather than on the
 	// server: permission must never depend on payload size.
-	summary, excerpt := summarizeToolInput(hook.ToolName, hook.ToolInput)
+	var toolInput map[string]any
+	if len(hook.ToolInput) > 0 {
+		_ = json.Unmarshal(hook.ToolInput, &toolInput)
+	}
+	summary, excerpt := summarizeToolInput(hook.ToolName, toolInput)
 	body, err := json.Marshal(map[string]any{
 		"tool_name":   hook.ToolName,
 		"tool_use_id": hook.ToolUseID,
