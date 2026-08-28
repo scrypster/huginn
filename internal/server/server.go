@@ -60,6 +60,10 @@ type Server struct {
 	// Override in tests to inject a known configuration without touching the filesystem.
 	agentLoader func() (*agents.AgentsConfig, error)
 
+	// agentSaver is nil in production — only tests set it — so callers fall
+	// back to agents.SaveAgents, mirroring agentLoader.
+	agentSaver func(*agents.AgentsConfig) error
+
 	// onAgentsChanged, if set, is invoked after any agent create/update/rename/
 	// delete/clone is persisted, so the live in-memory agent registry can be
 	// reloaded from disk. Without this, agents created via the API are invisible
@@ -1077,7 +1081,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// never work. Left unauthenticated on the same 127.0.0.1-only basis as
 	// /token and /health above; body size is still capped defensively.
 	mux.HandleFunc("POST /api/v1/claude/approve",
-		loggingMiddleware(requestIDMiddleware(withMaxBody(1<<20, s.handleClaudeApprove))))
+		loggingMiddleware(requestIDMiddleware(withMaxBody(64<<10, s.handleClaudeApprove))))
 
 	// REST API (auth required)
 	mux.HandleFunc("POST /api/v1/restart", api(s.handleRestart))
@@ -1254,6 +1258,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// above, not here — see the comment there for why.
 	mux.HandleFunc("GET /api/v1/claude/status", api(s.handleClaudeStatus))
 	mux.HandleFunc("POST /api/v1/claude/backfill", api(s.handleClaudeBackfill))
+	mux.HandleFunc("GET /api/v1/claude/approvals", api(s.handleListClaudeApprovals))
+	mux.HandleFunc("POST /api/v1/claude/approve/decide", api(withMaxBody(4<<10, s.handleDecideClaudeApproval)))
 
 	// Spaces API (authenticated)
 	// NOTE: route ordering matters in Go 1.22+ ServeMux.
