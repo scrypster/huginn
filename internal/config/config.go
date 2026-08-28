@@ -56,13 +56,13 @@ type CloudConfig struct {
 
 // BackendConfig holds configuration for the LLM backend.
 type BackendConfig struct {
-	Type            string `json:"type"`                      // "external" (Phase 1 default) or "managed" (Phase 3)
+	Type            string `json:"type"`                       // "external" (Phase 1 default) or "managed" (Phase 3)
 	Endpoint        string `json:"endpoint"`                   // used when type="external"
-	Provider        string `json:"provider,omitempty"`        // "anthropic", "openai", "openrouter", "ollama"
-	APIKey          string `json:"api_key,omitempty"`         // literal key or "$ENV_VAR_NAME"
-	BuiltinModel    string `json:"builtin_model,omitempty"`   // active model when type="managed" (builtin llama.cpp)
-	Project         string `json:"project,omitempty"`         // GCP project (vertex provider); fallback: GOOGLE_CLOUD_PROJECT
-	Location        string `json:"location,omitempty"`        // GCP region (vertex provider); fallback: GOOGLE_CLOUD_LOCATION, default us-central1
+	Provider        string `json:"provider,omitempty"`         // "anthropic", "openai", "openrouter", "ollama"
+	APIKey          string `json:"api_key,omitempty"`          // literal key or "$ENV_VAR_NAME"
+	BuiltinModel    string `json:"builtin_model,omitempty"`    // active model when type="managed" (builtin llama.cpp)
+	Project         string `json:"project,omitempty"`          // GCP project (vertex provider); fallback: GOOGLE_CLOUD_PROJECT
+	Location        string `json:"location,omitempty"`         // GCP region (vertex provider); fallback: GOOGLE_CLOUD_LOCATION, default us-central1
 	CredentialsPath string `json:"credentials_path,omitempty"` // path to service-account JSON; fallback: GOOGLE_APPLICATION_CREDENTIALS
 }
 
@@ -88,44 +88,44 @@ func (bc *BackendConfig) ResolvedAPIKey() string {
 
 // Config holds all Huginn configuration.
 type Config struct {
-	DefaultModel      string        `json:"default_model,omitempty"`       // default model for the primary agent
-	ReasonerModel     string        `json:"reasoner_model"`
-	OllamaBaseURL     string        `json:"ollama_base_url"`
-	Backend           BackendConfig `json:"backend"`
-	Theme             string        `json:"theme"`
-	ContextLimitKB    int           `json:"context_limit_kb"`
-	GitStageOnWrite   bool          `json:"git_stage_on_write"`
-	WorkspacePath     string        `json:"workspace_path,omitempty"`
-	MaxTurns          int           `json:"max_turns,omitempty"`         // default 50; max agentic loop iterations
-	ToolsEnabled      bool          `json:"tools_enabled"`               // default true
-	AllowedTools      []string      `json:"allowed_tools,omitempty"`     // whitelist; empty = all allowed
-	DisallowedTools   []string      `json:"disallowed_tools,omitempty"`  // blacklist
-	BashTimeoutSecs   int           `json:"bash_timeout_secs,omitempty"` // default 120
-	MachineID         string        `json:"machine_id,omitempty"`
-	DiffReviewMode    string        `json:"diff_review_mode,omitempty"` // "always", "never", "auto"
-	MCPServers        []mcp.MCPServerConfig `json:"mcp_servers,omitempty"`     // MCP server configurations
-	NotepadsEnabled   bool          `json:"notepads_enabled"`
-	NotepadsMaxTokens int           `json:"notepads_max_tokens,omitempty"`
-	CompactMode       string        `json:"compact_mode,omitempty"`    // "auto", "never", "always"
-	CompactTrigger    float64       `json:"compact_trigger,omitempty"` // 0.0-1.0
-	VisionEnabled     bool          `json:"vision_enabled"`
-	MaxImageSizeKB    int           `json:"max_image_size_kb,omitempty"`
-	EmbeddingModel    string        `json:"embedding_model,omitempty"`     // default "nomic-embed-text"
-	SemanticSearch    bool          `json:"semantic_search,omitempty"`     // default false
-	BraveAPIKey       string        `json:"brave_api_key,omitempty"`       // web_search disabled if empty
-	WebUI        WebUIConfig        `json:"web_ui"`
-	Integrations IntegrationsConfig `json:"integrations"`
-	Cloud        CloudConfig        `json:"cloud"`
-	ActiveSessionID   string        `json:"active_session_id,omitempty"`
-	SchedulerEnabled  bool          `json:"scheduler_enabled"` // default true; set false to pause all routines
-	Version           int           `json:"version,omitempty"`
+	DefaultModel      string                `json:"default_model,omitempty"` // default model for the primary agent
+	ReasonerModel     string                `json:"reasoner_model"`
+	OllamaBaseURL     string                `json:"ollama_base_url"`
+	Backend           BackendConfig         `json:"backend"`
+	Theme             string                `json:"theme"`
+	ContextLimitKB    int                   `json:"context_limit_kb"`
+	GitStageOnWrite   bool                  `json:"git_stage_on_write"`
+	WorkspacePath     string                `json:"workspace_path,omitempty"`
+	MaxTurns          int                   `json:"max_turns,omitempty"`         // default 50; max agentic loop iterations
+	ToolsEnabled      bool                  `json:"tools_enabled"`               // default true
+	AllowedTools      []string              `json:"allowed_tools,omitempty"`     // whitelist; empty = all allowed
+	DisallowedTools   []string              `json:"disallowed_tools,omitempty"`  // blacklist
+	BashTimeoutSecs   int                   `json:"bash_timeout_secs,omitempty"` // default 120
+	MachineID         string                `json:"machine_id,omitempty"`
+	DiffReviewMode    string                `json:"diff_review_mode,omitempty"` // "always", "never", "auto"
+	MCPServers        []mcp.MCPServerConfig `json:"mcp_servers,omitempty"`      // MCP server configurations
+	NotepadsEnabled   bool                  `json:"notepads_enabled"`
+	NotepadsMaxTokens int                   `json:"notepads_max_tokens,omitempty"`
+	CompactMode       string                `json:"compact_mode,omitempty"`    // "auto", "never", "always"
+	CompactTrigger    float64               `json:"compact_trigger,omitempty"` // 0.0-1.0
+	VisionEnabled     bool                  `json:"vision_enabled"`
+	MaxImageSizeKB    int                   `json:"max_image_size_kb,omitempty"`
+	EmbeddingModel    string                `json:"embedding_model,omitempty"` // default "nomic-embed-text"
+	SemanticSearch    bool                  `json:"semantic_search,omitempty"` // default false
+	BraveAPIKey       string                `json:"brave_api_key,omitempty"`   // web_search disabled if empty
+	WebUI             WebUIConfig           `json:"web_ui"`
+	Integrations      IntegrationsConfig    `json:"integrations"`
+	Cloud             CloudConfig           `json:"cloud"`
+	ActiveSessionID   string                `json:"active_session_id,omitempty"`
+	SchedulerEnabled  bool                  `json:"scheduler_enabled"` // default true; set false to pause all routines
+	Version           int                   `json:"version,omitempty"`
 }
 
 // Default returns a Config with all production defaults.
 func Default() *Config {
 	return &Config{
-		ReasonerModel:   "deepseek-r1:14b",
-		OllamaBaseURL:   "http://localhost:11434",
+		ReasonerModel: "deepseek-r1:14b",
+		OllamaBaseURL: "http://localhost:11434",
 		Backend: BackendConfig{
 			Type:     "external",
 			Endpoint: "http://localhost:11434",
@@ -551,4 +551,40 @@ func (c *Config) SaveTo(path string) error {
 	// fsyncDir may fail on tmpfs/network mounts — treat as non-fatal.
 	_ = fsyncDir(filepath.Dir(path))
 	return nil
+}
+
+// updateMu serializes UpdateAt calls within this process so two concurrent
+// callers can't both read the same on-disk snapshot and each write back a
+// version missing the other's change.
+var updateMu sync.Mutex
+
+// UpdateAt performs a read-modify-write update of the config file at path:
+// it reloads the CURRENT on-disk config — never a possibly-stale in-memory
+// copy — applies mutate to it, and saves the result back.
+//
+// Any writer that mutates a field on a Config it loaded earlier and then
+// calls Save()/SaveTo() on that whole struct risks clobbering fields another
+// writer changed on disk since that load (e.g. a long-lived in-memory config
+// snapshot held for the life of a process saving over a change the config
+// API made moments earlier). UpdateAt closes that window by always
+// re-reading disk immediately before writing, so callers should express
+// "set field X" as a mutate closure rather than "save my whole copy".
+func UpdateAt(path string, mutate func(*Config)) error {
+	updateMu.Lock()
+	defer updateMu.Unlock()
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		return err
+	}
+	mutate(cfg)
+	return cfg.SaveTo(path)
+}
+
+// UpdateDefault is UpdateAt against the default ~/.huginn/config.json path.
+func UpdateDefault(mutate func(*Config)) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("config.UpdateDefault: get home dir: %w", err)
+	}
+	return UpdateAt(filepath.Join(home, ".huginn", "config.json"), mutate)
 }

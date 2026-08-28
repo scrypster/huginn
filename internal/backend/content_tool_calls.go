@@ -505,31 +505,11 @@ func VisibleAssistantContentAfterDeny(content string) string {
 // ({"pong_response":"PONG","multiplication_result":"56"}), so the speech
 // channel reads like a teammate: "Reggie said PONG. 7 times 8 is 56."
 func VisibleAssistantContentAfterTools(content string, userAsk ...string) string {
-	visible := VisibleAssistantContent(content)
-	visible = stripEmbeddedHarnessToolJSON(visible)
-	visible = StripResidualSpeechAfterTools(visible)
-	visible = stripHarnessVisibleTokens(visible)
-	visible = stripHarnessClockLabel(visible)
 	ask := ""
 	if len(userAsk) > 0 {
 		ask = userAsk[0]
 	}
-	if isTimeAsk(ask) {
-		visible = dropTimeExcuseSentences(visible)
-	}
-	if rewrite := teammateCompanyWallRewrite(visible, content, ask); rewrite != "" {
-		return stripHarnessClockLabel(rewrite)
-	}
-	if rewrite := teammateHostnameFailRewrite(visible, content, ask); rewrite != "" {
-		return stripHarnessClockLabel(rewrite)
-	}
-	if rewrite := teammateTimeFailRewrite(visible, content, ask); rewrite != "" {
-		return stripHarnessClockLabel(rewrite)
-	}
-	if rewrite := teammateInvalidToolPongRewrite(visible, content, ask); rewrite != "" {
-		return stripHarnessClockLabel(rewrite)
-	}
-	return stripHarnessClockLabel(visible)
+	return finalizeDisplaySpeech(content, ask)
 }
 
 // PersistVisibleAssistantContent is the hallway REST and WS persist filter.
@@ -542,14 +522,7 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 	if len(userAsk) > 0 {
 		ask = userAsk[0]
 	}
-	visible := VisibleAssistantContentAfterTools(content, ask)
-	visible = stripLeadingBareClockSentence(visible, ask)
-	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
-	visible = dropLeftoverHireGhost(visible, ask)
-	visible = dropLeftoverDelegatedHire(visible, ask)
-	visible = EchoAckRewrite(visible, ask)
-	visible = StatementFragmentAckRewrite(visible, ask)
-	return closeIncompletePersist(fillTrivialAckPersist(fillTrivialPingPersist(visible, ask), ask))
+	return finalizePersistSpeech(content, ask)
 }
 
 // closeIncompletePersist adds a period when persist would otherwise stop
@@ -573,7 +546,6 @@ func closeIncompletePersist(s string) string {
 	}
 	return s + "."
 }
-
 
 // stripHarnessVisibleTokens removes leftover fail tokens and lines that are
 // only a harness tool name. Ordinary prose that happens to mention "bash"

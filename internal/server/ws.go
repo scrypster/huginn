@@ -1840,10 +1840,18 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	// runs on its own goroutine while setStatus runs on the run goroutine.
 	var statusMu sync.Mutex
 	lastStatus := "thinking"
-	setStatus := func(content string) {
+	// updateLastStatus records the current phase without emitting — shared by
+	// setStatus (tool-call-derived statuses) and onEvent's StreamStatus branch
+	// below (plain engine statuses: "thinking", "hiring", "continuing",
+	// model-loading) so the heartbeat always re-emits the true current phase
+	// instead of a stale one.
+	updateLastStatus := func(content string) {
 		statusMu.Lock()
 		lastStatus = content
 		statusMu.Unlock()
+	}
+	setStatus := func(content string) {
+		updateLastStatus(content)
 		emit(WSMessage{Type: "status", Content: content, SessionID: sessionID})
 	}
 	currentStatus := func() string {
@@ -1885,6 +1893,15 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		// leftover suffix lands as a nameless orphan bubble.
 		if ev.Type == backend.StreamDone {
 			return
+		}
+		// Plain StreamStatus events (agent_dispatcher's "thinking", hire_ask's
+		// "hiring", the loop-nudge's "continuing", external.go's model-loading
+		// status) previously went straight to emit without updating lastStatus,
+		// so the 15s heartbeat below re-emitted the OLD phase and stomped these
+		// within 15s. Route the content through the same tracking setStatus
+		// uses, before emitting, so the heartbeat sees the true current phase.
+		if ev.Type == backend.StreamStatus {
+			updateLastStatus(ev.Content)
 		}
 		emit(streamEventToWS(ev, sessionID))
 		// Phase-true status translation layer: a tool_call event already
@@ -1988,8 +2005,15 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	// terminal turn was gated and only flushes at the very end). Keep the
 	// "thinking" status alive on the wire so the UI never reads as hung.
 	heartbeatDone := make(chan struct{})
+	// Read wsHeartbeatInterval synchronously here, before spawning the
+	// goroutine below, and capture it in heartbeatInterval. The goroutine
+	// itself may not get scheduled until well after this function (and even
+	// the whole test) returns, so a direct `wsHeartbeatInterval` read inside
+	// it races against the next test's `wsHeartbeatInterval = ...` under
+	// `go test -race` even though heartbeatDone has already been closed.
+	heartbeatInterval := wsHeartbeatInterval
 	go func() {
-		ticker := time.NewTicker(wsHeartbeatInterval)
+		ticker := time.NewTicker(heartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {

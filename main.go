@@ -886,7 +886,18 @@ func main() {
 						cfg.Backend.APIKey = apiKey
 					}
 					backendMu.Unlock()
-					return cfg.Save()
+					// Read-modify-write against the CURRENT on-disk config, not
+					// this process's long-lived in-memory cfg snapshot: cfg.Save()
+					// here would write cfg's stale copy of every other field
+					// (tools_enabled, web_ui.port, ...) over whatever the config
+					// API has saved since this process started, reverting it.
+					return config.UpdateDefault(func(disk *config.Config) {
+						disk.Backend.Provider = provider
+						disk.Backend.Endpoint = endpoint
+						if apiKey != "" {
+							disk.Backend.APIKey = apiKey
+						}
+					})
 				},
 				PullModel: func(name string) error {
 					baseURL := cfg.OllamaBaseURL
@@ -3618,7 +3629,18 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 						cfg.Backend.APIKey = apiKey
 					}
 					backendMu.Unlock()
-					return cfg.Save()
+					// Read-modify-write against the CURRENT on-disk config, not
+					// this process's long-lived in-memory cfg snapshot: cfg.Save()
+					// here would write cfg's stale copy of every other field
+					// (tools_enabled, web_ui.port, ...) over whatever the config
+					// API has saved since this process started, reverting it.
+					return config.UpdateDefault(func(disk *config.Config) {
+						disk.Backend.Provider = provider
+						disk.Backend.Endpoint = endpoint
+						if apiKey != "" {
+							disk.Backend.APIKey = apiKey
+						}
+					})
 				},
 				PullModel: func(name string) error {
 					baseURL := cfg.OllamaBaseURL

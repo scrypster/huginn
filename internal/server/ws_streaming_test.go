@@ -423,6 +423,81 @@ func TestWSChat_HeartbeatDoesNotStompPhaseStatus(t *testing.T) {
 	}
 }
 
+// TestWSChat_HeartbeatDoesNotStompPlainStreamStatus is the regression test
+// for DEFECT 2: plain StreamStatus events emitted directly by the engine
+// (agent_dispatcher's "thinking", hire_ask's "hiring", the loop-nudge's
+// "continuing", external.go's model-loading status) went straight to emit
+// without updating lastStatus, so the 15s heartbeat re-emitted the OLD phase
+// and stomped them within 15s — unlike tool-call-derived statuses, which
+// already went through setStatus. This backend fires a StreamStatus event
+// with a distinctive, non-"thinking" phase and stalls before the first
+// token long enough for several heartbeat ticks to land; none of them may
+// revert the wire back to "thinking".
+func TestWSChat_HeartbeatDoesNotStompPlainStreamStatus(t *testing.T) {
+	prev := wsHeartbeatInterval
+	wsHeartbeatInterval = 10 * time.Millisecond
+	defer func() { wsHeartbeatInterval = prev }()
+
+	eb := &delegateStatusEventBackend{
+		reply: "Done.",
+		delay: 120 * time.Millisecond, // long enough for several heartbeats
+		events: []backend.StreamEvent{
+			{Type: backend.StreamStatus, Content: "hiring"},
+		},
+	}
+	orch, err := agent.NewOrchestrator(eb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+	srv, _ := newTestServer(t)
+	srv.orch = orch
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "Winston", Model: modelconfig.DefaultModels().Reasoner, IsDefault: true, SystemPrompt: "You are Winston."},
+		}}, nil
+	}
+
+	sess := srv.store.New("plain-status-heartbeat-session", "/workspace", modelconfig.DefaultModels().Reasoner)
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	client := &wsClient{send: make(chan WSMessage, 512), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   "please add a teammate",
+		RunID:     "plain-status-heartbeat-run-1",
+	})
+
+	deadline := time.After(10 * time.Second)
+	sawHiring := false
+	for {
+		select {
+		case msg := <-client.send:
+			if msg.Type == "status" {
+				if msg.Content == "hiring" {
+					sawHiring = true
+				} else if sawHiring && msg.Content == "thinking" {
+					t.Fatalf("heartbeat stomped the plain StreamStatus phase: got %q after %q", msg.Content, "hiring")
+				}
+			}
+			if msg.Type == "done" && msg.RunID == "plain-status-heartbeat-run-1" {
+				if !sawHiring {
+					t.Fatal("never saw the hiring status")
+				}
+				waitForAssistantPersisted(t, srv, sess.ID)
+				return
+			}
+			if msg.Type == "error" {
+				t.Fatalf("unexpected error message: %v", msg.Content)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for run to complete")
+		}
+	}
+}
+
 // waitForAssistantPersisted blocks until the run goroutine has finished its
 // post-"done" persistence for sessionID, so t.TempDir cleanup cannot race the
 // write. Bounded; fails the test rather than hanging.
