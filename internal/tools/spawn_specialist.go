@@ -129,6 +129,12 @@ func (t *SpawnSpecialistTool) Execute(ctx context.Context, args map[string]any) 
 		return hireErr("I need to say why nobody on the roster covers this before bringing in a specialist.")
 	}
 
+	// Auto-sanitize before validating: small local models routinely propose
+	// "Specialist: COBOL" or "COBOL/Security". Rather than bounce the model
+	// into a retry loop against a rule it keeps breaking, clean the name the
+	// way a careful colleague would and proceed (live falsification on
+	// v0.4.0-fable21 — the CoS looped apologizing for invalid names).
+	name = sanitizeSpecialistName(name)
 	if t.Deps.ValidateName != nil {
 		if err := t.Deps.ValidateName(name); err != nil {
 			return hireErr("That name won't work for a specialist (letters, numbers, hyphens only — no colons). Try something like \"" + suggestSpecialistName(name) + "\".")
@@ -180,6 +186,38 @@ func specialistDomain(name string) string {
 
 // suggestSpecialistName proposes a "<Domain> Specialist" formatted name from
 // a rejected name, for the validation error message.
+// sanitizeSpecialistName strips characters agent names disallow (colons,
+// slashes, etc.), collapses whitespace, and ensures an alphanumeric start —
+// turning "Specialist: COBOL" into "Specialist COBOL" and "COBOL/Security"
+// into "COBOLSecurity" so a small model's near-miss still spawns.
+func sanitizeSpecialistName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if isValidSpecialistNameChar(r) {
+			b.WriteRune(r)
+		} else if r == ':' || r == '/' || r == ',' || r == '\\' {
+			b.WriteRune(' ')
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	for len(out) > 0 && !isAlnum(rune(out[0])) {
+		out = strings.TrimSpace(out[1:])
+	}
+	if out == "" {
+		out = "Domain Specialist"
+	}
+	return out
+}
+
+func isValidSpecialistNameChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+		r == ' ' || r == '-' || r == '_' || r == '.'
+}
+
+func isAlnum(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
 func suggestSpecialistName(name string) string {
 	domain := specialistSuffixRE.ReplaceAllString(name, "")
 	domain = strings.Join(strings.Fields(domain), " ")

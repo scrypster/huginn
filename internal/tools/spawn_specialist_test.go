@@ -177,3 +177,18 @@ func TestStripHireGrant_StripsBothHiringTools(t *testing.T) {
 		t.Errorf("expected 2 tools remaining, got %v", got)
 	}
 }
+
+func TestSanitizeSpecialistName(t *testing.T) {
+	cases := map[string]string{
+		"Specialist: COBOL":   "Specialist COBOL",
+		"COBOL/Security":      "COBOL Security",
+		":::leading":          "leading",
+		"  Rust  Audit  ":     "Rust Audit",
+		"@#$":                 "Domain Specialist",
+	}
+	for in, want := range cases {
+		if got := sanitizeSpecialistName(in); got != want {
+			t.Errorf("sanitizeSpecialistName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
