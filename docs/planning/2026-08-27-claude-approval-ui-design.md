@@ -35,7 +35,7 @@ There is no existing web approval surface to extend:
 **Result, 2026-08-27: Claude Code honours a 300s hook timeout, and a deny
 returned after 290s of blocking is respected.** §3 is settled.
 
-Two facts, both established empirically:
+Three facts, all established empirically:
 
 1. A hook that does not answer within its declared `timeout` is **killed, and
    the tool runs anyway** — hooks fail OPEN on timeout. Probed with
@@ -45,9 +45,23 @@ Two facts, both established empirically:
    `TOOL_RAN` never created; `permission_denials` contained the single `Bash`
    call; the reason string propagated back to the model; 310s elapsed.
 
+3. A hook returning `permissionDecision: "allow"` **grants a tool that is NOT in
+   `--allowedTools`**. Probed with `--allowedTools Read` and a gated `Bash`:
+   the hook allowed, `permission_denials` was empty, and the command ran.
+
 Fact 1 is why the derived-timeout guard in §3 exists at all. Fact 2 is what
 makes a five-minute human wait viable rather than a permission UI that only
-appears to gate.
+appears to gate. Fact 3 is what makes the UI able to *grant* rather than only
+withhold — without it, clicking Allow would leave the tool blocked by Claude
+Code's own permission layer and the UI would be theatre.
+
+**Fact 3 invalidates an existing doc comment.** `internal/claudecode/hooks.go:25-32`
+currently states that the hook's contribution is "a log entry and a
+human-readable deny reason, not additional restriction", because today the
+approval endpoint allows exactly what `--allowedTools` already allows. Once this
+work ships, the hook can allow tools outside `--allowedTools`, and that comment
+becomes false. Updating it is part of the implementation, not optional
+housekeeping.
 
 Re-run the probe below if the Claude Code version changes — fact 2 is a
 behaviour of the CLI, not a documented contract, and it could regress.
