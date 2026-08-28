@@ -251,11 +251,12 @@ func (o *Orchestrator) prefetchMemoryContextWithEvents(
 		}
 	}
 
+	recallQuery := sanitizeRecallQuery(userMsg)
 	recallOutput := ""
-	if userMsg != "" && hasRecall {
+	if recallQuery != "" && hasRecall {
 		recallArgs := map[string]any{
 			"vault":     pinned,
-			"context":   []string{userMsg},
+			"context":   []string{recallQuery},
 			"mode":      "balanced",
 			"limit":     5,
 			"threshold": 0.6,
@@ -269,7 +270,7 @@ func (o *Orchestrator) prefetchMemoryContextWithEvents(
 				}
 			}
 		} else {
-			recallKey := agentName + ":" + vaultName + ":recall:" + hashMessage(userMsg)
+			recallKey := agentName + ":" + vaultName + ":recall:" + hashMessage(recallQuery)
 			if cachedRecall := o.getCachedSemanticPrefetch(recallKey); cachedRecall != "" {
 				recallOutput = cachedRecall
 				slog.Info("memory.inject", "kind", "recall", "vault", pinned, "cached", true)
@@ -381,6 +382,29 @@ func (o *Orchestrator) rememberPull(sessionKey, userMsg, recall string) {
 		userMsg = st.lastUser
 	}
 	o.memoryPulled.Store(sessionKey, sessionPullState{lastUser: userMsg, recall: recall})
+}
+
+// maxRecallQueryChars caps how much of the raw user message is sent to
+// muninn_recall as the semantic query. A rambling turn shouldn't blow the
+// query past what the vault's embedder expects.
+const maxRecallQueryChars = 500
+
+// sanitizeRecallQuery strips DM/channel @mention prefixes and truncates the
+// user's ask before it becomes the muninn_recall "context" query. Leading
+// mentions ("@Winston what's our production database called?") are pure
+// routing noise — leaving them in the semantic query dilutes it against the
+// actual question. Live repro: 2026-08-27 Winston DM, recall query polluted
+// by the mention prefix returned no hits for a fact that was in the vault.
+func sanitizeRecallQuery(userMsg string) string {
+	s := stripLeadingMentions(userMsg)
+	s = strings.TrimSpace(s)
+	if len(s) > maxRecallQueryChars {
+		r := []rune(s)
+		if len(r) > maxRecallQueryChars {
+			s = strings.TrimSpace(string(r[:maxRecallQueryChars]))
+		}
+	}
+	return s
 }
 
 // trimToLines returns at most n lines from s, appending "…" if truncated.

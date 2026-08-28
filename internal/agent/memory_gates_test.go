@@ -752,3 +752,34 @@ func TestDistillFactContent_PlainFactUnchanged(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// TestIsQuestionShaped_TrailingMarkAndInterrogativeOpeners verifies the
+// question detector used to gate model-initiated memory writes: it must
+// catch both a trailing '?' and a bare interrogative opener without one.
+func TestIsQuestionShaped_TrailingMarkAndInterrogativeOpeners(t *testing.T) {
+	yes := []string{
+		"what's our production database called?",
+		"@Winston what's our production database called?",
+		"What is the deploy window",
+		"Who owns the staging server",
+		"is the CI pipeline green",
+		"Can you tell me the vault name",
+	}
+	for _, s := range yes {
+		if !isQuestionShaped(s) {
+			t.Errorf("isQuestionShaped(%q) = false, want true", s)
+		}
+	}
+
+	no := []string{
+		"our production database is named yggdrasil",
+		"for the record, the staging server is called valkyrie",
+		"remember this: deploys happen on Fridays",
+		"",
+	}
+	for _, s := range no {
+		if isQuestionShaped(s) {
+			t.Errorf("isQuestionShaped(%q) = true, want false", s)
+		}
+	}
+}

@@ -1645,6 +1645,43 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 	}
 }
 
+// visibleTokenGate tracks the visible content actually sent to the client
+// for one streaming run, so runWSChat's onToken can self-correct when a
+// mid-stream rewrite changes a prefix that was already emitted (e.g. the
+// harness clock label "Local time now: Friday, ...ET" only becomes "It's
+// Friday, ...ET." once the stamp finishes streaming — see
+// backend.stripHarnessClockLabel). Without this, a divergence (new visible
+// content that is not a suffix-extension of what shipped) would either be
+// silently dropped or have its emitted-so-far bookkeeping quietly
+// overwritten as if the client had received it, permanently wedging the
+// live bubble on stale partial text (huginn: hallway fast-path prefix
+// drop). Emitted must only ever be updated to a value that was actually
+// handed to emit().
+type visibleTokenGate struct {
+	emitted string
+}
+
+// next reports what to send for the newly computed visible content.
+//   - visible == emitted: nothing changed, emit is false.
+//   - visible extends emitted: delta is the plain append suffix.
+//   - visible diverges from emitted (not a suffix-extension — a rewrite
+//     changed earlier characters): delta is the full visible content and
+//     replace is true, telling the client to repaint from scratch instead
+//     of appending. This is the only correct way to fix already-emitted
+//     characters over an append-only "token" stream.
+func (g *visibleTokenGate) next(visible string) (delta string, replace bool, emit bool) {
+	if visible == g.emitted {
+		return "", false, false
+	}
+	if g.emitted == "" || strings.HasPrefix(visible, g.emitted) {
+		delta = strings.TrimPrefix(visible, g.emitted)
+		g.emitted = visible
+		return delta, false, delta != ""
+	}
+	g.emitted = visible
+	return visible, true, true
+}
+
 // runWSChat executes one chat turn for sessionID. It runs under a context
 // derived from the server lifecycle (see beginChatRun), NOT the originating
 // client's connection context, so the run survives client disconnects and tab
@@ -1673,7 +1710,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
 	}
-	var lastVisible string
+	var tokenGate visibleTokenGate
 	onToken := func(token string) {
 		assistantBuf.WriteString(token)
 		raw := assistantBuf.String()
@@ -1687,18 +1724,15 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if !agent.IsTrivialPingAsk(userMsg) && backend.IsLeftoverPongSpeech(visible) {
 			visible = ""
 		}
-		if visible == lastVisible {
+		delta, replace, doEmit := tokenGate.next(visible)
+		if !doEmit {
 			return
 		}
-		if lastVisible == "" || strings.HasPrefix(visible, lastVisible) {
-			delta := strings.TrimPrefix(visible, lastVisible)
-			lastVisible = visible
-			if delta != "" {
-				emit(WSMessage{Type: "token", Content: delta})
-			}
-			return
+		msg := WSMessage{Type: "token", Content: delta}
+		if replace {
+			msg.Payload = map[string]any{"replace": true}
 		}
-		lastVisible = visible
+		emit(msg)
 	}
 	onEvent := func(ev backend.StreamEvent) {
 		// StreamDone is an internal backend signal. parseSSE emits it at the

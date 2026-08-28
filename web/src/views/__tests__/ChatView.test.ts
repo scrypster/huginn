@@ -2164,6 +2164,33 @@ describe('ChatView — message display edge cases', () => {
     expect(streaming[0].content).toBe('PONG')
   })
 
+  it('token with payload.replace repaints the bubble instead of appending', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: 'what time is it' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    // Server streamed a partial harness-clock fragment, then the rewrite
+    // settled and it corrects the bubble with a replace token instead of
+    // appending — appending would leave "Friday, August 28It's Friday, ...".
+    mockWs.simulateMessage({ type: 'token', content: 'Friday, August 28' })
+    mockWs.simulateMessage({
+      type: 'token',
+      content: "It's Friday, August 28, 2026, 12:13 AM ET.",
+      payload: { replace: true },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streaming = msgs.filter((m: any) => m.role === 'assistant')
+    expect(streaming).toHaveLength(1)
+    expect(streaming[0].content).toBe("It's Friday, August 28, 2026, 12:13 AM ET.")
+  })
+
   it('plain streamed PONG does not drop the first character', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = [

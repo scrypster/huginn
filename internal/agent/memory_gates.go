@@ -394,6 +394,27 @@ func isDeclarativeFactAsk(userMsg string) bool {
 	return possessiveFactRE.MatchString(body)
 }
 
+// interrogativeOpenerRE matches a message that opens with a common question
+// word/verb, even without a trailing '?' (some chat clients strip it, some
+// users just don't type it).
+var interrogativeOpenerRE = regexp.MustCompile(`(?i)^(what|who|when|where|why|how|which|is|are|was|were|do|does|did|can|could|would|should|will|has|have|had)\b`)
+
+// isQuestionShaped reports whether userMsg reads as a question — either a
+// trailing '?' or an interrogative opener. Used to gate model-initiated
+// memory writes: live repro (2026-08-27, Winston DM) shows a question-shaped
+// turn must be answered from recall, never by inventing and storing a new
+// "fact".
+func isQuestionShaped(userMsg string) bool {
+	body := stripLeadingMentions(strings.TrimSpace(userMsg))
+	if body == "" {
+		return false
+	}
+	if strings.HasSuffix(body, "?") {
+		return true
+	}
+	return interrogativeOpenerRE.MatchString(body)
+}
+
 func isTrivialSpeech(s string) bool {
 	t := strings.ToLower(strings.TrimSpace(s))
 	t = strings.TrimRight(t, ".! ")

@@ -155,6 +155,27 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 		return makeResult(fmt.Sprintf("I don't have %s.", toolName))
 	}
 
+	// Memory write gate: a question-shaped turn must be answered from recall,
+	// never by inventing and storing a new "fact". Live repro (2026-08-27,
+	// Winston DM): asked "what's our production database called?", the model
+	// skipped recall, invented "PostgreSQL", and wrote it to the vault as a
+	// human-confidence-1 fact. Intercept muninn write-tool calls here — before
+	// they ever reach Muninn — whenever the turn's user message reads as a
+	// question. Statement-shaped turns pass through untouched.
+	if isMuninnWriteTool(toolName) && isQuestionShaped(cfg.MemoryUserMsg) {
+		blockOutput := "This is a question, not a new fact — I did not store anything. " +
+			"Call muninn_recall with the user's question as context and answer from what you find. " +
+			"Never store your own guess or inference as if it were a fact the user told you."
+		if cfg.OnToolCall != nil {
+			cfg.OnToolCall(callID, toolName, argsMap)
+		}
+		blockResult := tools.ToolResult{Output: blockOutput}
+		if cfg.OnToolDone != nil {
+			cfg.OnToolDone(callID, toolName, blockResult)
+		}
+		return makeResult(blockOutput)
+	}
+
 	if cfg.Gate != nil {
 		req := permissions.PermissionRequest{
 			ToolName: toolName,

@@ -2638,7 +2638,18 @@ watch(wsRef, (ws) => {
       const msgs = getMessages(sid)
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
       if (streamMsg?.streaming) {
-        streamMsg.content += msg.content ?? ''
+        // A server-side rewrite (e.g. the harness clock label settling into
+        // "It's {stamp}." once the stamp finishes streaming) can change text
+        // already sent to the client. The server flags that correction with
+        // payload.replace so the bubble is repainted from scratch instead of
+        // appending — appending here would double up or permanently strand
+        // the client on stale partial text (huginn: hallway fast-path
+        // leading-prefix drop).
+        if (msg.payload?.replace) {
+          streamMsg.content = msg.content ?? ''
+        } else {
+          streamMsg.content += msg.content ?? ''
+        }
         streamMsg.content = visibleAssistantContent(streamMsg.content)
         scrollToBottom()
         return
