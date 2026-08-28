@@ -134,7 +134,6 @@ func TestFillTrivialPingPersist_LeftoverPongDoesNotLeak(t *testing.T) {
 	}
 }
 
-
 func containsClockLabel(s string) bool {
 	return hasHarnessClockLabel(s)
 }
@@ -241,5 +240,49 @@ func TestPersistVisibleAssistantContent_ClosesMidClause(t *testing.T) {
 	q := PersistVisibleAssistantContent("Could you please provide more context or ask a different question?")
 	if q != "Could you please provide more context or ask a different question?" {
 		t.Fatalf("question closer changed: %q", q)
+	}
+}
+
+func TestBindPersistToThisTurn_SessionLeftoverPong(t *testing.T) {
+	// Session: prior ping persist, then a non-ping ask. Leftover Pong
+	// must not write onto the later user row.
+	for _, ask := range []string{
+		"what company is this channel in?",
+		"hire a teammate",
+		"Ask Steve for the hostname",
+		"thanks",
+	} {
+		content, write := BindPersistToThisTurn("u-ping", "ping", "u-next", ask, "Pong.")
+		if write || content != "" {
+			t.Errorf("leftover ping persist onto %q: write=%v content=%q", ask, write, content)
+		}
+		content, write = BindPersistToThisTurn("u-next", ask, "u-next", ask, "Pong.")
+		if !write {
+			t.Errorf("same-turn %q should still write (empty after drop)", ask)
+		}
+		if content != "" {
+			t.Errorf("same-turn leftover Pong on %q: %q, want empty", ask, content)
+		}
+	}
+	content, write := BindPersistToThisTurn("u-ping", "ping", "u-ping", "ping", "Pong.")
+	if !write || content != "Pong." {
+		t.Fatalf("isolated ping: write=%v content=%q, want Pong.", write, content)
+	}
+	content, write = BindPersistToThisTurn("u1", "ping", "u2", "@Winston ping two", "Pong.")
+	if !write || content != "Pong." {
+		t.Fatalf("FIFO ping burst: write=%v content=%q, want Pong.", write, content)
+	}
+}
+
+func TestFillTrivialHeadcountPersist_WhoIsHere(t *testing.T) {
+	names := []string{"Winston", "Reggie", "Steve"}
+	for _, ask := range []string{"who is here", "who's here", "@Winston who is here"} {
+		got := FillTrivialHeadcountPersist("", ask, names)
+		if !containsAll(got, "3", "Winston", "Reggie", "Steve") {
+			t.Errorf("who-is-here fill %q: %q", ask, got)
+		}
+	}
+	if got := FillTrivialHeadcountPersist("", "who is in Lab", names); got != "" {
+		t.Fatalf("Lab roster must not headcount-fill: %q", got)
 	}
 }

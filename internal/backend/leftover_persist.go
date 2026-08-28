@@ -184,7 +184,7 @@ func isTrivialPingAsk(s string) bool {
 	return trivialPingRE.MatchString(norm)
 }
 
-var trivialHeadcountAskRE = regexp.MustCompile(`(?i)\b(?:how many people(?: are(?: in this channel| here)?)?|who(?:'?s| is) in this channel)\b`)
+var trivialHeadcountAskRE = regexp.MustCompile(`(?i)\b(?:how many people(?: are(?: in this channel| here)?)?|who(?:'?s| is) (?:in this channel|here)|who(?:'?s| is) on the (?:team|roster)|roster)\b`)
 
 func isTrivialHeadcountAsk(s string) bool {
 	norm := mentionOnlyRE.ReplaceAllString(s, " ")
@@ -273,4 +273,21 @@ func PendingHarnessClockPrefix(s string) bool {
 // should persist even when a newer request superseded the run.
 func IsHarnessFillAsk(s string) bool {
 	return isTrivialPingAsk(s) || isTrivialHeadcountAsk(s)
+}
+
+// BindPersistToThisTurn filters persistAccumulated with THIS turn's user
+// id/text. Leftover assistant stream from a prior ping ("Pong.") is dropped
+// when the current ask is not ping/pong. If a newer user row is already in
+// the session, leftover Pong is not written onto that later ask unless the
+// successor is also a queued ping (FIFO burst).
+func BindPersistToThisTurn(thisTurnUserID, thisTurnAsk, latestUserID, latestUserAsk, stream string) (content string, write bool) {
+	content = PersistVisibleAssistantContent(stream, thisTurnAsk)
+	// A newer user row is already last (cancelled ping, then company/hire/…).
+	// Only refuse leftover Pong onto that later ask. Real speech still writes.
+	if latestUserID != "" && latestUserID != thisTurnUserID && !isTrivialPingAsk(latestUserAsk) {
+		if isLeftoverPongOnly(content) || (isTrivialPingAsk(thisTurnAsk) && isLeftoverPongOnly(stream)) {
+			return "", false
+		}
+	}
+	return content, true
 }
