@@ -35,6 +35,7 @@ type ContextBuilder struct {
 	skillsFragment string
 	notepads       []*notepad.Notepad
 	gitRoot        string
+	workspaceRoot  string
 	searcher       search.Searcher
 }
 
@@ -75,6 +76,16 @@ func (cb *ContextBuilder) SetGitRoot(root string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.gitRoot = root
+}
+
+// SetWorkspaceRoot sets a fallback workspace root used for loading project
+// instructions (.huginn.md) when no git root is set. Callers that operate
+// outside a git repository (or that haven't wired git detection at all)
+// should set this so .huginn.md still loads in a plain directory.
+func (cb *ContextBuilder) SetWorkspaceRoot(root string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.workspaceRoot = root
 }
 
 // SetSearcher sets the semantic searcher for context retrieval.
@@ -119,6 +130,7 @@ func (cb *ContextBuilder) BuildCtx(ctx context.Context, query string, modelName 
 	// Snapshot mutable fields under the read lock to avoid data races.
 	cb.mu.RLock()
 	gitRoot := cb.gitRoot
+	workspaceRoot := cb.workspaceRoot
 	skillsFragment := cb.skillsFragment
 	notepads := cb.notepads
 	searcher := cb.searcher
@@ -196,8 +208,19 @@ func (cb *ContextBuilder) BuildCtx(ctx context.Context, query string, modelName 
 	// every context-build path (web chat, delegated threads, scheduled agents)
 	// gets them consistently — not just the one call site that used to load them
 	// directly (mcp_agent_chat.go).
-	if gitRoot != "" {
-		if projectInstructions := LoadProjectInstructions(gitRoot); projectInstructions != "" {
+	//
+	// Prefer gitRoot (also used for git context above), but fall back to
+	// workspaceRoot when there's no git root — e.g. a plain, non-git
+	// directory, or a caller that only wired workspace detection. Without
+	// this fallback .huginn.md silently stops loading outside a git repo,
+	// even though the older direct-load path (o.workspaceRoot) never had
+	// that restriction.
+	instructionsRoot := gitRoot
+	if instructionsRoot == "" {
+		instructionsRoot = workspaceRoot
+	}
+	if instructionsRoot != "" {
+		if projectInstructions := LoadProjectInstructions(instructionsRoot); projectInstructions != "" {
 			result += "\n\n## Project Instructions\n" + projectInstructions
 		}
 	}

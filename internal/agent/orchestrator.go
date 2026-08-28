@@ -103,6 +103,7 @@ type Orchestrator struct {
 	workspaceRoot    string                // set by SetGitRoot; used to load .huginn.md project instructions
 	huginnHome       string                // set by SetHuginnHome; used to locate agent memory files
 	skillsReg        *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
+	hooks            *HookRegistry         // PreToolUse/PostToolUse chain (G10); nil until SetHooks. Carries G1 syntax validation.
 
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string
@@ -378,6 +379,7 @@ func (o *Orchestrator) CodeWithAgent(
 		return agCodeErr
 	}
 	cfg := RunLoopConfig{
+		Hooks:              o.toolHooks(),
 		MaxTurns:           maxTurns,
 		Messages:           messages,
 		Tools:              vr.sessionReg,

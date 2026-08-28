@@ -201,6 +201,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 		ctx = session.WithEnv(ctx, agentSess.Env)
 
 		loopCfg := RunLoopConfig{
+			Hooks:            o.toolHooks(),
 			MaxTurns:         50,
 			ModelName:        ag.GetModelID(),
 			Messages:         msgs,

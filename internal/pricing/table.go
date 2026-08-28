@@ -104,14 +104,26 @@ func IsCloudModel(table map[string]PricingEntry, model string) bool {
 }
 
 // Lookup resolves a model ID to a pricing entry, falling back to the
-// longest table key that appears as a substring of model when there is no
-// exact match (e.g. a dated/regional variant like "claude-opus-4-6-us" or
-// "claude-sonnet-4-6-20260615" still resolves against "claude-opus-4-6" /
-// "claude-sonnet-4-6"). This replaces the ad-hoc substring table that used
-// to live in internal/threadmgr/cost.go — that package now calls Lookup
-// against this table instead of keeping its own, so there is exactly one
-// place pricing numbers are verified and corrected. Returns ok=false for
-// models with no exact or substring match (e.g. local Ollama models).
+// longest table key that appears as a WORD-BOUNDARY match within model when
+// there is no exact match (e.g. a dated/regional variant like
+// "claude-opus-4-6-us" or "claude-sonnet-4-6-20260615" still resolves
+// against "claude-opus-4-6" / "claude-sonnet-4-6"). This replaces the
+// ad-hoc substring table that used to live in internal/threadmgr/cost.go —
+// that package now calls Lookup against this table instead of keeping its
+// own, so there is exactly one place pricing numbers are verified and
+// corrected.
+//
+// The match is boundary-aware, not a bare strings.Contains: the matched key
+// must be flanked by non-alphanumeric characters (or the start/end of the
+// string) on both sides. This matters most for the short 2-char OpenAI keys
+// ("o1", "o3") — a bare Contains would mis-price any model whose name merely
+// contains those two characters mid-token (e.g. a hypothetical
+// "gpto1-custom" or "foo3bar" model), pricing it as an OpenAI o1/o3 reasoning
+// model it isn't. "chat-o1-preview" still matches "o1" (flanked by '-' on
+// both sides); "gpto1-custom" does not (flanked by 't' on the left).
+//
+// Returns ok=false for models with no exact or boundary-match (e.g. local
+// Ollama models).
 func Lookup(table map[string]PricingEntry, model string) (PricingEntry, bool) {
 	if entry, ok := table[model]; ok {
 		return entry, true
@@ -124,13 +136,50 @@ func Lookup(table map[string]PricingEntry, model string) (PricingEntry, bool) {
 		if key == "" {
 			continue
 		}
-		if strings.Contains(lower, strings.ToLower(key)) && len(key) > len(bestKey) {
+		lowerKey := strings.ToLower(key)
+		if hasWordBoundaryMatch(lower, lowerKey) && len(key) > len(bestKey) {
 			bestKey = key
 			best = entry
 			found = true
 		}
 	}
 	return best, found
+}
+
+// isAlnumByte reports whether b is an ASCII letter or digit. Model IDs are
+// ASCII, so a byte-level check is sufficient and avoids rune decoding.
+func isAlnumByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// hasWordBoundaryMatch reports whether key occurs in s at a position flanked
+// by non-alphanumeric characters (or the start/end of s) on both sides —
+// i.e. key appears as its own token, not merely as a run of characters
+// inside a longer alphanumeric token. Scans all occurrences of key in s
+// since an early, non-boundary occurrence must not shadow a later
+// boundary-matching one.
+func hasWordBoundaryMatch(s, key string) bool {
+	if key == "" {
+		return false
+	}
+	searchFrom := 0
+	for {
+		idx := strings.Index(s[searchFrom:], key)
+		if idx == -1 {
+			return false
+		}
+		start := searchFrom + idx
+		end := start + len(key)
+		beforeOK := start == 0 || !isAlnumByte(s[start-1])
+		afterOK := end == len(s) || !isAlnumByte(s[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		searchFrom = start + 1
+		if searchFrom >= len(s) {
+			return false
+		}
+	}
 }
 
 // MonthlyKey returns the KV key for monthly cost tracking.

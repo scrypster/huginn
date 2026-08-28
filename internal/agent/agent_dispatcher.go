@@ -755,6 +755,7 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 
 	// 7. Run the tool-calling loop.
 	cfg := RunLoopConfig{
+		Hooks:              o.toolHooks(),
 		MaxTurns:           opts.maxTurns,
 		ModelName:          ag.GetModelID(),
 		Messages:           messages,

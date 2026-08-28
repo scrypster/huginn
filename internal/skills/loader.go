@@ -109,6 +109,19 @@ func (l *Loader) LoadAll() ([]Skill, []error) {
 // without a git repo in the path.
 const maxRuleFileWalkDepth = 32
 
+// maxRuleFileBytes caps how much of a single rule file (CLAUDE.md, AGENTS.md,
+// etc.) is loaded. Matches the notepad 32KB precedent (maxNotepadsChars in
+// internal/agent/context.go) — an oversized rule file is truncated with a
+// visible marker instead of silently blowing the context budget.
+const maxRuleFileBytes = 32 * 1024
+
+// maxRuleFilesTotalBytes bounds the concatenated size of ALL rule files
+// LoadRuleFiles collects while walking every directory level up to the git
+// root (multiple known patterns per level, multiple levels). Without this,
+// a deep tree with several rule files per level can concatenate far more
+// than any single-file cap would suggest.
+const maxRuleFilesTotalBytes = 4 * maxRuleFileBytes
+
 // LoadRuleFiles scans workspaceRoot, and every ancestor directory up to AND
 // INCLUDING the first directory containing a .git marker, for known provider
 // rule file patterns. This picks up instructions living above the working
@@ -132,6 +145,9 @@ func (l *Loader) LoadRuleFiles(workspaceRoot string) string {
 	root := filepath.Clean(workspaceRoot)
 	dir := root
 	var parts []string
+	totalBytes := 0
+	budgetExhausted := false
+runwalk:
 	for i := 0; i < maxRuleFileWalkDepth; i++ {
 		for _, pattern := range knownRuleFiles {
 			path := filepath.Join(dir, pattern)
@@ -143,8 +159,20 @@ func (l *Loader) LoadRuleFiles(workspaceRoot string) string {
 			if rel, relErr := filepath.Rel(root, dir); relErr == nil && rel != "." {
 				label = filepath.Join(rel, pattern)
 			}
+			content := strings.TrimRight(string(data), "\n")
+			content, fileTruncated := truncateRuleFile(content)
+
+			if totalBytes+len(content) > maxRuleFilesTotalBytes {
+				budgetExhausted = true
+				break runwalk
+			}
+			totalBytes += len(content)
+
 			header := fmt.Sprintf("// Rules from: %s", label)
-			parts = append(parts, header+"\n"+strings.TrimRight(string(data), "\n"))
+			if fileTruncated {
+				header += fmt.Sprintf(" (truncated, over %dKB cap)", maxRuleFileBytes/1024)
+			}
+			parts = append(parts, header+"\n"+content)
 		}
 		// Stop after processing the directory containing the git root marker.
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
@@ -156,5 +184,40 @@ func (l *Loader) LoadRuleFiles(workspaceRoot string) string {
 		}
 		dir = parent
 	}
+	if budgetExhausted {
+		parts = append(parts, fmt.Sprintf("// …[remaining rule files skipped, total cap of %dKB reached]", maxRuleFilesTotalBytes/1024))
+	}
 	return strings.Join(parts, "\n\n")
+}
+
+// truncateRuleFile caps content at maxRuleFileBytes, appending a clear
+// marker naming how much was cut when truncation occurs. Returns the
+// (possibly truncated) content and whether truncation happened.
+func truncateRuleFile(content string) (string, bool) {
+	if len(content) <= maxRuleFileBytes {
+		return content, false
+	}
+	overBytes := len(content) - maxRuleFileBytes
+	overKB := (overBytes + 1023) / 1024
+	if overKB < 1 {
+		overKB = 1
+	}
+	// Back the cut off any partial UTF-8 rune so the concatenated rule text
+	// never carries an invalid byte sequence (a raw byte slice can split a
+	// multi-byte rune).
+	cut := runeSafeCut(content, maxRuleFileBytes)
+	return content[:cut] + fmt.Sprintf("\n…[truncated, %d KB over cap]", overKB), true
+}
+
+// runeSafeCut returns the largest index <= n at which s can be sliced without
+// splitting a multi-byte UTF-8 rune, walking back over any trailing UTF-8
+// continuation bytes (0b10xxxxxx) that a cut at n would orphan.
+func runeSafeCut(s string, n int) int {
+	if n >= len(s) {
+		return len(s)
+	}
+	for n > 0 && s[n]&0xC0 == 0x80 {
+		n--
+	}
+	return n
 }

@@ -655,6 +655,8 @@ func main() {
 		tools.RegisterTestsTool(toolReg, cwd, bashTimeout)
 		tools.RegisterGitHubTools(toolReg, cwd)
 		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+		tools.RegisterGitLabTools(toolReg, cwd)
+		toolReg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, cwd)
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
@@ -2871,6 +2873,8 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		tools.RegisterTestsTool(toolReg, srvCWD, srvBashTimeout)
 		tools.RegisterGitHubTools(toolReg, srvCWD)
 		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+		tools.RegisterGitLabTools(toolReg, srvCWD)
+		toolReg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, srvCWD)
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
@@ -3271,6 +3275,10 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// values degrade specific features but never block boot.
 		orch.SetGitRoot(srvCWD)
 		orch.SetHuginnHome(huginnHome)
+		// G10/G1: PreToolUse/PostToolUse chain + edit-time syntax validation
+		// (blocks syntactically-broken Go/Python writes; per-repo overridable
+		// via .huginn/workspace.json syntax_validation).
+		orch.EnableToolHooks()
 		// Wire agent memory store so cross-session summaries and recall work.
 		// Mirrors lines ~440-451 in TUI mode but scoped to server mode.
 		var srvMemStore agentslib.MemoryStoreIface
