@@ -72,3 +72,84 @@ func TestLoadRuleFiles_RecognisesAgentsMD(t *testing.T) {
 		t.Errorf("output should label the source file, got:\n%s", out)
 	}
 }
+
+// LoadRuleFiles must cap an oversized single rule file, matching the notepad
+// 32KB precedent, and mark the truncation clearly rather than dropping the
+// file or silently blowing the context budget.
+func TestLoadRuleFiles_OversizedFileTruncatesWithMarker(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	over := 3 * 1024
+	content := strings.Repeat("x", maxRuleFileBytes+over)
+	if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := &Loader{}
+	out := l.LoadRuleFiles(repo)
+
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("expected a truncation marker in output, got:\n%s", out[:200])
+	}
+	if len(out) >= len(content) {
+		t.Errorf("expected truncated output shorter than the original file: out=%d content=%d", len(out), len(content))
+	}
+}
+
+// A small rule file well under the cap must be loaded byte-for-byte, with no
+// truncation marker attached.
+func TestLoadRuleFiles_SmallFileUntouched(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "small rule content"
+	if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := &Loader{}
+	out := l.LoadRuleFiles(repo)
+
+	if !strings.Contains(out, content) {
+		t.Errorf("expected small file content intact, got:\n%s", out)
+	}
+	if strings.Contains(out, "truncated") {
+		t.Errorf("small file should not carry a truncation marker, got:\n%s", out)
+	}
+}
+
+// The TOTAL size across every rule file walked (multiple patterns per level,
+// multiple levels up to the git root) must stay bounded — a directory tree
+// with many rule files must not concatenate unboundedly.
+func TestLoadRuleFiles_TotalSizeBounded(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write every known rule pattern at the repo root, each near the
+	// per-file cap, so the total comfortably exceeds maxRuleFilesTotalBytes.
+	nearCapContent := strings.Repeat("y", maxRuleFileBytes-100)
+	for _, pattern := range knownRuleFiles {
+		full := filepath.Join(repo, pattern)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(nearCapContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	l := &Loader{}
+	out := l.LoadRuleFiles(repo)
+
+	if len(out) > maxRuleFilesTotalBytes+8*1024 { // small slack for headers/markers
+		t.Errorf("expected total output bounded near %d bytes, got %d", maxRuleFilesTotalBytes, len(out))
+	}
+	if !strings.Contains(out, "reached") {
+		t.Errorf("expected a marker noting the total cap was reached, got tail:\n%s", out[len(out)-200:])
+	}
+}

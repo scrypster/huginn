@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -455,5 +456,27 @@ func TestPromptTool_ExecuteShell_MalformedBodyTemplate(t *testing.T) {
 	result := pt.Execute(context.Background(), map[string]any{})
 	if !result.IsError {
 		t.Error("expected error for malformed shell body template")
+	}
+}
+
+// TestTruncateRuleFile_RuneSafe verifies the rule-file truncation backs off to
+// a UTF-8 rune boundary rather than slicing mid-rune (which would emit invalid
+// bytes into the concatenated rule text).
+func TestTruncateRuleFile_RuneSafe(t *testing.T) {
+	pad := strings.Repeat("a", maxRuleFileBytes-1)
+	s := pad + "€€€€" // first euro sign straddles the byte cap
+	got, truncated := truncateRuleFile(s)
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("truncated rule file contains invalid UTF-8")
+	}
+	body := strings.SplitN(got, "\n…[truncated", 2)[0]
+	if len(body) > maxRuleFileBytes {
+		t.Errorf("body %d exceeds cap %d", len(body), maxRuleFileBytes)
+	}
+	if !utf8.ValidString(body) {
+		t.Error("kept body is not valid UTF-8")
 	}
 }

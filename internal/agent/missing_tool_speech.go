@@ -38,6 +38,8 @@ var externalGrantNames = []string{
 	"aws", "github", "github_cli",
 	"gh_pr_list", "gh_pr_view", "gh_pr_diff", "gh_pr_create",
 	"gh_issue_list", "gh_issue_view", "gh_issue_create",
+	"gitlab", "gitlab_cli",
+	"glab_mr_create", "glab_mr_checks", "glab_ci_view_failed", "glab_mr_comment",
 	"slack",
 }
 
@@ -171,6 +173,9 @@ func grantSchemasFromAgent(ag *agents.Agent) []backend.Tool {
 			schemas = append(schemas, backend.Tool{Function: backend.ToolFunction{Name: p}})
 			if p == "github_cli" || p == "github" {
 				schemas = append(schemas, backend.Tool{Function: backend.ToolFunction{Name: "github"}})
+			}
+			if p == "gitlab_cli" || p == "gitlab" {
+				schemas = append(schemas, backend.Tool{Function: backend.ToolFunction{Name: "gitlab"}})
 			}
 		}
 	}

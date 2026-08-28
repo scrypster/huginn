@@ -13,6 +13,7 @@ import (
 	huginsession "github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/skills"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/workspace"
 )
 
 // recordLLMLatency records a latency sample to the stats collector.
@@ -375,6 +376,41 @@ func (o *Orchestrator) SetGitRoot(root string) {
 	defer o.mu.Unlock()
 	o.workspaceRoot = root
 	o.contextBuilder.SetGitRoot(root)
+	// Also set as the workspace-root fallback so project instructions keep
+	// loading even for a caller path that later clears gitRoot without a
+	// corresponding workspace root (defensive; see ContextBuilder.BuildCtx).
+	o.contextBuilder.SetWorkspaceRoot(root)
+}
+
+// EnableToolHooks builds the PreToolUse/PostToolUse chain (G10) and registers
+// G1 edit-time syntax validation, reading the mode fresh each call from the
+// workspace config so a repo can set syntax_validation: block|warn|off. Wired
+// into every RunLoop the orchestrator drives.
+func (o *Orchestrator) EnableToolHooks() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.hooks != nil {
+		return
+	}
+	reg := NewHookRegistry()
+	root := o.workspaceRoot
+	RegisterSyntaxValidation(reg, func() string {
+		if root == "" {
+			return "block"
+		}
+		if cfg, err := workspace.LoadConfig(root); err == nil && cfg != nil && cfg.SyntaxValidation != "" {
+			return cfg.SyntaxValidation
+		}
+		return "block"
+	})
+	o.hooks = reg
+}
+
+// toolHooks returns the registered hook chain (may be nil).
+func (o *Orchestrator) toolHooks() *HookRegistry {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.hooks
 }
 
 // WorkspaceRoot returns the git repository root set by SetGitRoot.

@@ -93,6 +93,43 @@ func GitHubCLIToolNames() []string {
 	}
 }
 
+// RegisterGitLabTools registers all glab CLI tools — the second forge belt,
+// mirroring RegisterGitHubTools's gh_* set for GitLab. Only called if
+// exec.LookPath("glab") succeeds. sandboxRoot is set as the working
+// directory for every glab invocation, same discipline as gh_* (see
+// ghBase.command) — without it glab runs in the process's own cwd instead
+// of the project the agent is operating on.
+//
+// Deliberately no typed mr-merge tool, matching gh: humans merge.
+//
+// Bitbucket is NOT given a belt here. As of this wave there is no
+// maintained official Bitbucket PR CLI to mirror gh/glab against — Atlassian
+// does not ship one, and the community options are unmaintained or
+// third-party wrappers around the REST API. A future implementer adding
+// Bitbucket support should build directly against the Bitbucket REST API
+// (or Bitbucket Pipelines API for CI) rather than shelling out to a CLI, or
+// re-check whether an official CLI has since shipped before assuming this
+// gap still holds.
+func RegisterGitLabTools(reg *Registry, sandboxRoot string) {
+	glabPath, err := exec.LookPath("glab")
+	if err != nil {
+		return
+	}
+	base := glBase{GlabPath: glabPath, SandboxRoot: sandboxRoot}
+	reg.Register(&GlabMRCreateTool{glBase: base})
+	reg.Register(&GlabMRChecksTool{glBase: base})
+	reg.Register(&GlabCIViewFailedTool{glBase: base})
+	reg.Register(&GlabMRCommentTool{glBase: base})
+}
+
+// GitLabCLIToolNames returns the registered names of all glab CLI tools.
+// Used by main.go to tag them with the "gitlab_cli" provider.
+func GitLabCLIToolNames() []string {
+	return []string{
+		"glab_mr_create", "glab_mr_checks", "glab_ci_view_failed", "glab_mr_comment",
+	}
+}
+
 // BuiltinToolNames returns the names of all non-external tools that are
 // registered by RegisterBuiltins, RegisterGitTools, RegisterTestsTool,
 // RegisterWebTools, and RegisterWorktreeTools.

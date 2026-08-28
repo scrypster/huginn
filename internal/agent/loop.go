@@ -89,6 +89,11 @@ type RunLoopConfig struct {
 	// this (e.g. some tests).
 	AgentName string
 	SessionID string
+
+	// Hooks is the internal PreToolUse/PostToolUse chain (see hooks.go). Not
+	// user-configurable — the harness populates it. Nil = no hooks, behavior
+	// identical to before hooks existed.
+	Hooks *HookRegistry
 }
 
 // LoopResult is the final state after the loop ends.
@@ -225,6 +230,34 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 		}
 	}
 
+	// PreToolUse hook chain (G10): internal, harness-populated groundings
+	// (e.g. G1 edit-time syntax validation) get a chance to veto the call
+	// here — after the permission gate, before OnBeforeWrite's user-facing
+	// diff preview, so a syntactically-broken edit never even reaches the
+	// approval UI. dispatchTools may be running this concurrently with other
+	// independent tool calls; runPre is goroutine-safe.
+	if cfg.Hooks != nil {
+		if allow, denyReason := cfg.Hooks.runPre(ctx, toolName, argsMap); !allow {
+			denyOutput := fmt.Sprintf("%s blocked: %s", toolName, denyReason)
+			denyResult := tools.ToolResult{
+				Output:  denyOutput,
+				Error:   denyReason,
+				IsError: true,
+				Metadata: map[string]any{
+					"pre_tool_use_denied": true,
+					"reason":              denyReason,
+				},
+			}
+			if cfg.OnToolCall != nil {
+				cfg.OnToolCall(callID, toolName, argsMap)
+			}
+			if cfg.OnToolDone != nil {
+				cfg.OnToolDone(callID, toolName, denyResult)
+			}
+			return makeResult(denyOutput)
+		}
+	}
+
 	if (toolName == "write_file" || toolName == "edit_file") && cfg.OnBeforeWrite != nil {
 		path, oldContent, newContent := previewWrite(toolName, argsMap)
 		writeMu.Lock()
@@ -284,6 +317,14 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 
 	if cfg.OnToolDone != nil {
 		cfg.OnToolDone(callID, toolName, toolResult)
+	}
+
+	// PostToolUse hook chain (G10): fires for every completed call, before
+	// the credential rewrite / truncation pass below, so a hook that
+	// annotates Output (e.g. G1's warn-mode syntax notice) is seen by both
+	// the model and OnToolDone's raw copy already captured above.
+	if cfg.Hooks != nil {
+		cfg.Hooks.runPost(ctx, toolName, argsMap, &toolResult)
 	}
 
 	content := toolResult.Output

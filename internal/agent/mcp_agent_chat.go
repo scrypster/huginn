@@ -122,6 +122,7 @@ func (o *Orchestrator) AgentChat(
 		return agentChatErr
 	}
 	cfg := RunLoopConfig{
+		Hooks:              o.toolHooks(),
 		MaxTurns:           maxTurns,
 		Messages:           messages,
 		Tools:              vr.sessionReg,

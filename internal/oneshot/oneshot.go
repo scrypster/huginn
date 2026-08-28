@@ -94,6 +94,8 @@ func DefaultToolRegistry(cwd string, bashTimeout time.Duration) *tools.Registry 
 	tools.RegisterTestsTool(reg, cwd, bashTimeout)
 	tools.RegisterGitHubTools(reg, cwd)
 	reg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+	tools.RegisterGitLabTools(reg, cwd)
+	reg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 	reg.TagTools(tools.BuiltinToolNames(), "builtin")
 	return reg
 }

@@ -16,6 +16,11 @@ type WorkspaceConfig struct {
 	// workspace, remembered so tools like run_tests can surface it instead of
 	// the model guessing between `make test`, `go test ./...`, etc.
 	LastTestCommand string `json:"last_test_command,omitempty"`
+	// SyntaxValidation controls edit-time syntax validation (G1) for
+	// write_file/edit_file: "block" (default — reject syntactically broken
+	// writes), "warn" (write anyway, annotate the tool result), or "off"
+	// (disable). See internal/tools/validation.NormalizeMode for parsing.
+	SyntaxValidation string `json:"syntax_validation,omitempty"`
 }
 
 // maxDiscoverDepth caps the number of parent directories DiscoverRoot will
