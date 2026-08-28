@@ -173,16 +173,26 @@ func (s *Store) Register(req Request) (*Pending, error) {
 
 // Wait blocks until a decision arrives, the deadline expires, or ctx is done.
 // Every non-delivery outcome is Deny.
-func (s *Store) Wait(ctx context.Context, p *Pending) Decision {
+//
+// The second return value reports whether a HUMAN produced this decision.
+// False means nobody answered — the deadline fired, the hook gave up, or the
+// process is shutting down — and the caller must not record that as a human
+// denial: "a person refused this" and "nobody was watching" are different
+// facts about the operator, and only the second one says the gate went
+// unattended. It is a second return value rather than a new Decision constant
+// so that Deny stays the zero value and Allowed() keeps its meaning: a path
+// that forgets to set anything still denies.
+func (s *Store) Wait(ctx context.Context, p *Pending) (Decision, bool) {
 	timer := time.NewTimer(time.Until(p.expiresAt))
 	defer timer.Stop()
 
 	select {
 	case got, ok := <-p.ch:
 		if !ok {
-			return Deny // channel closed by Close()
+			// Closed by Close(): shutdown released the waiter, no human saw it.
+			return Deny, false
 		}
-		return got
+		return got, true
 	case <-timer.C:
 	case <-ctx.Done():
 	}
@@ -196,7 +206,7 @@ func (s *Store) Wait(ctx context.Context, p *Pending) Decision {
 	s.mu.Unlock()
 
 	if stillPending {
-		return Deny
+		return Deny, false
 	}
 
 	// The entry was already claimed by a Deliver. Because Deliver sends while
@@ -207,11 +217,11 @@ func (s *Store) Wait(ctx context.Context, p *Pending) Decision {
 	select {
 	case got, ok := <-p.ch:
 		if ok {
-			return got
+			return got, true
 		}
 	default:
 	}
-	return Deny
+	return Deny, false
 }
 
 // Deliver hands a decision to a waiter. It reports false when the id is

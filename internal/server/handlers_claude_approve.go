@@ -136,7 +136,7 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		"agent", agent.Name, "tool", req.ToolName, "id", pending.ID)
 	s.broadcastApprovalChange()
 
-	decision := s.approvals.Wait(r.Context(), pending)
+	decision, byHuman := s.approvals.Wait(r.Context(), pending)
 	s.broadcastApprovalChange()
 
 	if decision == approvals.AllowCommand {
@@ -156,12 +156,22 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Audit EVERY outcome, and distinguish them. The allow paths are the ones
+	// with no other record anywhere: Claude Code logs its own denials in
+	// permission_denials but never logs what Huginn waved through, and an
+	// allow here grants a tool the agent's --allowedTools does not contain.
+	// Promotion (AllowTool) additionally rewrites the agent's config, so it
+	// must be separable from a one-off allow when someone asks later how a
+	// tool stopped being gated.
+	if s.auditLog != nil {
+		s.auditLog.Log("tool_permission", req.ToolName, decision.Allowed(),
+			auditReasonFor(decision, byHuman))
+	}
+
 	if !decision.Allowed() {
-		if s.auditLog != nil {
-			s.auditLog.Log("tool_permission", req.ToolName, false, "claude_approval_denied")
-		}
 		slog.Info("claudecode: tool call denied",
-			"agent", agent.Name, "tool", req.ToolName, "id", pending.ID)
+			"agent", agent.Name, "tool", req.ToolName, "id", pending.ID,
+			"by_human", byHuman)
 		respondApprove(w, "deny", "Huginn: "+req.ToolName+" was not approved")
 		return
 	}
@@ -169,6 +179,31 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 	slog.Info("claudecode: tool call approved by a human",
 		"agent", agent.Name, "tool", req.ToolName, "id", pending.ID)
 	respondApprove(w, "allow", "Huginn: "+req.ToolName+" was approved")
+}
+
+// auditReasonFor names the outcome for the audit trail.
+//
+// byHuman separates the two denials that used to share one reason: a person
+// clicking Deny, and a prompt nobody answered before it expired. Only the
+// second one says the gate was unattended, which is the fact an operator
+// reviewing the log actually needs. "prompt_timeout" matches
+// permissions.ReasonPromptTimeout, so both approval systems name it alike.
+//
+// The default is the denial reason, so a Decision added later without touching
+// this function is reported as a refusal rather than as an approval.
+func auditReasonFor(d approvals.Decision, byHuman bool) string {
+	switch d {
+	case approvals.Allow:
+		return "claude_approval_allowed"
+	case approvals.AllowCommand:
+		return "claude_approval_allowed_command"
+	case approvals.AllowTool:
+		return "claude_approval_allowed_tool"
+	}
+	if !byHuman {
+		return "prompt_timeout"
+	}
+	return "claude_approval_denied"
 }
 
 // broadcastApprovalChange tells every connected client that the pending set

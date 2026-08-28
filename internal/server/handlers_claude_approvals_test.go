@@ -60,7 +60,7 @@ func TestDecideDeliversDecision(t *testing.T) {
 	p, _ := s.approvals.Register(approvals.Request{AgentName: "codey", ToolName: "Bash", Summary: "ls"})
 
 	got := make(chan approvals.Decision, 1)
-	go func() { got <- s.approvals.Wait(context.Background(), p) }()
+	go func() { d, _ := s.approvals.Wait(context.Background(), p); got <- d }()
 
 	rr := httptest.NewRecorder()
 	s.handleDecideClaudeApproval(rr, httptest.NewRequest("POST", "/api/v1/claude/approve/decide",
@@ -178,7 +178,7 @@ func TestDecideAllowToolPromotesTheRightAgentAndTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := make(chan approvals.Decision, 1)
-	go func() { got <- s.approvals.Wait(context.Background(), p) }()
+	go func() { d, _ := s.approvals.Wait(context.Background(), p); got <- d }()
 
 	rr := httptest.NewRecorder()
 	s.handleDecideClaudeApproval(rr, httptest.NewRequest("POST", "/api/v1/claude/approve/decide",

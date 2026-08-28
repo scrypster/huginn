@@ -28,7 +28,7 @@ func TestDeliverAllowUnblocksWait(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	if got := s.Wait(context.Background(), p); got != Allow {
+	if got, byHuman := s.Wait(context.Background(), p); got != Allow || !byHuman {
 		t.Fatalf("Wait = %v, want Allow", got)
 	}
 }
@@ -40,10 +40,15 @@ func TestWaitDeniesOnDeadline(t *testing.T) {
 	defer s.Close()
 	p, _ := s.Register(req())
 	start := time.Now()
-	got := s.Wait(context.Background(), p)
+	got, byHuman := s.Wait(context.Background(), p)
 	elapsed := time.Since(start)
 	if got != Deny {
 		t.Fatalf("Wait = %v, want Deny", got)
+	}
+	// The deadline is NOT a human denial: the audit trail has to be able to say
+	// nobody was watching.
+	if byHuman {
+		t.Fatal("Wait reported the deadline as a human decision")
 	}
 	if elapsed < 50*time.Millisecond {
 		t.Fatalf("Wait returned after %v; it did not actually block", elapsed)
@@ -62,8 +67,8 @@ func TestDeliverAfterDeadlineReturnsFalse(t *testing.T) {
 	s := New(20 * time.Millisecond)
 	defer s.Close()
 	p, _ := s.Register(req())
-	if got := s.Wait(context.Background(), p); got != Deny {
-		t.Fatalf("Wait = %v, want Deny", got)
+	if got, byHuman := s.Wait(context.Background(), p); got != Deny || byHuman {
+		t.Fatalf("Wait = (%v, byHuman=%v), want (Deny, false)", got, byHuman)
 	}
 	if s.Deliver(p.ID, Allow) {
 		t.Fatal("Deliver succeeded after the deadline had already denied")
@@ -83,7 +88,7 @@ func TestConcurrentDeliverAndExpireProduceOneWinner(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 			delivered = s.Deliver(p.ID, Allow)
 		}()
-		got := s.Wait(context.Background(), p)
+		got, _ := s.Wait(context.Background(), p)
 		wg.Wait()
 		if delivered && got != Allow {
 			t.Fatalf("Deliver reported success but Wait returned %v", got)
@@ -257,7 +262,7 @@ func TestCloseReleasesPendingWaitersWithDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := make(chan Decision, 1)
-	go func() { got <- s.Wait(context.Background(), p) }()
+	go func() { d, _ := s.Wait(context.Background(), p); got <- d }()
 
 	// Let the waiter park before closing, so this exercises the release path
 	// rather than a Wait that was never blocked.
