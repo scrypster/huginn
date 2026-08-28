@@ -243,7 +243,7 @@ func (s *Server) handlePermissionResponse(msg WSMessage) {
 
 	var decision permissions.Decision
 	switch scope {
-	case "always_agent":
+	case "always_agent", "always_agent_all":
 		decision = permissions.AllowAll
 	case "once":
 		decision = permissions.Allow
@@ -256,7 +256,16 @@ func (s *Server) handlePermissionResponse(msg WSMessage) {
 		return
 	}
 
-	if scope == "always_agent" && req.AgentName != "" && req.ToolName != "" {
+	if scope == "always_agent_all" && req.AgentName != "" {
+		// MJ's "approve everything for this agent": the wildcard grant
+		// suppresses exec prompting for every tool this agent runs, so the
+		// human isn't asked once per tool. Persisted like any other grant;
+		// removable as a "*" chip in the agent editor.
+		if err := s.grantApprovedTool(req.AgentName, "*"); err != nil {
+			slog.Error("permission prompt: failed to persist always-all grant",
+				"agent", req.AgentName, "err", err)
+		}
+	} else if scope == "always_agent" && req.AgentName != "" && req.ToolName != "" {
 		if err := s.grantApprovedTool(req.AgentName, req.ToolName); err != nil {
 			slog.Error("permission prompt: failed to persist always-allow grant",
 				"agent", req.AgentName, "tool", req.ToolName, "err", err)

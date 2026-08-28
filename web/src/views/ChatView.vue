@@ -907,6 +907,9 @@
             <button @click="approvePermission('always_agent')" data-testid="permission-allow-always"
               class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
                      border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Always allow for {{ permissionAgentName }}</button>
+            <button @click="approvePermission('always_agent_all')" data-testid="permission-allow-always-all"
+              class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Always allow everything for {{ permissionAgentName }}</button>
             <button @click="approvePermission('deny')" data-testid="permission-deny"
               class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-red transition-all duration-150
                      border border-huginn-red/30 hover:bg-huginn-red/15 active:scale-95">Deny</button>

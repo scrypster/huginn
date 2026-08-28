@@ -226,3 +226,23 @@ func TestSetExecPromptExempt_EmptyClears(t *testing.T) {
 		t.Errorf("expected the cleared exemption to prompt once, got %d", prompted)
 	}
 }
+
+// MJ's "approve everything for this agent" wildcard: approved_tools ["*"]
+// suppresses exec prompting for every tool on the seeded gate.
+func TestSeedSessionAllowed_WildcardCoversAllExecTools(t *testing.T) {
+	g := NewGate(true, nil)
+	g.SetExecRequiresPrompt(true)
+	prompted := 0
+	g.SetPromptFunc(func(req PermissionRequest) Decision { prompted++; return Deny })
+	fork := g.Fork(nil, nil)
+	fork.SeedSessionAllowed([]string{"*"})
+	for _, tool := range []string{"bash", "run_tests"} {
+		res := fork.CheckDetailed(PermissionRequest{ToolName: tool, Level: tools.PermExec})
+		if !res.Allowed {
+			t.Fatalf("wildcard grant should allow %s without prompting: %+v", tool, res)
+		}
+	}
+	if prompted != 0 {
+		t.Fatalf("promptFunc fired %d times despite wildcard grant", prompted)
+	}
+}

@@ -290,9 +290,18 @@ func (g *Gate) SeedSessionAllowed(toolNames []string) {
 		if name == "" || g.sessionAllowed[name] {
 			continue
 		}
+		// "*" is the MJ "approve everything for this agent" wildcard grant
+		// (approved_tools: ["*"]) — it suppresses exec prompting for every
+		// tool on this forked gate, honored in checkSessionAllowed.
 		g.sessionAllowed[name] = true
 		g.lruTouch(name)
 	}
+}
+
+// sessionAllowedFor reports whether toolName is covered by a session/seeded
+// grant, honoring the "*" wildcard. Callers must hold g.mu.
+func (g *Gate) sessionAllowedFor(toolName string) bool {
+	return g.sessionAllowed[toolName] || g.sessionAllowed["*"]
 }
 
 // SetAllowedProviders configures the set of connection providers whose tools
@@ -470,7 +479,7 @@ func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 	}
 	g.mu.Lock()
 	// Check session allow-list
-	if g.sessionAllowed[req.ToolName] {
+	if g.sessionAllowedFor(req.ToolName) {
 		g.mu.Unlock()
 		return CheckResult{Allowed: true}
 	}
@@ -513,7 +522,7 @@ func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 	switch decision {
 	case AllowAll:
 		g.mu.Lock()
-		if !g.sessionAllowed[req.ToolName] {
+		if !g.sessionAllowedFor(req.ToolName) {
 			g.sessionAllowed[req.ToolName] = true
 			g.lruTouch(req.ToolName)
 			// Evict LRU entry when cap is exceeded (evict exactly one entry).
