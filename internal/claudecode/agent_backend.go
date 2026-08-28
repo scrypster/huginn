@@ -153,11 +153,17 @@ func (b *AgentBackend) ChatCompletion(ctx context.Context, req backend.ChatReque
 	// The whole turn — including every onEvent callback below — runs while
 	// holding this slot. The `claude-approve` approval path MUST NOT route
 	// back into this backend (or into anything that itself waits on this
-	// agent's turn), or the approval deadlocks, and Claude Code's 30s
-	// PreToolUse hook timeout then FAILS OPEN and runs the tool unapproved.
-	// See ClaudeHookTimeoutSecs in hooks.go. It does not: the hook is a
-	// separate `huginn claude-approve` process talking HTTP to the server,
-	// and that handler touches no backend state.
+	// agent's turn), or the approval deadlocks, and Claude Code's PreToolUse
+	// hook timeout (ClaudeHookTimeoutSecs = 300s, see hooks.go) then FAILS
+	// OPEN and runs the tool unapproved.
+	//
+	// It does not route back: the hook is a separate `huginn claude-approve`
+	// process talking HTTP to the server. The handler is not state-free — it
+	// calls agents.LoadAgents to resolve the session's agent, and an
+	// allow_tool promotion writes one agent file — but neither touches THIS
+	// backend or waits on this agent's session slot, which is the property
+	// that matters here. Keep it that way: anything added to that handler
+	// must stay off this backend's path.
 	release, err := acquireSession(ctx, b.semKey)
 	if err != nil {
 		return nil, fmt.Errorf("claudecode agent: gave up waiting for the session: %w", err)

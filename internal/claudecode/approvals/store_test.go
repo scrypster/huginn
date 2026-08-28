@@ -280,3 +280,55 @@ func TestCloseReleasesPendingWaitersWithDeny(t *testing.T) {
 	}
 	s.Close() // idempotent
 }
+
+// TestListSortsBySoonestDeadlineFirst pins an ordering that nothing else does.
+//
+// Deleting the sort.Slice in List() left every other test green, because with
+// one pending entry a map range and a sort are indistinguishable. The order is
+// load-bearing anyway: the browser re-fetches this list on every change and
+// replaces its cards with it, so an unsorted List() reshuffles the cards on
+// screen each refresh, under the user's cursor, next to an Allow button. Most
+// urgent first is also the right reading order.
+func TestListSortsBySoonestDeadlineFirst(t *testing.T) {
+	s := New(time.Minute)
+	defer s.Close()
+
+	// Register in a deliberately unsorted order, with deadlines far enough
+	// apart that scheduling jitter cannot reorder them. Register uses the
+	// store's deadline, so vary it between calls.
+	order := []time.Duration{30 * time.Second, 5 * time.Second, 60 * time.Second, 15 * time.Second}
+	for i, d := range order {
+		s.mu.Lock()
+		s.deadline = d
+		s.mu.Unlock()
+		r := req()
+		r.Summary = string(rune('a' + i))
+		if _, err := s.Register(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := s.List()
+	if len(got) != len(order) {
+		t.Fatalf("List len = %d, want %d", len(got), len(order))
+	}
+	// Expected reading order: 5s, 15s, 30s, 60s → summaries b, d, a, c.
+	wantSummaries := []string{"b", "d", "a", "c"}
+	gotSummaries := make([]string, 0, len(got))
+	for _, v := range got {
+		gotSummaries = append(gotSummaries, v.Summary)
+	}
+	for i := range wantSummaries {
+		if gotSummaries[i] != wantSummaries[i] {
+			t.Fatalf("List order = %v, want %v (soonest deadline first)", gotSummaries, wantSummaries)
+		}
+	}
+	// And the remaining times really are ascending, which is the property the
+	// summaries above stand in for.
+	for i := 1; i < len(got); i++ {
+		if got[i-1].RemainingMS > got[i].RemainingMS {
+			t.Fatalf("RemainingMS not ascending at %d: %d then %d",
+				i, got[i-1].RemainingMS, got[i].RemainingMS)
+		}
+	}
+}
