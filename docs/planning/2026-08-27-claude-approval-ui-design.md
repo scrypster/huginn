@@ -456,3 +456,53 @@ still pass this test?*
 - Prefix or pattern command matching (see §7 — deliberately excluded).
 - Durable pending approvals (see §6 — deliberately excluded).
 - The `LoadAgents()`-per-request concern (deferred from Phase 0, still deferred).
+
+## 12. Known gaps after Phase 1
+
+Surfaced by the final whole-branch review and its scoped re-review, adjudicated and
+deliberately NOT fixed in this phase. Recorded here because they are real and because a
+gap nobody wrote down is a gap nobody fixes.
+
+**Ranked by what they could cost.**
+
+1. **`Remembered()` is truncation-blind, and the hook's `summary_truncated` flag is the
+   only guard.** The server trusts the flag; there is no server-side length check behind
+   it. And the memory LOOKUP at the top of the handler never consults truncation at all.
+   So if a command of exactly `maxCommandBytes` (4096) were ever remembered, a later,
+   longer command sharing that prefix would arrive clipped to the identical key and
+   auto-allow — no card, no human. Phase 1 narrowed the window from "any 4 KiB prefix"
+   to "a remembered command of exactly 4096 bytes", but did not close it. Two cheap
+   hardenings, either sufficient: skip the `Remembered` lookup when `SummaryTruncated` is
+   set, and/or treat `len(Summary) >= 4096` as truncated server-side.
+
+2. **The two genuine auto-allow paths write no audit row.** An allowlisted tool and a
+   remembered command both allow with no card. The remembered-command allow is the only
+   grant in the whole feature with no human in the loop at any point, which makes it the
+   most valuable row the audit log could hold — and it is the one row that does not exist.
+
+3. **Shutdown denials are never audited.** `Server.Stop` closes the audit log (step 2)
+   before releasing pending approvals (step 4), so the denials produced by
+   `approvals.Close()` land in a channel whose drain goroutine has already exited. They
+   are dropped silently rather than crashing — `auditLogger.Log` is a non-blocking send on
+   a never-closed channel. Moving `approvals.Close()` above `auditLog.Close()` fixes it.
+
+4. **No `SetReadDeadline` beside the write-deadline extension.** `ReadTimeout` is 30s.
+   This is harmless *only* because `json.Decoder` does not read the request body to EOF,
+   so net/http never starts the background read that would cancel the request context.
+   Change that decode to `io.ReadAll` some day and every approval starts dying at 30
+   seconds, for reasons that will look nothing like the cause. Extending the read deadline
+   alongside the write deadline is free insurance.
+
+5. **`byHuman == false` conflates three outcomes** — deadline expiry, client hang-up, and
+   shutdown — so all three audit as `prompt_timeout`. Moot while gap 3 stands, since
+   shutdown denials are dropped anyway.
+
+6. **One card test cannot fail.** `ClaudeApprovalCard`'s "stops ticking after unmount"
+   asserts `expect(() => vi.advanceTimersByTime(10000)).not.toThrow()`, which passes with
+   or without the `clearInterval`. The cleanup is present in the source; this test is not
+   what pins it.
+
+Also worth knowing, not a defect: promoting a tool on an agent stored as legacy `.json`
+writes a `.yaml` for **that one agent**, because `SaveAgent` is YAML-only. That matches
+what `handleUpdateAgent` already does. The feature docs tell a user to hand-edit the
+config to undo a promotion — after a promotion, that means the `.yaml`.
