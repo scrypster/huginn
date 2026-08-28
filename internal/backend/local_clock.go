@@ -13,7 +13,10 @@ var (
 	// Speech clock as spoken by Winston/Steve, including optional "at" and **wrap**.
 	speechClockStampRE = regexp.MustCompile(`(?i)\*{0,2}((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4},(?:\s+at)?\s+\d{1,2}:\d{2}\s+(?:AM|PM)\s+ET)\*{0,2}`)
 	timeExcuseRE       = regexp.MustCompile(`(?i)cannot directly provide the current time|cannot directly provide real-time|not having access to real-time data|i don'?t have access to real-time|i do not have access to real-time`)
-	timeAskRE          = regexp.MustCompile(`(?i)\b(?:what time|current time|time is it|time it is|what day|current date|what(?:'s| is) the date|date is it)\b`)
+	// "today's date" / "date today" are ordinary ways to ask for the date and
+	// were missing here: without them stripLeadingBareClockSentence treats the
+	// ask as a non-time ask and deletes the very stamp sentence that answers it.
+	timeAskRE = regexp.MustCompile(`(?i)\b(?:what time|current time|time is it|time it is|what day|current date|what(?:'s| is) the date|date is it|today'?s date|date today)\b`)
 	// Live Steve hallway recap around a real clock stamp. Used to rewrite
 	// leftover time-ask speech to teammate "It's {clock}." without eating
 	// the stamp. "contains Winston" is not enough — the post-bounce
@@ -187,6 +190,37 @@ func isBareClockStamp(s string) bool {
 		rest = strings.TrimSpace(rest)
 	}
 	return rest == ""
+}
+
+// stripLeadingBareClockSentence drops a leading sentence that is ONLY a
+// speech clock stamp ("Friday, August 28, 2026, 8:57 AM ET.") glued onto a
+// delegated-recap answer ("Steve reported: DELTA.") when the human ask was
+// not a time ask. Nobody asked for the clock; the answer sentence(s) that
+// follow are returned untouched for downstream rewrites (relay-frame). A
+// stamp embedded in prose (not its own leading sentence) is left alone —
+// that is the existing embedded-clock behavior. If the stamp is the only
+// content, it is left in place so existing leftover handling (e.g.
+// dropLeftoverClockWhenNotTimeAsk) still applies.
+func stripLeadingBareClockSentence(visible, userAsk string) string {
+	if isTimeAsk(userAsk) {
+		return visible
+	}
+	trim := strings.TrimSpace(visible)
+	if trim == "" {
+		return visible
+	}
+	sentences := splitSentences(trim)
+	if len(sentences) < 2 {
+		return visible
+	}
+	if !isBareClockStamp(sentences[0]) {
+		return visible
+	}
+	rest := strings.TrimSpace(strings.Join(sentences[1:], " "))
+	if rest == "" {
+		return visible
+	}
+	return rest
 }
 
 // stripHarnessClockLabel removes the injected LocalClockLine prefix from

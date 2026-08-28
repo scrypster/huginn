@@ -274,6 +274,7 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 			line = dropToolPlanNarrationSentences(line)
 			line = dropHelpdeskCloserSentences(line)
 			line = rewriteMissingAgentHelpdesk(line, s)
+			line = rewriteRelayFrameSentences(line)
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
@@ -293,6 +294,7 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 		out := collapseBlankRuns(deduplicateTeammateSentences(strings.Join(kept, "\n")))
 		out = collapseLabWallGlue(out)
 		out = stripHarnessClockLabel(out)
+		out = dropDelegatedAckWhenResultFollows(out)
 		if strings.TrimSpace(out) == "" && strings.Contains(s, "Steve isn't in Lab") && !hasTeammateAnswer(s) {
 			out = "Steve isn't in Lab. Sam is."
 		}

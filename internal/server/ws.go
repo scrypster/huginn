@@ -745,6 +745,33 @@ func logToolPermissionAudit(a *auditLogger, payload map[string]any) {
 }
 
 // streamEventToWS converts a backend.StreamEvent to a WSMessage.
+// statusForToolCall derives a phase-true status message from a tool_call
+// StreamEvent's payload ({"id", "tool", "args"} — see the chatOnToolCall /
+// executeSingle wiring in internal/agent). Returns ("", false) for tool
+// calls that don't map to a user-facing phase (most local tools), so the
+// caller falls back to the last status already on the wire (default
+// "thinking…"). This is intentionally a pure, ws.go-local translation —
+// it reads the existing tool_call wire shape rather than requiring any
+// change to the agent engine.
+func statusForToolCall(payload map[string]any) (string, bool) {
+	tool, _ := payload["tool"].(string)
+	switch tool {
+	case "delegate_to_agent":
+		if args, ok := payload["args"].(map[string]any); ok {
+			if target, ok := args["agent"].(string); ok {
+				if target = strings.TrimSpace(target); target != "" {
+					return fmt.Sprintf("asking %s…", target), true
+				}
+			}
+		}
+		return "asking a teammate…", true
+	case "muninn_where_left_off", "muninn_recall":
+		return "recalling memory", true
+	default:
+		return "", false
+	}
+}
+
 func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 	// Normalize streaming text and thought events to "token" so that the
 	// frontend can use a single type to identify token stream messages.
@@ -1801,6 +1828,29 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
 	}
 	var tokenGate visibleTokenGate
+	// wroteFirstToken gates the one-shot "writing" status transition — fired
+	// the moment the first visible token reaches the wire, so the UI moves
+	// off "thinking…"/"asking …" the instant the reply actually starts.
+	var wroteFirstToken bool
+	// lastStatus keeps the heartbeat honest. The 15s keep-alive ticker below
+	// re-emits a status so a long turn never reads as hung; without tracking
+	// the current phase here it would re-emit a hardcoded "thinking" and
+	// stomp a phase-true status ("asking Steve…") every 15 seconds during a
+	// long delegation, flip-flopping the UI. Guarded because the heartbeat
+	// runs on its own goroutine while setStatus runs on the run goroutine.
+	var statusMu sync.Mutex
+	lastStatus := "thinking"
+	setStatus := func(content string) {
+		statusMu.Lock()
+		lastStatus = content
+		statusMu.Unlock()
+		emit(WSMessage{Type: "status", Content: content, SessionID: sessionID})
+	}
+	currentStatus := func() string {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		return lastStatus
+	}
 	onToken := func(token string) {
 		assistantBuf.WriteString(token)
 		raw := assistantBuf.String()
@@ -1818,6 +1868,10 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if !doEmit {
 			return
 		}
+		if !wroteFirstToken {
+			wroteFirstToken = true
+			setStatus("writing")
+		}
 		msg := WSMessage{Type: "token", Content: delta}
 		if replace {
 			msg.Payload = map[string]any{"replace": true}
@@ -1833,6 +1887,15 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			return
 		}
 		emit(streamEventToWS(ev, sessionID))
+		// Phase-true status translation layer: a tool_call event already
+		// carries the tool name and (for delegate_to_agent) the target
+		// agent — derive a status line from it here rather than changing
+		// the agent engine. See statusForToolCall.
+		if ev.Type == backend.StreamToolCall {
+			if statusContent, ok := statusForToolCall(ev.Payload); ok {
+				setStatus(statusContent)
+			}
+		}
 		// Capture tool results so they're persisted with the assistant message.
 		if ev.Type == backend.StreamToolResult && ev.Payload != nil {
 			tc := session.PersistedToolCall{
@@ -1849,8 +1912,10 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	}
 
 	// Emit thinking immediately so the 60s client watchdog does not fire
-	// during context prep / model load (before the first token).
-	emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
+	// during context prep / model load (before the first token). Routed
+	// through setStatus so the heartbeat's notion of the current phase and
+	// the wire agree from the very first status.
+	setStatus("thinking")
 
 	// A deep FIFO backlog is queued, never dropped — but silence past a few
 	// messages reads as broken, not busy. Say so honestly once the backlog
@@ -1916,20 +1981,24 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
 	}
 
+	// wsHeartbeatInterval is a var (not a const) purely so tests can shorten
+	// it; production behaviour is unchanged at 15s.
 	// Heartbeat: DEFECT A made hallway turns look dead for tens of seconds
 	// while runChat is in flight but nothing has streamed yet (or a whole
 	// terminal turn was gated and only flushes at the very end). Keep the
 	// "thinking" status alive on the wire so the UI never reads as hung.
 	heartbeatDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(wsHeartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-heartbeatDone:
 				return
 			case <-ticker.C:
-				emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
+				// Re-emit the CURRENT phase, not a hardcoded "thinking" —
+				// otherwise the keep-alive stomps "asking Steve…"/"writing".
+				emit(WSMessage{Type: "status", Content: currentStatus(), SessionID: sessionID})
 			}
 		}
 	}()
@@ -2161,3 +2230,8 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		"had_error", err != nil,
 	)
 }
+
+// wsHeartbeatInterval is how often runWSChat re-emits the current status so a
+// long turn never reads as hung. A var rather than a const so tests can shorten
+// it; production behaviour is unchanged.
+var wsHeartbeatInterval = 15 * time.Second

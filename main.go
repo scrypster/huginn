@@ -532,6 +532,10 @@ func main() {
 	// Resolve username up-front so vault names include the user segment
 	// (e.g. "huginn:agent:mj:steve" rather than "huginn:agent::steve").
 	tuiUsername := memory.ResolveUsername(cwd)
+	// One-time migration: rewrite any AgentDef.VaultName left over from the old
+	// hire-flow's "<slug-of-name>-huginn" auto-naming scheme to the canonical
+	// "huginn:agent:<user>:<name>" form, persisting the change to disk.
+	agentslib.MigrateLegacyVaultNamesDefault(agentsCfg, tuiUsername)
 	agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, models, tuiUsername)
 
 	// 7b-warn. Warn if any agent uses a literal API key instead of $ENV or keyring:
@@ -2788,6 +2792,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// during web chat. Agents are loaded fresh; failure is non-fatal.
 	if agentsCfg, agentsErr := agentslib.LoadAgents(); agentsErr == nil && agentsCfg != nil && len(agentsCfg.Agents) > 0 {
 		srvUsername := memory.ResolveUsername("")
+		// One-time canonical vault-name migration (<slug>-huginn ->
+		// huginn:agent:<user>:<name>) must run on the serve path too — the
+		// daemon is the long-lived process; TUI-only migration would leave
+		// serve-created hires unmigrated until someone opens the TUI.
+		agentslib.MigrateLegacyVaultNamesDefault(agentsCfg, srvUsername)
 		agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, models, srvUsername)
 		logger.Info("startServer: wiring agents", "count", len(agentsCfg.Agents), "names", agentReg.Names())
 		orch.SetAgentRegistry(agentReg)

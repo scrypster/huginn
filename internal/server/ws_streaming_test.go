@@ -1,9 +1,15 @@
 package server
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/scrypster/huginn/internal/agent"
+	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/modelconfig"
 )
 
 // ---------------------------------------------------------------------------
@@ -165,4 +171,274 @@ func TestWSMessage_RunID_EchoedInError(t *testing.T) {
 	if errMsg.RunID != runID {
 		t.Errorf("RunID should be echoed in error message, got %q", errMsg.RunID)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// statusForToolCall: phase-true status translation (Preparing context…
+// replacement — the UI shows the latest status Content instead of a static
+// string for every hallway turn)
+// ---------------------------------------------------------------------------
+
+func TestStatusForToolCall_DelegateToAgent_NamesTarget(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "delegate_to_agent",
+		"args": map[string]any{"agent": "Steve", "task": "check the logs"},
+	})
+	if !ok {
+		t.Fatalf("expected delegate_to_agent to map to a status phase")
+	}
+	if content != "asking Steve…" {
+		t.Errorf("content = %q, want %q", content, "asking Steve…")
+	}
+}
+
+func TestStatusForToolCall_DelegateToAgent_MissingTargetFallsBackGenerically(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "delegate_to_agent",
+		"args": map[string]any{"task": "check the logs"},
+	})
+	if !ok {
+		t.Fatalf("expected delegate_to_agent to map to a status phase even without a resolvable target")
+	}
+	if content != "asking a teammate…" {
+		t.Errorf("content = %q, want %q", content, "asking a teammate…")
+	}
+}
+
+func TestStatusForToolCall_MemoryTools_MapToRecallingMemory(t *testing.T) {
+	for _, tool := range []string{"muninn_where_left_off", "muninn_recall"} {
+		content, ok := statusForToolCall(map[string]any{"tool": tool})
+		if !ok {
+			t.Fatalf("tool %q: expected a status phase", tool)
+		}
+		if content != "recalling memory" {
+			t.Errorf("tool %q: content = %q, want %q", tool, content, "recalling memory")
+		}
+	}
+}
+
+func TestStatusForToolCall_OrdinaryLocalTool_NoStatusPhase(t *testing.T) {
+	_, ok := statusForToolCall(map[string]any{"tool": "read_file", "args": map[string]any{"file_path": "x.go"}})
+	if ok {
+		t.Errorf("read_file should not map to a status phase (falls back to the last status already on the wire)")
+	}
+}
+
+func TestStatusForToolCall_NilPayload_NoStatusPhase(t *testing.T) {
+	if _, ok := statusForToolCall(nil); ok {
+		t.Errorf("nil payload should not map to a status phase")
+	}
+}
+
+// delegateStatusEventBackend is a scripted Backend whose ChatCompletion emits the given
+// StreamEvents directly via req.OnEvent before returning — simulating the
+// wire shape a real backend/RunLoop tool dispatch produces (see
+// RunLoopConfig.OnEvent -> backend.ChatRequest.OnEvent in internal/agent/loop.go)
+// without requiring a real tool registered under that name. This isolates
+// the ws.go translation layer (runWSChat's onEvent closure) from the rest of
+// the agentic tool-dispatch machinery.
+type delegateStatusEventBackend struct {
+	events []backend.StreamEvent
+	reply  string
+	// delay holds ChatCompletion open after the events fire, so heartbeat
+	// ticks land between the tool_call status and the first token.
+	delay time.Duration
+}
+
+func (b *delegateStatusEventBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	for _, ev := range b.events {
+		if req.OnEvent != nil {
+			req.OnEvent(ev)
+		}
+	}
+	if b.delay > 0 {
+		time.Sleep(b.delay)
+	}
+	if req.OnToken != nil {
+		req.OnToken(b.reply)
+	}
+	return &backend.ChatResponse{DoneReason: "stop", Content: b.reply}, nil
+}
+
+func (b *delegateStatusEventBackend) Health(_ context.Context) error   { return nil }
+func (b *delegateStatusEventBackend) Shutdown(_ context.Context) error { return nil }
+func (b *delegateStatusEventBackend) ContextWindow() int               { return 8192 }
+
+// TestWSChat_DelegateToAgentToolCall_EmitsAskingStatus is the wire-level
+// regression test for the "Preparing context and delegation plan…" static
+// status defect: a delegate_to_agent tool_call StreamEvent fired during a
+// hallway run must produce a status event naming the target agent on the
+// wire, not a generic placeholder.
+func TestWSChat_DelegateToAgentToolCall_EmitsAskingStatus(t *testing.T) {
+	eb := &delegateStatusEventBackend{
+		reply: "Done.",
+		events: []backend.StreamEvent{
+			{
+				Type: backend.StreamToolCall,
+				Payload: map[string]any{
+					"id":   "call-1",
+					"tool": "delegate_to_agent",
+					"args": map[string]any{"agent": "Steve", "task": "check the logs"},
+				},
+			},
+		},
+	}
+	orch, err := agent.NewOrchestrator(eb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+	srv, _ := newTestServer(t)
+	srv.orch = orch
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "Winston", Model: modelconfig.DefaultModels().Reasoner, IsDefault: true, SystemPrompt: "You are Winston."},
+		}}, nil
+	}
+
+	sess := srv.store.New("delegate-status-session", "/workspace", modelconfig.DefaultModels().Reasoner)
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	client := &wsClient{send: make(chan WSMessage, 256), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   "please loop in Steve",
+		RunID:     "delegate-run-1",
+	})
+
+	deadline := time.After(10 * time.Second)
+	sawAskingSteve := false
+	sawOldStaticString := false
+	for {
+		select {
+		case msg := <-client.send:
+			if msg.Type == "status" {
+				if strings.Contains(msg.Content, "Preparing context and delegation plan") {
+					sawOldStaticString = true
+				}
+				if msg.Content == "asking Steve…" {
+					sawAskingSteve = true
+				}
+			}
+			if msg.Type == "done" && msg.RunID == "delegate-run-1" {
+				if !sawAskingSteve {
+					t.Fatalf("never saw a status event %q on the wire for the delegate_to_agent tool_call", "asking Steve…")
+				}
+				if sawOldStaticString {
+					t.Fatalf("status wire content must never carry the removed static string")
+				}
+				// runWSChat emits "done" BEFORE persistAccumulated writes the
+				// assistant row (see internal/server/ws.go). Returning here
+				// would race that write against t.TempDir()'s RemoveAll and
+				// fail the whole package with "directory not empty". Wait for
+				// the assistant row to land before letting cleanup run.
+				waitForAssistantPersisted(t, srv, sess.ID)
+				return
+			}
+			if msg.Type == "error" {
+				t.Fatalf("unexpected error message: %v", msg.Content)
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for run to complete")
+		}
+	}
+}
+
+// TestWSChat_HeartbeatDoesNotStompPhaseStatus is the regression test for the
+// cross-package interaction between the 15s keep-alive heartbeat and the
+// phase-true status layer: the heartbeat must re-emit the CURRENT phase, not
+// a hardcoded "thinking" that flips the UI off "asking Steve…" every 15
+// seconds for the whole length of a long delegation.
+func TestWSChat_HeartbeatDoesNotStompPhaseStatus(t *testing.T) {
+	prev := wsHeartbeatInterval
+	wsHeartbeatInterval = 10 * time.Millisecond
+	defer func() { wsHeartbeatInterval = prev }()
+
+	eb := &delegateStatusEventBackend{
+		reply: "Done.",
+		delay: 120 * time.Millisecond, // long enough for several heartbeats
+		events: []backend.StreamEvent{
+			{
+				Type: backend.StreamToolCall,
+				Payload: map[string]any{
+					"id":   "call-1",
+					"tool": "delegate_to_agent",
+					"args": map[string]any{"agent": "Steve", "task": "check the logs"},
+				},
+			},
+		},
+	}
+	orch, err := agent.NewOrchestrator(eb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+	srv, _ := newTestServer(t)
+	srv.orch = orch
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "Winston", Model: modelconfig.DefaultModels().Reasoner, IsDefault: true, SystemPrompt: "You are Winston."},
+		}}, nil
+	}
+
+	sess := srv.store.New("heartbeat-status-session", "/workspace", modelconfig.DefaultModels().Reasoner)
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	client := &wsClient{send: make(chan WSMessage, 512), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   "please loop in Steve",
+		RunID:     "heartbeat-run-1",
+	})
+
+	deadline := time.After(10 * time.Second)
+	sawAsking := false
+	for {
+		select {
+		case msg := <-client.send:
+			if msg.Type == "status" {
+				if msg.Content == "asking Steve…" {
+					sawAsking = true
+				} else if sawAsking && msg.Content == "thinking" {
+					t.Fatalf("heartbeat stomped the phase-true status: got %q after %q", msg.Content, "asking Steve…")
+				}
+			}
+			if msg.Type == "done" && msg.RunID == "heartbeat-run-1" {
+				if !sawAsking {
+					t.Fatal("never saw the asking-Steve status")
+				}
+				waitForAssistantPersisted(t, srv, sess.ID)
+				return
+			}
+			if msg.Type == "error" {
+				t.Fatalf("unexpected error message: %v", msg.Content)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for run to complete")
+		}
+	}
+}
+
+// waitForAssistantPersisted blocks until the run goroutine has finished its
+// post-"done" persistence for sessionID, so t.TempDir cleanup cannot race the
+// write. Bounded; fails the test rather than hanging.
+func waitForAssistantPersisted(t *testing.T, srv *Server, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs, err := srv.store.ReadMessages(sessionID)
+		if err == nil {
+			for _, m := range msgs {
+				if m.Role == "assistant" {
+					return
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("assistant message never persisted for session %s", sessionID)
 }

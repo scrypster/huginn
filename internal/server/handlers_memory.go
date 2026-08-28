@@ -137,6 +137,9 @@ func (s *Server) handleMuninnTool(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadGateway, "tool call failed: "+callErr.Error())
 		return
 	}
+	if req.Tool == "muninn_forget" {
+		s.logEntityAudit("memory_forget", "forgot memory in vault "+req.Vault, map[string]any{"vault": req.Vault, "args": req.Args})
+	}
 
 	jsonOK(w, map[string]any{"result": result})
 }

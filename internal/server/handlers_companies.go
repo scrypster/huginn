@@ -270,6 +270,7 @@ func (s *Server) handleSeatCompanyMember(w http.ResponseWriter, r *http.Request)
 		jsonSpaceError(w, err)
 		return
 	}
+	s.logEntityAudit("member_seat", "seated "+agent+" in company "+id, map[string]any{"company_id": id, "agent": agent})
 	c, err := cs.GetCompany(id)
 	if err != nil {
 		jsonSpaceError(w, err)
@@ -298,6 +299,7 @@ func (s *Server) handleUnseatCompanyMember(w http.ResponseWriter, r *http.Reques
 		jsonSpaceError(w, err)
 		return
 	}
+	s.logEntityAudit("member_unseat", "unseated "+agent+" from company "+id, map[string]any{"company_id": id, "agent": agent})
 	c, err := cs.GetCompany(id)
 	if err != nil {
 		jsonSpaceError(w, err)

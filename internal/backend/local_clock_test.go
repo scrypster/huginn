@@ -101,3 +101,67 @@ func TestExtractClockStamp_LatestWins(t *testing.T) {
 		t.Fatalf("got %q, want latest %q", got, want)
 	}
 }
+
+// Live 2026-08-28 8:57 AM ET Winston->Steve delegated-recap hallway reply:
+// a leading bare clock stamp sentence nobody asked for, glued onto the
+// relay frame. Not a time ask ("say DELTA") — the stamp sentence must go,
+// the answer sentence must stay untouched for the relay-frame rewrite.
+const liveDelegatedRecapClockStamp = `Friday, August 28, 2026, 8:57 AM ET. Steve reported: DELTA.`
+
+func TestStripLeadingBareClockSentence_NotTimeAskDropsStamp(t *testing.T) {
+	got := stripLeadingBareClockSentence(liveDelegatedRecapClockStamp, "say DELTA")
+	if strings.Contains(got, "8:57 AM ET") {
+		t.Fatalf("leading clock stamp not stripped: %q", got)
+	}
+	want := "Steve reported: DELTA."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripLeadingBareClockSentence_TimeAskKeepsStamp(t *testing.T) {
+	got := stripLeadingBareClockSentence(liveDelegatedRecapClockStamp, "what time is it")
+	if !strings.Contains(got, "8:57 AM ET") {
+		t.Fatalf("time-ask stamp was stripped: %q", got)
+	}
+	if got != liveDelegatedRecapClockStamp {
+		t.Fatalf("time-ask content mutated: %q", got)
+	}
+}
+
+func TestStripLeadingBareClockSentence_SoleContentUntouched(t *testing.T) {
+	stamp := "Friday, August 28, 2026, 8:57 AM ET."
+	got := stripLeadingBareClockSentence(stamp, "say DELTA")
+	if got != stamp {
+		t.Fatalf("fall back to existing leftover handling: got %q, want unchanged %q", got, stamp)
+	}
+}
+
+func TestStripLeadingBareClockSentence_EmbeddedStampNotLeading(t *testing.T) {
+	// Stamp embedded in prose (not its own leading sentence) is untouched —
+	// existing embedded-clock behavior (TestPersistVisibleAssistantContent_LiveSteveHallwayClockRecapNotTimeAsk)
+	// must not regress.
+	s := "The first response from Winston indicates that it is currently Thursday, August 27, 2026, at 8:42 AM ET."
+	got := stripLeadingBareClockSentence(s, "hello")
+	if got != s {
+		t.Fatalf("embedded stamp sentence mutated: %q", got)
+	}
+}
+
+// "what's today's date" is an ordinary date ask. It must count as a time ask,
+// or stripLeadingBareClockSentence deletes the stamp sentence that answers it.
+func TestIsTimeAsk_TodaysDatePhrasings(t *testing.T) {
+	for _, ask := range []string{
+		"what's today's date",
+		"whats todays date?",
+		"can you tell me the date today",
+	} {
+		if !isTimeAsk(ask) {
+			t.Errorf("isTimeAsk(%q) = false, want true", ask)
+		}
+	}
+	got := stripLeadingBareClockSentence("Friday, August 28, 2026, 8:57 AM ET. Anything else?", "what's today's date")
+	if !strings.Contains(got, "8:57 AM ET") {
+		t.Errorf("date-ask stamp was stripped: %q", got)
+	}
+}

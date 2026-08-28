@@ -226,6 +226,11 @@ type Server struct {
 	// nil if not configured.
 	auditLog *auditLogger
 
+	// entityAudit is the append-only JSONL audit trail for entity lifecycle
+	// actions (agent hire/delete, company seat/unseat, memory forget).
+	// Always initialised in New() — never nil.
+	entityAudit *entityAuditLogger
+
 	// workstreamStore is the workstream store wired for the /api/v1/workstreams endpoints.
 	// nil if workstreams are not configured.
 	workstreamStore workstreamStore
@@ -330,6 +335,7 @@ func New(
 		credValidators:  buildCredentialValidatorRegistry(),
 		relayKeys:       make(map[string]string),
 		spaceWakeCounts: make(map[string]int),
+		entityAudit:     newEntityAuditLogger(huginnDir),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
 		sessionCreateLimiter: newEndpointRateLimiter(10, time.Minute),
@@ -1122,6 +1128,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", api(s.handleGetMessages))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(50<<10, s.handleSendMessage))))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/chat/stream", api(s.handleChatStream))
+	mux.HandleFunc("GET /api/v1/audit", api(s.handleGetAudit))
 	mux.HandleFunc("GET /api/v1/agents", api(s.handleListAgents))
 	mux.HandleFunc("GET /api/v1/agents/capability-matrix", api(s.handleGetCapabilityMatrix))
 	mux.HandleFunc("POST /api/v1/agents/capability-matrix/validate", api(withMaxBody(100<<10, s.handleValidateCapabilityMatrix)))

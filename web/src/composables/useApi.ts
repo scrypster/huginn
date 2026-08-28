@@ -377,7 +377,12 @@ export const api = {
     }>(`/api/v1/stats/history${q}`)
   },
 
-  cost: () => apiFetch<{ session_total_usd: number }>('/api/v1/cost'),
+  cost: () => apiFetch<{
+    session_total_usd: number
+    prompt_tokens_total?: number
+    completion_tokens_total?: number
+    is_local?: boolean
+  }>('/api/v1/cost'),
 
   logs: (n = 100) => apiFetch<{ lines: string[] }>(`/api/v1/logs?n=${n}`),
 

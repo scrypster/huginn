@@ -543,6 +543,7 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 		ask = userAsk[0]
 	}
 	visible := VisibleAssistantContentAfterTools(content, ask)
+	visible = stripLeadingBareClockSentence(visible, ask)
 	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
 	visible = dropLeftoverHireGhost(visible, ask)
 	visible = dropLeftoverDelegatedHire(visible, ask)

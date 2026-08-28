@@ -859,6 +859,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// Refresh the live agent registry so the deleted agent immediately stops
 	// resolving for delegation and mention parsing (issue #124).
 	s.notifyAgentsChanged()
+	s.logEntityAudit("agent_delete", "deleted agent "+name, map[string]any{"agent": name})
 	// Broadcast so all connected frontends remove the deleted agent.
 	s.BroadcastWS(WSMessage{
 		Type: "agent_changed",
@@ -999,13 +1000,57 @@ func (s *Server) handleRuntimeStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
-	if s.ca == nil {
-		jsonOK(w, map[string]any{"session_total_usd": 0.0})
-		return
+// isLocalBackend reports whether the configured LLM backend is a local
+// model — one for which $ pricing is unknowable (builtin llama.cpp, or an
+// external endpoint pointed at an "ollama" provider). For these, token
+// counts are the honest cost signal, not a $0.00 that reads as "no usage".
+func isLocalBackend(cfg config.BackendConfig) bool {
+	if cfg.Type == "managed" {
+		return true
 	}
-	jsonOK(w, map[string]any{"session_total_usd": s.ca.Total()})
+	return strings.EqualFold(cfg.Provider, "ollama")
 }
+
+// costTokenTotals sums prompt/completion tokens recorded in cost_history.
+// This is the same table handleStatsHistory reads from, so it reflects real
+// usage even for local models whose $ cost is always 0.
+func (s *Server) costTokenTotals() (prompt, completion int) {
+	if s.db == nil {
+		return 0, 0
+	}
+	rdb := s.db.Read()
+	if rdb == nil {
+		return 0, 0
+	}
+	_ = rdb.QueryRow(`SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0) FROM cost_history`).
+		Scan(&prompt, &completion) // nolint:errcheck — zeros are fine on error
+	return prompt, completion
+}
+
+func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	local := isLocalBackend(s.cfg.Backend)
+	s.mu.Unlock()
+
+	promptTotal, completionTotal := s.costTokenTotals()
+
+	var total float64
+	if s.ca != nil {
+		total = s.ca.Total()
+	}
+
+	jsonOK(w, map[string]any{
+		"session_total_usd":       total,
+		"prompt_tokens_total":     promptTotal,
+		"completion_tokens_total": completionTotal,
+		"is_local":                local,
+	})
+}
+
+// activeSessionWindow is how recently a session must have been touched to
+// count as "active" when it has no run currently in flight. Chosen to match
+// the human sense of "someone is here right now", not "ever used".
+const activeSessionWindow = 15 * time.Minute
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var prompt, completion any
@@ -1015,10 +1060,41 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			prompt, completion = p, c
 		}
 	}
+
+	totalSessions, activeSessions := s.computeSessionCounts()
+
 	jsonOK(w, map[string]any{
 		"last_prompt_tokens":     prompt,
 		"last_completion_tokens": completion,
+		"total_sessions":         totalSessions,
+		"active_sessions":        activeSessions,
 	})
+}
+
+// computeSessionCounts returns the honest total and active session counts.
+// A session counts as active when it has a run currently in flight (per the
+// thread manager) OR it has had activity within activeSessionWindow. A
+// session's stored Status field is not used for this — it is set to
+// "active" at creation and never meaningfully transitions, so it cannot
+// distinguish a live session from one that has been quiet for days.
+func (s *Server) computeSessionCounts() (total, active int) {
+	if s.store == nil {
+		return 0, 0
+	}
+	manifests, err := s.store.List()
+	if err != nil {
+		return 0, 0
+	}
+	total = len(manifests)
+	now := time.Now().UTC()
+	for _, m := range manifests {
+		inFlight := s.tm != nil && s.tm.ActiveCount(m.SessionID) > 0
+		recent := now.Sub(m.UpdatedAt.UTC()) <= activeSessionWindow
+		if inFlight || recent {
+			active++
+		}
+	}
+	return total, active
 }
 
 func persistModelName(sess *session.Session, ag *agents.Agent) string {

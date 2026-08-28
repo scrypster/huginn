@@ -840,7 +840,27 @@ describe('ChatView', () => {
     await chatEditor.vm.$emit('send', 'Hello')
     await nextTick()
 
-    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('thinking')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+  })
+
+  it('pre-stream status line reflects the phase-true status content from the wire, never the old static string', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Ask Steve to check the logs')
+    await nextTick()
+
+    expect(wrapper.html()).toContain('thinking')
+
+    mockWs.simulateMessage({ type: 'status', session_id: 'test-session-id', content: 'asking Steve…' })
+    await nextTick()
+
+    expect(wrapper.html()).toContain('asking Steve…')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
   })
 
   it('hides delegation-plan banner on a trivial ping', async () => {
@@ -2723,7 +2743,8 @@ describe('ChatView — space mode', () => {
 
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
     expect(wrapper.html()).toContain('Tess is responding')
-    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('thinking')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
     expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
     expect(wrapper.html()).not.toContain('When you send now:')
 

@@ -994,7 +994,7 @@
         <div v-if="prestreamThinking && !trivialAskPending"
           class="flex-shrink-0 text-xs px-4 py-1.5"
           style="background:rgba(88,166,255,0.06);border-top:1px solid rgba(88,166,255,0.14);color:rgba(139,148,158,0.95)">
-          Preparing context and delegation plan…
+          {{ displayAgent?.name ?? 'Agent' }} is responding… · {{ latestRunStatus }}<template v-if="streamingElapsed >= 10"> ({{ formatElapsed(streamingElapsed) }})</template>
         </div>
       </Transition>
 
@@ -2252,6 +2252,13 @@ const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
 const trivialAskPending = ref(false)
+// DEFAULT_RUN_STATUS / latestRunStatus back the pre-first-token status line.
+// It must reflect what the turn is actually doing phase-by-phase ("thinking…",
+// "asking Steve…", "recalling memory", "writing" — see runWSChat's status
+// translation layer in internal/server/ws.go) and must NEVER fall back to a
+// static "Preparing context and delegation plan…" placeholder.
+const DEFAULT_RUN_STATUS = 'thinking…'
+const latestRunStatus = ref(DEFAULT_RUN_STATUS)
 const sendOptionsOpen = ref(false)
 
 function armTrivialAskPending(markdown: string) {
@@ -2262,6 +2269,7 @@ function rearmDelegationPlanFromLiveWork() {
   if (!trivialAskPending.value) return
   trivialAskPending.value = false
   if (streaming.value) prestreamThinking.value = true
+  latestRunStatus.value = DEFAULT_RUN_STATUS
 }
 
 function onSendOptionsToggle(e: Event) {
@@ -2284,6 +2292,7 @@ type OwnerRunState = {
   trivialAskPending: boolean
   currentRunId: string
   queuedRunIds: string[]
+  statusText: string
 }
 const runByOwner = ref<Record<string, OwnerRunState>>({})
 
@@ -2294,6 +2303,7 @@ function snapshotOwnerRun(): OwnerRunState {
     trivialAskPending: trivialAskPending.value,
     currentRunId: currentRunId.value,
     queuedRunIds: [...queuedRunIds.value],
+    statusText: latestRunStatus.value,
   }
 }
 
@@ -2308,6 +2318,7 @@ function applyOwnerRun(state: OwnerRunState) {
   trivialAskPending.value = state.trivialAskPending
   currentRunId.value = state.currentRunId
   queuedRunIds.value = [...state.queuedRunIds]
+  latestRunStatus.value = state.statusText || DEFAULT_RUN_STATUS
   if (state.streaming) {
     startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
@@ -2320,7 +2331,7 @@ function applyOwnerRun(state: OwnerRunState) {
 function restoreOwnerRun(key: string) {
   if (!key) return
   const saved = runByOwner.value[key]
-  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] })
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [], statusText: DEFAULT_RUN_STATUS })
 }
 
 function finishStoredOwnerRun(key: string) {
@@ -2331,13 +2342,13 @@ function finishStoredOwnerRun(key: string) {
     const rest = saved.queuedRunIds.slice(1)
     runByOwner.value = {
       ...runByOwner.value,
-      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest },
+      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest, statusText: DEFAULT_RUN_STATUS },
     }
     return
   }
   runByOwner.value = {
     ...runByOwner.value,
-    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] },
+    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [], statusText: DEFAULT_RUN_STATUS },
   }
 }
 
@@ -2395,6 +2406,7 @@ function promoteNextQueuedRun() {
   currentRunId.value = next
   streaming.value = true
   prestreamThinking.value = true
+  latestRunStatus.value = DEFAULT_RUN_STATUS
   trivialAskPending.value = false
   startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
@@ -2451,6 +2463,7 @@ async function handleEditorSend(markdown: string) {
       currentRunId.value = runId
       streaming.value = true
       prestreamThinking.value = true
+      latestRunStatus.value = DEFAULT_RUN_STATUS
       armTrivialAskPending(markdown)
       startStreamingWatchdog(runActivityProbe)
       startElapsedTimer()
@@ -2498,6 +2511,7 @@ async function handleEditorSend(markdown: string) {
     currentRunId.value = runId
     streaming.value = true
     prestreamThinking.value = true
+    latestRunStatus.value = DEFAULT_RUN_STATUS
     armTrivialAskPending(markdown)
     startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
@@ -2829,6 +2843,17 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     promoteNextQueuedRun()
     if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
+  })
+
+  // Phase-true status line: content varies by what the turn is actually
+  // doing ("thinking…", "asking Steve…", "recalling memory", "writing" —
+  // see runWSChat's status translation in internal/server/ws.go). Never
+  // falls back to a static placeholder; an empty/unrecognised content still
+  // resolves to DEFAULT_RUN_STATUS.
+  registerWS(ws, 'status', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
+    latestRunStatus.value = (msg.content ?? '').trim() || DEFAULT_RUN_STATUS
+    if (props.spaceId) persistOwnerRun(props.spaceId)
   })
 
 registerWS(ws, 'warning', (msg: WSMessage) => {
