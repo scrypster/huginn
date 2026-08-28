@@ -775,7 +775,17 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 
 		ask := lastHumanUserText(messages)
 		if wallDeny != "" && !userAskedSam(ask) {
-			return stopTurnPersist(result, messages, cfg, result.FinalContent, wallDeny, ask)
+			if askMentionsDeniedAgent(ask, wallDeny) {
+				return stopTurnPersist(result, messages, cfg, result.FinalContent, wallDeny, ask)
+			}
+			// The human never named the refused agent — they asked for
+			// something else entirely and the model delegated on its own.
+			// "X isn't in this company." is teammate-to-teammate glue, not
+			// an answer; speaking it verbatim reads as a non-sequitur.
+			// Retry once with delegation withheld so the model answers the
+			// human directly; fall back to an honest rewrite if that retry
+			// itself produces nothing sayable.
+			return wallDenyAnswerDirectly(ctx, cfg, result, messages, ask)
 		}
 		if waitAnswer != "" {
 			return stopTurnPersist(result, messages, cfg, result.FinalContent, waitAnswer, ask)
@@ -815,6 +825,65 @@ func waitReturnedSpecialistResult(content string) bool {
 // the human named Sam, so a re-delegate is their ask, not glue.
 func userAskedSam(ask string) bool {
 	return strings.Contains(strings.ToLower(ask), "ask sam")
+}
+
+// askMentionsDeniedAgent reports whether the human's own ask named the
+// agent a delegate/consult call was just refused for (e.g. they asked
+// "Ask Steve for the hostname" and delegation to Steve was denied). When
+// true, stating the wall line is an honest, on-topic answer. When false,
+// the human asked for something unrelated and the refusal is glue from a
+// delegation they never requested.
+func askMentionsDeniedAgent(ask, wallDeny string) bool {
+	name := backend.DeniedAgentName(wallDeny)
+	if name == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(ask), strings.ToLower(name))
+}
+
+// wallDenyAnswerDirectly handles a company-wall deny for an agent the
+// human's ask never named: one extra completion with delegate_to_agent and
+// consult_agent withheld, so the model must answer the human directly
+// instead of narrating the refusal. If that retry itself produces nothing
+// sayable (empty, another tool call, or another refusal), falls back to an
+// honest rewrite rather than ever speaking "X isn't in this company."
+// verbatim as the answer to an unrelated ask.
+func wallDenyAnswerDirectly(ctx context.Context, cfg RunLoopConfig, result *LoopResult, messages []backend.Message, ask string) (*LoopResult, error) {
+	final := ""
+	if cfg.Backend != nil {
+		var noDelegate []backend.Tool
+		for _, t := range cfg.ToolSchemas {
+			if t.Function.Name == "delegate_to_agent" || t.Function.Name == "consult_agent" {
+				continue
+			}
+			noDelegate = append(noDelegate, t)
+		}
+		retryMessages := append(append([]backend.Message{}, messages...), backend.Message{
+			Role:    "user",
+			Content: "[system] That teammate isn't available for this. Answer directly yourself — no delegating, no tools.",
+		})
+		if chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
+			Model:    cfg.ModelName,
+			Messages: retryMessages,
+			Tools:    noDelegate,
+		}); err == nil && chatResult != nil {
+			content := strings.TrimSpace(chatResult.Content)
+			if content != "" && len(chatResult.ToolCalls) == 0 && !backend.IsCompanyWallDeny(content) {
+				final = content
+			}
+		}
+	}
+	if final == "" {
+		final = fmt.Sprintf("Couldn't hand that off — %s needs a teammate I don't have here.", strings.TrimSpace(ask))
+	}
+	messages = append(messages, backend.Message{Role: "assistant", Content: final})
+	if cfg.OnToken != nil {
+		cfg.OnToken(final)
+	}
+	result.FinalContent = final
+	result.StopReason = "stop"
+	result.Messages = messages
+	return result, nil
 }
 
 // stopTurnPersist ends the run without another model completion and persists

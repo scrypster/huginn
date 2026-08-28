@@ -26,6 +26,9 @@ func IsTrivialAsk(s string) bool {
 	if norm == "" {
 		return false
 	}
+	if _, ok := TrivialSayEchoWord(s); ok {
+		return true
+	}
 	return isTrivialTimeAsk(s, norm) ||
 		isTrivialPing(norm) ||
 		backend.IsTrivialAckAsk(s) ||
@@ -105,6 +108,66 @@ func isTrivialRoster(norm string) bool {
 
 func isTrivialHeadcount(norm string) bool {
 	return trivialHeadcountRE.MatchString(norm)
+}
+
+var (
+	// trivialSayEchoRE finds a trailing "say/repeat/echo <tail>" clause.
+	// Anchored to end-of-string so a "burst two-B:" style prefix ahead of
+	// the verb does not stop the match, but any real content the verb
+	// introduces (a full sentence, not a bare word) still shows up in the
+	// captured tail for the word-count/stopword checks below to reject.
+	trivialSayEchoRE = regexp.MustCompile(`(?i)\b(?:say|repeat|echo)\s+(.+)$`)
+	// trivialWordRE requires each tail token to look like a single bare
+	// word (letters/digits/hyphen/apostrophe only) — no spaces-within-token
+	// punctuation that would signal real sentence content.
+	trivialWordRE = regexp.MustCompile(`^[\p{L}\p{N}'-]+$`)
+)
+
+// trivialSayStopWords are common connector/function words that, if present
+// in the tail, mean this is a real sentence ("say something about our
+// roadmap"), not a bare word to echo back.
+var trivialSayStopWords = map[string]bool{
+	"about": true, "regarding": true, "on": true, "to": true, "that": true,
+	"this": true, "what": true, "how": true, "why": true, "please": true,
+	"something": true, "someone": true, "anything": true, "everything": true,
+	"nothing": true, "your": true, "my": true, "our": true, "the": true,
+	"a": true, "an": true, "is": true, "are": true, "was": true, "were": true,
+	"and": true, "or": true, "but": true, "if": true, "when": true, "then": true,
+	"so": true, "because": true, "of": true, "for": true, "with": true,
+}
+
+// TrivialSayEchoWord reports whether userMsg is a trivial "say <WORD>" /
+// "repeat <WORD>" / "echo <WORD>" ask — a bare word (up to 3 tokens) with
+// no other content after the verb, once @mentions and a leading
+// "burst ...:" style prefix are set aside. When it matches, the tail is
+// exactly what should be spoken back — zero delegation, zero LLM.
+// A real sentence ("say something about our roadmap") must NOT match: the
+// word-count cap and stopword list both guard against that.
+func TrivialSayEchoWord(s string) (string, bool) {
+	stripped := mentionRE.ReplaceAllString(s, " ")
+	stripped = strings.TrimSpace(stripped)
+	m := trivialSayEchoRE.FindStringSubmatch(stripped)
+	if m == nil {
+		return "", false
+	}
+	tail := strings.Trim(strings.TrimSpace(m[1]), " \t.!?…")
+	if tail == "" {
+		return "", false
+	}
+	words := strings.Fields(tail)
+	if len(words) == 0 || len(words) > 3 {
+		return "", false
+	}
+	for _, w := range words {
+		lw := strings.ToLower(strings.Trim(w, ".,!?;:'\""))
+		if trivialSayStopWords[lw] {
+			return "", false
+		}
+		if !trivialWordRE.MatchString(w) {
+			return "", false
+		}
+	}
+	return tail, true
 }
 
 // stripTrivialAskDelegationTools is the last-chance belt: 14b will call

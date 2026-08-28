@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/scrypster/huginn/internal/agent"
+	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/session"
@@ -116,9 +117,9 @@ func TestWSChat_RapidBurst_FIFOTurnsAllPersistInOrder(t *testing.T) {
 	client := &wsClient{send: make(chan WSMessage, 256), ctx: context.Background()}
 
 	asks := []string{
-		"burst check one: say ALPHA",
-		"burst check two: say BRAVO",
-		"burst check three: say CHARLIE",
+		"burst check one: reply with ALPHA",
+		"burst check two: reply with BRAVO",
+		"burst check three: reply with CHARLIE",
 	}
 	runIDs := []string{"run-1", "run-2", "run-3"}
 
@@ -270,6 +271,178 @@ func TestWSChat_ChatCancel_StillCancelsActiveRun(t *testing.T) {
 	close(release)
 
 	drainDoneMessages(t, client, []string{"run-cancel-1"}, 5*time.Second)
+}
+
+// slowFifoBackend is a scripted Backend like fifoBurstBackend but with a
+// configurable per-call delay long enough (relative to a shrunk test
+// ceiling) to force the queue-wait retry path: a predecessor turn is still
+// genuinely in flight when a queued turn's FIFO/session-exclusive wait
+// ceilings elapse.
+type slowFifoBackend struct {
+	mu      sync.Mutex
+	calls   int
+	replies []string
+	delay   time.Duration
+}
+
+func (b *slowFifoBackend) ChatCompletion(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	b.mu.Lock()
+	idx := b.calls
+	b.calls++
+	b.mu.Unlock()
+
+	reply := fmt.Sprintf("slow-call-%d", idx)
+	if idx < len(b.replies) {
+		reply = b.replies[idx]
+	}
+	if req.OnToken != nil {
+		req.OnToken(reply)
+	}
+	select {
+	case <-time.After(b.delay):
+		return &backend.ChatResponse{DoneReason: "stop", Content: reply}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (b *slowFifoBackend) Health(_ context.Context) error   { return nil }
+func (b *slowFifoBackend) Shutdown(_ context.Context) error { return nil }
+func (b *slowFifoBackend) ContextWindow() int               { return 8192 }
+
+func (b *slowFifoBackend) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// drainDoneMessagesAnyOrder reads from client.send until n distinct "done"
+// run IDs (from wantRunIDs, any order) have been observed, or the deadline
+// fires. Any "error" message fails the test immediately: with a slow
+// predecessor and shrunk queue-wait ceilings, a queued turn must keep
+// re-enqueuing rather than ever surfacing (and persisting) a raw
+// queue-wait error. Order is deliberately not enforced here — shrinking
+// the FIFO escape-hatch ceiling for this test can let a queued goroutine's
+// wait give up early and race the session-exclusive lock with its
+// predecessor, which is a pre-existing, out-of-scope ordering nuance; what
+// this test asserts is that a slow predecessor is never spoken as an error.
+func drainDoneMessagesAnyOrder(t *testing.T, c *wsClient, wantRunIDs []string, timeout time.Duration) {
+	t.Helper()
+	want := map[string]bool{}
+	for _, id := range wantRunIDs {
+		want[id] = true
+	}
+	seen := map[string]bool{}
+	deadline := time.After(timeout)
+	for len(seen) < len(want) {
+		select {
+		case msg := <-c.send:
+			switch msg.Type {
+			case "error":
+				t.Fatalf("unexpected error message (want none — queue-wait must never surface as an error): %v", msg.Content)
+			case "done":
+				if want[msg.RunID] {
+					seen[msg.RunID] = true
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for all done messages; got %d/%d: %v", len(seen), len(want), seen)
+		}
+	}
+}
+
+// TestWSChat_SlowBackend_QueueWaitNeverPersistsErrorRow is the regression
+// test for the live-burst defect: a queued turn behind a slow-but-still-
+// running predecessor must never persist "chat(<agent>): session <id>
+// still busy after queue wait" (or any raw queue-wait error) as an
+// assistant row. Both queue-wait ceilings are shrunk via test hooks so the
+// retry path is exercised in well under a second instead of the real 120s.
+func TestWSChat_SlowBackend_QueueWaitNeverPersistsErrorRow(t *testing.T) {
+	origRunQueueWait := agent.RunQueueWaitCeiling
+	origChatTurnWait := chatTurnWaitCeiling
+	origRetryWait := chatQueueRetryWait
+	agent.RunQueueWaitCeiling = 50 * time.Millisecond
+	chatTurnWaitCeiling = 50 * time.Millisecond
+	chatQueueRetryWait = 50 * time.Millisecond
+	t.Cleanup(func() {
+		agent.RunQueueWaitCeiling = origRunQueueWait
+		chatTurnWaitCeiling = origChatTurnWait
+		chatQueueRetryWait = origRetryWait
+	})
+
+	slow := &slowFifoBackend{
+		replies: []string{"ALPHA.", "BRAVO.", "CHARLIE."},
+		delay:   300 * time.Millisecond,
+	}
+	orch, err := agent.NewOrchestrator(slow, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+	srv, _ := newTestServer(t)
+	srv.orch = orch
+	// A real (non-empty) agent config is required so runWSChat resolves a
+	// non-nil agent and routes through ChatWithAgent — the exclusive-run/
+	// queue-wait path this test exercises. newTestServer's default loader
+	// returns zero agents, which would silently fall back to Orchestrator.Chat
+	// (no session-exclusive guard at all) and never touch the code under test.
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "Winston", Model: modelconfig.DefaultModels().Reasoner, IsDefault: true, SystemPrompt: "You are Winston."},
+		}}, nil
+	}
+
+	sess := srv.store.New("slow-burst-session", "/workspace", modelconfig.DefaultModels().Reasoner)
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	client := &wsClient{send: make(chan WSMessage, 256), ctx: context.Background()}
+
+	asks := []string{
+		"burst check one: reply with ALPHA now please",
+		"burst check two: reply with BRAVO now please",
+		"burst check three: reply with CHARLIE now please",
+	}
+	runIDs := []string{"slow-run-1", "slow-run-2", "slow-run-3"}
+	for i, ask := range asks {
+		srv.handleWSMessage(client, WSMessage{
+			Type:      "chat",
+			SessionID: sess.ID,
+			Content:   ask,
+			RunID:     runIDs[i],
+		})
+		if i < len(asks)-1 {
+			time.Sleep(30 * time.Millisecond)
+		}
+	}
+
+	drainDoneMessagesAnyOrder(t, client, runIDs, 10*time.Second)
+
+	if got := slow.callCount(); got != 3 {
+		t.Fatalf("backend called %d times, want 3 (no dropped/duplicated turns)", got)
+	}
+
+	var msgs []session.SessionMessage
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := srv.store.TailMessages(sess.ID, 50)
+		if err != nil {
+			t.Fatalf("TailMessages: %v", err)
+		}
+		msgs = got
+		if len(msgs) >= 6 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(msgs) != 6 {
+		t.Fatalf("persisted %d messages, want 6 (3 user + 3 assistant)\n%+v", len(msgs), msgs)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "chat(") || strings.Contains(m.Content, "still busy") {
+			t.Fatalf("queue-wait error leaked into a persisted row: %+v", m)
+		}
+	}
 }
 
 // blockingBackend blocks in ChatCompletion until release is closed, signalling

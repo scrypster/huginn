@@ -246,10 +246,15 @@ func (s *Session) WaitForIdle(ctx context.Context) bool {
 	}
 }
 
-// defaultRunQueueWait is how long ChatWithAgent waits for a busy session
-// before giving up. Hallway @mentions share one space-chat session; a
-// fail-closed "already running" SNAP leaked into #Huginn as assistant speech.
-const defaultRunQueueWait = 120 * time.Second
+// RunQueueWaitCeiling is how long a single beginExclusiveRun attempt waits
+// for a busy session's exclusive run slot before giving up FOR THAT
+// ATTEMPT and returning false. This is NOT a hard failure ceiling — a
+// queued turn behind a genuinely slow predecessor (a slow local model can
+// take minutes) is expected to keep retrying past it (see ChatWithAgent's
+// caller loop in runWSChat), never to persist an error just because one
+// wait attempt elapsed. Exported var (not const) so tests can shrink it to
+// exercise the retry path without waiting 120s.
+var RunQueueWaitCeiling = 120 * time.Second
 
 // beginExclusiveRun claims the exclusive run slot, waiting if another run
 // is in progress. Returns true if this caller now owns the slot (caller
@@ -260,7 +265,7 @@ func (s *Session) beginExclusiveRun(ctx context.Context) bool {
 	}
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultRunQueueWait)
+		ctx, cancel = context.WithTimeout(ctx, RunQueueWaitCeiling)
 		defer cancel()
 	}
 	for {

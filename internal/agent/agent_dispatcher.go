@@ -333,6 +333,15 @@ func (o *Orchestrator) SwarmWithAgents(ctx context.Context, agentNames, prompts 
 // ErrSessionBusy is returned when a swarm is requested on a session that is already running.
 var ErrSessionBusy = fmt.Errorf("session is busy: concurrent runs are not supported")
 
+// ErrQueueWaitTimeout marks a ChatWithAgent error as "this queued turn could
+// not claim its session's exclusive run slot within one wait ceiling" — a
+// queuing fact, never a real failure. A predecessor that is still
+// legitimately running (a slow local model can take minutes) is expected
+// to eventually finish; callers must keep retrying (with errors.Is on this
+// sentinel) rather than ever surfacing the wrapping error as assistant
+// speech or a persisted chat row.
+var ErrQueueWaitTimeout = fmt.Errorf("queue wait timeout")
+
 // SwarmWithAgentsBroadcast runs a multi-agent swarm and broadcasts WebSocket events to the
 // given session. Returns nil immediately (202-style async); the swarm runs in background
 // goroutines tied to the server-lifetime ctx rather than the request context.
@@ -997,7 +1006,11 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	// session). Do not fail-closed with "already running" — that leaked into
 	// #Huginn as assistant speech.
 	if !sess.beginExclusiveRun(ctx) {
-		return fmt.Errorf("chat(%s): session %s still busy after queue wait", ag.Name, sessionID)
+		// Wrap ErrQueueWaitTimeout so callers (runWSChat) can tell "still
+		// queued, keep retrying" apart from a real failure with errors.Is
+		// instead of string-sniffing — and MUST NEVER persist this as
+		// assistant speech: a queued turn is not an error.
+		return fmt.Errorf("chat(%s): session %s still busy after queue wait: %w", ag.Name, sessionID, ErrQueueWaitTimeout)
 	}
 	defer sess.endRun()
 	sess.setState(StateAgentLoop)
@@ -1020,6 +1033,19 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			onToken(pong)
 		}
 		appendHistoryHonoringGate(sess, userMsg, pong, nil, false)
+		o.compactHistoryAsync(sess)
+		return nil
+	}
+	// "say DELTA" / "repeat X" / "echo X": a bare word to speak back, not a
+	// task. Answering it via a full agentic turn is how a trivial ask ends
+	// up costing 3 LLM calls and minutes on a slow local model — the model
+	// sometimes even delegates it. Skip straight to speaking the word.
+	if word, ok := TrivialSayEchoWord(userMsg); ok {
+		speech := word + "."
+		if onToken != nil {
+			onToken(speech)
+		}
+		appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
 		o.compactHistoryAsync(sess)
 		return nil
 	}

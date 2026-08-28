@@ -1090,6 +1090,25 @@ func IsCompanyWallDeny(content string) bool {
 	return strings.Contains(s, "Steve isn't in Lab")
 }
 
+// DeniedAgentName extracts the agent name from a company-wall deny string
+// ("Buggy isn't in this company." -> "Buggy"). Returns "" if content is not
+// a recognizable wall-deny line. Used by the run loop to decide whether the
+// human's own ask named the refused agent (an honest wall line answers
+// their question) or never mentioned it at all (the refusal is glue from a
+// delegation the human never asked for, and must not be spoken verbatim).
+func DeniedAgentName(content string) string {
+	s := strings.TrimSpace(content)
+	s = strings.TrimPrefix(s, "error: ")
+	s = strings.TrimSpace(s)
+	if m := honestMissingAgentRE.FindStringSubmatch(s); len(m) > 1 {
+		return m[1]
+	}
+	if m := missingAgentHelpdeskRE.FindStringSubmatch(s); len(m) > 1 {
+		return m[1]
+	}
+	return ""
+}
+
 // PersistStopTurn is the persist filter when the loop ends without another
 // model completion (company-wall deny or wait already answered).
 func PersistStopTurn(speech, toolBlob, userAsk string) string {

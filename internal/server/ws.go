@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -1399,6 +1400,21 @@ func (s *Server) reserveChatRun(sessionID string) (run *chatRunHandle, waitCh <-
 	return run, waitCh, depth
 }
 
+// chatTurnWaitCeiling bounds a single awaitChatTurn wait for the prior
+// FIFO turn. NOT a hard failure ceiling: a legitimately slow predecessor
+// (a slow local model can take minutes) elapsing this ceiling only means
+// this goroutine stops blocking here and falls through to its own
+// session-level exclusive-run wait in ChatWithAgent, which retries past
+// its own ceiling too — see runWSChat's isQueueBusy retry loop. Var (not
+// const) so tests can shrink it to exercise that retry path quickly.
+var chatTurnWaitCeiling = 120 * time.Second
+
+// chatQueueRetryWait bounds each WaitForSessionIdle call in runWSChat's
+// queue-busy retry loop (how long one re-enqueue attempt waits for the
+// predecessor to free the session before looping again). Var so tests can
+// shrink it to exercise many retry iterations quickly.
+var chatQueueRetryWait = 30 * time.Second
+
 // awaitChatTurn blocks until it is run's turn to execute: the prior run in
 // the FIFO chain finished (waitCh closed), run's own context was cancelled
 // (explicit chat_cancel / shutdown while queued), or a generous ceiling
@@ -1410,7 +1426,7 @@ func (s *Server) awaitChatTurn(run *chatRunHandle, waitCh <-chan struct{}) {
 	}
 	select {
 	case <-waitCh:
-	case <-time.After(120 * time.Second):
+	case <-time.After(chatTurnWaitCeiling):
 	case <-run.ctx.Done():
 	}
 }
@@ -1918,10 +1934,27 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 	}()
 
+	// isQueueBusy reports a queue-wait-ceiling error from ChatWithAgent —
+	// the predecessor turn is still legitimately running (a slow local
+	// model can take minutes), not a real failure. errors.Is is the
+	// primary check; the string fallback covers any legacy caller that
+	// still returns the old "already running" text. This class of error
+	// must NEVER reach the err != nil branch below (which would persist it
+	// as "⚠️ <err>" assistant speech, a Tier-0 violation) — the loop below
+	// keeps re-enqueuing until it succeeds or the run is truly cancelled.
+	isQueueBusy := func(e error) bool {
+		if e == nil {
+			return false
+		}
+		return errors.Is(e, agent.ErrQueueWaitTimeout) ||
+			strings.Contains(e.Error(), "already running") ||
+			strings.Contains(e.Error(), "still busy after queue wait")
+	}
+
 	err := runChat()
-	if err != nil && (strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "still busy after queue wait")) {
+	for queueRetries := 0; isQueueBusy(err); queueRetries++ {
 		warnContent := "Another response is still finishing — queued your message and retrying."
-		if intent == "update_active_work" && s.tm != nil {
+		if queueRetries == 0 && intent == "update_active_work" && s.tm != nil {
 			switch updateRoute {
 			case "lead_only":
 				warnContent = "Queued a lead follow-up to your update."
@@ -1948,19 +1981,36 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			default:
 				warnContent = "Queued a lead follow-up to your update."
 			}
+		} else if queueRetries > 0 {
+			// Re-enqueue: the backlog is deeper than one 30s wait — say so
+			// honestly instead of ever giving up and speaking the raw
+			// queue-wait error. Throttled so a long backlog does not spam
+			// the client with a warning every 30s.
+			if queueRetries%4 == 0 {
+				warnContent = fmt.Sprintf("Still working through the backlog — %s is queued.", strings.TrimSpace(userMsg))
+			} else {
+				warnContent = ""
+			}
 		}
 		// Slack-like behavior: treat quick follow-up user messages as queued
 		// guidance when another run is still winding down.
-		emit(WSMessage{
-			Type:    "warning",
-			Content: warnContent,
-			RunID:   runID,
-		})
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer waitCancel()
-		if s.orch.WaitForSessionIdle(sessionID, waitCtx) {
-			err = runChat()
+		if warnContent != "" {
+			emit(WSMessage{
+				Type:    "warning",
+				Content: warnContent,
+				RunID:   runID,
+			})
 		}
+		// chatCtx derives from the server lifetime, not this ceiling — only
+		// an explicit chat_cancel or server shutdown ends the re-enqueue
+		// loop early. A merely slow predecessor is not a reason to give up.
+		if chatCtx.Err() != nil {
+			break
+		}
+		waitCtx, waitCancel := context.WithTimeout(chatCtx, chatQueueRetryWait)
+		s.orch.WaitForSessionIdle(sessionID, waitCtx)
+		waitCancel()
+		err = runChat()
 	}
 	close(heartbeatDone)
 	// persistAccumulated saves whatever assistant content/tool-calls have

@@ -203,6 +203,60 @@ func TestChatWithAgent_PingShortCircuitNoLLM(t *testing.T) {
 	}
 }
 
+func TestChatWithAgent_SayEchoShortCircuitNoLLM(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should-not-run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	ag := &agents.Agent{Name: "Winston", ModelID: "claude-sonnet-4", SystemPrompt: "You are Winston."}
+	var tokens strings.Builder
+	msg := "burst two-B: say ECHO"
+	if err := o.ChatWithAgent(context.Background(), ag, msg, "", func(tkn string) { tokens.WriteString(tkn) }, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) != 0 {
+		t.Fatalf("say-X must not call the LLM (no delegation, no LLM), got %d requests", len(mb.lastRequests))
+	}
+	if tokens.String() != "ECHO." {
+		t.Fatalf("say-X tokens %q, want ECHO.", tokens.String())
+	}
+}
+
+func TestTrivialSayEchoWord(t *testing.T) {
+	trueCases := map[string]string{
+		"say DELTA":                "DELTA",
+		"burst two-B: say ECHO":    "ECHO",
+		"burst two-C: say FOXTROT": "FOXTROT",
+		"@Winston repeat hello":    "hello",
+		"echo test":                "test",
+		"repeat one two three":     "one two three",
+		"say hi-there":             "hi-there",
+	}
+	for ask, want := range trueCases {
+		got, ok := TrivialSayEchoWord(ask)
+		if !ok {
+			t.Errorf("TrivialSayEchoWord(%q) ok=false, want true", ask)
+			continue
+		}
+		if got != want {
+			t.Errorf("TrivialSayEchoWord(%q) = %q, want %q", ask, got, want)
+		}
+	}
+	falseCases := []string{
+		"say something about our roadmap",
+		"say hi to the team",
+		"repeat your understanding of the plan",
+		"echo one two three four",
+		"hire Steve",
+		"what time is it",
+	}
+	for _, ask := range falseCases {
+		if _, ok := TrivialSayEchoWord(ask); ok {
+			t.Errorf("TrivialSayEchoWord(%q) ok=true, want false (real ask must not fast-path)", ask)
+		}
+	}
+}
+
 func TestIsTrivialPingAsk(t *testing.T) {
 	for _, ask := range []string{"ping", "pong", "@Winston ping", "@Winston ping one", "ping two", "ping three", "ping 2"} {
 		if !IsTrivialPingAsk(ask) {
