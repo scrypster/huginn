@@ -1378,6 +1378,44 @@ describe('ChatView', () => {
     expect(card.content).toContain('Added regression coverage.')
   })
 
+  it('thread_done with status error renders a failure card, not an accomplishment', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'delegate to Reggie',
+        delegatedThreads: [{ threadId: 'thr-reggie', agentId: 'Reggie', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: 'test-session-id',
+      payload: {
+        thread_id: 'thr-reggie',
+        agent_id: 'Reggie',
+        status: 'error',
+        summary: 'delegation timed out — thread never started',
+      },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const card = msgs.find((m: any) => m.threadSummaryThreadId === 'thr-reggie')
+    expect(card).toBeDefined()
+    expect(card.threadSummary).toBe(true)
+    expect(card.threadSummaryFailed).toBe(true)
+    expect(card.content).not.toContain('completed delegated work')
+    expect(card.content).toContain("**Reggie**'s delegated task failed")
+    expect(card.content).toContain('delegation timed out — thread never started')
+    // Real agent name, not the literal "Delegate" fallback.
+    expect(card.content).not.toContain('**Delegate**')
+  })
+
   it('thread_help surfaces a blocked-thread alert banner', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []

@@ -49,6 +49,9 @@ export type SystemSpeech = SystemFailSpeech
 const AUTO_APPROVED_RE = /^Delegation to @(\S+) was auto-approved after \d+s\.?$/i
 const DELEGATED_TO_RE = /^Delegated to @(\S+)(?::\s*(.*))?$/i
 const COMPLETED_WORK_RE = /^\*\*([^*]+)\*\* completed delegated work:\s*(.*)$/i
+// Reaper/watchdog timeouts and other StatusError completions are phrased as
+// a failure, not an accomplishment — see server.go persistThreadLifecycleEvent.
+const FAILED_WORK_RE = /^\*\*([^*]+)\*\*'s delegated task failed:\s*(.*)$/i
 const NEEDS_INPUT_RE = /^@(\S+) needs input(?::\s*(.*))?$/i
 
 function trimContent(content: string | undefined | null): string {
@@ -73,6 +76,9 @@ export function parseSystemFailSpeech(content: string | undefined | null): Syste
   if (am) return { kind: 'announcement', message: '', agent: am[1], summary: am[2] || undefined }
 
   am = trimmed.match(COMPLETED_WORK_RE)
+  if (am) return { kind: 'announcement', message: '', agent: am[1]?.trim(), summary: am[2] || undefined }
+
+  am = trimmed.match(FAILED_WORK_RE)
   if (am) return { kind: 'announcement', message: '', agent: am[1]?.trim(), summary: am[2] || undefined }
 
   am = trimmed.match(NEEDS_INPUT_RE)
@@ -146,6 +152,11 @@ export function isCompletedDelegationAnnouncement(content: string | undefined | 
   return COMPLETED_WORK_RE.test(trimContent(content))
 }
 
+/** True for a StatusError/timeout completion phrased as a failure (not an accomplishment). */
+export function isFailedDelegationAnnouncement(content: string | undefined | null): boolean {
+  return FAILED_WORK_RE.test(trimContent(content))
+}
+
 /** True when the whole message is a fail token (not an announcement wrapping one). */
 export function isBareFailSpeech(content: string | undefined | null): boolean {
   const kind = parseSystemFailSpeech(content)?.kind
@@ -156,6 +167,8 @@ export interface HarnessDisplay {
   threadSummary: boolean
   systemLine: boolean
   hideFailSpeech: boolean
+  /** Set only when threadSummary is a StatusError/timeout failure, not an accomplishment. */
+  threadSummaryFailed?: boolean
 }
 
 /**
@@ -179,11 +192,13 @@ export function classifyHarnessDisplay(msg: {
     return { threadSummary: false, systemLine: false, hideFailSpeech: false }
   }
   if (parsed.kind === 'announcement') {
-    const completion = isCompletedDelegationAnnouncement(msg.content)
+    const failed = isFailedDelegationAnnouncement(msg.content)
+    const completion = failed || isCompletedDelegationAnnouncement(msg.content)
     return {
       threadSummary: completion,
       systemLine: !completion,
       hideFailSpeech: false,
+      ...(failed ? { threadSummaryFailed: true } : {}),
     }
   }
   const hasDelegationChrome = !!(msg.delegatedThreads?.length || msg.toolCalls?.length)

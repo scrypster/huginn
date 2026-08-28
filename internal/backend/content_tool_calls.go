@@ -546,6 +546,7 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
 	visible = dropLeftoverHireGhost(visible, ask)
 	visible = dropLeftoverDelegatedHire(visible, ask)
+	visible = EchoAckRewrite(visible, ask)
 	return closeIncompletePersist(fillTrivialAckPersist(fillTrivialPingPersist(visible, ask), ask))
 }
 

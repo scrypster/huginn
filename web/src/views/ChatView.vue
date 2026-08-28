@@ -404,20 +404,28 @@
               <div class="flex-1 h-px bg-huginn-border/40" />
             </div>
 
-            <!-- Thread completion summary card — visually distinct from regular messages -->
+            <!-- Thread completion summary card — visually distinct from regular messages.
+                 Failed (StatusError/timeout) completions reuse the same card shape but in
+                 the fail-red palette so a reaper timeout never reads as an accomplishment. -->
             <div v-if="msg.threadSummary"
               class="flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl mx-2 mt-4"
-              style="background:rgba(46,160,67,0.07);border:1px solid rgba(46,160,67,0.22)">
-              <svg class="w-3.5 h-3.5 text-huginn-green/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              :style="msg.threadSummaryFailed
+                ? 'background:rgba(248,81,73,0.07);border:1px solid rgba(248,81,73,0.22)'
+                : 'background:rgba(46,160,67,0.07);border:1px solid rgba(46,160,67,0.22)'"
+              :data-testid="msg.threadSummaryFailed ? 'thread-summary-failed' : 'thread-summary'">
+              <svg v-if="msg.threadSummaryFailed" class="w-3.5 h-3.5 text-huginn-red/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <svg v-else class="w-3.5 h-3.5 text-huginn-green/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
               </svg>
               <div class="flex-1 min-w-0">
-                <div class="md-content text-xs leading-relaxed" style="color:rgba(46,160,67,0.85)"
+                <div class="md-content text-xs leading-relaxed" :style="msg.threadSummaryFailed ? 'color:rgba(248,81,73,0.85)' : 'color:rgba(46,160,67,0.85)'"
                   v-html="renderWithMentions(msg.content)" />
                 <button v-if="msg.threadSummaryThreadId"
                   @click="openThreadDetailById(msg.threadSummaryThreadId!)"
                   class="mt-1 text-[10px] font-medium hover:underline"
-                  style="color:rgba(46,160,67,0.55)">
+                  :style="msg.threadSummaryFailed ? 'color:rgba(248,81,73,0.55)' : 'color:rgba(46,160,67,0.55)'">
                   View thread →
                 </button>
               </div>
@@ -3090,6 +3098,9 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (!threadId) return
     const summary = typeof p?.summary === 'string' ? p.summary : ''
     const agentId = p?.agent_id as string | undefined
+    // A reaper/watchdog timeout (or any other hard failure) sets status
+    // "error" — that must read as a failure notice, not an accomplishment.
+    const failed = typeof p?.status === 'string' && p.status.toLowerCase() === 'error'
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
@@ -3125,13 +3136,18 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (summary) {
       const alreadyPosted = msgs.some(m => m.threadSummaryThreadId === threadId)
       if (!alreadyPosted) {
+        const label = agentId || 'Delegate'
+        const content = failed
+          ? `**${label}**'s delegated task failed: ${summary}`
+          : `**${label}** completed delegated work: ${summary}`
         const completionMsg: ChatMessage = {
           id: `thread-summary-${threadId}-${Date.now()}`,
           role: 'assistant',
-          content: `**${agentId || 'Delegate'}** completed delegated work: ${summary}`,
+          content,
           agent: agentId || undefined,
           createdAt: new Date().toISOString(),
           threadSummary: true,
+          threadSummaryFailed: failed || undefined,
           threadSummaryThreadId: threadId,
           ...(props.spaceId && msg.session_id ? {
             session_id: msg.session_id as string,

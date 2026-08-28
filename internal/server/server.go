@@ -609,6 +609,7 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	task, _ := payload["task"].(string)
 	helpMsg, _ := payload["message"].(string)
 	summary, _ := payload["summary"].(string)
+	status, _ := payload["status"].(string)
 	timeoutSeconds, _ := payload["timeout_seconds"].(int)
 	parentID := ""
 	if s.tm != nil {
@@ -628,6 +629,13 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	agentLabel := strings.TrimSpace(agentID)
 	if agentLabel == "" {
 		agentLabel = "delegate"
+	}
+	// Backfill the resolved agent_id onto the payload map itself (maps are
+	// reference types, so this mutation is visible to the caller too) so the
+	// raw WS broadcast that follows carries the real agent name instead of
+	// leaving clients to fall back to a placeholder label.
+	if strings.TrimSpace(agentID) != "" {
+		payload["agent_id"] = agentID
 	}
 	var content string
 	switch msgType {
@@ -650,7 +658,14 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 		if doneSummary == "" {
 			doneSummary = "Completed delegated work."
 		}
-		content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+		if strings.EqualFold(strings.TrimSpace(status), "error") {
+			// A reaper timeout / hard failure must not be phrased as an
+			// accomplishment — see StartWatchdog and the error-summary
+			// paths in threadmgr/spawn.go.
+			content = fmt.Sprintf("**%s**'s delegated task failed: %s", agentLabel, doneSummary)
+		} else {
+			content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+		}
 	case "delegation_preview_timeout":
 		if timeoutSeconds <= 0 {
 			timeoutSeconds = 30

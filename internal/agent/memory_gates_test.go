@@ -650,3 +650,105 @@ func TestPinMuninnVault_LabCompanyDefaultNotSent(t *testing.T) {
 		t.Fatalf("lab company vault default: got %q", got)
 	}
 }
+
+// --- Defect 2: implicit declarative-fact memory writes ---
+
+func TestIsDeclarativeFactAsk_ForTheRecordAndFYI(t *testing.T) {
+	for _, msg := range []string{
+		"@Winston for the record: our staging server is called valkyrie and deploys happen on Fridays.",
+		"FYI the release branch is cut every other Thursday.",
+		"just so you know, the on-call rotation starts Monday.",
+		"heads up, the API key rotates monthly.",
+		"Our staging server is called valkyrie.",
+		"The deploy window is Fridays at 5pm.",
+	} {
+		if !isDeclarativeFactAsk(msg) {
+			t.Errorf("%q: want declarative fact, got false", msg)
+		}
+	}
+}
+
+func TestIsDeclarativeFactAsk_QuestionsAndSmallTalkNotFacts(t *testing.T) {
+	for _, msg := range []string{
+		"What is our staging server called?",
+		"Is the deploy window Fridays?",
+		"good morning",
+		"thanks!",
+		"can you check the logs?",
+	} {
+		if isDeclarativeFactAsk(msg) {
+			t.Errorf("%q: want not a declarative fact, got true", msg)
+		}
+	}
+}
+
+func TestDetectNewFact_DeclarativeFactWithoutRememberVerb(t *testing.T) {
+	need, kind := detectNewFact(
+		"@Winston for the record: our staging server is called valkyrie and deploys happen on Fridays.",
+		"For the record: our staging server is called valkyrie and deploys happen on Fridays.",
+		"conversational",
+	)
+	if !need || kind != "declarative_fact" {
+		t.Fatalf("need=%v kind=%q, want true/declarative_fact", need, kind)
+	}
+}
+
+func TestConversational_DeclarativeFactWithoutRememberVerb_HarnessPersist(t *testing.T) {
+	remember := &gateStubTool{name: "muninn_remember"}
+	reg := tools.NewRegistry()
+	reg.Register(remember)
+
+	dec := applyMemoryGate(context.Background(), memoryGateInput{
+		Mode:      "conversational",
+		Vault:     "huginn",
+		Agent:     "Winston",
+		UserMsg:   "@Winston for the record: our staging server is called valkyrie and deploys happen on Fridays.",
+		Assistant: "For the record: our staging server is called valkyrie and deploys happen on Fridays.",
+		Registry:  reg,
+	})
+	if !dec.Receipt || dec.Source != "harness" {
+		t.Fatalf("decision = %+v, want harness receipt", dec)
+	}
+	if remember.callCount() != 1 {
+		t.Fatalf("remember called %d times, want 1", remember.callCount())
+	}
+	content, _ := remember.calls[0]["content"].(string)
+	if !strings.Contains(strings.ToLower(content), "valkyrie") {
+		t.Fatalf("stored content missing fact: %q", content)
+	}
+	if strings.Contains(strings.ToLower(content), "for the record") {
+		t.Fatalf("stored content kept the wrapper: %q", content)
+	}
+}
+
+func TestDistillFactContent_StripsRememberWrapperAndInstructionCruft(t *testing.T) {
+	got := distillFactContent("Please remember this: the wringer tag is immersion-gates-2026. Confirm in one short sentence. Do not invent other vaults.")
+	want := "the wringer tag is immersion-gates-2026."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestDistillFactContent_StripsForTheRecordWrapper(t *testing.T) {
+	got := distillFactContent("for the record: our staging server is called valkyrie and deploys happen on Fridays.")
+	want := "our staging server is called valkyrie and deploys happen on Fridays."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestDistillFactContent_StackedWrappersFullyUnwrap(t *testing.T) {
+	got := distillFactContent("Please remember this: for the record, the deploy window is Fridays.")
+	want := "the deploy window is Fridays."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestDistillFactContent_PlainFactUnchanged(t *testing.T) {
+	got := distillFactContent("cats like boxes.")
+	want := "cats like boxes."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
