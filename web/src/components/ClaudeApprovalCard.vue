@@ -60,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { ClaudeApproval, ApprovalDecision } from '../composables/useClaudeApprovals'
 
 const props = defineProps<{ approval: ClaudeApproval }>()
@@ -71,6 +71,13 @@ const emit = defineEmits<{ (e: 'decide', d: ApprovalDecision): void }>()
 // file. It therefore must not share the one-click path that grants a single
 // call.
 const confirmingTool = ref(false)
+
+// Reset the confirm gate whenever this card is reused for a different
+// approval. Today the parent keys by approval.id so Vue remounts instead of
+// patching, and this never fires — but the two-click gate guards a permanent
+// privilege escalation, so it defends its own invariant rather than trusting
+// every future caller to key the list correctly.
+watch(() => props.approval.id, () => { confirmingTool.value = false })
 
 const countdown = computed(() => {
   const total = Math.max(0, Math.floor(props.approval.remaining_ms / 1000))

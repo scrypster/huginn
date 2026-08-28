@@ -48,9 +48,22 @@ describe('ClaudeApprovalCard', () => {
       .toContain('this session')
   })
 
-  it('renders a countdown from remaining_ms', () => {
+  it('renders a zero-padded countdown from remaining_ms', () => {
+    // 245000ms = 4m05s. An unpadded formatter renders "4:5" and fails here.
+    const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, remaining_ms: 245000 } } })
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('4:05')
+  })
+
+  it('renders a two-digit seconds countdown unchanged', () => {
     const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, remaining_ms: 252000 } } })
-    expect(w.text()).toContain('4:12')
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('4:12')
+  })
+
+  it('clamps a zero or negative countdown to 0:00', () => {
+    for (const ms of [0, -1, -60000]) {
+      const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, remaining_ms: ms } } })
+      expect(w.get('[data-testid="approval-countdown"]').text()).toBe('0:00')
+    }
   })
 
   it('shows the excerpt when present', () => {
@@ -58,5 +71,24 @@ describe('ClaudeApprovalCard', () => {
       props: { approval: { ...base, tool_name: 'Write', can_remember: false, summary: '/tmp/a.ts', excerpt: 'import x' } },
     })
     expect(w.text()).toContain('import x')
+  })
+
+  it('renders the excerpt as text, never as HTML', () => {
+    const w = mount(ClaudeApprovalCard, {
+      props: { approval: { ...base, tool_name: 'Write', can_remember: false, excerpt: '<img src=x onerror=alert(1)>' } },
+    })
+    expect(w.html()).not.toContain('<img')
+    expect(w.text()).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  it('resets the confirm gate when the approval id changes', async () => {
+    const w = mount(ClaudeApprovalCard, { props: { approval: base } })
+    await w.get('[data-testid="approval-allow-tool"]').trigger('click')
+    expect(w.find('[data-testid="approval-allow-tool-confirm"]').exists()).toBe(true)
+
+    await w.setProps({ approval: { ...base, id: 'a2' } })
+
+    expect(w.find('[data-testid="approval-allow-tool-confirm"]').exists()).toBe(false)
+    expect(w.find('[data-testid="approval-allow-tool"]').exists()).toBe(true)
   })
 })
