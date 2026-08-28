@@ -425,37 +425,62 @@ func (s *Store) Wait(ctx context.Context, p *Pending) Decision {
 	timer := time.NewTimer(time.Until(p.expiresAt))
 	defer timer.Stop()
 
-	var d Decision
 	select {
 	case got, ok := <-p.ch:
-		if ok {
-			d = got
-		} // channel closed by Close() => Deny (zero value)
+		if !ok {
+			return Deny // channel closed by Close()
+		}
+		return got
 	case <-timer.C:
 	case <-ctx.Done():
 	}
 
-	// Remove first so a late Deliver returns false rather than silently
-	// landing in a channel nobody reads.
+	// The deadline or the context fired. Whether we actually get to deny
+	// depends on whether a Deliver beat us to the entry, and that question is
+	// only answerable under the lock.
 	s.mu.Lock()
+	_, stillPending := s.pending[p.ID]
 	delete(s.pending, p.ID)
 	s.mu.Unlock()
-	return d
+
+	if stillPending {
+		return Deny
+	}
+
+	// The entry was already claimed by a Deliver. Because Deliver sends while
+	// holding the mutex, that send has completed by the time we observed the
+	// entry gone, so this receive always finds the value. The delivered
+	// decision is authoritative — do not override a human's answer with Deny
+	// just because the timer also fired.
+	select {
+	case got, ok := <-p.ch:
+		if ok {
+			return got
+		}
+	default:
+	}
+	return Deny
 }
 
 // Deliver hands a decision to a waiter. It reports false when the id is
 // unknown — already decided, already expired, or never existed.
+//
+// The send happens while the mutex is HELD, which is what makes the claim and
+// the handoff atomic. Without that, Wait's select could commit to its deadline
+// branch while Deliver still saw the entry in the map, and Deliver would
+// return true for a decision nobody ever consumed — telling the browser
+// "approved" for a call that was in fact denied. The send cannot block: the
+// channel is buffered with capacity 1 and the delete guarantees exactly one
+// send per pending entry.
 func (s *Store) Deliver(id string, d Decision) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	p, ok := s.pending[id]
-	if ok {
-		delete(s.pending, id)
-	}
-	s.mu.Unlock()
 	if !ok {
 		return false
 	}
-	p.ch <- d // buffered, cannot block
+	delete(s.pending, id)
+	p.ch <- d
 	return true
 }
 
