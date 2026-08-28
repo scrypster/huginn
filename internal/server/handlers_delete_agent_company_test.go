@@ -142,3 +142,39 @@ func TestHandleDeleteAgent_BlocksDeletingCompanyLead(t *testing.T) {
 		t.Fatalf("members should be unchanged, got %v", got.Members)
 	}
 }
+
+// A deleted agent must also leave every SPACE membership list — otherwise the
+// channel rail, header count, and mention picker keep a ghost member (live
+// repro 2026-08-28: fableprobe and two driveprobe-* agents lingered in
+// #Huginn's member_agents after DELETE /agents/{name}).
+func TestHandleDeleteAgent_RemovesSpaceMemberships(t *testing.T) {
+	srv := setupDeleteAgentCompanyServer(t, []string{"Winston", "ghostprobe"})
+	sp, err := srv.spaceStore.CreateChannel("ghost-ch", "Winston", []string{"ghostprobe"}, "", "")
+	if err != nil {
+		t.Fatalf("create space: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/v1/agents/{name}", srv.handleDeleteAgent)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/agents/ghostprobe", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got, err := srv.spaceStore.GetSpace(sp.ID)
+	if err != nil {
+		t.Fatalf("get space: %v", err)
+	}
+	for _, m := range got.Members {
+		if m == "ghostprobe" {
+			t.Fatalf("deleted agent still a space member: %v", got.Members)
+		}
+	}
+}

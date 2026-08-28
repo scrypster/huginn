@@ -848,6 +848,14 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Remove the agent from every SPACE membership list too — a deleted agent
+	// lingering in space_members keeps ghost roster rows, wrong header counts,
+	// and a mention picker that disagrees with the company roster.
+	if s.spaceStore != nil {
+		if _, err := s.spaceStore.RemoveAgentFromAllSpaces(name); err != nil {
+			slog.Warn("handleDeleteAgent: failed to remove from spaces", "agent", name, "err", err)
+		}
+	}
 	// Refresh the live agent registry so the deleted agent immediately stops
 	// resolving for delegation and mention parsing (issue #124).
 	s.notifyAgentsChanged()
