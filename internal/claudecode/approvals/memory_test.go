@@ -1,7 +1,6 @@
 package approvals
 
 import (
-	"fmt"
 	"testing"
 )
 
@@ -96,5 +95,4 @@ func TestMemoryReAddDoesNotGrow(t *testing.T) {
 	if !m.has("codey", "Bash", "one") {
 		t.Fatal("re-adding the same command consumed two slots")
 	}
-	_ = fmt.Sprint()
 }

@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -219,8 +220,13 @@ func (s *Store) Deliver(id string, d Decision) bool {
 	return true
 }
 
-// List returns every pending request, newest last, with remaining time
-// computed now.
+// List returns every pending request, soonest deadline first, with remaining
+// time computed now.
+//
+// The order is explicit rather than incidental: the caller renders this list in
+// the browser and re-fetches it on every change, so ranging a map here would
+// reshuffle the cards on screen each refresh. Most urgent first is also the
+// right reading order.
 func (s *Store) List() []PendingView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -242,6 +248,7 @@ func (s *Store) List() []PendingView {
 			CanRemember: p.Request.ToolName == rememberableTool,
 		})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RemainingMS < out[j].RemainingMS })
 	return out
 }
 
