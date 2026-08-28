@@ -157,6 +157,10 @@ type SpaceMessageToolCall struct {
 	Name   string         `json:"name"`
 	Args   map[string]any `json:"args,omitempty"`
 	Result string         `json:"result,omitempty"`
+	// Diff carries the unified file diff captured by write/edit tools
+	// (path, unified, added, removed, truncated, is_new, is_delete) so the
+	// hallway DiffCard survives a reload. Mirrors session.PersistedToolCall.
+	Diff map[string]any `json:"diff,omitempty"`
 }
 
 // SpaceMessage is a single message returned by ListSpaceMessages.
