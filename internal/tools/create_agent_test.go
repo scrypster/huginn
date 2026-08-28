@@ -561,3 +561,48 @@ func TestCreateAgent_NilRegistryDegradesSafely(t *testing.T) {
 		t.Errorf("ack should not claim auto-granted tools, got %q", res.Output)
 	}
 }
+
+// TestCreateAgent_BareHireAsksOneQuestion covers rubric 2.3: "hire someone"
+// with no name and no role must produce exactly ONE clarifying question, not
+// a form/checklist of every missing field, and must not persist anything.
+func TestCreateAgent_BareHireAsksOneQuestion(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{})
+	if !res.IsError {
+		t.Fatal("expected clarifying-question error, got success")
+	}
+	if len(r.persisted) != 0 {
+		t.Fatalf("must not persist on a bare hire ask, got %+v", r.persisted)
+	}
+	const want = "Who should I hire — name and what they'll do?"
+	if res.Error != want {
+		t.Fatalf("Error = %q, want exactly %q", res.Error, want)
+	}
+	if strings.Count(res.Error, "?") != 1 {
+		t.Fatalf("must read as ONE question, got %q", res.Error)
+	}
+}
+
+// TestCreateAgent_BareHireThenFollowUpCompletes covers the two-turn contract:
+// after the single clarifying question, a follow-up call carrying name+role
+// completes the hire — no interview loop, no repeated question.
+func TestCreateAgent_BareHireThenFollowUpCompletes(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+
+	askRes := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{})
+	if !askRes.IsError {
+		t.Fatal("first turn: expected clarifying question")
+	}
+
+	followRes := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Nova", "description": "researches the web",
+	})
+	if followRes.IsError {
+		t.Fatalf("follow-up turn: expected hire to complete, got error %q", followRes.Error)
+	}
+	if len(r.persisted) != 1 || r.persisted[0].Name != "Nova" {
+		t.Fatalf("follow-up turn: persist = %+v", r.persisted)
+	}
+}

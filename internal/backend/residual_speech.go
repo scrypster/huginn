@@ -812,7 +812,7 @@ func splitSentences(s string) []string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		b.WriteByte(s[i])
-		if s[i] == '.' || s[i] == '!' || s[i] == '?' {
+		if (s[i] == '.' || s[i] == '!' || s[i] == '?') && isSentenceBoundary(s, i) {
 			sent := strings.Join(strings.Fields(b.String()), " ")
 			if sent != "" {
 				sentences = append(sentences, sent)
@@ -824,6 +824,30 @@ func splitSentences(s string) []string {
 		sentences = append(sentences, rest)
 	}
 	return sentences
+}
+
+// isSentenceBoundary reports whether the '.'/'!'/'?' at s[i] ends a
+// sentence, as opposed to sitting inside a dotted identifier, filename
+// extension, dotdir path, decimal, or abbreviation ("mathutil.go",
+// ".tmp-t5sandbox", "3.14"). Callers that split on this punctuation and
+// rejoin the pieces with an inserted space (deduplicateTeammateSentences)
+// would otherwise splice a space into the middle of the untouched token.
+//
+// A real sentence boundary is followed by whitespace, the end of the
+// string, or — the one case where punctuation glues directly onto the
+// next word with no space at all — an uppercase letter, which is a
+// genuine run-on sentence missing its space ("Done.Next step is...").
+// Anything else glued directly onto the punctuation (a lowercase letter
+// or digit) is part of the token itself and must not be split.
+func isSentenceBoundary(s string, i int) bool {
+	if i+1 >= len(s) {
+		return true
+	}
+	next := s[i+1]
+	if next == ' ' || next == '\t' || next == '\n' || next == '\r' {
+		return true
+	}
+	return next >= 'A' && next <= 'Z'
 }
 
 func findEndOfSentence(s string) int {

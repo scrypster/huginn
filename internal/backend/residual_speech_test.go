@@ -1089,3 +1089,63 @@ func TestStripResidualSpeechAfterTools_SelfCorrectionGlue(t *testing.T) {
 		}
 	}
 }
+
+// TestFinalizeSpeech_DottedFilenameSurvivesSentenceBoundaryFixup is the
+// direct reproduction for the "filename spaces in speech" wart:
+// deduplicateTeammateSentences (via splitSentences) used to treat every
+// '.'/'!'/'?' as a sentence boundary, then rejoined the resulting pieces
+// with a forced space. That turned "mathutil.go" into "mathutil. go" and
+// ".tmp-t5sandbox" into ". tmp-t5sandbox" even though the periods were
+// never followed by whitespace in the original text. Run through the
+// actual display and persist stages of FinalizeSpeech, not the helper
+// directly, since the bug only shows up after the two stages are wired
+// together.
+func TestFinalizeSpeech_DottedFilenameSurvivesSentenceBoundaryFixup(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"filename extension", "See mathutil.go for details."},
+		{"dotdir path", "Check the .tmp-t5sandbox directory for details."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, persist := range []bool{false, true} {
+				got := FinalizeSpeech(SpeechInput{
+					Raw:        c.raw,
+					UserAsk:    "where's the code?",
+					AfterTools: true,
+					Persist:    persist,
+				}).Speech
+				if got != c.raw {
+					t.Errorf("persist=%v: got %q, want %q unchanged", persist, got, c.raw)
+				}
+				if strings.Contains(got, ". go") || strings.Contains(got, ". tmp") {
+					t.Errorf("persist=%v: dotted identifier split with an inserted space: %q", persist, got)
+				}
+			}
+		})
+	}
+}
+
+// TestSplitSentences_DottedIdentifiersStayIntact locks down
+// isSentenceBoundary's rule directly: a '.'/'!'/'?' glued to a lowercase
+// letter or digit (no space) is part of the token and must not end a
+// sentence, but one glued directly to an uppercase letter is a genuine
+// run-on missing its space and must still split.
+func TestSplitSentences_DottedIdentifiersStayIntact(t *testing.T) {
+	if got := splitSentences("See mathutil.go for details."); len(got) != 1 || got[0] != "See mathutil.go for details." {
+		t.Errorf("filename extension split: %#v", got)
+	}
+	if got := splitSentences("Check the .tmp-t5sandbox directory."); len(got) != 1 || got[0] != "Check the .tmp-t5sandbox directory." {
+		t.Errorf("dotdir split: %#v", got)
+	}
+	if got := splitSentences("Pi is roughly 3.14 today."); len(got) != 1 || got[0] != "Pi is roughly 3.14 today." {
+		t.Errorf("decimal split: %#v", got)
+	}
+	// Run-on sentence with no space still splits: this is the legitimate
+	// case the original forced-rejoin was protecting.
+	if got := splitSentences("Done.Next step is testing."); len(got) != 2 || got[0] != "Done." || got[1] != "Next step is testing." {
+		t.Errorf("run-on sentence not split: %#v", got)
+	}
+}

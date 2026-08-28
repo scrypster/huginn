@@ -753,6 +753,108 @@ func logToolPermissionAudit(a *auditLogger, payload map[string]any) {
 // "thinking…"). This is intentionally a pure, ws.go-local translation —
 // it reads the existing tool_call wire shape rather than requiring any
 // change to the agent engine.
+// newWSToolEventHandler builds the callback passed as ChatWithAgent's
+// onToolEvent parameter. That parameter carries BOTH prefetch-phase calls
+// (automatic muninn_recall / muninn_where_left_off / muninn_guide, run
+// silently before the visible turn starts) and every regular in-loop tool
+// call — agent_dispatcher.go's chatOnToolCall / chatOnToolDone route through
+// onToolEvent instead of onEvent whenever onToolEvent is non-nil, for both
+// kinds alike. Passing onToolEvent=nil (the previous behavior at every
+// ChatWithAgent call site) silently drops prefetch events entirely —
+// chatPrefetchCallback no-ops when onToolEvent is nil — so the client never
+// saw "recalling memory" for automatic recall.
+//
+// Prefetch calls — marked by the producer with "phase": "prefetch" — surface
+// only via setStatus("recalling memory"), no tool chip: the turn hasn't
+// started yet, so a chip would appear before any assistant activity. The
+// marker is set by the producer rather than inferred from the tool name
+// because muninn_recall is ALSO a tool the agent calls deliberately mid-loop;
+// a name-based test would swallow those real calls.
+//
+// Every other tool call is re-expressed as the same backend.StreamToolCall /
+// StreamToolResult events onEvent already handles, so persistence
+// (collectedToolCalls), the phase-true status derivation (statusForToolCall),
+// and permission audit logging all run exactly as they did when these tools
+// went through onEvent directly. The engine carries the LLM's real callID in
+// the payload's "id", so tool_call/tool_result pair exactly even when tools
+// run in parallel (see dispatchTools). The per-tool-name FIFO below is only a
+// fallback for producers that send no id.
+func newWSToolEventHandler(setStatus func(string), onEvent func(backend.StreamEvent)) func(eventType string, payload map[string]any) {
+	var mu sync.Mutex
+	pending := map[string][]string{}
+	var nextID int64
+
+	return func(eventType string, payload map[string]any) {
+		toolName, _ := payload["tool"].(string)
+		// Prefetch is identified by the producer-set phase marker, NOT by tool
+		// name: muninn_recall is also a tool the agent calls deliberately
+		// mid-loop, and matching on the name would swallow those real calls.
+		if phase, _ := payload["phase"].(string); phase == "prefetch" {
+			if eventType == "tool_call" {
+				setStatus("recalling memory")
+			}
+			return
+		}
+		switch eventType {
+		case "tool_call":
+			id, _ := payload["id"].(string)
+			if id == "" {
+				// Fallback for producers that carry no callID: pair by
+				// per-tool-name FIFO. Only correct while no two same-name
+				// calls are in flight at once.
+				mu.Lock()
+				nextID++
+				id = fmt.Sprintf("wsToolEvent-%d", nextID)
+				pending[toolName] = append(pending[toolName], id)
+				mu.Unlock()
+			}
+			args, _ := payload["args"].(map[string]any)
+			onEvent(backend.StreamEvent{
+				Type:    backend.StreamToolCall,
+				Payload: map[string]any{"id": id, "tool": toolName, "args": args},
+			})
+		case "tool_result":
+			id, _ := payload["id"].(string)
+			if id == "" {
+				mu.Lock()
+				if ids := pending[toolName]; len(ids) > 0 {
+					id = ids[0]
+					pending[toolName] = ids[1:]
+				}
+				mu.Unlock()
+			}
+			permissionDenied, _ := payload["permission_denied"].(bool)
+			// Prefer the producer's own success flag: a tool that failed with
+			// an error but was NOT permission-denied must not report success.
+			success := !permissionDenied
+			if s, ok := payload["success"].(bool); ok {
+				success = s && !permissionDenied
+			}
+			resultPayload := map[string]any{
+				"id":      id,
+				"tool":    toolName,
+				"success": success,
+				"result":  payload["result"],
+			}
+			if args, ok := payload["args"].(map[string]any); ok {
+				resultPayload["args"] = args
+			}
+			if md, ok := payload["metadata"]; ok {
+				resultPayload["metadata"] = md
+			}
+			if permissionDenied {
+				resultPayload["permission_denied"] = true
+				resultPayload["reason_code"] = payload["reason_code"]
+				resultPayload["reason"] = payload["reason"]
+			}
+			onEvent(backend.StreamEvent{
+				Type:    backend.StreamToolResult,
+				Payload: resultPayload,
+			})
+		}
+	}
+}
+
 func statusForToolCall(payload map[string]any) (string, bool) {
 	tool, _ := payload["tool"].(string)
 	switch tool {
@@ -1928,6 +2030,11 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 	}
 
+	// onToolEvent handles ChatWithAgent's tool-event channel; see
+	// newWSToolEventHandler's doc comment for why it exists and how it
+	// avoids regressing regular (non-prefetch) tool events.
+	onToolEvent := newWSToolEventHandler(setStatus, onEvent)
+
 	// Emit thinking immediately so the 60s client watchdog does not fire
 	// during context prep / model load (before the first token). Routed
 	// through setStatus so the heartbeat's notion of the current phase and
@@ -1992,7 +2099,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 
 	runChat := func() error {
 		if ag != nil {
-			return s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, nil, onEvent)
+			return s.orch.ChatWithAgent(chatCtx, ag, userMsg, sessionID, onToken, onToolEvent, onEvent)
 		}
 		// No agents configured — fall back to generic Chat.
 		return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)

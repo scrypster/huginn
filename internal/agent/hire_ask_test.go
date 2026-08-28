@@ -24,6 +24,7 @@ func TestParseNamedHire(t *testing.T) {
 		{"hire a teammate named Nova who researches", "Nova", "researches", true},
 		{"create an agent named fableprobe who researches.", "fableprobe", "researches", true},
 		{"hire someone who researches", "", "", false},
+		{"hire someone", "", "", false},
 		{"create an agent", "", "", false},
 		{"what time is it", "", "", false},
 		{"hire Steve who researches the web", "Steve", "researches the web", true},

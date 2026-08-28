@@ -127,6 +127,13 @@ func (t *CreateAgentTool) Schema() backend.Tool {
 func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) ToolResult {
 	name := strings.TrimSpace(asToolString(args["name"]))
 	role := strings.TrimSpace(firstToolString(args, "description", "role"))
+	// Bare "hire someone" (rubric 2.3): neither name nor role given. Ask
+	// exactly ONE clarifying question — not a two-step interview where the
+	// human supplies a name only to be asked for a role next, or vice
+	// versa in a way that reads like a form.
+	if name == "" && role == "" {
+		return hireErr("Who should I hire — name and what they'll do?")
+	}
 	if name == "" {
 		return hireErr("I need a name for them.")
 	}

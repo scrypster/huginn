@@ -1084,6 +1084,9 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			return nil
 		}
 	}
+	if o.tryForgetFastPath(ctx, ag, userMsg, sess, reg, onToken) {
+		return nil
+	}
 	if o.tryNamedHireFastPath(ctx, ag, userMsg, sess, reg, onToken, onEvent) {
 		return nil
 	}
@@ -1095,8 +1098,13 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		if cached || onToolEvent == nil {
 			return
 		}
-		onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
-		onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
+		// "phase": "prefetch" marks these as silent pre-turn calls. Consumers
+		// must key off this, NOT the tool name: muninn_recall is also a tool
+		// the agent calls deliberately mid-loop, and a name-based test would
+		// swallow those real calls (no chip, no persisted record, no
+		// permission audit entry).
+		onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args, "phase": "prefetch"})
+		onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output, "phase": "prefetch"})
 	}
 
 	// Start vault connect + memory prefetch concurrently with
@@ -1174,7 +1182,11 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			toolArgsCapture[callID] = args
 			toolArgsMu.Unlock()
 			if onToolEvent != nil {
-				onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
+				// Carry the real callID: consumers pair tool_call with
+				// tool_result by it. Tools run in parallel (dispatchTools),
+				// so name-based pairing mis-attributes results between two
+				// concurrent same-name calls.
+				onToolEvent("tool_call", map[string]any{"id": callID, "tool": name, "args": args})
 			} else if onEvent != nil {
 				onEvent(backend.StreamEvent{
 					Type:    backend.StreamToolCall,
@@ -1210,7 +1222,17 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			}
 			slog.Debug("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 			if onToolEvent != nil {
-				payload := map[string]any{"tool": name, "result": toolResultDisplayText(result)}
+				// id/args/success must match the onEvent branch below: the WS
+				// path routes ALL tools through onToolEvent, so anything
+				// missing here is lost from the tool chip, the persisted
+				// tool-call record, and the permission audit entry.
+				payload := map[string]any{
+					"id":      callID,
+					"tool":    name,
+					"result":  toolResultDisplayText(result),
+					"args":    capturedArgs,
+					"success": result.Error == "",
+				}
 				if result.Metadata != nil {
 					payload["metadata"] = result.Metadata
 				}

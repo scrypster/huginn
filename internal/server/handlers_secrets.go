@@ -53,7 +53,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	applySecretRef(&s.cfg, slot, ref)
 	s.mu.Unlock()
 
-	if err := s.saveConfig(&s.cfg); err != nil {
+	if err := s.updateConfig(func(c *config.Config) {
+		applySecretRef(c, slot, ref)
+	}); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())
 		return
 	}
@@ -92,7 +94,9 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	applySecretRef(&s.cfg, slot, "")
 	s.mu.Unlock()
 
-	if err := s.saveConfig(&s.cfg); err != nil {
+	if err := s.updateConfig(func(c *config.Config) {
+		applySecretRef(c, slot, "")
+	}); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())
 		return
 	}

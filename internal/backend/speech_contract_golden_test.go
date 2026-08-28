@@ -172,6 +172,22 @@ func TestFinalizeSpeech_ContractGoldenTable(t *testing.T) {
 			persist:    true,
 			want:       "The build passed and I merged the branch.",
 		},
+		{
+			name:       "dotted filename survives sentence-boundary fixup",
+			raw:        "See mathutil.go for details.",
+			userAsk:    "where's the code?",
+			afterTools: true,
+			persist:    true,
+			want:       "See mathutil.go for details.",
+		},
+		{
+			name:       "dotdir path survives sentence-boundary fixup",
+			raw:        "Check the .tmp-t5sandbox directory for details.",
+			userAsk:    "where's the code?",
+			afterTools: true,
+			persist:    true,
+			want:       "Check the .tmp-t5sandbox directory for details.",
+		},
 	}
 
 	for _, c := range cases {
