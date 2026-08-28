@@ -52,23 +52,30 @@ func TestSpawnSpecialist_EmptyRationaleIsToolError(t *testing.T) {
 	}
 }
 
-func TestSpawnSpecialist_NameValidationRejectsColons(t *testing.T) {
+// Colons are now SANITIZED (auto-cleaned) rather than rejected, so a small
+// model proposing "rust:audit" spawns as "rust audit" instead of looping.
+func TestSpawnSpecialist_NameColonsSanitizedNotRejected(t *testing.T) {
+	var seen string
 	tool := &SpawnSpecialistTool{Deps: SpawnSpecialistDeps{
 		ValidateName: func(name string) error {
+			seen = name
 			if strings.Contains(name, ":") {
 				return errors.New("invalid character")
 			}
 			return nil
 		},
+		NameTaken:    func(string) bool { return false },
+		ResolveModel: func(string) (ModelChoice, bool) { return ModelChoice{}, true },
+		Spawn:        func(context.Context, SpawnSpecialistRequest) (string, error) { return "t1", nil },
 	}}
 	res := tool.Execute(context.Background(), map[string]any{
 		"name": "rust:audit", "task": "t", "model": "m", "rationale": "r",
 	})
-	if !res.IsError {
-		t.Fatal("expected validation error for colon in name")
+	if res.IsError {
+		t.Fatalf("colon name should sanitize and proceed, got error: %q", res.Error)
 	}
-	if !strings.Contains(res.Error, "Specialist") {
-		t.Errorf("expected suggested name format in error, got %q", res.Error)
+	if strings.Contains(seen, ":") {
+		t.Errorf("ValidateName saw an unsanitized name: %q", seen)
 	}
 }
 
