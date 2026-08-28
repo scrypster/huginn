@@ -2,6 +2,8 @@ package server
 
 import (
 	"log/slog"
+	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,9 +22,9 @@ type auditEvent struct {
 // via a non-blocking buffered channel + background goroutine.
 // Pruning of old rows is handled by stats.Persister on its 5-minute flush cycle.
 type auditLogger struct {
-	db  *sqlitedb.DB
-	ch  chan auditEvent
-	wg  sync.WaitGroup
+	db   *sqlitedb.DB
+	ch   chan auditEvent
+	wg   sync.WaitGroup
 	done chan struct{}
 }
 
@@ -83,6 +85,50 @@ func (a *auditLogger) run() {
 			}
 		}
 	}
+}
+
+// auditActor identifies who performed an audited entity action. Huginn is a
+// single-operator local app with no multi-user identity system yet, so this
+// is a fixed label rather than a per-request principal — it exists so the
+// audit schema does not need to change when multi-user support lands.
+const auditActor = "user"
+
+// logEntityAudit appends one entity-lifecycle audit entry, best-effort.
+// A write failure is logged but never blocks or fails the caller's action —
+// the audit trail must not become a reason a hire/delete/seat/forget fails.
+func (s *Server) logEntityAudit(action, what string, detail map[string]any) {
+	if s.entityAudit == nil {
+		return
+	}
+	if err := s.entityAudit.Append(action, auditActor, what, detail); err != nil {
+		slog.Warn("entity audit: append failed", "action", action, "err", err)
+	}
+}
+
+// handleGetAudit returns the most recent entity-lifecycle audit entries,
+// newest first.
+//
+//	GET /api/v1/audit?limit=100
+func (s *Server) handleGetAudit(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if s.entityAudit == nil {
+		jsonOK(w, map[string]any{"entries": []entityAuditEntry{}})
+		return
+	}
+	entries, err := s.entityAudit.List(limit)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "read audit log: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]any{"entries": entries})
 }
 
 func (a *auditLogger) write(ev auditEvent) {

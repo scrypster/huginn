@@ -106,4 +106,51 @@ describe('useEditor mention picker', () => {
 
     wrapper.unmount()
   })
+
+  it('does not reset the cursor to the start of the document when the user types before the deferred autofocus call runs', async () => {
+    // Tiptap's Editor.mount() always schedules the actual focus call via a
+    // real `window.setTimeout(..., 0)` macrotask (see @tiptap/core's
+    // Editor.mount) — not synchronously, and not via microtask/rAF. With
+    // `autofocus: true` that deferred call resolves to
+    // Selection.atStart(doc) using whatever the document contains *when it
+    // fires* — so a user who types before that timer runs gets their
+    // cursor silently yanked back to the start of the document, discarding
+    // where they were typing and closing any mention popup that had just
+    // started opening. useEditor.ts must use `autofocus: 'end'` instead,
+    // which resolves to Selection.atEnd(doc) at that same later moment —
+    // landing after whatever was already typed.
+    const onSend = vi.fn()
+    const Host = defineComponent({
+      setup() {
+        const el = ref<HTMLElement>()
+        const agents = ref([{ name: 'Ada', color: '#58a6ff' }])
+        const api = useEditor({ agents, onSend })
+        onMounted(() => {
+          if (el.value) api.init(el.value)
+        })
+        return { el, api }
+      },
+      template: '<div ref="el"></div>',
+    })
+
+    const wrapper = mount(Host, { attachTo: document.body })
+    await flushPromises()
+    const editor = wrapper.vm.api.editor.value!
+    expect(editor).toBeTruthy()
+
+    // Type immediately — deliberately not waiting for the deferred autofocus
+    // timer (a real macrotask) to fire first, unlike the Escape test above.
+    editor.view.dispatch(editor.state.tr.insertText('hello'))
+    const afterTypingPos = editor.state.selection.from
+
+    // Let the deferred autofocus timer run (it's a real setTimeout(0)).
+    await new Promise<void>(r => setTimeout(r, 10))
+    await flushPromises()
+
+    expect(editor.state.doc.textContent).toBe('hello')
+    // The cursor must still be after what was typed, not reset to position 1.
+    expect(editor.state.selection.from).toBe(afterTypingPos)
+
+    wrapper.unmount()
+  })
 })

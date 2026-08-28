@@ -174,6 +174,84 @@ func TestRunLoop_StopAfterWaitWithClock(t *testing.T) {
 	}
 }
 
+// TestRunLoop_WallDenyRetriesDirectlyWhenAskDidNotNameAgent is the
+// regression test for the "Steve isn't in this company." /
+// "Buggy isn't in this company." non-sequitur: the human asked something
+// that never mentioned the delegated-to agent at all (the model chose to
+// delegate on its own), so the refusal must never be spoken verbatim — the
+// loop retries once with delegation withheld and answers directly.
+func TestRunLoop_WallDenyRetriesDirectlyWhenAskDidNotNameAgent(t *testing.T) {
+	delegate := &mockTool{
+		name:   "delegate_to_agent",
+		result: tools.ToolResult{IsError: true, Error: "Buggy isn't in this company."},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("delegate_to_agent", "call_1"),
+			stopResponse("FOXTROT"),
+		},
+	}
+	res, err := RunLoop(context.Background(), RunLoopConfig{
+		Backend:     mb,
+		Tools:       newRegistryWith(delegate),
+		ToolSchemas: a2aSchemas(),
+		Messages:    []backend.Message{{Role: "user", Content: "burst two-C: say FOXTROT"}},
+	})
+	if err != nil {
+		t.Fatalf("RunLoop error: %v", err)
+	}
+	if mb.callCount != 2 {
+		t.Fatalf("model completions = %d, want 2 (one retry answering directly)", mb.callCount)
+	}
+	if res.FinalContent != "FOXTROT" {
+		t.Fatalf("final = %q, want the direct retry answer, not the refusal", res.FinalContent)
+	}
+	if strings.Contains(res.FinalContent, "isn't in this company") {
+		t.Fatalf("refusal leaked into final answer: %q", res.FinalContent)
+	}
+	// The retry must withhold delegation tools so the model cannot just
+	// refuse again the same way.
+	retryReq := mb.lastRequests[1]
+	for _, tool := range retryReq.Tools {
+		if tool.Function.Name == "delegate_to_agent" || tool.Function.Name == "consult_agent" {
+			t.Fatalf("retry offered %q — delegation must be withheld", tool.Function.Name)
+		}
+	}
+}
+
+// TestRunLoop_WallDenyFallsBackToHonestRewriteWhenRetryAlsoRefuses verifies
+// that if the direct-answer retry itself produces nothing sayable (another
+// refusal, another tool call, or emptiness), the loop falls back to an
+// honest rewrite instead of ever persisting the raw "X isn't in this
+// company." teammate-refusal string as the answer.
+func TestRunLoop_WallDenyFallsBackToHonestRewriteWhenRetryAlsoRefuses(t *testing.T) {
+	delegate := &mockTool{
+		name:   "delegate_to_agent",
+		result: tools.ToolResult{IsError: true, Error: "Buggy isn't in this company."},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("delegate_to_agent", "call_1"),
+			stopResponse("Buggy isn't in this company."),
+		},
+	}
+	res, err := RunLoop(context.Background(), RunLoopConfig{
+		Backend:     mb,
+		Tools:       newRegistryWith(delegate),
+		ToolSchemas: a2aSchemas(),
+		Messages:    []backend.Message{{Role: "user", Content: "burst two-C: say FOXTROT"}},
+	})
+	if err != nil {
+		t.Fatalf("RunLoop error: %v", err)
+	}
+	if strings.Contains(res.FinalContent, "isn't in this company") {
+		t.Fatalf("raw refusal persisted as final answer: %q", res.FinalContent)
+	}
+	if !strings.Contains(res.FinalContent, "Couldn't hand that off") {
+		t.Fatalf("final = %q, want an honest rewrite", res.FinalContent)
+	}
+}
+
 func TestUserAskedSam(t *testing.T) {
 	if !userAskedSam("Ask Sam for the hostname") {
 		t.Fatal("Ask Sam")

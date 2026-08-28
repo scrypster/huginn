@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -153,6 +154,27 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 	// for this agent's toolbelt.
 	if !cfg.toolSchemaAllows(toolName) {
 		return makeResult(fmt.Sprintf("I don't have %s.", toolName))
+	}
+
+	// Memory write gate: a question-shaped turn must be answered from recall,
+	// never by inventing and storing a new "fact". Live repro (2026-08-27,
+	// Winston DM): asked "what's our production database called?", the model
+	// skipped recall, invented "PostgreSQL", and wrote it to the vault as a
+	// human-confidence-1 fact. Intercept muninn write-tool calls here — before
+	// they ever reach Muninn — whenever the turn's user message reads as a
+	// question. Statement-shaped turns pass through untouched.
+	if isMuninnWriteTool(toolName) && isQuestionShaped(cfg.MemoryUserMsg) {
+		blockOutput := "This is a question, not a new fact — I did not store anything. " +
+			"Call muninn_recall with the user's question as context and answer from what you find. " +
+			"Never store your own guess or inference as if it were a fact the user told you."
+		if cfg.OnToolCall != nil {
+			cfg.OnToolCall(callID, toolName, argsMap)
+		}
+		blockResult := tools.ToolResult{Output: blockOutput}
+		if cfg.OnToolDone != nil {
+			cfg.OnToolDone(callID, toolName, blockResult)
+		}
+		return makeResult(blockOutput)
 	}
 
 	if cfg.Gate != nil {
@@ -452,6 +474,10 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 	// the playbook (recall / delegate again) against a task that is done.
 	var specialistResult bool
 	var workDone bool
+	// unfinishedPlanNudges counts continuation nudges injected for
+	// looksLikeUnfinishedPlan exits (see below). Bounded by
+	// maxUnfinishedPlanContinuations; never reset once incremented.
+	var unfinishedPlanNudges int
 	var lastWorkSpeech string
 	var speechHinted bool
 	var contentBeforeAutoWait string
@@ -464,6 +490,27 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 		}
 	}
 
+	// tokenGate is recreated each turn (see below) but declared here so it
+	// survives the loop's exit: the max-turns fallthrough returns after the
+	// for-loop body, and still needs the last turn's gate to flush whatever
+	// it held back.
+	var tokenGate *backend.ContentToolCallTokenGate
+	// flushFinal guarantees the authoritative visible content for this run
+	// reaches cfg.OnToken exactly once before RunLoop returns. The gate
+	// tracks what it already forwarded live (g.emitted) and Finish only
+	// emits the un-streamed suffix, so a turn that already streamed never
+	// gets double-painted; a turn the gate held back in full (it looked like
+	// a tool-call candidate that never resolved) finally gets flushed.
+	flushFinal := func(visible string) {
+		if tokenGate != nil {
+			tokenGate.Finish(visible)
+			return
+		}
+		if cfg.OnToken != nil && visible != "" {
+			cfg.OnToken(visible)
+		}
+	}
+
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
 
@@ -472,7 +519,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 		// not Finish again after ChatCompletion — a second suffix flush
 		// after StreamDone forks leftover (`PONG` → `ONG`) into a new
 		// anonymous timeline row.
-		tokenGate := backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
+		tokenGate = backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
 		tokenGate.SetGrantedTools(cfg.ToolSchemas)
 		onToken := cfg.OnToken
 		if tokenGate != nil {
@@ -562,10 +609,12 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 				}
 			}
 			chatResult.Content = applyTeammateSpeech(messages, cfg.ToolSchemas, chatResult.Content)
-			if cfg.OnToken != nil && chatResult.Content != "" && !cutter.Cut() {
-				// Emit the sayable remainder once (the turn was buffered).
-				cfg.OnToken(chatResult.Content)
-			}
+			// Emit the sayable remainder once (the turn was buffered by the
+			// cutter, not the token gate — cutter.OnToken never forwards
+			// downstream, so flushFinal's suffix math starts from "" and
+			// this is a plain one-shot emit regardless of whether decoding
+			// was cut on leading tool JSON).
+			flushFinal(chatResult.Content)
 			messages = append(messages, backend.Message{Role: "assistant", Content: chatResult.Content})
 			result.FinalContent = chatResult.Content
 			result.StopReason = "stop"
@@ -667,12 +716,34 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 				// rather than ending with an empty answer.
 				result.FinalContent = contentBeforeAutoWait
 			}
+			// Bounded continuation: a model with tools available, and at
+			// least one tool already run this loop, sometimes narrates the
+			// next step ("I will read X, then fix it") instead of calling
+			// the tool, and the no-tool-calls exit above would otherwise end
+			// the turn half-done. Nudge it to act instead of describing,
+			// up to maxUnfinishedPlanContinuations times; on the last one,
+			// fall through to the normal terminal path below — an honest
+			// partial answer beats a spin loop.
+			if toolsRan && len(cfg.ToolSchemas) > 0 &&
+				unfinishedPlanNudges < maxUnfinishedPlanContinuations &&
+				looksLikeUnfinishedPlan(result.FinalContent) {
+				unfinishedPlanNudges++
+				messages = append(messages, backend.Message{
+					Role:    "user",
+					Content: "[system] Continue: execute the next step now by calling the tool — do not describe it.",
+				})
+				if cfg.OnEvent != nil {
+					cfg.OnEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "continuing"})
+				}
+				continue
+			}
 			if speech := applyTeammateSpeech(messages, cfg.ToolSchemas, result.FinalContent); speech != result.FinalContent {
 				result.FinalContent = speech
 				if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
 					messages[n-1].Content = speech
 				}
 			}
+			flushFinal(result.FinalContent)
 			result.StopReason = "stop"
 			result.Messages = messages
 			return result, nil
@@ -730,13 +801,24 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 
 		ask := lastHumanUserText(messages)
 		if wallDeny != "" && !userAskedSam(ask) {
-			return stopTurnPersist(result, messages, cfg, result.FinalContent, wallDeny, ask)
+			if askMentionsDeniedAgent(ask, wallDeny) {
+				return stopTurnPersist(result, messages, cfg, result.FinalContent, wallDeny, ask)
+			}
+			// The human never named the refused agent — they asked for
+			// something else entirely and the model delegated on its own.
+			// "X isn't in this company." is teammate-to-teammate glue, not
+			// an answer; speaking it verbatim reads as a non-sequitur.
+			// Retry once with delegation withheld so the model answers the
+			// human directly; fall back to an honest rewrite if that retry
+			// itself produces nothing sayable.
+			return wallDenyAnswerDirectly(ctx, cfg, result, messages, ask)
 		}
 		if waitAnswer != "" {
 			return stopTurnPersist(result, messages, cfg, result.FinalContent, waitAnswer, ask)
 		}
 	}
 
+	flushFinal(result.FinalContent)
 	result.StopReason = "max_turns"
 	result.Messages = messages
 	return result, nil
@@ -754,6 +836,79 @@ func isTerminalWorkTool(name string) bool {
 	}
 }
 
+// maxUnfinishedPlanContinuations bounds how many times RunLoop nudges a model
+// that ended a tool-less turn with future-tense narration ("I will read X,
+// then fix it") instead of calling a tool. Declared as a var so tests can
+// lower it to exercise the cap quickly.
+var maxUnfinishedPlanContinuations = 3
+
+// unfinishedPlanFutureRE matches a future-tense commitment to do *work*: an
+// intent phrase ("I'll", "I will", "let me", "I'm going to", "I plan to")
+// followed, within a few filler words, by a verb that names actual tool work
+// (read, check, run, edit, ...). The work-verb requirement is load-bearing —
+// the intent phrase alone also appears in ordinary polite closers ("Let me
+// know if you need anything else.", "I'll be here if you need me.", "Next, I
+// will be available for questions.", "I plan to keep the vault updated"),
+// none of which have a next step to execute. Each false nudge costs a full
+// extra model turn (~30s on 14b), so the check errs toward not firing.
+var unfinishedPlanFutureRE = regexp.MustCompile(`(?i)\b(?:i'll|i will|i'm going to|i am going to|i plan to|let me)\s+(?:(?:now|then|go|ahead|and|first|next|also|just|quickly|immediately|start|begin|by|proceed|to|try|attempt)\s+){0,3}(?:read|check|open|run|inspect|look at|examin|verify|test|edit|fix|update|write|creat|add|remov|delet|apply|patch|modif|search|grep|find|list|scan|fetch|quer|call|use|execut|implement|review|analyz|analys|investigat|continu|gather|collect|compil|build|install|configur|deploy|delegat|consult|recall|remember|save|store)`)
+
+// unfinishedPlanCompletedRE matches completed-result markers. Their presence
+// anywhere in the answer means the turn already reported a finished result,
+// even if it also mentions further steps — err toward not nudging rather
+// than double-nudging a genuinely finished answer.
+var unfinishedPlanCompletedRE = regexp.MustCompile("(?i)\\b(done|passes|passing|fixed|changed|complete[d]?|resolved)\\b|```|diff --git")
+
+// looksLikeUnfinishedPlan reports whether text reads as a model narrating
+// future work ("I will read the file, then fix the bug") rather than
+// reporting a completed result. It is deliberately conservative: any
+// completed-result marker anywhere in the text disqualifies a match, and a
+// future-tense commitment must appear in the last sentence(s) — an early
+// aside ("First let me note: ...") that ends with a real result should not
+// match.
+func looksLikeUnfinishedPlan(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if unfinishedPlanCompletedRE.MatchString(t) {
+		return false
+	}
+	// n=3 rather than 2: upstream residual-speech cleanup sometimes inserts a
+	// stray space after a filename's dot (e.g. "mathutil.go" -> "mathutil.
+	// go"), which the crude sentence splitter below reads as an extra
+	// sentence boundary. 3 keeps the check anchored near the end of the
+	// answer without being fooled by that artifact.
+	return unfinishedPlanFutureRE.MatchString(lastSentences(t, 3))
+}
+
+// unfinishedPlanSentenceSplitRE splits text into rough sentences/lines for
+// lastSentences. Not a full sentence tokenizer — good enough to isolate the
+// tail of a short narration turn.
+var unfinishedPlanSentenceSplitRE = regexp.MustCompile(`(?:[.!?]+\s+|\n+)`)
+
+// lastSentences returns the last n non-empty sentences/lines of text, joined
+// back with ". ". Used to look only at how a turn ends, not whether it
+// mentions future work anywhere (an aside earlier in a finished answer
+// should not count).
+func lastSentences(text string, n int) string {
+	parts := unfinishedPlanSentenceSplitRE.Split(text, -1)
+	nonEmpty := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	if n > len(nonEmpty) {
+		n = len(nonEmpty)
+	}
+	return strings.Join(nonEmpty[len(nonEmpty)-n:], ". ")
+}
+
 // waitReturnedSpecialistResult reports whether a wait_for_threads tool result
 // carries at least one finished thread (threadmgr renders "## Finished
 // threads (n)"). A timeout with only "Still running" threads, an error, or
@@ -769,6 +924,65 @@ func waitReturnedSpecialistResult(content string) bool {
 // the human named Sam, so a re-delegate is their ask, not glue.
 func userAskedSam(ask string) bool {
 	return strings.Contains(strings.ToLower(ask), "ask sam")
+}
+
+// askMentionsDeniedAgent reports whether the human's own ask named the
+// agent a delegate/consult call was just refused for (e.g. they asked
+// "Ask Steve for the hostname" and delegation to Steve was denied). When
+// true, stating the wall line is an honest, on-topic answer. When false,
+// the human asked for something unrelated and the refusal is glue from a
+// delegation they never requested.
+func askMentionsDeniedAgent(ask, wallDeny string) bool {
+	name := backend.DeniedAgentName(wallDeny)
+	if name == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(ask), strings.ToLower(name))
+}
+
+// wallDenyAnswerDirectly handles a company-wall deny for an agent the
+// human's ask never named: one extra completion with delegate_to_agent and
+// consult_agent withheld, so the model must answer the human directly
+// instead of narrating the refusal. If that retry itself produces nothing
+// sayable (empty, another tool call, or another refusal), falls back to an
+// honest rewrite rather than ever speaking "X isn't in this company."
+// verbatim as the answer to an unrelated ask.
+func wallDenyAnswerDirectly(ctx context.Context, cfg RunLoopConfig, result *LoopResult, messages []backend.Message, ask string) (*LoopResult, error) {
+	final := ""
+	if cfg.Backend != nil {
+		var noDelegate []backend.Tool
+		for _, t := range cfg.ToolSchemas {
+			if t.Function.Name == "delegate_to_agent" || t.Function.Name == "consult_agent" {
+				continue
+			}
+			noDelegate = append(noDelegate, t)
+		}
+		retryMessages := append(append([]backend.Message{}, messages...), backend.Message{
+			Role:    "user",
+			Content: "[system] That teammate isn't available for this. Answer directly yourself — no delegating, no tools.",
+		})
+		if chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
+			Model:    cfg.ModelName,
+			Messages: retryMessages,
+			Tools:    noDelegate,
+		}); err == nil && chatResult != nil {
+			content := strings.TrimSpace(chatResult.Content)
+			if content != "" && len(chatResult.ToolCalls) == 0 && !backend.IsCompanyWallDeny(content) {
+				final = content
+			}
+		}
+	}
+	if final == "" {
+		final = fmt.Sprintf("Couldn't hand that off — %s needs a teammate I don't have here.", strings.TrimSpace(ask))
+	}
+	messages = append(messages, backend.Message{Role: "assistant", Content: final})
+	if cfg.OnToken != nil {
+		cfg.OnToken(final)
+	}
+	result.FinalContent = final
+	result.StopReason = "stop"
+	result.Messages = messages
+	return result, nil
 }
 
 // stopTurnPersist ends the run without another model completion and persists

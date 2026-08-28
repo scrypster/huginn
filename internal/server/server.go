@@ -194,12 +194,18 @@ type Server struct {
 	// goroutines (e.g. SpawnThread) that must outlive individual HTTP requests.
 	ctx context.Context
 
-	// chatRunsMu guards chatRunCancels — the per-session cancel handles for
-	// in-flight WS chat runs. Runs derive from the server lifecycle context so
-	// they survive client disconnects; "chat_cancel" stops them explicitly.
-	// See beginChatRun / cancelChatRun in ws.go.
+	// chatRunsMu guards chatRunCancels and chatQueueDepth — the per-session
+	// FIFO admission state for WS chat runs. Runs derive from the server
+	// lifecycle context so they survive client disconnects; "chat_cancel"
+	// stops them explicitly. A run is never silently superseded by a
+	// fast-follow message — see reserveChatRun / beginChatRun / cancelChatRun
+	// in ws.go.
 	chatRunsMu     sync.Mutex
 	chatRunCancels map[string]*chatRunHandle
+	// chatQueueDepth counts admitted-but-not-finished chat runs per session
+	// (the FIFO queue depth), used to give an honest "I'm behind" notice
+	// once a session's backlog grows large instead of dropping asks.
+	chatQueueDepth map[string]int
 
 	// spawnWg tracks in-flight SpawnThread goroutines so Stop() can drain them.
 	spawnWg sync.WaitGroup
@@ -219,6 +225,11 @@ type Server struct {
 	// auditLog writes permission gate decisions to the SQLite audit_log table.
 	// nil if not configured.
 	auditLog *auditLogger
+
+	// entityAudit is the append-only JSONL audit trail for entity lifecycle
+	// actions (agent hire/delete, company seat/unseat, memory forget).
+	// Always initialised in New() — never nil.
+	entityAudit *entityAuditLogger
 
 	// workstreamStore is the workstream store wired for the /api/v1/workstreams endpoints.
 	// nil if workstreams are not configured.
@@ -324,6 +335,7 @@ func New(
 		credValidators:  buildCredentialValidatorRegistry(),
 		relayKeys:       make(map[string]string),
 		spaceWakeCounts: make(map[string]int),
+		entityAudit:     newEntityAuditLogger(huginnDir),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
 		sessionCreateLimiter: newEndpointRateLimiter(10, time.Minute),
@@ -609,6 +621,7 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	task, _ := payload["task"].(string)
 	helpMsg, _ := payload["message"].(string)
 	summary, _ := payload["summary"].(string)
+	status, _ := payload["status"].(string)
 	timeoutSeconds, _ := payload["timeout_seconds"].(int)
 	parentID := ""
 	if s.tm != nil {
@@ -628,6 +641,13 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	agentLabel := strings.TrimSpace(agentID)
 	if agentLabel == "" {
 		agentLabel = "delegate"
+	}
+	// Backfill the resolved agent_id onto the payload map itself (maps are
+	// reference types, so this mutation is visible to the caller too) so the
+	// raw WS broadcast that follows carries the real agent name instead of
+	// leaving clients to fall back to a placeholder label.
+	if strings.TrimSpace(agentID) != "" {
+		payload["agent_id"] = agentID
 	}
 	var content string
 	switch msgType {
@@ -650,7 +670,14 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 		if doneSummary == "" {
 			doneSummary = "Completed delegated work."
 		}
-		content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+		if strings.EqualFold(strings.TrimSpace(status), "error") {
+			// A reaper timeout / hard failure must not be phrased as an
+			// accomplishment — see StartWatchdog and the error-summary
+			// paths in threadmgr/spawn.go.
+			content = fmt.Sprintf("**%s**'s delegated task failed: %s", agentLabel, doneSummary)
+		} else {
+			content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+		}
 	case "delegation_preview_timeout":
 		if timeoutSeconds <= 0 {
 			timeoutSeconds = 30
@@ -1101,6 +1128,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", api(s.handleGetMessages))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(50<<10, s.handleSendMessage))))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/chat/stream", api(s.handleChatStream))
+	mux.HandleFunc("GET /api/v1/audit", api(s.handleGetAudit))
 	mux.HandleFunc("GET /api/v1/agents", api(s.handleListAgents))
 	mux.HandleFunc("GET /api/v1/agents/capability-matrix", api(s.handleGetCapabilityMatrix))
 	mux.HandleFunc("POST /api/v1/agents/capability-matrix/validate", api(withMaxBody(100<<10, s.handleValidateCapabilityMatrix)))

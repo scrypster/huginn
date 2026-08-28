@@ -223,7 +223,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			},
 			OnToolDone: func(callID string, name string, result tools.ToolResult) {
 				if onToolEvent != nil {
-					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})
+					onToolEvent("tool_result", map[string]any{"tool": name, "result": toolResultDisplayText(result)})
 				}
 			},
 		}
@@ -242,7 +242,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 				newMsgs = res.Messages[initialCount:]
 			}
 			appendHistoryHonoringGate(sess, userMsg, res.FinalContent, newMsgs, res.HoldClose)
-			o.compactHistory(ctx, sess)
+			o.compactHistoryAsync(sess)
 			return nil
 		}
 		// Fall through: model doesn't support tools — plain completion below.
@@ -282,7 +282,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 		backend.Message{Role: "user", Content: userMsg},
 		backend.Message{Role: "assistant", Content: buf.String()},
 	)
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return nil
 }
 
@@ -316,12 +316,38 @@ func (o *Orchestrator) compactHistory(ctx context.Context, sess *Session) {
 	if compactBackend == nil {
 		compactBackend = fallbackCompactBackend
 	}
-	snapshot := sess.snapshotHistory()
+	// snapshotHistoryRaw, not snapshotHistory: compactHistory runs while
+	// compactHistoryAsync already holds sess.compactMu, and snapshotHistory
+	// waits on that same mutex — calling it here would self-deadlock.
+	snapshot := sess.snapshotHistoryRaw()
 	newHistory, wasCompacted, _ := comp.MaybeCompact(ctx, snapshot, compactBackend, modelName)
 	if wasCompacted {
 		sess.replaceHistory(newHistory)
 		o.sc.Record("agent.compaction_triggered", 1)
 	}
+}
+
+// compactHistoryAsync schedules compactHistory to run in the background,
+// off the response path, so a slow summarization LLM call (triggered when a
+// session's history is over budget) never delays the reply that was just
+// finalized. sess.compactMu serializes compactions for the same session — if
+// two turns finish close together, the second compaction waits for the first
+// rather than racing it. The *next* turn is allowed to wait on an in-flight
+// compaction (via Session.snapshotHistory), but the current turn's reply
+// never does: by the time this goroutine starts, the reply has already been
+// appended to history and returned to the caller.
+//
+// A background context is used (not the request ctx) because the request's
+// context is typically canceled once the HTTP/WS handler returns, which
+// would abort the compaction before it completes.
+func (o *Orchestrator) compactHistoryAsync(sess *Session) {
+	go func() {
+		sess.compactMu.Lock()
+		defer sess.compactMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		o.compactHistory(ctx, sess)
+	}()
 }
 
 // Chat sends a direct message to the coder model without planning.
@@ -379,7 +405,7 @@ func (o *Orchestrator) Chat(ctx context.Context, userMsg string, onToken func(st
 		backend.Message{Role: "user", Content: userMsg},
 		backend.Message{Role: "assistant", Content: buf.String()},
 	)
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return nil
 }
 

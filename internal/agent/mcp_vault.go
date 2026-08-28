@@ -43,6 +43,65 @@ var (
 	vaultHealthCache   = make(map[string]vaultHealthEntry)
 )
 
+// vaultNegativeCacheTTL bounds how long a failed/unconfigured vault connect
+// is remembered per agent before the next turn is allowed to retry it.
+// Without this, an unconfigured or unreachable vault endpoint is
+// re-attempted (config load + up to vaultMaxAttempts connect retries) on
+// EVERY turn for EVERY agent, adding seconds of latency to turns that only
+// ever fail anyway (see logs: "muninn mcp: config unavailable ... endpoint=").
+const vaultNegativeCacheTTL = 30 * time.Second
+
+// vaultNegativeCacheEntry records the last connect failure for an agent.
+type vaultNegativeCacheEntry struct {
+	warning  string
+	failedAt time.Time
+}
+
+// vaultNegativeCacheGet returns the cached failure warning for agentName if
+// it is still within the TTL window. ok is false on a cache miss or expiry.
+// Scoped to this Orchestrator instance via o.mu (same lazy-init pattern as
+// memoryPrefetchCache) so two orchestrators never share negative-cache state.
+func (o *Orchestrator) vaultNegativeCacheGet(agentName string) (warning string, ok bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.vaultNegCache == nil {
+		return "", false
+	}
+	entry, found := o.vaultNegCache[agentName]
+	if !found || time.Since(entry.failedAt) >= vaultNegativeCacheTTL {
+		return "", false
+	}
+	return entry.warning, true
+}
+
+// vaultNegativeCacheSet records a failed/unconfigured vault connect attempt
+// for agentName, keyed per-agent so one agent's failure never suppresses a
+// retry for a different agent.
+func (o *Orchestrator) vaultNegativeCacheSet(agentName, warning string) {
+	if agentName == "" {
+		return
+	}
+	o.mu.Lock()
+	if o.vaultNegCache == nil {
+		o.vaultNegCache = make(map[string]vaultNegativeCacheEntry)
+	}
+	o.vaultNegCache[agentName] = vaultNegativeCacheEntry{warning: warning, failedAt: time.Now()}
+	o.mu.Unlock()
+}
+
+// vaultNegativeCacheClear removes any cached failure for agentName. Called
+// after a successful vault connect so a subsequent failure (e.g. the vault
+// goes down mid-session) is retried immediately rather than trusting stale
+// negative-cache state from before the config became valid.
+func (o *Orchestrator) vaultNegativeCacheClear(agentName string) {
+	if agentName == "" {
+		return
+	}
+	o.mu.Lock()
+	delete(o.vaultNegCache, agentName)
+	o.mu.Unlock()
+}
+
 // isVaultConnectionError reports whether err indicates a lost transport connection
 // to the MuninnDB vault (EOF, closed pipe, reset). Intentional teardowns such as
 // context cancellation or deadline exceeded are NOT classified as connection errors.
@@ -369,6 +428,12 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}}
 	}
 
+	// Negative cache: a vault that just failed/was unconfigured for this
+	// agent is not worth re-attempting on every single turn.
+	if warning, cached := o.vaultNegativeCacheGet(ag.Name); cached {
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warning}
+	}
+
 	o.mu.Lock()
 	cfgPath := o.muninnCfgPath
 	o.mu.Unlock()
@@ -385,7 +450,9 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 
 	if cfgPath == "" {
 		logger.Warn("muninn mcp: config path not set", "agent", ag.Name)
-		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: "muninn config path not set"}
+		warn := "muninn config path not set"
+		o.vaultNegativeCacheSet(ag.Name, warn)
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
 	muninnCfg, usedPath, err := mem.LoadAndPinGlobalConfig(cfgPath)
@@ -395,11 +462,14 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 			warn = fmt.Sprintf("muninn config load: %v", err)
 		}
 		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", usedPath, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 	if muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
 		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", usedPath, "err", mem.ErrEmptyMuninnEndpoint)
-		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: "muninn config load: " + mem.ErrEmptyMuninnEndpoint.Error()}
+		warn := "muninn config load: " + mem.ErrEmptyMuninnEndpoint.Error()
+		o.vaultNegativeCacheSet(ag.Name, warn)
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 	logger.Info("muninn mcp: config loaded", "agent", ag.Name, "endpoint_set", strings.TrimSpace(muninnCfg.Endpoint) != "")
 
@@ -407,6 +477,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	if err != nil {
 		warn := fmt.Sprintf("no MCP token configured (set mcp_token in muninn.json or add vault token for %q)", ag.VaultName)
 		logger.Warn("muninn mcp: no MCP token", "agent", ag.Name, "vault", ag.VaultName, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
@@ -414,6 +485,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	if err != nil {
 		warn := fmt.Sprintf("invalid muninn endpoint: %v", err)
 		logger.Warn("muninn mcp: invalid endpoint", "agent", ag.Name, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
@@ -435,6 +507,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	if err != nil {
 		warn := fmt.Sprintf("connect: %v", err)
 		logger.Warn("muninn mcp: connect failed", "agent", ag.Name, "vault", ag.VaultName, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
@@ -454,6 +527,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	// memoryBlock is only populated on successful connection.
 	block := agents.BuildMemoryBlock(ag)
 	logger.Info("muninn mcp: vault connected", "agent", ag.Name, "vault", ag.VaultName, "tools", len(mcpTools))
+	o.vaultNegativeCacheClear(ag.Name)
 	return vaultResult{
 		sessionReg:  sessionReg,
 		cancel:      reconnector.Close,

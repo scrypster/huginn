@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -552,15 +552,24 @@ func sendPersistenceError(c *wsClient, errCtx string, _ error) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Validate token via query param (WebSocket upgrades can't set headers from browser).
-	// Use constant-time comparison to prevent timing-based token oracle attacks.
-	tok := r.URL.Query().Get("token")
-	if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+	// Validate the token via the "huginn-token.<token>" Sec-WebSocket-Protocol
+	// subprotocol (used by the web client) or, failing that, the legacy
+	// ?token= query param (TUI client / back-compat). See wsAuthorizeToken.
+	ok, subprotocol := wsAuthorizeToken(r, s.token)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	// RFC 6455: a server that accepts a subprotocol MUST echo it back in the
+	// response, or the browser rejects the handshake. The upgrader has no
+	// static Subprotocols list (the token varies per request), so it's set
+	// directly on the response header here.
+	var respHeader http.Header
+	if subprotocol != "" {
+		respHeader = http.Header{"Sec-WebSocket-Protocol": []string{subprotocol}}
+	}
+	conn, err := s.upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
 		return
 	}
@@ -736,6 +745,33 @@ func logToolPermissionAudit(a *auditLogger, payload map[string]any) {
 }
 
 // streamEventToWS converts a backend.StreamEvent to a WSMessage.
+// statusForToolCall derives a phase-true status message from a tool_call
+// StreamEvent's payload ({"id", "tool", "args"} — see the chatOnToolCall /
+// executeSingle wiring in internal/agent). Returns ("", false) for tool
+// calls that don't map to a user-facing phase (most local tools), so the
+// caller falls back to the last status already on the wire (default
+// "thinking…"). This is intentionally a pure, ws.go-local translation —
+// it reads the existing tool_call wire shape rather than requiring any
+// change to the agent engine.
+func statusForToolCall(payload map[string]any) (string, bool) {
+	tool, _ := payload["tool"].(string)
+	switch tool {
+	case "delegate_to_agent":
+		if args, ok := payload["args"].(map[string]any); ok {
+			if target, ok := args["agent"].(string); ok {
+				if target = strings.TrimSpace(target); target != "" {
+					return fmt.Sprintf("asking %s…", target), true
+				}
+			}
+		}
+		return "asking a teammate…", true
+	case "muninn_where_left_off", "muninn_recall":
+		return "recalling memory", true
+	default:
+		return "", false
+	}
+}
+
 func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {
 	// Normalize streaming text and thought events to "token" so that the
 	// frontend can use a single type to identify token stream messages.
@@ -1333,48 +1369,109 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	return ctx
 }
 
-// chatRunHandle tracks the cancel func of an in-flight WS chat run so that an
-// explicit "chat_cancel" message (or server shutdown) can stop it. Handles are
-// compared by pointer identity so a finished run never deregisters a newer run
-// that replaced it for the same session.
+// chatQueueBehindThreshold is the FIFO queue depth (admitted-but-not-finished
+// chat runs for one session, this one included) past which runWSChat tells
+// the user honestly that it is behind, rather than leaving a deep backlog to
+// read as a hang. Messages are never dropped regardless of depth.
+const chatQueueBehindThreshold = 5
+
+// chatRunHandle tracks the context/cancel func of an in-flight or
+// admitted-but-not-yet-started WS chat run so that an explicit "chat_cancel"
+// message (or server shutdown) can stop it. Handles are compared by pointer
+// identity so a finished run never deregisters a newer run that replaced it
+// for the same session.
 type chatRunHandle struct {
+	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-// beginChatRun derives a connection-independent context for a chat run from
-// the server lifecycle context (NOT the originating client's connection
-// context), so a client disconnect or tab close no longer cancels an in-flight
-// LLM run mid-stream. The returned handle is registered as the session's
-// active run; cancel it via cancelChatRun and release it via endChatRun.
-func (s *Server) beginChatRun(sessionID, userMsg string) (context.Context, *chatRunHandle) {
+// reserveChatRun admits a new chat run for sessionID into the session's
+// strict FIFO queue and returns immediately (it never blocks). Admission
+// order is the caller's call order — the WS read pump calls this
+// synchronously, once per "chat" frame, before spawning that turn's
+// goroutine, so admission order always matches wire arrival order rather
+// than goroutine-scheduling order. The returned handle is registered as the
+// session's active/queued run immediately; a run is NEVER cancelled just
+// because a newer message was admitted behind it — supersede/cancel only
+// happens via an explicit "chat_cancel" (cancelChatRun) or server shutdown.
+//
+// waitCh is the previous run's done channel (nil if none is queued ahead of
+// this one) — callers MUST wait on it via awaitChatTurn before starting
+// their turn's work, then MUST call endChatRun when finished. depth is the
+// number of runs (including this one) currently admitted-but-not-finished
+// for this session, so callers can give an honest "I'm behind" notice once
+// a session's backlog grows large instead of ever dropping an ask.
+func (s *Server) reserveChatRun(sessionID string) (run *chatRunHandle, waitCh <-chan struct{}, depth int) {
 	base := s.ctx
 	if base == nil {
 		base = context.Background()
 	}
 	ctx, cancel := context.WithCancel(base)
-	run := &chatRunHandle{cancel: cancel, done: make(chan struct{})}
+	run = &chatRunHandle{ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	s.chatRunsMu.Lock()
 	if s.chatRunCancels == nil {
 		s.chatRunCancels = make(map[string]*chatRunHandle)
 	}
+	if s.chatQueueDepth == nil {
+		s.chatQueueDepth = make(map[string]int)
+	}
 	prev := s.chatRunCancels[sessionID]
-	queue := prev != nil && prev != run && agent.IsTrivialPingAsk(userMsg)
-	if prev != nil && prev != run && !queue {
-		// Non-trivial new_request still supersedes leftover hire/clock (SNAP-0).
-		prev.cancel()
-	}
 	s.chatRunCancels[sessionID] = run
+	s.chatQueueDepth[sessionID]++
+	depth = s.chatQueueDepth[sessionID]
 	s.chatRunsMu.Unlock()
-	if queue {
-		// Burst "@Winston ping one/two/three" FIFO so all three persist (SNAP-0.8).
-		select {
-		case <-prev.done:
-		case <-time.After(120 * time.Second):
-		case <-ctx.Done():
-		}
+	if prev != nil {
+		waitCh = prev.done
 	}
-	return ctx, run
+	return run, waitCh, depth
+}
+
+// chatTurnWaitCeiling bounds a single awaitChatTurn wait for the prior
+// FIFO turn. NOT a hard failure ceiling: a legitimately slow predecessor
+// (a slow local model can take minutes) elapsing this ceiling only means
+// this goroutine stops blocking here and falls through to its own
+// session-level exclusive-run wait in ChatWithAgent, which retries past
+// its own ceiling too — see runWSChat's isQueueBusy retry loop. Var (not
+// const) so tests can shrink it to exercise that retry path quickly.
+var chatTurnWaitCeiling = 120 * time.Second
+
+// chatQueueRetryWait bounds each WaitForSessionIdle call in runWSChat's
+// queue-busy retry loop (how long one re-enqueue attempt waits for the
+// predecessor to free the session before looping again). Var so tests can
+// shrink it to exercise many retry iterations quickly.
+var chatQueueRetryWait = 30 * time.Second
+
+// awaitChatTurn blocks until it is run's turn to execute: the prior run in
+// the FIFO chain finished (waitCh closed), run's own context was cancelled
+// (explicit chat_cancel / shutdown while queued), or a generous ceiling
+// elapses so a stuck predecessor can never wedge the session forever.
+// A nil waitCh (nothing queued ahead) returns immediately.
+func (s *Server) awaitChatTurn(run *chatRunHandle, waitCh <-chan struct{}) {
+	if waitCh == nil {
+		return
+	}
+	select {
+	case <-waitCh:
+	case <-time.After(chatTurnWaitCeiling):
+	case <-run.ctx.Done():
+	}
+}
+
+// beginChatRun derives a connection-independent context for a chat run from
+// the server lifecycle context (NOT the originating client's connection
+// context), so a client disconnect or tab close no longer cancels an
+// in-flight LLM run mid-stream. It reserves this session's next FIFO slot
+// and immediately waits for it — the combination reserveChatRun +
+// awaitChatTurn split out below is what lets the WS read pump reserve a
+// slot synchronously (preserving wire arrival order) while waiting inside
+// the run's own goroutine. Cancel via cancelChatRun, release via
+// endChatRun.
+func (s *Server) beginChatRun(sessionID, userMsg string) (context.Context, *chatRunHandle) {
+	_ = userMsg // admission is unconditional FIFO now; kept for call-site compatibility.
+	run, waitCh, _ := s.reserveChatRun(sessionID)
+	s.awaitChatTurn(run, waitCh)
+	return run.ctx, run
 }
 
 // endChatRun releases run's context resources and deregisters it if it is
@@ -1383,6 +1480,14 @@ func (s *Server) endChatRun(sessionID string, run *chatRunHandle) {
 	s.chatRunsMu.Lock()
 	if s.chatRunCancels[sessionID] == run {
 		delete(s.chatRunCancels, sessionID)
+	}
+	if s.chatQueueDepth != nil {
+		if s.chatQueueDepth[sessionID] > 0 {
+			s.chatQueueDepth[sessionID]--
+		}
+		if s.chatQueueDepth[sessionID] <= 0 {
+			delete(s.chatQueueDepth, sessionID)
+		}
 	}
 	s.chatRunsMu.Unlock()
 	if run.done != nil {
@@ -1438,7 +1543,14 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if rawTarget, ok := msg.Payload["target_agent"].(string); ok {
 			targetAgent = strings.TrimSpace(rawTarget)
 		}
-		go s.runWSChat(c, sessionID, userMsg, runID, intent, updateRoute, targetAgent)
+		// Reserve this turn's FIFO slot synchronously, on the read pump,
+		// BEFORE spawning its goroutine. handleWSMessage is called once
+		// per inbound frame from a single-threaded read loop (see
+		// wsReadPump), so admission order here always matches wire
+		// arrival order — a fast burst of messages can never race the Go
+		// scheduler into running turns out of order.
+		run, waitCh, depth := s.reserveChatRun(sessionID)
+		go s.runWSChat(c, sessionID, userMsg, runID, intent, updateRoute, targetAgent, run, waitCh, depth)
 
 	case "chat_cancel":
 		// Explicit user-initiated cancellation of the session's in-flight chat
@@ -1645,6 +1757,43 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 	}
 }
 
+// visibleTokenGate tracks the visible content actually sent to the client
+// for one streaming run, so runWSChat's onToken can self-correct when a
+// mid-stream rewrite changes a prefix that was already emitted (e.g. the
+// harness clock label "Local time now: Friday, ...ET" only becomes "It's
+// Friday, ...ET." once the stamp finishes streaming — see
+// backend.stripHarnessClockLabel). Without this, a divergence (new visible
+// content that is not a suffix-extension of what shipped) would either be
+// silently dropped or have its emitted-so-far bookkeeping quietly
+// overwritten as if the client had received it, permanently wedging the
+// live bubble on stale partial text (huginn: hallway fast-path prefix
+// drop). Emitted must only ever be updated to a value that was actually
+// handed to emit().
+type visibleTokenGate struct {
+	emitted string
+}
+
+// next reports what to send for the newly computed visible content.
+//   - visible == emitted: nothing changed, emit is false.
+//   - visible extends emitted: delta is the plain append suffix.
+//   - visible diverges from emitted (not a suffix-extension — a rewrite
+//     changed earlier characters): delta is the full visible content and
+//     replace is true, telling the client to repaint from scratch instead
+//     of appending. This is the only correct way to fix already-emitted
+//     characters over an append-only "token" stream.
+func (g *visibleTokenGate) next(visible string) (delta string, replace bool, emit bool) {
+	if visible == g.emitted {
+		return "", false, false
+	}
+	if g.emitted == "" || strings.HasPrefix(visible, g.emitted) {
+		delta = strings.TrimPrefix(visible, g.emitted)
+		g.emitted = visible
+		return delta, false, delta != ""
+	}
+	g.emitted = visible
+	return visible, true, true
+}
+
 // runWSChat executes one chat turn for sessionID. It runs under a context
 // derived from the server lifecycle (see beginChatRun), NOT the originating
 // client's connection context, so the run survives client disconnects and tab
@@ -1652,7 +1801,12 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 // the session — including clients that reconnect mid-run — with a direct-send
 // fallback to the originating client when it is not registered with the hub.
 // Persistence of accumulated content runs on every exit path.
-func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updateRoute, targetAgent string) {
+// run/waitCh/queueDepth come from a reserveChatRun call made synchronously
+// on the WS read pump before this goroutine was spawned (see
+// handleWSMessage's "chat" case), so this turn's FIFO position is fixed by
+// wire arrival order before any of the work below (agent resolution, space
+// context injection, LLM call) begins.
+func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updateRoute, targetAgent string, run *chatRunHandle, waitCh <-chan struct{}, queueDepth int) {
 	// assistantBuf accumulates response tokens for persistence after completion.
 	var assistantBuf strings.Builder
 	// collectedToolCalls accumulates tool results for persistence with the assistant message.
@@ -1673,7 +1827,38 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
 	}
-	var lastVisible string
+	var tokenGate visibleTokenGate
+	// wroteFirstToken gates the one-shot "writing" status transition — fired
+	// the moment the first visible token reaches the wire, so the UI moves
+	// off "thinking…"/"asking …" the instant the reply actually starts.
+	var wroteFirstToken bool
+	// lastStatus keeps the heartbeat honest. The 15s keep-alive ticker below
+	// re-emits a status so a long turn never reads as hung; without tracking
+	// the current phase here it would re-emit a hardcoded "thinking" and
+	// stomp a phase-true status ("asking Steve…") every 15 seconds during a
+	// long delegation, flip-flopping the UI. Guarded because the heartbeat
+	// runs on its own goroutine while setStatus runs on the run goroutine.
+	var statusMu sync.Mutex
+	lastStatus := "thinking"
+	// updateLastStatus records the current phase without emitting — shared by
+	// setStatus (tool-call-derived statuses) and onEvent's StreamStatus branch
+	// below (plain engine statuses: "thinking", "hiring", "continuing",
+	// model-loading) so the heartbeat always re-emits the true current phase
+	// instead of a stale one.
+	updateLastStatus := func(content string) {
+		statusMu.Lock()
+		lastStatus = content
+		statusMu.Unlock()
+	}
+	setStatus := func(content string) {
+		updateLastStatus(content)
+		emit(WSMessage{Type: "status", Content: content, SessionID: sessionID})
+	}
+	currentStatus := func() string {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		return lastStatus
+	}
 	onToken := func(token string) {
 		assistantBuf.WriteString(token)
 		raw := assistantBuf.String()
@@ -1687,18 +1872,19 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if !agent.IsTrivialPingAsk(userMsg) && backend.IsLeftoverPongSpeech(visible) {
 			visible = ""
 		}
-		if visible == lastVisible {
+		delta, replace, doEmit := tokenGate.next(visible)
+		if !doEmit {
 			return
 		}
-		if lastVisible == "" || strings.HasPrefix(visible, lastVisible) {
-			delta := strings.TrimPrefix(visible, lastVisible)
-			lastVisible = visible
-			if delta != "" {
-				emit(WSMessage{Type: "token", Content: delta})
-			}
-			return
+		if !wroteFirstToken {
+			wroteFirstToken = true
+			setStatus("writing")
 		}
-		lastVisible = visible
+		msg := WSMessage{Type: "token", Content: delta}
+		if replace {
+			msg.Payload = map[string]any{"replace": true}
+		}
+		emit(msg)
 	}
 	onEvent := func(ev backend.StreamEvent) {
 		// StreamDone is an internal backend signal. parseSSE emits it at the
@@ -1708,7 +1894,25 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if ev.Type == backend.StreamDone {
 			return
 		}
+		// Plain StreamStatus events (agent_dispatcher's "thinking", hire_ask's
+		// "hiring", the loop-nudge's "continuing", external.go's model-loading
+		// status) previously went straight to emit without updating lastStatus,
+		// so the 15s heartbeat below re-emitted the OLD phase and stomped these
+		// within 15s. Route the content through the same tracking setStatus
+		// uses, before emitting, so the heartbeat sees the true current phase.
+		if ev.Type == backend.StreamStatus {
+			updateLastStatus(ev.Content)
+		}
 		emit(streamEventToWS(ev, sessionID))
+		// Phase-true status translation layer: a tool_call event already
+		// carries the tool name and (for delegate_to_agent) the target
+		// agent — derive a status line from it here rather than changing
+		// the agent engine. See statusForToolCall.
+		if ev.Type == backend.StreamToolCall {
+			if statusContent, ok := statusForToolCall(ev.Payload); ok {
+				setStatus(statusContent)
+			}
+		}
 		// Capture tool results so they're persisted with the assistant message.
 		if ev.Type == backend.StreamToolResult && ev.Payload != nil {
 			tc := session.PersistedToolCall{
@@ -1725,8 +1929,21 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	}
 
 	// Emit thinking immediately so the 60s client watchdog does not fire
-	// during context prep / model load (before the first token).
-	emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
+	// during context prep / model load (before the first token). Routed
+	// through setStatus so the heartbeat's notion of the current phase and
+	// the wire agree from the very first status.
+	setStatus("thinking")
+
+	// A deep FIFO backlog is queued, never dropped — but silence past a few
+	// messages reads as broken, not busy. Say so honestly once the backlog
+	// is more than chatQueueBehindThreshold turns deep (this one included).
+	if queueDepth > chatQueueBehindThreshold {
+		emit(WSMessage{
+			Type:    "warning",
+			Content: "I'm behind — answering in order.",
+			RunID:   runID,
+		})
+	}
 
 	// Hallway / desk-DM ChatWithAgent never went through wakeSpaceThreadAgent,
 	// so space_reply_typing never fired and left-nav rows stayed still during
@@ -1753,9 +1970,13 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		s.spawnAdditionalUserMentions(spawnCtx, sessionID, userMsg, userMsgID, ag)
 	}
 
-	// Derive the run context from the server lifetime and register it as the
-	// session's active run so a "chat_cancel" message can stop it explicitly.
-	chatCtx, run := s.beginChatRun(sessionID, userMsg)
+	// Wait for this session's FIFO turn (reserved synchronously by
+	// handleWSMessage before this goroutine was spawned — see runWSChat's
+	// doc comment). The run's context derives from the server lifetime, not
+	// this client's connection, and is registered as the session's active
+	// run so a "chat_cancel" message can stop it explicitly.
+	s.awaitChatTurn(run, waitCh)
+	chatCtx := run.ctx
 	defer s.endChatRun(sessionID, run)
 
 	// Build space context (channel team roster + descriptions) and inject
@@ -1777,10 +1998,56 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
 	}
 
+	// wsHeartbeatInterval is a var (not a const) purely so tests can shorten
+	// it; production behaviour is unchanged at 15s.
+	// Heartbeat: DEFECT A made hallway turns look dead for tens of seconds
+	// while runChat is in flight but nothing has streamed yet (or a whole
+	// terminal turn was gated and only flushes at the very end). Keep the
+	// "thinking" status alive on the wire so the UI never reads as hung.
+	heartbeatDone := make(chan struct{})
+	// Read wsHeartbeatInterval synchronously here, before spawning the
+	// goroutine below, and capture it in heartbeatInterval. The goroutine
+	// itself may not get scheduled until well after this function (and even
+	// the whole test) returns, so a direct `wsHeartbeatInterval` read inside
+	// it races against the next test's `wsHeartbeatInterval = ...` under
+	// `go test -race` even though heartbeatDone has already been closed.
+	heartbeatInterval := wsHeartbeatInterval
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				// Re-emit the CURRENT phase, not a hardcoded "thinking" —
+				// otherwise the keep-alive stomps "asking Steve…"/"writing".
+				emit(WSMessage{Type: "status", Content: currentStatus(), SessionID: sessionID})
+			}
+		}
+	}()
+
+	// isQueueBusy reports a queue-wait-ceiling error from ChatWithAgent —
+	// the predecessor turn is still legitimately running (a slow local
+	// model can take minutes), not a real failure. errors.Is is the
+	// primary check; the string fallback covers any legacy caller that
+	// still returns the old "already running" text. This class of error
+	// must NEVER reach the err != nil branch below (which would persist it
+	// as "⚠️ <err>" assistant speech, a Tier-0 violation) — the loop below
+	// keeps re-enqueuing until it succeeds or the run is truly cancelled.
+	isQueueBusy := func(e error) bool {
+		if e == nil {
+			return false
+		}
+		return errors.Is(e, agent.ErrQueueWaitTimeout) ||
+			strings.Contains(e.Error(), "already running") ||
+			strings.Contains(e.Error(), "still busy after queue wait")
+	}
+
 	err := runChat()
-	if err != nil && (strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "still busy after queue wait")) {
+	for queueRetries := 0; isQueueBusy(err); queueRetries++ {
 		warnContent := "Another response is still finishing — queued your message and retrying."
-		if intent == "update_active_work" && s.tm != nil {
+		if queueRetries == 0 && intent == "update_active_work" && s.tm != nil {
 			switch updateRoute {
 			case "lead_only":
 				warnContent = "Queued a lead follow-up to your update."
@@ -1807,20 +2074,38 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			default:
 				warnContent = "Queued a lead follow-up to your update."
 			}
+		} else if queueRetries > 0 {
+			// Re-enqueue: the backlog is deeper than one 30s wait — say so
+			// honestly instead of ever giving up and speaking the raw
+			// queue-wait error. Throttled so a long backlog does not spam
+			// the client with a warning every 30s.
+			if queueRetries%4 == 0 {
+				warnContent = fmt.Sprintf("Still working through the backlog — %s is queued.", strings.TrimSpace(userMsg))
+			} else {
+				warnContent = ""
+			}
 		}
 		// Slack-like behavior: treat quick follow-up user messages as queued
 		// guidance when another run is still winding down.
-		emit(WSMessage{
-			Type:    "warning",
-			Content: warnContent,
-			RunID:   runID,
-		})
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer waitCancel()
-		if s.orch.WaitForSessionIdle(sessionID, waitCtx) {
-			err = runChat()
+		if warnContent != "" {
+			emit(WSMessage{
+				Type:    "warning",
+				Content: warnContent,
+				RunID:   runID,
+			})
 		}
+		// chatCtx derives from the server lifetime, not this ceiling — only
+		// an explicit chat_cancel or server shutdown ends the re-enqueue
+		// loop early. A merely slow predecessor is not a reason to give up.
+		if chatCtx.Err() != nil {
+			break
+		}
+		waitCtx, waitCancel := context.WithTimeout(chatCtx, chatQueueRetryWait)
+		s.orch.WaitForSessionIdle(sessionID, waitCtx)
+		waitCancel()
+		err = runChat()
 	}
+	close(heartbeatDone)
 	// persistAccumulated saves whatever assistant content/tool-calls have
 	// been accumulated so far. The inbound user row is written at accept;
 	// this is the fallback if that write failed. Called on success (done),
@@ -1832,12 +2117,12 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		// Bind persist to THIS inbound user row — never a leftover ping ask
 		// or leftover assistant stream from an earlier turn in the session.
+		// This run is never superseded by a fast-follow message anymore
+		// (reserveChatRun always queues FIFO, it never cancels an earlier
+		// run) — the only way chatCtx.Err() is non-nil here is an explicit
+		// chat_cancel or server shutdown, handled below.
 		thisTurnAsk := userMsg
 		thisTurnUserID := userMsgID
-		s.chatRunsMu.Lock()
-		current := s.chatRunCancels[sessionID]
-		superseded := current != nil && current != run
-		s.chatRunsMu.Unlock()
 		sess, loadErr := s.store.Load(sessionID)
 		if loadErr != nil {
 			return
@@ -1855,24 +2140,20 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 				}
 			}
 		}
-		// Compute persist first so a superseded ping/headcount still keeps
+		// Compute persist first so a cancelled ping/headcount still keeps
 		// its harness fill. Leftover-clock-only stays empty and is skipped.
+		// BindPersistToThisTurn already drops a leftover-Pong-only stream
+		// when a later, non-queued-ping user row is already the tail (a
+		// cancelled ping followed by a real ask) — real content it returns
+		// always persists here, whether or not this run was cancelled, per
+		// this function's contract: it must run regardless of client
+		// disconnects, cancellation, or real errors.
 		early, write := backend.BindPersistToThisTurn(thisTurnUserID, thisTurnAsk, latestUserID, latestUserAsk, assistantBuf.String())
 		if !write && errContent == "" {
 			return
 		}
 		if early == "" {
 			early = s.fillEmptyHarnessPersist(early, thisTurnAsk, sess)
-		}
-		if superseded && errContent == "" {
-			if !backend.IsHarnessFillAsk(thisTurnAsk) || early == "" {
-				return
-			}
-			// FIFO burst pings finish normally (successor queued). A non-ping
-			// successor already accepted — do not leftover-persist Pong onto that ask.
-			if chatCtx.Err() != nil && latestUserID != thisTurnUserID && !agent.IsTrivialPingAsk(latestUserAsk) {
-				return
-			}
 		}
 		agentName := ""
 		if ag != nil {
@@ -1973,3 +2254,8 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		"had_error", err != nil,
 	)
 }
+
+// wsHeartbeatInterval is how often runWSChat re-emits the current status so a
+// long turn never reads as hung. A var rather than a const so tests can shorten
+// it; production behaviour is unchanged.
+var wsHeartbeatInterval = 15 * time.Second

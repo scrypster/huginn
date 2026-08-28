@@ -129,6 +129,13 @@ type Orchestrator struct {
 	// memoryPrefetchCache caches MuninnDB memory briefing results per agent/session key.
 	memoryPrefetchCache *prefetchCache
 
+	// vaultNegCache remembers a failed/unconfigured vault connect per agent
+	// name for vaultNegativeCacheTTL, so connectAgentVault does not
+	// re-attempt config load + connect on every single turn. Scoped to the
+	// Orchestrator instance (not a package-level var) so two orchestrators
+	// — or two tests — never leak cached failures into each other.
+	vaultNegCache map[string]vaultNegativeCacheEntry
+
 	// semanticPrefetchCache caches semantic search results per query key.
 	semanticPrefetchCache *prefetchCache
 
@@ -402,7 +409,7 @@ func (o *Orchestrator) CodeWithAgent(
 			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
 		)
 	}
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return nil
 }
 

@@ -178,7 +178,12 @@ interface RankedItem {
 }
 
 const statsData = ref<Record<string, number | null>>({})
-const costData = ref<{ session_total_usd: number } | null>(null)
+const costData = ref<{
+  session_total_usd: number
+  prompt_tokens_total?: number
+  completion_tokens_total?: number
+  is_local?: boolean
+} | null>(null)
 const healthData = ref<{ status: string; version: string; satellite_connected: boolean; backend_status: string } | null>(null)
 const sessionsData = ref<SessionManifest[]>([])
 const costHistory = ref<Array<{ ts: number; session_id: string; cost_usd: number; prompt_tokens: number; completion_tokens: number }>>([])
@@ -188,31 +193,35 @@ const lastRefreshed = ref('')
 
 const serverVersionLabel = computed(() => formatVersionLabel(healthData.value?.version ?? ''))
 
-const totalSessions = computed(() => sessionsData.value.length)
-
-const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
-
-function isActiveSession(s: SessionManifest, now = Date.now()): boolean {
-  const status = (s.status || '').toLowerCase()
-  if (status === 'idle' || status === 'archived' || status === 'closed') return false
-  if (!s.updated_at) return status === 'active'
-  const t = Date.parse(s.updated_at)
-  if (!Number.isFinite(t)) return status === 'active'
-  return now - t <= ACTIVE_WINDOW_MS
-}
-
-const activeSessions = computed(() =>
-  sessionsData.value.filter((s) => isActiveSession(s)).length
+// Total/active session counts come from the server (/api/v1/stats), which
+// defines "active" honestly: a run in flight OR activity in the last 15
+// minutes. The stored per-session `status` field is not a reliable signal —
+// it is set to "active" at creation and never meaningfully transitions — so
+// it is not used here. Fall back to the raw session list length only if the
+// server didn't report a total (e.g. stats endpoint unreachable).
+const totalSessions = computed(() =>
+  typeof statsData.value.total_sessions === 'number'
+    ? statsData.value.total_sessions
+    : sessionsData.value.length
 )
+
+const activeSessions = computed(() => statsData.value.active_sessions ?? 0)
 
 const totalMessages = computed(() =>
   sessionsData.value.reduce((sum, s) => sum + (s.message_count ?? 0), 0)
 )
 
 const formattedCost = computed(() => {
-  const val = costData.value?.session_total_usd
-  if (!val) return '—'
-  return `$${val.toFixed(4)}`
+  const c = costData.value
+  if (!c) return '—'
+  if (c.is_local) {
+    const prompt = c.prompt_tokens_total ?? 0
+    const completion = c.completion_tokens_total ?? 0
+    if (prompt === 0 && completion === 0) return 'n/a (local)'
+    return `n/a (local) · ${(prompt + completion).toLocaleString()} tok`
+  }
+  if (!c.session_total_usd) return '—'
+  return `$${c.session_total_usd.toFixed(4)}`
 })
 
 function formatTokens(n: number | null | undefined): string {

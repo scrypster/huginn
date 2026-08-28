@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -346,12 +347,72 @@ func detectNewFact(userMsg, assistant, mode string) (bool, string) {
 			return true, "decision"
 		}
 	}
+	if isDeclarativeFactAsk(userMsg) {
+		return true, "declarative_fact"
+	}
 	if normalizeMemoryMode(mode) == MemoryModeImmersive {
 		if strings.TrimSpace(assistant) != "" && !isTrivialSpeech(assistant) {
 			return true, "immersive_summary"
 		}
 	}
 	return false, ""
+}
+
+// declarativeFactPhrases flag an ask that is announcing a fact rather than
+// asking a question — "for the record", "FYI", "heads up" and their kin.
+// These never had an explicit "remember" verb, so detectNewFact previously
+// dropped them on the floor: a natural statement of fact addressed to the
+// agent produced no memory write at all.
+var declarativeFactPhraseRE = regexp.MustCompile(`(?i)\b(for the record|fyi|f\.y\.i\.?|just so you know|just so you're aware|heads up|just to let you know|worth noting|worth knowing)\b`)
+
+// possessiveFactRE catches plain declarative facts like "our staging server
+// is called valkyrie" or "the deploy window is Fridays" — a possessive/
+// definite subject followed directly by a copula. Deliberately narrow (no
+// intervening prepositional clause) to avoid firing on ordinary questions.
+var possessiveFactRE = regexp.MustCompile(`(?i)\b(our|my|the)\s+[a-z][\w'-]*(?:\s+[a-z][\w'-]*){0,3}\s+(?:is|are|was|were)\s+`)
+
+var leadingMentionRE = regexp.MustCompile(`^(?:@[\w.-]+[\s,:]*)+`)
+
+func stripLeadingMentions(s string) string {
+	return strings.TrimSpace(leadingMentionRE.ReplaceAllString(strings.TrimSpace(s), ""))
+}
+
+// isDeclarativeFactAsk reports whether userMsg is a statement-shaped fact
+// addressed to the agent (not a question) worth remembering on its own,
+// without the user ever saying "remember".
+func isDeclarativeFactAsk(userMsg string) bool {
+	body := stripLeadingMentions(userMsg)
+	if body == "" {
+		return false
+	}
+	if strings.HasSuffix(strings.TrimSpace(body), "?") {
+		return false
+	}
+	if declarativeFactPhraseRE.MatchString(body) {
+		return true
+	}
+	return possessiveFactRE.MatchString(body)
+}
+
+// interrogativeOpenerRE matches a message that opens with a common question
+// word/verb, even without a trailing '?' (some chat clients strip it, some
+// users just don't type it).
+var interrogativeOpenerRE = regexp.MustCompile(`(?i)^(what|who|when|where|why|how|which|is|are|was|were|do|does|did|can|could|would|should|will|has|have|had)\b`)
+
+// isQuestionShaped reports whether userMsg reads as a question — either a
+// trailing '?' or an interrogative opener. Used to gate model-initiated
+// memory writes: live repro (2026-08-27, Winston DM) shows a question-shaped
+// turn must be answered from recall, never by inventing and storing a new
+// "fact".
+func isQuestionShaped(userMsg string) bool {
+	body := stripLeadingMentions(strings.TrimSpace(userMsg))
+	if body == "" {
+		return false
+	}
+	if strings.HasSuffix(body, "?") {
+		return true
+	}
+	return interrogativeOpenerRE.MatchString(body)
 }
 
 func isTrivialSpeech(s string) bool {
@@ -381,10 +442,12 @@ var ackPullTokens = map[string]struct{}{
 
 func atomicMemoryContent(userMsg, assistant, kind string) string {
 	text := strings.TrimSpace(assistant)
-	if kind == "user_ask" || text == "" || isTrivialSpeech(text) {
+	if kind == "user_ask" || kind == "declarative_fact" || text == "" || isTrivialSpeech(text) {
 		text = strings.TrimSpace(userMsg)
 	}
+	text = stripLeadingMentions(text)
 	text = firstParagraph(text)
+	text = distillFactContent(text)
 	text = strings.Join(strings.Fields(text), " ")
 	if len(text) < 8 {
 		return ""
@@ -394,6 +457,67 @@ func atomicMemoryContent(userMsg, assistant, kind string) string {
 	}
 	_ = kind
 	return text
+}
+
+// leadingFactWrapperRE matches the imperative wrapper around a fact —
+// "please remember this:", "note that", "for the record,", "FYI:" — so the
+// distilled memory stores the fact itself, not the instruction to store it.
+// Applied repeatedly so stacked wrappers ("Please remember this: for the
+// record, …") fully unwrap.
+var leadingFactWrapperRE = regexp.MustCompile(`(?i)^(please\s+)?(remember\s+(this|that)|store\s+this|save\s+this|make\s+a\s+note(\s+that)?|note\s+that|keep\s+this\s+in\s+mind(\s+that)?|for\s+the\s+record|fyi|f\.y\.i\.?|just\s+so\s+you\s+know|just\s+so\s+you'?re\s+aware|heads\s+up|just\s+to\s+let\s+you\s+know|worth\s+noting|worth\s+knowing|don'?t\s+forget|do\s+not\s+forget)[:,]?\s*`)
+
+// instructionCruftSentenceRE flags sentences that are instructions to the
+// assistant about how to respond ("Confirm in one short sentence.", "Do not
+// invent other vaults.") rather than part of the fact being reported.
+var instructionCruftSentenceRE = regexp.MustCompile(`(?i)^(please\s+)?(confirm|acknowledge|reply\s+with|respond\s+with|say\s+only|do\s+not\s+invent|don'?t\s+invent)\b`)
+
+// distillFactContent strips the imperative wrapper and any trailing
+// meta-instruction sentences off a user message so the stored memory is the
+// fact itself: "our staging server is called valkyrie", not "Please
+// remember this: our staging server is called valkyrie. Confirm in one
+// short sentence."
+func distillFactContent(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		stripped := strings.TrimSpace(leadingFactWrapperRE.ReplaceAllString(s, ""))
+		if stripped == s {
+			break
+		}
+		s = stripped
+	}
+	sentences := splitSentences(s)
+	kept := sentences[:0]
+	for _, sent := range sentences {
+		trim := strings.TrimSpace(sent)
+		if trim == "" {
+			continue
+		}
+		if instructionCruftSentenceRE.MatchString(trim) {
+			continue
+		}
+		kept = append(kept, trim)
+	}
+	if len(kept) == 0 {
+		return s
+	}
+	return strings.TrimSpace(strings.Join(kept, " "))
+}
+
+// splitSentences splits on sentence-ending punctuation, keeping the
+// punctuation attached to each sentence.
+func splitSentences(s string) []string {
+	var out []string
+	start := 0
+	for i, r := range s {
+		if r == '.' || r == '!' || r == '?' {
+			out = append(out, s[start:i+1])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
+	}
+	return out
 }
 
 func firstParagraph(s string) string {

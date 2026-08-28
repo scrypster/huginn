@@ -840,7 +840,27 @@ describe('ChatView', () => {
     await chatEditor.vm.$emit('send', 'Hello')
     await nextTick()
 
-    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('thinking')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+  })
+
+  it('pre-stream status line reflects the phase-true status content from the wire, never the old static string', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Ask Steve to check the logs')
+    await nextTick()
+
+    expect(wrapper.html()).toContain('thinking')
+
+    mockWs.simulateMessage({ type: 'status', session_id: 'test-session-id', content: 'asking Steve…' })
+    await nextTick()
+
+    expect(wrapper.html()).toContain('asking Steve…')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
   })
 
   it('hides delegation-plan banner on a trivial ping', async () => {
@@ -1376,6 +1396,44 @@ describe('ChatView', () => {
     expect(card.threadSummary).toBe(true)
     expect(card.content).toContain('completed delegated work')
     expect(card.content).toContain('Added regression coverage.')
+  })
+
+  it('thread_done with status error renders a failure card, not an accomplishment', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'delegate to Reggie',
+        delegatedThreads: [{ threadId: 'thr-reggie', agentId: 'Reggie', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: 'test-session-id',
+      payload: {
+        thread_id: 'thr-reggie',
+        agent_id: 'Reggie',
+        status: 'error',
+        summary: 'delegation timed out — thread never started',
+      },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const card = msgs.find((m: any) => m.threadSummaryThreadId === 'thr-reggie')
+    expect(card).toBeDefined()
+    expect(card.threadSummary).toBe(true)
+    expect(card.threadSummaryFailed).toBe(true)
+    expect(card.content).not.toContain('completed delegated work')
+    expect(card.content).toContain("**Reggie**'s delegated task failed")
+    expect(card.content).toContain('delegation timed out — thread never started')
+    // Real agent name, not the literal "Delegate" fallback.
+    expect(card.content).not.toContain('**Delegate**')
   })
 
   it('thread_help surfaces a blocked-thread alert banner', async () => {
@@ -2126,6 +2184,33 @@ describe('ChatView — message display edge cases', () => {
     expect(streaming[0].content).toBe('PONG')
   })
 
+  it('token with payload.replace repaints the bubble instead of appending', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: 'what time is it' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    // Server streamed a partial harness-clock fragment, then the rewrite
+    // settled and it corrects the bubble with a replace token instead of
+    // appending — appending would leave "Friday, August 28It's Friday, ...".
+    mockWs.simulateMessage({ type: 'token', content: 'Friday, August 28' })
+    mockWs.simulateMessage({
+      type: 'token',
+      content: "It's Friday, August 28, 2026, 12:13 AM ET.",
+      payload: { replace: true },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streaming = msgs.filter((m: any) => m.role === 'assistant')
+    expect(streaming).toHaveLength(1)
+    expect(streaming[0].content).toBe("It's Friday, August 28, 2026, 12:13 AM ET.")
+  })
+
   it('plain streamed PONG does not drop the first character', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = [
@@ -2658,7 +2743,8 @@ describe('ChatView — space mode', () => {
 
     expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
     expect(wrapper.html()).toContain('Tess is responding')
-    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('thinking')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
     expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
     expect(wrapper.html()).not.toContain('When you send now:')
 

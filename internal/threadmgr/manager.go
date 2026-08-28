@@ -1407,67 +1407,92 @@ func (tm *ThreadManager) StartWatchdog(ctx context.Context, broadcast BroadcastF
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				now := time.Now()
-				tm.mu.Lock()
-				type timedOut struct {
-					id        string
-					sessionID string
-					summary   string
-				}
-				var victims []timedOut
-				for id, t := range tm.threads {
-					switch t.Status {
-					case StatusQueued:
-						if now.Sub(t.CreatedAt) > queuedTimeout {
-							victims = append(victims, timedOut{
-								id:        id,
-								sessionID: t.SessionID,
-								summary:   "delegation timed out — thread never started",
-							})
-						}
-					case StatusThinking, StatusTooling:
-						if now.Sub(t.CreatedAt) > runningTimeout {
-							victims = append(victims, timedOut{
-								id:        id,
-								sessionID: t.SessionID,
-								summary:   "delegation timed out — sub-agent did not complete",
-							})
-						}
-					}
-				}
-				// Transition victims to StatusError while still holding the lock.
-				for _, v := range victims {
-					t, ok := tm.threads[v.id]
-					if !ok {
-						continue
-					}
-					// Skip threads that transitioned since we built the list.
-					switch t.Status {
-					case StatusDone, StatusCancelled, StatusError:
-						continue
-					}
-					t.Status = StatusError
-					t.CompletedAt = now
-				}
-				tm.mu.Unlock()
-
-				// Fire status-change hooks and broadcast events outside the lock.
-				for _, v := range victims {
-					tm.appendAudit(v.id, "error", "", v.summary)
-					tm.fireStatusChange(v.id, StatusError)
-					if broadcast != nil {
-						broadcast(v.sessionID, "thread_done", map[string]any{
-							"thread_id": v.id,
-							"status":    "error",
-							"summary":   v.summary,
-						})
-					}
-					slog.Warn("threadmgr: watchdog timed out thread",
-						"thread_id", v.id, "session_id", v.sessionID, "reason", v.summary)
-				}
+				tm.watchdogScan(time.Now(), broadcast, queuedTimeout, runningTimeout)
 			}
 		}
 	}()
+}
+
+// watchdogScan performs one watchdog pass: it finds threads that have been
+// StatusQueued longer than queuedTimeout or StatusThinking/StatusTooling
+// longer than runningTimeout, transitions them to StatusError, and
+// broadcasts a thread_done event for each. Extracted from StartWatchdog so
+// it can be driven directly (and deterministically) by tests.
+//
+// The StatusError transition is written through to the durable ThreadStore
+// (when one is configured) before returning, exactly like Finalize/Cancel.
+// Without this, a process restart reloads the thread via LoadFromStore still
+// in its last-persisted (non-terminal) status, and the next watchdog scan
+// times it out — and re-broadcasts — all over again.
+func (tm *ThreadManager) watchdogScan(now time.Time, broadcast BroadcastFn, queuedTimeout, runningTimeout time.Duration) {
+	tm.mu.Lock()
+	type timedOut struct {
+		id        string
+		sessionID string
+		agentID   string
+		summary   string
+	}
+	var victims []timedOut
+	for id, t := range tm.threads {
+		switch t.Status {
+		case StatusQueued:
+			if now.Sub(t.CreatedAt) > queuedTimeout {
+				victims = append(victims, timedOut{
+					id:        id,
+					sessionID: t.SessionID,
+					agentID:   t.AgentID,
+					summary:   "delegation timed out — thread never started",
+				})
+			}
+		case StatusThinking, StatusTooling:
+			if now.Sub(t.CreatedAt) > runningTimeout {
+				victims = append(victims, timedOut{
+					id:        id,
+					sessionID: t.SessionID,
+					agentID:   t.AgentID,
+					summary:   "delegation timed out — sub-agent did not complete",
+				})
+			}
+		}
+	}
+	// Transition victims to StatusError while still holding the lock.
+	for _, v := range victims {
+		t, ok := tm.threads[v.id]
+		if !ok {
+			continue
+		}
+		// Skip threads that transitioned since we built the list.
+		switch t.Status {
+		case StatusDone, StatusCancelled, StatusError:
+			continue
+		}
+		t.Status = StatusError
+		t.CompletedAt = now
+	}
+	store := tm.store
+	tm.mu.Unlock()
+
+	// Fire status-change hooks, broadcast events, and persist the terminal
+	// status to the durable store (when configured) outside the lock.
+	for _, v := range victims {
+		tm.appendAudit(v.id, "error", "", v.summary)
+		tm.fireStatusChange(v.id, StatusError)
+		if store != nil {
+			if err := store.UpdateThreadStatus(context.Background(), v.id, string(StatusError)); err != nil {
+				slog.Warn("threadmgr: UpdateThreadStatus (watchdog) failed", "thread_id", v.id, "err", err)
+			}
+		}
+		if broadcast != nil {
+			broadcast(v.sessionID, "thread_done", map[string]any{
+				"thread_id": v.id,
+				"agent_id":  v.agentID,
+				"status":    "error",
+				"summary":   v.summary,
+			})
+		}
+		slog.Warn("threadmgr: watchdog timed out thread",
+			"thread_id", v.id, "session_id", v.sessionID, "reason", v.summary)
+	}
 }
 
 // trySnapshot serialises the current thread dependency graph for sessionID to

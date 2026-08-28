@@ -404,20 +404,28 @@
               <div class="flex-1 h-px bg-huginn-border/40" />
             </div>
 
-            <!-- Thread completion summary card — visually distinct from regular messages -->
+            <!-- Thread completion summary card — visually distinct from regular messages.
+                 Failed (StatusError/timeout) completions reuse the same card shape but in
+                 the fail-red palette so a reaper timeout never reads as an accomplishment. -->
             <div v-if="msg.threadSummary"
               class="flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl mx-2 mt-4"
-              style="background:rgba(46,160,67,0.07);border:1px solid rgba(46,160,67,0.22)">
-              <svg class="w-3.5 h-3.5 text-huginn-green/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              :style="msg.threadSummaryFailed
+                ? 'background:rgba(248,81,73,0.07);border:1px solid rgba(248,81,73,0.22)'
+                : 'background:rgba(46,160,67,0.07);border:1px solid rgba(46,160,67,0.22)'"
+              :data-testid="msg.threadSummaryFailed ? 'thread-summary-failed' : 'thread-summary'">
+              <svg v-if="msg.threadSummaryFailed" class="w-3.5 h-3.5 text-huginn-red/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <svg v-else class="w-3.5 h-3.5 text-huginn-green/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
               </svg>
               <div class="flex-1 min-w-0">
-                <div class="md-content text-xs leading-relaxed" style="color:rgba(46,160,67,0.85)"
+                <div class="md-content text-xs leading-relaxed" :style="msg.threadSummaryFailed ? 'color:rgba(248,81,73,0.85)' : 'color:rgba(46,160,67,0.85)'"
                   v-html="renderWithMentions(msg.content)" />
                 <button v-if="msg.threadSummaryThreadId"
                   @click="openThreadDetailById(msg.threadSummaryThreadId!)"
                   class="mt-1 text-[10px] font-medium hover:underline"
-                  style="color:rgba(46,160,67,0.55)">
+                  :style="msg.threadSummaryFailed ? 'color:rgba(248,81,73,0.55)' : 'color:rgba(46,160,67,0.55)'">
                   View thread →
                 </button>
               </div>
@@ -986,7 +994,7 @@
         <div v-if="prestreamThinking && !trivialAskPending"
           class="flex-shrink-0 text-xs px-4 py-1.5"
           style="background:rgba(88,166,255,0.06);border-top:1px solid rgba(88,166,255,0.14);color:rgba(139,148,158,0.95)">
-          Preparing context and delegation plan…
+          {{ displayAgent?.name ?? 'Agent' }} is responding… · {{ latestRunStatus }}<template v-if="streamingElapsed >= 10"> ({{ formatElapsed(streamingElapsed) }})</template>
         </div>
       </Transition>
 
@@ -2008,7 +2016,13 @@ function dismissMemoryChip() {
 }
 
 function onMuninnChipStatus(status: MuninnPresence) {
-  muninnStatus.value = { ...muninnStatus.value, ...status }
+  // `status` here reports local-daemon reachability (from muninn.connectLocal),
+  // not whether this agent's vault is attached — that only becomes true once
+  // the user actually confirms a vault (see onMemoryVaultConnected). Merging
+  // its `connected` in would prematurely resolve the memory chip to null and
+  // yank the connect modal out from under the user mid-flow.
+  const { connected: _daemonConnected, ...availability } = status
+  muninnStatus.value = { ...muninnStatus.value, ...availability }
 }
 
 async function onMemoryVaultConnected() {
@@ -2238,6 +2252,13 @@ const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
 const trivialAskPending = ref(false)
+// DEFAULT_RUN_STATUS / latestRunStatus back the pre-first-token status line.
+// It must reflect what the turn is actually doing phase-by-phase ("thinking…",
+// "asking Steve…", "recalling memory", "writing" — see runWSChat's status
+// translation layer in internal/server/ws.go) and must NEVER fall back to a
+// static "Preparing context and delegation plan…" placeholder.
+const DEFAULT_RUN_STATUS = 'thinking…'
+const latestRunStatus = ref(DEFAULT_RUN_STATUS)
 const sendOptionsOpen = ref(false)
 
 function armTrivialAskPending(markdown: string) {
@@ -2248,6 +2269,7 @@ function rearmDelegationPlanFromLiveWork() {
   if (!trivialAskPending.value) return
   trivialAskPending.value = false
   if (streaming.value) prestreamThinking.value = true
+  latestRunStatus.value = DEFAULT_RUN_STATUS
 }
 
 function onSendOptionsToggle(e: Event) {
@@ -2270,6 +2292,7 @@ type OwnerRunState = {
   trivialAskPending: boolean
   currentRunId: string
   queuedRunIds: string[]
+  statusText: string
 }
 const runByOwner = ref<Record<string, OwnerRunState>>({})
 
@@ -2280,6 +2303,7 @@ function snapshotOwnerRun(): OwnerRunState {
     trivialAskPending: trivialAskPending.value,
     currentRunId: currentRunId.value,
     queuedRunIds: [...queuedRunIds.value],
+    statusText: latestRunStatus.value,
   }
 }
 
@@ -2294,8 +2318,9 @@ function applyOwnerRun(state: OwnerRunState) {
   trivialAskPending.value = state.trivialAskPending
   currentRunId.value = state.currentRunId
   queuedRunIds.value = [...state.queuedRunIds]
+  latestRunStatus.value = state.statusText || DEFAULT_RUN_STATUS
   if (state.streaming) {
-    startStreamingWatchdog()
+    startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
   } else {
     clearStreamingWatchdog()
@@ -2306,7 +2331,7 @@ function applyOwnerRun(state: OwnerRunState) {
 function restoreOwnerRun(key: string) {
   if (!key) return
   const saved = runByOwner.value[key]
-  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] })
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [], statusText: DEFAULT_RUN_STATUS })
 }
 
 function finishStoredOwnerRun(key: string) {
@@ -2317,13 +2342,13 @@ function finishStoredOwnerRun(key: string) {
     const rest = saved.queuedRunIds.slice(1)
     runByOwner.value = {
       ...runByOwner.value,
-      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest },
+      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest, statusText: DEFAULT_RUN_STATUS },
     }
     return
   }
   runByOwner.value = {
     ...runByOwner.value,
-    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [] },
+    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [], statusText: DEFAULT_RUN_STATUS },
   }
 }
 
@@ -2381,8 +2406,9 @@ function promoteNextQueuedRun() {
   currentRunId.value = next
   streaming.value = true
   prestreamThinking.value = true
+  latestRunStatus.value = DEFAULT_RUN_STATUS
   trivialAskPending.value = false
-  startStreamingWatchdog()
+  startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
   pendingToolResults.value = []
   if (props.sessionId) {
@@ -2437,8 +2463,9 @@ async function handleEditorSend(markdown: string) {
       currentRunId.value = runId
       streaming.value = true
       prestreamThinking.value = true
+      latestRunStatus.value = DEFAULT_RUN_STATUS
       armTrivialAskPending(markdown)
-      startStreamingWatchdog()
+      startStreamingWatchdog(runActivityProbe)
       startElapsedTimer()
     } else {
       queueRun(runId)
@@ -2484,8 +2511,9 @@ async function handleEditorSend(markdown: string) {
     currentRunId.value = runId
     streaming.value = true
     prestreamThinking.value = true
+    latestRunStatus.value = DEFAULT_RUN_STATUS
     armTrivialAskPending(markdown)
-    startStreamingWatchdog()
+    startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
     pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
     msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true, agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
@@ -2511,7 +2539,7 @@ function handleRetry(content: string) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   currentRunId.value = runId
   streaming.value = true
-  startStreamingWatchdog()
+  startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: new Date().toISOString() })
@@ -2581,9 +2609,20 @@ const { notify } = useBrowserNotifications()
 // handlers accumulating across component remounts, e.g. when navigating away and back).
 const wsCleanupFns: (() => void)[] = []
 
+// Any WS traffic while a run is live counts as "the run is still working" for
+// the streaming watchdog ('done'/'error' clear the watchdog themselves).
+let lastRunActivityMs = 0
+function runActivityProbe(): boolean {
+  return Date.now() - lastRunActivityMs < 60_000
+}
+
 function registerWS(ws: HuginnWS, type: string, fn: (msg: WSMessage) => void) {
-  ws.on(type, fn)
-  wsCleanupFns.push(() => ws.off(type, fn))
+  const wrapped = (msg: WSMessage) => {
+    lastRunActivityMs = Date.now()
+    fn(msg)
+  }
+  ws.on(type, wrapped)
+  wsCleanupFns.push(() => ws.off(type, wrapped))
 }
 
 watch(wsRef, (ws) => {
@@ -2605,15 +2644,37 @@ watch(wsRef, (ws) => {
       const lastUser = [...msgs].reverse().find(m => m.role === 'user')
       if (lastUser) setLastSeenMessageId(sid, lastUser.id)
     }
-    startStreamingWatchdog() // reset watchdog on each token to detect true inactivity
+    startStreamingWatchdog(runActivityProbe) // reset watchdog on each token to detect true inactivity
     const apply = () => {
       prestreamThinking.value = false
       // Flush buffered prefetch tool results now that the assistant message exists.
       flushPendingToolResults(sid)
       const msgs = getMessages(sid)
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
+      // A replace-correction can race the 'done' that closed the streaming
+      // bubble. If no bubble is streaming any more, repaint the last
+      // assistant bubble in place — never mint a second bubble for it.
+      if (msg.payload?.replace && !streamMsg?.streaming) {
+        const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
+        if (lastAssistant) {
+          lastAssistant.content = visibleAssistantContent(msg.content ?? '')
+          scrollToBottom()
+          return
+        }
+      }
       if (streamMsg?.streaming) {
-        streamMsg.content += msg.content ?? ''
+        // A server-side rewrite (e.g. the harness clock label settling into
+        // "It's {stamp}." once the stamp finishes streaming) can change text
+        // already sent to the client. The server flags that correction with
+        // payload.replace so the bubble is repainted from scratch instead of
+        // appending — appending here would double up or permanently strand
+        // the client on stale partial text (huginn: hallway fast-path
+        // leading-prefix drop).
+        if (msg.payload?.replace) {
+          streamMsg.content = msg.content ?? ''
+        } else {
+          streamMsg.content += msg.content ?? ''
+        }
         streamMsg.content = visibleAssistantContent(streamMsg.content)
         scrollToBottom()
         return
@@ -2782,6 +2843,17 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     promoteNextQueuedRun()
     if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
+  })
+
+  // Phase-true status line: content varies by what the turn is actually
+  // doing ("thinking…", "asking Steve…", "recalling memory", "writing" —
+  // see runWSChat's status translation in internal/server/ws.go). Never
+  // falls back to a static placeholder; an empty/unrecognised content still
+  // resolves to DEFAULT_RUN_STATUS.
+  registerWS(ws, 'status', (msg: WSMessage) => {
+    if (!isForActiveSession(msg)) return
+    latestRunStatus.value = (msg.content ?? '').trim() || DEFAULT_RUN_STATUS
+    if (props.spaceId) persistOwnerRun(props.spaceId)
   })
 
 registerWS(ws, 'warning', (msg: WSMessage) => {
@@ -3073,6 +3145,9 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (!threadId) return
     const summary = typeof p?.summary === 'string' ? p.summary : ''
     const agentId = p?.agent_id as string | undefined
+    // A reaper/watchdog timeout (or any other hard failure) sets status
+    // "error" — that must read as a failure notice, not an accomplishment.
+    const failed = typeof p?.status === 'string' && p.status.toLowerCase() === 'error'
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
@@ -3108,13 +3183,18 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (summary) {
       const alreadyPosted = msgs.some(m => m.threadSummaryThreadId === threadId)
       if (!alreadyPosted) {
+        const label = agentId || 'Delegate'
+        const content = failed
+          ? `**${label}**'s delegated task failed: ${summary}`
+          : `**${label}** completed delegated work: ${summary}`
         const completionMsg: ChatMessage = {
           id: `thread-summary-${threadId}-${Date.now()}`,
           role: 'assistant',
-          content: `**${agentId || 'Delegate'}** completed delegated work: ${summary}`,
+          content,
           agent: agentId || undefined,
           createdAt: new Date().toISOString(),
           threadSummary: true,
+          threadSummaryFailed: failed || undefined,
           threadSummaryThreadId: threadId,
           ...(props.spaceId && msg.session_id ? {
             session_id: msg.session_id as string,

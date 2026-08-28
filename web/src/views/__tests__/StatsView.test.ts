@@ -29,6 +29,8 @@ import StatsView from '../StatsView.vue'
 const sampleStats = {
   last_prompt_tokens: 1234,
   last_completion_tokens: 567,
+  total_sessions: 3,
+  active_sessions: 2,
 }
 
 const sampleCost = { session_total_usd: 0.0025 }
@@ -107,16 +109,34 @@ describe('StatsView', () => {
     expect(w.text()).toContain('2')
   })
 
-  it('does not count stale status=active sessions as ACTIVE', async () => {
+  it('trusts the server-computed active_sessions rather than the stored status field', async () => {
+    // Every session below carries status: 'active' (the stored field never
+    // meaningfully transitions), but the server says only 1 is really active.
     mockApiSessionsList.mockResolvedValueOnce([
       { session_id: 'a', status: 'active', updated_at: '2026-06-10T13:54:41Z', message_count: 1 },
       { session_id: 'b', status: 'active', updated_at: new Date().toISOString(), message_count: 2 },
       { session_id: 'c', status: 'active', updated_at: new Date().toISOString(), message_count: 3 },
     ])
+    mockApiStats.mockResolvedValueOnce({ ...sampleStats, total_sessions: 3, active_sessions: 1 })
     const w = mountView()
     await flushPromises()
     expect(w.text()).toContain('3')
-    expect(w.text()).toContain('2')
+    expect(w.text()).toContain('1')
+  })
+
+  it('falls back to the session list length for total when stats omits total_sessions', async () => {
+    mockApiStats.mockResolvedValueOnce({ last_prompt_tokens: 1 })
+    const w = mountView()
+    await flushPromises()
+    // sampleSessions has 3 entries
+    expect(w.text()).toContain('3')
+  })
+
+  it('shows 0 active sessions when stats omits active_sessions', async () => {
+    mockApiStats.mockResolvedValueOnce({ last_prompt_tokens: 1 })
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('0')
   })
 
   it('shows total messages count', async () => {
@@ -200,6 +220,27 @@ describe('StatsView', () => {
     await flushPromises()
     expect(w.text()).toContain('Top Models')
     expect(w.text()).toContain('claude-sonnet-4-6')
+  })
+
+  it('shows token totals instead of a misleading $0 for a local model', async () => {
+    mockApiCost.mockResolvedValueOnce({
+      session_total_usd: 0,
+      prompt_tokens_total: 4000,
+      completion_tokens_total: 1000,
+      is_local: true,
+    })
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('n/a (local)')
+    expect(w.text()).toContain('5,000 tok')
+    expect(w.text()).not.toContain('$0.0000')
+  })
+
+  it('shows plain "n/a (local)" when a local model has no recorded tokens yet', async () => {
+    mockApiCost.mockResolvedValueOnce({ session_total_usd: 0, is_local: true })
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('n/a (local)')
   })
 
   it('shows "—" for cost when no cost data', async () => {

@@ -91,6 +91,11 @@ func memoryModeInstruction(mode, vault, vaultDescription string) string {
 	if vaultDescription != "" {
 		sb.WriteString(fmt.Sprintf("Your memory vault (%s) is described as: %s\n\n", vault, vaultDescription))
 	}
+	const questionFirstRule = "When the user asks a question, recall first and answer from what recall returns — " +
+		"never store a new memory while you are answering a question. " +
+		"Never store your own inference, assumption, or guess as if it were a fact the user told you; " +
+		"if you don't know something and recall didn't surface it, say so instead of inventing an answer and writing it to memory.\n\n"
+
 	switch mode {
 	case "passive":
 		sb.WriteString("Use memory tools only when the user explicitly asks you to remember or recall something. " +
@@ -103,6 +108,7 @@ func memoryModeInstruction(mode, vault, vaultDescription string) string {
 			"Write atomic memories for every new fact, decision, or preference you learn. " +
 			"Use `muninn_evolve` to update stale facts rather than writing duplicates. " +
 			"Periodically call `muninn_consolidate` when memories feel redundant.\n\n" +
+			questionFirstRule +
 			"You are a long-term collaborator, not a session assistant. Act like someone who genuinely remembers.\n\n")
 	default: // "conversational"
 		sb.WriteString("At the start of each conversation, call `muninn_recall` passing the user's message text as the `context` parameter. " +
@@ -110,7 +116,8 @@ func memoryModeInstruction(mode, vault, vaultDescription string) string {
 			"After using a recalled memory to answer a question, call `muninn_feedback` to signal whether it was helpful — " +
 			"this improves recall quality over time. " +
 			"Use `muninn_evolve` to update outdated facts. " +
-			"Do not flood memory with obvious or session-specific details.\n\n")
+			"Do not flood memory with obvious or session-specific details.\n\n" +
+			questionFirstRule)
 	}
 	sb.WriteString("Speak naturally — never mention 'engram IDs', 'vault names', or internal MuninnDB terminology to the user. " +
 		"If you're unsure what you remember, say so honestly. Memory enriches your responses; it doesn't replace judgment.\n\n")

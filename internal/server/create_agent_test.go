@@ -149,7 +149,7 @@ func TestCreateAgentTool_WinstonSeatsAndVaultDefault(t *testing.T) {
 	if strings.Contains(res.Output, "Muninn is down") {
 		t.Errorf("stale down speech: %q", res.Output)
 	}
-	if !strings.Contains(res.Output, "morgan-huginn") && !strings.Contains(res.Output, "No vault yet") {
+	if !strings.Contains(res.Output, "huginn:agent:") && !strings.Contains(res.Output, "No vault yet") {
 		t.Errorf("vault default or skip missing: %q", res.Output)
 	}
 	cfg, _ := agents.LoadAgents()
@@ -157,8 +157,9 @@ func TestCreateAgentTool_WinstonSeatsAndVaultDefault(t *testing.T) {
 	for _, a := range cfg.Agents {
 		if strings.EqualFold(a.Name, "Morgan") {
 			found = true
-			if a.VaultName != "morgan-huginn" {
-				t.Errorf("vault_name=%q want morgan-huginn", a.VaultName)
+			// Canonical standard (MJ, 2026-08-28): huginn:agent:<user>:<name>.
+			if !strings.HasPrefix(a.VaultName, "huginn:agent:") || !strings.HasSuffix(a.VaultName, ":morgan") {
+				t.Errorf("vault_name=%q want huginn:agent:<user>:morgan", a.VaultName)
 			}
 		}
 	}
@@ -298,7 +299,7 @@ func TestCreateAgentTool_VaultReadyWhenDaemonUp(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("hire: %s", res.Error)
 	}
-	if !strings.Contains(res.Output, "morgan-huginn") || !strings.Contains(res.Output, "is ready") {
+	if !strings.Contains(res.Output, "huginn:agent:") || !strings.Contains(res.Output, ":morgan") || !strings.Contains(res.Output, "is ready") {
 		t.Fatalf("want vault-ready speech, got %q", res.Output)
 	}
 	if strings.Contains(res.Output, "Muninn is down") || strings.Contains(res.Output, "No vault yet") {

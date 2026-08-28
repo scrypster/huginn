@@ -22,18 +22,35 @@ export function useChatStreaming() {
   // If no token/done/error arrives within 60s of starting a run, reset streaming
   // so the user is not permanently locked out of sending.
   const STREAMING_WATCHDOG_MS = 60_000
+  // Hard ceiling: even with an activity probe re-arming the watchdog, a run that
+  // has produced no token/done for this long is force-reset so the composer is
+  // never permanently locked.
+  const STREAMING_WATCHDOG_CEILING_MS = 600_000
   let streamingWatchdog: ReturnType<typeof setTimeout> | null = null
 
-  function startStreamingWatchdog() {
+  /**
+   * Arm (or re-arm) the streaming watchdog.
+   *
+   * @param activityProbe optional callback consulted when the timer fires; if it
+   * returns true (thinking/status/tool events are still flowing for this run),
+   * the watchdog re-arms instead of resetting, up to STREAMING_WATCHDOG_CEILING_MS.
+   * Callers re-invoke this on each token, which restarts the ceiling.
+   */
+  function startStreamingWatchdog(activityProbe?: () => boolean) {
     if (streamingWatchdog !== null) { clearTimeout(streamingWatchdog); streamingWatchdog = null }
-    streamingWatchdog = setTimeout(() => {
-      if (streaming.value) {
+    const armedAt = Date.now()
+    const arm = () => {
+      streamingWatchdog = setTimeout(() => {
+        streamingWatchdog = null
+        if (!streaming.value) return
+        const withinCeiling = Date.now() - armedAt < STREAMING_WATCHDOG_CEILING_MS
+        if (withinCeiling && activityProbe?.()) { arm(); return }
         console.warn('[chat] streaming watchdog: no activity for 60s — resetting streaming state')
         streaming.value = false
         activeToolCalls.value = []
-      }
-      streamingWatchdog = null
-    }, STREAMING_WATCHDOG_MS)
+      }, STREAMING_WATCHDOG_MS)
+    }
+    arm()
   }
 
   function clearStreamingWatchdog() {

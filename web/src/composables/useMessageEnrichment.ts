@@ -103,6 +103,7 @@ function applyHarnessClassification<T extends ChatMessage>(msg: T): T & { system
   return {
     ...msg,
     threadSummary: display.threadSummary || msg.threadSummary,
+    threadSummaryFailed: display.threadSummaryFailed || (msg as any).threadSummaryFailed || undefined,
     systemLine: display.systemLine || undefined,
     hideFailSpeech: display.hideFailSpeech || undefined,
     toolCalls: msg.toolCalls ? visibleToolCalls(msg.toolCalls) : msg.toolCalls,

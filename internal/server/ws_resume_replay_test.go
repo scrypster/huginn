@@ -558,13 +558,40 @@ func TestBeginChatRun_IndependentOfClientContext(t *testing.T) {
 
 // TestEndChatRun_DoesNotDeregisterSuccessor verifies the pointer-identity
 // guard: an older run finishing must not remove a newer run's cancel handle.
+// Runs now queue strictly FIFO (a fast-follow message never supersedes an
+// in-flight run — see beginChatRun), so run2's admission is reserved
+// immediately but it must wait for run1 to end before beginChatRun returns;
+// once it does, run2 is the session's registered handle and run1 ending
+// late (its own endChatRun, called after run2 already started) must not
+// deregister it.
 func TestEndChatRun_DoesNotDeregisterSuccessor(t *testing.T) {
 	srv := &Server{}
 	_, run1 := srv.beginChatRun("s1", "")
-	ctx2, run2 := srv.beginChatRun("s1", "") // replaces run1 as the active run
 
-	srv.endChatRun("s1", run1) // old run finishes late
+	started := make(chan struct{})
+	var run2 *chatRunHandle
+	var ctx2 context.Context
+	go func() {
+		ctx2, run2 = srv.beginChatRun("s1", "")
+		close(started)
+	}()
+	select {
+	case <-started:
+		t.Fatal("run2 must queue behind run1, not replace it immediately")
+	case <-time.After(80 * time.Millisecond):
+	}
 
+	srv.endChatRun("s1", run1) // run1 finishes, unblocking queued run2
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("run2 did not start after run1 ended")
+	}
+
+	// run1 finishing already ran its own endChatRun above (simulating a late
+	// finish relative to run2 having started) — it must not have deregistered
+	// run2, which is now the session's active handle.
 	if !srv.cancelChatRun("s1") {
 		t.Fatal("newer run's handle was removed by the older run's endChatRun")
 	}

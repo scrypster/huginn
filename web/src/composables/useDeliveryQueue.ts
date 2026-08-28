@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue'
-import { getToken } from './useApi'
+import { getToken, ensureToken } from './useApi'
 
 export interface DeliveryQueueEntry {
   id: string
@@ -22,13 +22,19 @@ const actionableEntries = ref<DeliveryQueueEntry[]>([])
 const loading = ref(false)
 
 export function useDeliveryQueue() {
-  function authHeaders(): Record<string, string> {
+  // Gate every request on a ready token: this composable polls independently
+  // of App.vue's initApp() boot sequence (Vue fires child onMounted() before
+  // the parent's, so a caller that mounts early can otherwise fire before
+  // initApp() has set the token — producing a pre-auth 401 that's logged to
+  // the console). ensureToken() no-ops once the token is already set.
+  async function authHeaders(): Promise<Record<string, string>> {
+    await ensureToken()
     return { Authorization: `Bearer ${getToken()}` }
   }
 
   async function fetchBadge(): Promise<void> {
     try {
-      const res = await fetch('/api/v1/delivery-queue/badge', { headers: authHeaders() })
+      const res = await fetch('/api/v1/delivery-queue/badge', { headers: await authHeaders() })
       if (!res.ok) return
       const data = await res.json()
       badgeCount.value = data.count ?? 0
@@ -40,7 +46,7 @@ export function useDeliveryQueue() {
   async function fetchActionable(): Promise<void> {
     loading.value = true
     try {
-      const res = await fetch('/api/v1/delivery-queue', { headers: authHeaders() })
+      const res = await fetch('/api/v1/delivery-queue', { headers: await authHeaders() })
       if (!res.ok) return
       actionableEntries.value = await res.json()
       badgeCount.value = actionableEntries.value.length
@@ -52,7 +58,7 @@ export function useDeliveryQueue() {
   async function retryEntry(id: string): Promise<void> {
     const res = await fetch(`/api/v1/delivery-queue/${id}/retry`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers: await authHeaders(),
     })
     if (!res.ok) throw new Error(`retry failed: ${res.status}`)
     await fetchActionable()
@@ -61,7 +67,7 @@ export function useDeliveryQueue() {
   async function dismissEntry(id: string): Promise<void> {
     const res = await fetch(`/api/v1/delivery-queue/${id}`, {
       method: 'DELETE',
-      headers: authHeaders(),
+      headers: await authHeaders(),
     })
     if (!res.ok) throw new Error(`dismiss failed: ${res.status}`)
     actionableEntries.value = actionableEntries.value.filter(e => e.id !== id)

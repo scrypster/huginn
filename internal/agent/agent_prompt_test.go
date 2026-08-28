@@ -199,3 +199,25 @@ func (s *stubTool) Schema() backend.Tool {
 func (s *stubTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
 	return tools.ToolResult{}
 }
+
+// TestMemoryModeInstruction_QuestionAnswersFromRecallNeverInvents verifies
+// the hard rules added after the live 2026-08-27 Winston DM defect: asked
+// "what's our production database called?", the model neither recalled nor
+// answered from the stored fact — it invented "PostgreSQL" and wrote that
+// invented answer to the vault as a fact. conversational and immersive modes
+// (the modes where muninn_remember is offered to the model) must carry an
+// explicit instruction against both halves of that failure.
+func TestMemoryModeInstruction_QuestionAnswersFromRecallNeverInvents(t *testing.T) {
+	for _, mode := range []string{"conversational", "immersive"} {
+		got := memoryModeInstruction(mode, "huginn", "")
+		if !strings.Contains(strings.ToLower(got), "recall first") && !strings.Contains(strings.ToLower(got), "recall before") {
+			t.Errorf("mode=%q: expected instruction to tell the model to recall before answering a question, got:\n%s", mode, got)
+		}
+		if !strings.Contains(strings.ToLower(got), "never store") && !strings.Contains(strings.ToLower(got), "do not store") {
+			t.Errorf("mode=%q: expected instruction to forbid storing new facts while answering a question, got:\n%s", mode, got)
+		}
+		if !strings.Contains(strings.ToLower(got), "inference") && !strings.Contains(strings.ToLower(got), "guess") && !strings.Contains(strings.ToLower(got), "invent") {
+			t.Errorf("mode=%q: expected instruction to forbid storing the model's own inference as fact, got:\n%s", mode, got)
+		}
+	}
+}

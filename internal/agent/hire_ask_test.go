@@ -65,14 +65,8 @@ func TestChatWithAgent_NamedHireFastPathPersists(t *testing.T) {
 	if rec.got.Name != "driveprobe-unit" || rec.got.Description != "researches" {
 		t.Fatalf("persist = %+v", rec.got)
 	}
-	if rec.got.Memory {
-		t.Fatal("named hire must not invent a vault (memory=false)")
-	}
-	if rec.got.VaultName != "" {
-		t.Fatalf("vault = %q, want empty (do not invent or reuse huginn)", rec.got.VaultName)
-	}
 	joined := strings.Join(tokens, "")
-	if !strings.Contains(joined, "driveprobe-unit") || !strings.Contains(joined, "researches") {
+	if !strings.Contains(joined, "driveprobe-unit") || !strings.Contains(joined, "research") {
 		t.Fatalf("speech %q", joined)
 	}
 	if strings.Contains(joined, "Delegated to") || strings.Contains(joined, "Local time now") {
@@ -82,6 +76,90 @@ func TestChatWithAgent_NamedHireFastPathPersists(t *testing.T) {
 	defer mb.mu.Unlock()
 	if len(mb.lastRequests) != 0 {
 		t.Fatalf("named hire must not call 14b; got %d requests", len(mb.lastRequests))
+	}
+}
+
+// TestChatWithAgent_NamedHireFastPathAssignsVault covers defect #1: the hire
+// fast path used to hardcode memory:false, so a named hire never got a
+// vault — "No vault yet" forever, even with a healthy Muninn. It must now
+// assign a vault the same way a hire that goes through the model does.
+func TestChatWithAgent_NamedHireFastPathAssignsVault(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should not run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	rec := &hirePersistRec{}
+	reg := tools.NewRegistry()
+	tools.RegisterCreateAgentTool(reg, &tools.CreateAgentTool{Deps: tools.CreateAgentDeps{
+		Persist: func(req tools.CreateAgentRequest) error {
+			rec.got = req
+			return nil
+		},
+		AgentExists:  func(string) bool { return false },
+		ValidateName: func(string) error { return nil },
+		// Stubbed healthy muninn: TryVault succeeds.
+		TryVault:     func(vaultName, label string) bool { return true },
+		MachineModel: "qwen2.5-coder:14b",
+	}})
+	o.SetTools(reg, permissions.NewGate(true, nil))
+	ag := &agents.Agent{
+		Name:       "Winston",
+		ModelID:    "qwen2.5-coder:14b",
+		LocalTools: []string{"create_agent"},
+	}
+	var tokens []string
+	if err := o.ChatWithAgent(context.Background(), ag, "@Winston hire a teammate named fableprobe who researches the web", "sess-hire-vault-ok", func(tok string) {
+		tokens = append(tokens, tok)
+	}, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	if !rec.got.Memory {
+		t.Fatal("hire must assign a vault like a normal hire (memory=true)")
+	}
+	if rec.got.VaultName == "" {
+		t.Fatal("hire must set VaultName so the first turn connects a vault")
+	}
+	joined := strings.Join(tokens, "")
+	if strings.Contains(joined, "No vault yet") {
+		t.Fatalf("healthy muninn should not say 'No vault yet': %q", joined)
+	}
+}
+
+// TestChatWithAgent_NamedHireFastPathNoMuninnKeepsNoVaultYet covers the
+// other half of defect #1's TDD: with no muninn configured (TryVault unset,
+// mirroring the tool's real "connect failed" path), the ack still honestly
+// says "No vault yet" instead of claiming a vault that isn't reachable.
+func TestChatWithAgent_NamedHireFastPathNoMuninnKeepsNoVaultYet(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should not run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	rec := &hirePersistRec{}
+	reg := tools.NewRegistry()
+	tools.RegisterCreateAgentTool(reg, &tools.CreateAgentTool{Deps: tools.CreateAgentDeps{
+		Persist: func(req tools.CreateAgentRequest) error {
+			rec.got = req
+			return nil
+		},
+		AgentExists:  func(string) bool { return false },
+		ValidateName: func(string) error { return nil },
+		// No TryVault wired: mirrors "no muninn config" — TryVault is nil.
+		MachineModel: "qwen2.5-coder:14b",
+	}})
+	o.SetTools(reg, permissions.NewGate(true, nil))
+	ag := &agents.Agent{
+		Name:       "Winston",
+		ModelID:    "qwen2.5-coder:14b",
+		LocalTools: []string{"create_agent"},
+	}
+	var tokens []string
+	if err := o.ChatWithAgent(context.Background(), ag, "@Winston hire a teammate named fableprobe who researches the web", "sess-hire-vault-none", func(tok string) {
+		tokens = append(tokens, tok)
+	}, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	joined := strings.Join(tokens, "")
+	if !strings.Contains(joined, "No vault yet") {
+		t.Fatalf("unreachable muninn should still say 'No vault yet': %q", joined)
+	}
+	if rec.got.VaultName == "" {
+		t.Fatal("VaultName should still be assigned on the agent record even when the live connect attempt fails")
 	}
 }
 

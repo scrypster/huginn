@@ -13,6 +13,7 @@ import {
   isA2ATool,
   isBareFailSpeech,
   isDelegationAnnouncement,
+  isFailedDelegationAnnouncement,
   visibleToolCalls,
   FAIL_COPY,
   failVisibleCopy,
@@ -282,6 +283,45 @@ describe('classifyHarnessDisplay', () => {
       systemLine: false,
       hideFailSpeech: false,
     })
+  })
+
+  // Live bug: a reaper/watchdog timeout ("**Reggie**'s delegated task failed:
+  // ...") must still render as a thread-summary card (with the drawer link)
+  // but flagged as failed so the UI does not paint it green/checkmark like a
+  // real accomplishment.
+  it('flags a failed-delegation announcement as a failed thread summary', () => {
+    expect(classifyHarnessDisplay({
+      content: "**Reggie**'s delegated task failed: delegation timed out — thread never started",
+    })).toEqual({
+      threadSummary: true,
+      systemLine: false,
+      hideFailSpeech: false,
+      threadSummaryFailed: true,
+    })
+  })
+
+  it('does not flag a normal completion as failed', () => {
+    const result = classifyHarnessDisplay({
+      content: '**Researcher** completed delegated work: Added tests.',
+    })
+    expect(result.threadSummaryFailed).toBeFalsy()
+  })
+})
+
+describe('isFailedDelegationAnnouncement', () => {
+  it('matches the failure phrasing', () => {
+    expect(isFailedDelegationAnnouncement(
+      "**Reggie**'s delegated task failed: delegation timed out — thread never started",
+    )).toBe(true)
+  })
+
+  it('does not match the success phrasing', () => {
+    expect(isFailedDelegationAnnouncement('**Steve** completed delegated work: PONG')).toBe(false)
+  })
+
+  it('handles null/undefined', () => {
+    expect(isFailedDelegationAnnouncement(undefined)).toBe(false)
+    expect(isFailedDelegationAnnouncement(null)).toBe(false)
   })
 })
 

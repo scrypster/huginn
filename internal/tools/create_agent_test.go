@@ -7,17 +7,17 @@ import (
 )
 
 type hireRec struct {
-	persisted []CreateAgentRequest
-	vaults    []string
+	persisted   []CreateAgentRequest
+	vaults      []string
 	seated      []string
 	spaceSeated []string
-	exists    map[string]bool
-	conns     map[string]string
-	spaceCo   string
-	inCompany map[string]bool
-	coName    string
-	persistErr error
-	nameErr    error
+	exists      map[string]bool
+	conns       map[string]string
+	spaceCo     string
+	inCompany   map[string]bool
+	coName      string
+	persistErr  error
+	nameErr     error
 }
 
 func (r *hireRec) deps() CreateAgentDeps {
@@ -81,7 +81,16 @@ func (r *hireRec) deps() CreateAgentDeps {
 		},
 		CallerModel:  func(context.Context) string { return "qwen2.5-coder:14b" },
 		MachineModel: "qwen2.5-coder:14b",
+		Registry:     hireTestRegistry(),
 	}
+}
+
+// hireTestRegistry mirrors the real server's builtin tool wiring so
+// role-based local_tools inference has real tools to look up.
+func hireTestRegistry() *Registry {
+	reg := NewRegistry()
+	RegisterBuiltins(reg, "/tmp", 0)
+	return reg
 }
 
 type hireCallerKey struct{}
@@ -147,6 +156,31 @@ func TestCreateAgent_MuninnDownStillCreates(t *testing.T) {
 	}
 	if jargon(res.Output) {
 		t.Errorf("jargon in speech: %q", res.Output)
+	}
+}
+
+// Canonical standard (MJ, 2026-08-28): when the server wires ResolveVaultName,
+// hires get "huginn:agent:<user>:<name>". The "<name>-huginn" slug is only the
+// unwired fallback (covered by TestCreateAgent_VaultDefaultNameHuginn).
+func TestCreateAgent_VaultUsesCanonicalResolver(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	d := r.deps()
+	d.ResolveVaultName = func(agentName string) string {
+		return "huginn:agent:tester:" + strings.ToLower(agentName)
+	}
+	tool := &CreateAgentTool{Deps: d}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{"name": "Morgan", "description": "researcher"})
+	if res.IsError {
+		t.Fatal(res.Error)
+	}
+	if len(r.vaults) != 1 || r.vaults[0] != "huginn:agent:tester:morgan" {
+		t.Fatalf("vaults=%v, want huginn:agent:tester:morgan", r.vaults)
+	}
+	if r.persisted[0].VaultName != "huginn:agent:tester:morgan" {
+		t.Errorf("persisted vault %q", r.persisted[0].VaultName)
+	}
+	if !strings.Contains(res.Output, "huginn:agent:tester:morgan") {
+		t.Errorf("speech missing canonical vault: %q", res.Output)
 	}
 }
 
@@ -292,6 +326,164 @@ func TestCreateAgent_CreateAnAgentHitsSamePersist(t *testing.T) {
 	}
 }
 
+// TestCreateAgent_HireAckGrammarVerbPhraseRole covers defect #2: a verb-phrase
+// description ("researches the web") was spliced verbatim after "is on the
+// roster as", producing "fableprobe is on the roster as researches the web."
+// It must now read as a grammatical sentence.
+func TestCreateAgent_HireAckGrammarVerbPhraseRole(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "fableprobe", "description": "researches the web",
+	})
+	if res.IsError {
+		t.Fatal(res.Error)
+	}
+	if strings.Contains(res.Output, "on the roster as researches") {
+		t.Fatalf("verbatim splice leaked ungrammatical phrase: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "fableprobe joined the roster to research the web") {
+		t.Errorf("want a grammatical role phrase, got %q", res.Output)
+	}
+}
+
+// TestCreateAgent_HireAckGrammarNounPhraseRole covers the other branch: a
+// noun/role-phrase description keeps the original, already-grammatical
+// "is on the roster as <role>" wording.
+func TestCreateAgent_HireAckGrammarNounPhraseRole(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Morgan", "description": "researcher",
+	})
+	if res.IsError {
+		t.Fatal(res.Error)
+	}
+	if !strings.Contains(res.Output, "Morgan is on the roster as researcher") {
+		t.Errorf("want noun-phrase role wording, got %q", res.Output)
+	}
+}
+
+func TestIsVerbPhraseRole(t *testing.T) {
+	cases := []struct {
+		role string
+		want bool
+	}{
+		{"researches the web", true},
+		{"manages the calendar", true},
+		{"writes code", true},
+		{"handles support tickets", true},
+		{"researcher", false},
+		{"bookkeeper", false},
+		{"customer support", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isVerbPhraseRole(tc.role); got != tc.want {
+			t.Errorf("isVerbPhraseRole(%q) = %v, want %v", tc.role, got, tc.want)
+		}
+	}
+}
+
+func TestBaseVerbForm(t *testing.T) {
+	cases := []struct {
+		word, want string
+	}{
+		{"researches", "research"},
+		{"manages", "manage"},
+		{"writes", "write"},
+		{"helps", "help"},
+		{"goes", "go"},
+		{"studies", "study"},
+	}
+	for _, tc := range cases {
+		if got := baseVerbForm(tc.word); got != tc.want {
+			t.Errorf("baseVerbForm(%q) = %q, want %q", tc.word, got, tc.want)
+		}
+	}
+}
+
+// defaultHireCodingTools is the exact tool set role-based inference should
+// grant a coding/engineering hire when no explicit local_tools was given.
+var defaultHireCodingTools = []string{"read_file", "write_file", "edit_file", "bash", "list_dir"}
+
+func TestCreateAgent_CodingRoleInfersLocalTools(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Dex", "description": "Fix bugs in our Go codebase",
+	})
+	if res.IsError {
+		t.Fatalf("hire should succeed: %s", res.Error)
+	}
+	if len(r.persisted) != 1 {
+		t.Fatalf("expected persist, got %d", len(r.persisted))
+	}
+	got := r.persisted[0].LocalTools
+	if strings.Join(got, ",") != strings.Join(defaultHireCodingTools, ",") {
+		t.Fatalf("LocalTools = %v, want %v", got, defaultHireCodingTools)
+	}
+}
+
+func TestCreateAgent_CodingRoleTitleInfersLocalTools(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Priya", "description": "Software Engineer",
+	})
+	if res.IsError {
+		t.Fatalf("hire should succeed: %s", res.Error)
+	}
+	got := r.persisted[0].LocalTools
+	if strings.Join(got, ",") != strings.Join(defaultHireCodingTools, ",") {
+		t.Fatalf("LocalTools = %v, want %v", got, defaultHireCodingTools)
+	}
+}
+
+func TestCreateAgent_NonCodingRoleStaysToolless(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Marcy", "description": "Handles marketing copy",
+	})
+	if res.IsError {
+		t.Fatalf("hire should succeed: %s", res.Error)
+	}
+	if r.persisted[0].LocalTools != nil {
+		t.Fatalf("LocalTools = %v, want nil (unchanged behavior)", r.persisted[0].LocalTools)
+	}
+}
+
+func TestCreateAgent_ExplicitLocalToolsNotOverriddenByInference(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Dex", "description": "Software Engineer",
+		"local_tools": []any{"read_file"},
+	})
+	if res.IsError {
+		t.Fatalf("hire should succeed: %s", res.Error)
+	}
+	got := r.persisted[0].LocalTools
+	if strings.Join(got, ",") != "read_file" {
+		t.Fatalf("LocalTools = %v, want [read_file] (explicit must win)", got)
+	}
+}
+
+func TestCreateAgent_InferredToolsMentionedInAck(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Dex", "description": "Fix bugs in our Go codebase",
+	})
+	if res.IsError {
+		t.Fatalf("hire should succeed: %s", res.Error)
+	}
+	if !strings.Contains(res.Output, "auto-granted for coding work") {
+		t.Errorf("ack should mention inferred tools, got %q", res.Output)
+	}
+}
+
 func jargon(s string) bool {
 	low := strings.ToLower(s)
 	for _, tok := range []string{"create_agent", "persistagent", "/api/", "409", "422", "put "} {
@@ -300,4 +492,72 @@ func jargon(s string) bool {
 		}
 	}
 	return false
+}
+
+// TestRoleLooksCoding_Precision pins the inference predicate against the
+// false positives a bare substring match produced. Inference arms bash +
+// write_file + edit_file without the human asking, so a non-coding role
+// matching here is a real capability leak, not a cosmetic miss.
+func TestRoleLooksCoding_Precision(t *testing.T) {
+	coding := []string{
+		"Software Engineer",
+		"Fix bugs in our Go codebase",
+		"Backend developer",
+		"QA engineer who writes tests",
+		"Debug production incidents",
+		"Refactoring the payments module",
+		"Reviews pull requests for the platform team",
+		"Owns the integration test suite",
+		"DevOps on call",
+	}
+	for _, role := range coding {
+		if !roleLooksCoding(role) {
+			t.Errorf("roleLooksCoding(%q) = false, want true", role)
+		}
+	}
+
+	notCoding := []string{
+		"writes poetry about software testing",
+		"hiring manager",
+		"fixes the coffee machine and tests recipes",
+		"Handles marketing copy",
+		"Dress code compliance officer",
+		"Zip code data entry",
+		"Barcode inventory clerk",
+		"Manages the latest news digest",
+		"Runs contests and protests coverage",
+		"Prefix/suffix naming specialist",
+		"Fixture photographer",
+		"Greatest hits curator",
+		"Tests our product with real users (UX researcher)",
+		"Executive assistant",
+		"Financial analyst",
+	}
+	for _, role := range notCoding {
+		if roleLooksCoding(role) {
+			t.Errorf("roleLooksCoding(%q) = true, want false (would auto-grant bash/write_file)", role)
+		}
+	}
+}
+
+// TestCreateAgent_NilRegistryDegradesSafely covers the TUI / stripped-down
+// wiring where Deps.Registry is never set: inference is skipped entirely
+// and LocalTools stays nil, matching pre-inference behavior.
+func TestCreateAgent_NilRegistryDegradesSafely(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	deps := r.deps()
+	deps.Registry = nil
+	tool := &CreateAgentTool{Deps: deps}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Dex", "description": "Software Engineer",
+	})
+	if res.IsError {
+		t.Fatalf("hire should succeed: %s", res.Error)
+	}
+	if r.persisted[0].LocalTools != nil {
+		t.Fatalf("LocalTools = %v, want nil with no registry", r.persisted[0].LocalTools)
+	}
+	if strings.Contains(res.Output, "auto-granted") {
+		t.Errorf("ack should not claim auto-granted tools, got %q", res.Output)
+	}
 }

@@ -66,6 +66,15 @@ func (s *Server) RunSpaceThreadAgent(ctx context.Context, spaceID, parentID, age
 	// ephemeral orch session so leftover speech cannot land as a hallway root.
 	toolSID := s.spaceThreadToolSession(spaceID, strings.TrimSpace(parentID), ag.Name)
 	s.ensureDelegateSession(toolSID, spaceID)
+	// InjectSpaceContext (ws.go) trusts toolSID's *persisted* SpaceID over the
+	// spaceID we were actually called with — it re-derives company/roster from
+	// s.store.Load(toolSID).SpaceID(). spaceID here is ground truth: it comes
+	// from the parent message's own space (resolveSpaceThreadWakes → wakeSpaceThreadAgentHop
+	// → RunSpaceThreadAgent), so a drifted or reused session row (an agent like
+	// Winston who is seated in multiple companies makes stale reuse plausible)
+	// must never be allowed to hand a thread turn the wrong company's context.
+	// Force the row back in sync before InjectSpaceContext reads it.
+	s.ensureSpaceIDMatches(toolSID, spaceID)
 	ctx = agent.SetSessionID(ctx, toolSID)
 	ctx = agent.SetSpaceID(ctx, spaceID)
 	ctx = agent.SetParentMessageID(ctx, parentID)
@@ -73,6 +82,11 @@ func (s *Server) RunSpaceThreadAgent(ctx context.Context, spaceID, parentID, age
 	if toolSID != "" {
 		ctx = s.InjectSpaceContext(ctx, toolSID, ag)
 	}
+	// Belt-and-suspenders: whatever InjectSpaceContext derived internally, the
+	// owning space for this turn is never in question — restamp it so any tool
+	// reading agent.GetSpaceID(ctx) downstream cannot see a stale value even if
+	// ensureSpaceIDMatches raced a concurrent writer.
+	ctx = agent.SetSpaceID(ctx, spaceID)
 	sessionID := "space-thread-" + strings.TrimSpace(parentID) + "-" + ag.Name
 	var buf strings.Builder
 	var lastVisible string
@@ -122,6 +136,33 @@ func (s *Server) ensureDelegateSession(id, spaceID string) {
 	}
 	if _, err := session.LoadForDelegate(s.store, id, spaceID); err != nil {
 		slog.Warn("space thread: persist delegate session", "session_id", id, "err", err)
+	}
+}
+
+// ensureSpaceIDMatches forces session id's persisted SpaceID back in sync with
+// spaceID when it has drifted. session.LoadForDelegate only fills an *empty*
+// SpaceID — it deliberately never overwrites one that is already set, since a
+// delegate session legitimately keeps whatever space first bound it. That is
+// wrong for a thread-drawer tool session: spaceThreadToolSession reuses the
+// space's existing "hallway" session by id, and if that row's SpaceID ever
+// disagrees with the space this thread turn actually belongs to (stale data,
+// a migration, or reuse across an agent seated in multiple companies), the
+// downstream InjectSpaceContext(ctx, id, ag) call in ws.go would silently
+// hand the turn another company's roster/company name. The owning space
+// (spaceID, derived from the parent message) is always authoritative here.
+func (s *Server) ensureSpaceIDMatches(id, spaceID string) {
+	id = strings.TrimSpace(id)
+	spaceID = strings.TrimSpace(spaceID)
+	if s.store == nil || id == "" || spaceID == "" {
+		return
+	}
+	sess, err := s.store.Load(id)
+	if err != nil || sess == nil || sess.SpaceID() == spaceID {
+		return
+	}
+	sess.SetSpaceID(spaceID)
+	if err := s.store.SaveManifest(sess); err != nil {
+		slog.Warn("space thread: correct drifted session space id", "session_id", id, "space_id", spaceID, "err", err)
 	}
 }
 
@@ -310,12 +351,25 @@ func (s *Server) emitSpaceReplyMention(spaceID, parentID, preview string) {
 	})
 }
 
-// emitSpaceScoped broadcasts to sessions in the space AND globally with space_id
-// so a space-mode client hears it. Also SendRelay the same type + payload so a
-// remote puppet on the HuginnCloud satellite can render thinking pulse / live
-// replies. Cloud hub is a transparent pipe (unknown types ForwardToOwner).
-// Clients not viewing that space must ignore it.
+// emitSpaceScoped broadcasts to sessions in the space so a space-mode client
+// hears it. Also SendRelay the same type + payload so a remote puppet on the
+// HuginnCloud satellite can render thinking pulse / live replies. Cloud hub is
+// a transparent pipe (unknown types ForwardToOwner). Clients not viewing that
+// space must ignore it (they filter locally on payload space_id).
 // Nil hub / empty space_id / nil or disconnected satellite must not panic.
+//
+// BroadcastToSession(ref) already reaches every wildcard client (session_id
+// omitted — what every browser tab's single WS connection actually is; see
+// web/src/composables/useHuginnWS.ts) as well as any client scoped to that
+// exact session. Falling through to a second, unconditional BroadcastWS on
+// top of that double-delivers the same message to the same live connection —
+// harmless for one-shot events (an idempotent re-set of reply_count/typing
+// state) but fatal for a streaming token: every space_reply_token landed
+// twice on the wildcard client, rendering doubled words in the thread drawer
+// live stream ("WaitingWaiting for for the the..."). BroadcastWS is now only
+// the fallback for when no session exists yet to broadcast to (spaceStore
+// nil, a lookup error, or a space with no session rows at all) — the one case
+// BroadcastToSession(refs...) cannot reach a wildcard client on its own.
 func (s *Server) emitSpaceScoped(eventType, spaceID string, payload map[string]any) {
 	if strings.TrimSpace(spaceID) == "" {
 		return
@@ -330,14 +384,18 @@ func (s *Server) emitSpaceScoped(eventType, spaceID string, payload map[string]a
 	if s.onSpaceWS != nil {
 		s.onSpaceWS(msg)
 	}
+	delivered := false
 	if s.spaceStore != nil {
-		if refs, err := s.spaceStore.ListSessionsForSpace(spaceID); err == nil {
+		if refs, err := s.spaceStore.ListSessionsForSpace(spaceID); err == nil && len(refs) > 0 {
 			for _, r := range refs {
 				s.BroadcastToSession(r.ID, eventType, payload)
 			}
+			delivered = true
 		}
 	}
-	s.BroadcastWS(msg)
+	if !delivered {
+		s.BroadcastWS(msg)
+	}
 	// Same type string + payload as local WS. SpaceID is set on the envelope
 	// so a remote puppet can scope the event without parsing payload.
 	s.SendRelay(relay.Message{

@@ -131,5 +131,8 @@ func (s *Server) persistAgent(incoming agents.AgentDef, pathName string) (create
 			"action": action,
 		},
 	})
+	if existingAgent == nil {
+		s.logEntityAudit("agent_create", "hired agent "+incoming.Name, map[string]any{"agent": incoming.Name})
+	}
 	return existingAgent == nil, nil
 }

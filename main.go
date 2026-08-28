@@ -532,6 +532,10 @@ func main() {
 	// Resolve username up-front so vault names include the user segment
 	// (e.g. "huginn:agent:mj:steve" rather than "huginn:agent::steve").
 	tuiUsername := memory.ResolveUsername(cwd)
+	// One-time migration: rewrite any AgentDef.VaultName left over from the old
+	// hire-flow's "<slug-of-name>-huginn" auto-naming scheme to the canonical
+	// "huginn:agent:<user>:<name>" form, persisting the change to disk.
+	agentslib.MigrateLegacyVaultNamesDefault(agentsCfg, tuiUsername)
 	agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, models, tuiUsername)
 
 	// 7b-warn. Warn if any agent uses a literal API key instead of $ENV or keyring:
@@ -882,7 +886,18 @@ func main() {
 						cfg.Backend.APIKey = apiKey
 					}
 					backendMu.Unlock()
-					return cfg.Save()
+					// Read-modify-write against the CURRENT on-disk config, not
+					// this process's long-lived in-memory cfg snapshot: cfg.Save()
+					// here would write cfg's stale copy of every other field
+					// (tools_enabled, web_ui.port, ...) over whatever the config
+					// API has saved since this process started, reverting it.
+					return config.UpdateDefault(func(disk *config.Config) {
+						disk.Backend.Provider = provider
+						disk.Backend.Endpoint = endpoint
+						if apiKey != "" {
+							disk.Backend.APIKey = apiKey
+						}
+					})
 				},
 				PullModel: func(name string) error {
 					baseURL := cfg.OllamaBaseURL
@@ -2788,6 +2803,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// during web chat. Agents are loaded fresh; failure is non-fatal.
 	if agentsCfg, agentsErr := agentslib.LoadAgents(); agentsErr == nil && agentsCfg != nil && len(agentsCfg.Agents) > 0 {
 		srvUsername := memory.ResolveUsername("")
+		// One-time canonical vault-name migration (<slug>-huginn ->
+		// huginn:agent:<user>:<name>) must run on the serve path too — the
+		// daemon is the long-lived process; TUI-only migration would leave
+		// serve-created hires unmigrated until someone opens the TUI.
+		agentslib.MigrateLegacyVaultNamesDefault(agentsCfg, srvUsername)
 		agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, models, srvUsername)
 		logger.Info("startServer: wiring agents", "count", len(agentsCfg.Agents), "names", agentReg.Names())
 		orch.SetAgentRegistry(agentReg)
@@ -2832,7 +2852,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
 		// create_agent is grant-gated (named local_tools only). Do not tag
 		// builtin — God Mode ["*"] must not receive it.
-		toolReg.Register(srv.NewCreateAgentTool())
+		createAgentTool := srv.NewCreateAgentTool()
+		createAgentTool.Deps.Registry = toolReg
+		toolReg.Register(createAgentTool)
 		// Honor AllowedTools/DisallowedTools config filters (parity with TUI mode).
 		if len(cfg.AllowedTools) > 0 {
 			toolReg.SetAllowed(cfg.AllowedTools)
@@ -3607,7 +3629,18 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 						cfg.Backend.APIKey = apiKey
 					}
 					backendMu.Unlock()
-					return cfg.Save()
+					// Read-modify-write against the CURRENT on-disk config, not
+					// this process's long-lived in-memory cfg snapshot: cfg.Save()
+					// here would write cfg's stale copy of every other field
+					// (tools_enabled, web_ui.port, ...) over whatever the config
+					// API has saved since this process started, reverting it.
+					return config.UpdateDefault(func(disk *config.Config) {
+						disk.Backend.Provider = provider
+						disk.Backend.Endpoint = endpoint
+						if apiKey != "" {
+							disk.Backend.APIKey = apiKey
+						}
+					})
 				},
 				PullModel: func(name string) error {
 					baseURL := cfg.OllamaBaseURL
