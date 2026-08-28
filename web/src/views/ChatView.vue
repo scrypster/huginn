@@ -2624,7 +2624,7 @@ function handleThreadFollowUp(_threadId: string, draft?: string) {
 }
 
 
-function approvePermission(scope: 'once' | 'always_agent' | 'deny') {
+function approvePermission(scope: 'once' | 'always_agent' | 'always_agent_all' | 'deny') {
   const ws = wsRef.value
   if (!ws || !pendingPermission.value) return
   const id = (pendingPermission.value.payload as Record<string, string>)?.id
