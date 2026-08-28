@@ -451,10 +451,11 @@ describe('ChatView', () => {
     })
     await nextTick()
 
-    // The activeToolCalls are rendered in the template as an in-flight running chip.
-    // The chip shows "N tool calls · running" (not the tool name) — verify running state.
+    // The activeToolCalls are rendered in the template as a live tool ticker:
+    // an in-flight (spinner) entry naming this call, e.g. "⟳ ls".
     const html = wrapper.html()
-    expect(html).toContain('running')
+    expect(html).toContain('tool-ticker-active-entry')
+    expect(html).toContain('ls')
   })
 
   it('WS done handler: sets streaming to false', async () => {
@@ -2541,6 +2542,78 @@ describe('ChatView — space mode', () => {
     expect(userMsgs).toHaveLength(1)
     expect(userMsgs[0].content).toBe('My first question')
     expect(userMsgs[0].session_id).toBe(NEW_SESSION_ID)
+  })
+
+  it('space mode: live tool ticker shows a spinner per in-flight tool call, a check once it completes, and collapses when none remain', async () => {
+    const SESSION_ID = 'space-ticker-sess'
+    const st = seedSpace(SPACE_ID, SESSION_ID)
+    // A live streaming bubble (stream- prefix marks it in-flight, per
+    // useMessageEnrichment). wireSpaceTimelineWS itself is mocked in this
+    // file (see useSpaceTimeline.test.ts for its real WS-wiring coverage);
+    // this test seeds its effects directly to exercise ChatView's ticker.
+    st.messages.push({
+      id: 'stream-ticker-1',
+      session_id: SESSION_ID,
+      role: 'assistant',
+      content: 'working on it',
+      seq: -1,
+      ts: new Date().toISOString(),
+    })
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    // Two tool calls start — the ticker shows a spinner entry for each.
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-1', tool: 'read_file', args: { file_path: 'a/b/mathutil.go' } },
+    })
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-2', tool: 'bash', args: { command: 'go test ./...' } },
+    })
+    await nextTick()
+
+    let html = wrapper.html()
+    expect(html).toContain('data-testid="tool-ticker"')
+    expect((html.match(/tool-ticker-active-entry/g) ?? []).length).toBe(2)
+    expect(html).toContain('read mathutil.go')
+    expect(html).toContain('go test ./...')
+    expect(html).not.toContain('tool-ticker-done-entry')
+
+    // tc-1 finishes — its ticker entry flips from spinner to check while
+    // tc-2 is still running.
+    mockWs.simulateMessage({
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-1', tool: 'read_file', args: { file_path: 'a/b/mathutil.go' }, result: 'ok' },
+    })
+    const msg = st.messages.find((m: any) => m.id === 'stream-ticker-1') as any
+    msg.toolCalls = [{ id: 'tc-1', name: 'read_file', args: { file_path: 'a/b/mathutil.go' }, result: 'ok', done: true }]
+    await nextTick()
+
+    html = wrapper.html()
+    expect(html).toContain('tool-ticker-done-entry')
+    expect((html.match(/tool-ticker-active-entry/g) ?? []).length).toBe(1)
+    expect(html).toContain('go test ./...')
+
+    // tc-2 finishes too — no tool call is in flight any more, so the ticker
+    // collapses into the existing "N tool calls · done" chip (no duplicate
+    // surfaces: the live ticker and the collapsed chip never show together).
+    mockWs.simulateMessage({
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-2', tool: 'bash', args: { command: 'go test ./...' }, result: 'PASS' },
+    })
+    msg.toolCalls.push({ id: 'tc-2', name: 'bash', args: { command: 'go test ./...' }, result: 'PASS', done: true })
+    await nextTick()
+
+    html = wrapper.html()
+    expect(html).not.toContain('data-testid="tool-ticker"')
+    expect(html).toContain('2 tool call')
   })
 
   it('existing session: reuses activeSessionId without calling api.sessions.create', async () => {

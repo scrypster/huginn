@@ -1149,3 +1149,86 @@ func TestSplitSentences_DottedIdentifiersStayIntact(t *testing.T) {
 		t.Errorf("run-on sentence not split: %#v", got)
 	}
 }
+
+// TestSplitSentences_QualifiedIdentifiersStayIntact locks down the mask/
+// unmask fix: a server-side qualified identifier ("strings.Contains",
+// "os.Exit") must not be mistaken for a punct+Uppercase sentence boundary,
+// while a genuine run-on missing its space ("Done.Next step") still splits.
+func TestSplitSentences_QualifiedIdentifiersStayIntact(t *testing.T) {
+	if got := splitSentences("Use strings.Contains here. It works."); len(got) != 2 ||
+		got[0] != "Use strings.Contains here." || got[1] != "It works." {
+		t.Errorf("qualified identifier split: %#v", got)
+	}
+	if got := splitSentences("Call os.Exit to stop. Then it's done."); len(got) != 2 ||
+		got[0] != "Call os.Exit to stop." || got[1] != "Then it's done." {
+		t.Errorf("qualified identifier split (os.Exit): %#v", got)
+	}
+	// Run-on sentence with no space still splits even after the mask pass.
+	if got := splitSentences("Done.Next step is testing."); len(got) != 2 || got[0] != "Done." || got[1] != "Next step is testing." {
+		t.Errorf("run-on sentence not split after mask/unmask: %#v", got)
+	}
+}
+
+// TestSplitSentences_RunOnWithLowercaseTailStillSplits is the regression
+// guard for the qualified-identifier mask. The mask originally matched any
+// `\b[a-z]\w*\.[A-Z]\w*`, which swallowed the overwhelmingly common run-on
+// shape — a sentence ending in a lowercase word glued to the next sentence's
+// capitalized first word ("...is done.Next step..."). That silently undid the
+// punct+Uppercase split this package relies on to strip glue and narration
+// sentence by sentence; only run-ons whose preceding word happened to be
+// capitalized ("Done.Next") still split. The mask is now prefix-gated.
+func TestSplitSentences_RunOnWithLowercaseTailStillSplits(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"The build is done.Next step is testing.", []string{"The build is done.", "Next step is testing."}},
+		{"I ran the tests.Everything passed.", []string{"I ran the tests.", "Everything passed."}},
+		{"Wait for it.Then I'll check.", []string{"Wait for it.", "Then I'll check."}},
+		{"Done.Next step is testing.", []string{"Done.", "Next step is testing."}},
+	}
+	for _, c := range cases {
+		got := splitSentences(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("splitSentences(%q) = %#v, want %#v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("splitSentences(%q) = %#v, want %#v", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestSplitSentences_QualifiedIdentifierEdgeCases covers the pathological
+// inputs the mask has to survive: an identifier at the very end of a
+// sentence, several in one sentence, a multi-segment identifier
+// ("strings.Builder.WriteString" — a partial mask used to leave the trailing
+// ".WriteString" free to split), and a literal placeholder-shaped token in
+// the input, which must not be overwritten by the restore pass.
+func TestSplitSentences_QualifiedIdentifierEdgeCases(t *testing.T) {
+	if got := splitSentences("Use strings.Contains."); len(got) != 1 || got[0] != "Use strings.Contains." {
+		t.Errorf("identifier at sentence end: %#v", got)
+	}
+	if got := splitSentences("Both os.Exit and strings.Contains are fine. Done."); len(got) != 2 ||
+		got[0] != "Both os.Exit and strings.Contains are fine." || got[1] != "Done." {
+		t.Errorf("two identifiers in one sentence: %#v", got)
+	}
+	if got := splitSentences("Call strings.Builder.WriteString now. Ok."); len(got) != 2 ||
+		got[0] != "Call strings.Builder.WriteString now." || got[1] != "Ok." {
+		t.Errorf("multi-segment identifier: %#v", got)
+	}
+	// A literal NUL-delimited placeholder in the input must not be clobbered
+	// by the restore pass (the NULs are dropped, the digits survive).
+	if got := splitSentences("literal \x000\x00 marker and strings.Contains."); len(got) != 1 ||
+		got[0] != "literal 0 marker and strings.Contains." {
+		t.Errorf("placeholder collision: %#v", got)
+	}
+	// An unknown prefix is not masked: it keeps the pre-existing split
+	// behavior rather than silently suppressing a possible run-on.
+	if got := splitSentences("See widgetlib.Thing here."); len(got) != 2 {
+		t.Errorf("unknown prefix should keep prior split behavior: %#v", got)
+	}
+}
