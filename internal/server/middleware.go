@@ -151,6 +151,19 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the ResponseWriter this recorder wraps so that
+// http.ResponseController can reach the underlying connection.
+//
+// This is load-bearing, not cosmetic. handleClaudeApprove blocks for up to
+// approvalDeadline (285s) while a human decides, which is far longer than
+// http.Server.WriteTimeout, so it must push its own write deadline out with
+// http.NewResponseController. The controller walks Unwrap() chains; without
+// this method it stops here, SetWriteDeadline returns http.ErrNotSupported,
+// and a decision made after WriteTimeout is written to a connection the
+// server has already closed — the human sees "approved" and the tool is
+// denied. Any future ResponseWriter wrapper on a route must do the same.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // Flush implements http.Flusher so SSE / streaming handlers work correctly
 // through the logging middleware.
 func (r *statusRecorder) Flush() {

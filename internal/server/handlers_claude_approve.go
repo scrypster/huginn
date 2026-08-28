@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/claudecode/approvals"
@@ -26,6 +27,18 @@ import (
 // Consequence worth knowing: the agent's session semaphore is held for the
 // whole wait. One agent can be frozen for five minutes; others are unaffected.
 func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
+	// The server's global WriteTimeout (server.go) is far shorter than
+	// approvalDeadline, and Go sets that deadline before the handler runs and
+	// never resets it. Without extending it here, a decision made after the
+	// global timeout is written to a dead connection: the human sees "approved",
+	// the hook sees a transport error and denies, and nothing records that the
+	// two disagreed. Extend it for this request only.
+	if err := http.NewResponseController(w).SetWriteDeadline(
+		time.Now().Add(approvalDeadline + 15*time.Second)); err != nil {
+		slog.Error("claudecode: cannot extend the approval write deadline; "+
+			"a late approval will not reach the hook", "err", err)
+	}
+
 	// This route is intentionally unauthenticated (see its registration in
 	// server.go) because the hook client never sends a token. That safety
 	// margin must not depend on web_ui.bind staying 127.0.0.1 — that's a
