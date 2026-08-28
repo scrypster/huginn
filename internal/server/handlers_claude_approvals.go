@@ -72,8 +72,14 @@ func (s *Server) handleDecideClaudeApproval(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Capture the request before delivering: Deliver removes the entry, and
-	// AllowTool needs the agent and tool names to promote.
+	// Capture the agent and tool from the pending entry before delivering,
+	// because Deliver removes it and AllowTool needs both names to promote.
+	//
+	// This takes the store lock twice, and the gap is tolerated deliberately:
+	// if the entry expires in between, Deliver returns false, we 404 below, and
+	// the captured names are discarded before the promotion branch. The map is
+	// the single source of truth for both calls, so there is no interleaving
+	// where List sees an entry that Deliver then wrongly promotes.
 	var agentName, toolName string
 	for _, v := range s.approvals.List() {
 		if v.ID == req.ID {

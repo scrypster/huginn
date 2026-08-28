@@ -148,3 +148,53 @@ func TestPromoteClaudeToolIsIdempotent(t *testing.T) {
 		t.Fatalf("saver called %d times for an already-allowed tool, want 0", calls)
 	}
 }
+
+func TestDecideAllowToolPromotesTheRightAgentAndTool(t *testing.T) {
+	s := &Server{approvals: approvals.New(2 * time.Second)}
+	defer s.approvals.Close()
+
+	var savedAgent, savedTool string
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "other", ClaudeAllowedTools: []string{"Read"}},
+			{Name: "codey", ClaudeAllowedTools: []string{"Read"}},
+		}}, nil
+	}
+	s.agentSaver = func(cfg *agents.AgentsConfig) error {
+		for _, a := range cfg.Agents {
+			if len(a.ClaudeAllowedTools) == 2 {
+				savedAgent = a.Name
+				savedTool = a.ClaudeAllowedTools[1]
+			}
+		}
+		return nil
+	}
+
+	p, err := s.approvals.Register(approvals.Request{
+		AgentName: "codey", ToolName: "Bash", Summary: "ls",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan approvals.Decision, 1)
+	go func() { got <- s.approvals.Wait(context.Background(), p) }()
+
+	rr := httptest.NewRecorder()
+	s.handleDecideClaudeApproval(rr, httptest.NewRequest("POST", "/api/v1/claude/approve/decide",
+		strings.NewReader(`{"id":"`+p.ID+`","decision":"allow_tool"}`)))
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if d := <-got; d != approvals.AllowTool {
+		t.Fatalf("waiter got %v, want AllowTool", d)
+	}
+	// The agent and tool must come from the PENDING ENTRY, not from a default
+	// or an empty string. An implementation that promoted nothing, or promoted
+	// the first agent in the config, fails here.
+	if savedAgent != "codey" {
+		t.Fatalf("promoted agent = %q, want codey", savedAgent)
+	}
+	if savedTool != "Bash" {
+		t.Fatalf("promoted tool = %q, want Bash", savedTool)
+	}
+}
