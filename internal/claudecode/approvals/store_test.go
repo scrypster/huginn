@@ -154,3 +154,94 @@ func TestIDsAreUnique(t *testing.T) {
 		seen[p.ID] = true
 	}
 }
+
+// TestListCanRememberFalseWhenTruncated is the guard against prefix matching
+// re-entering through the back door.
+//
+// The hook clips a Bash command at maxCommandBytes. Everything past the clip
+// is unconstrained, so remembering a truncated command would authorise every
+// later command that merely SHARES ITS FIRST 4 KiB — exactly the prefix match
+// this package forbids, and with no card, no broadcast and no human.
+func TestListCanRememberFalseWhenTruncated(t *testing.T) {
+	s := New(time.Minute)
+	defer s.Close()
+	r := req()
+	r.SummaryTruncated = true
+	if _, err := s.Register(r); err != nil {
+		t.Fatal(err)
+	}
+	if s.List()[0].CanRemember {
+		t.Fatal("CanRemember = true for a TRUNCATED command; the bytes past the clip are " +
+			"unconstrained, so remembering it is prefix matching")
+	}
+}
+
+// TestListCanRememberFalseWhenSummaryEmpty covers the other half: the hook
+// returns an empty summary whenever tool_input has no usable `command` (a
+// non-string, a missing key, an unparseable input). Remembering "" would
+// auto-allow EVERY future Bash call whose input failed to parse.
+func TestListCanRememberFalseWhenSummaryEmpty(t *testing.T) {
+	s := New(time.Minute)
+	defer s.Close()
+	for _, summary := range []string{"", "   ", "\n\t"} {
+		r := req()
+		r.Summary = summary
+		p, err := s.Register(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got bool
+		for _, v := range s.List() {
+			if v.ID == p.ID {
+				got = v.CanRemember
+			}
+		}
+		if got {
+			t.Fatalf("CanRemember = true for summary %q; an empty command must never be "+
+				"rememberable or every unparseable Bash input auto-allows", summary)
+		}
+	}
+}
+
+// TestRememberRefusesEmptyCommand pins the guard inside the store itself. The
+// rule must not depend on the caller — or on the hook — being honest.
+func TestRememberRefusesEmptyCommand(t *testing.T) {
+	s := New(time.Minute)
+	defer s.Close()
+	for _, cmd := range []string{"", "   ", "\r\n"} {
+		s.Remember("codey", "Bash", cmd)
+		if s.Remembered("codey", "Bash", cmd) {
+			t.Fatalf("Remember(%q) stored an empty command; every Bash call with an "+
+				"unparseable tool_input would then auto-allow", cmd)
+		}
+		// The trimmed-equal spelling matters too: memKey trims trailing
+		// whitespace, so a stored "  " would also match a later "".
+		if s.Remembered("codey", "Bash", "") {
+			t.Fatalf("Remember(%q) made the empty command remembered", cmd)
+		}
+	}
+}
+
+// TestRememberableRejectsTruncatedAndEmpty pins the shared predicate directly,
+// so the rule cannot drift between List() and the server handler.
+func TestRememberableRejectsTruncatedAndEmpty(t *testing.T) {
+	ok := Request{ToolName: "Bash", Summary: "go test ./..."}
+	if !ok.Rememberable() {
+		t.Fatal("a complete, non-empty Bash command must be rememberable")
+	}
+	truncated := ok
+	truncated.SummaryTruncated = true
+	if truncated.Rememberable() {
+		t.Fatal("a truncated command must never be rememberable")
+	}
+	empty := ok
+	empty.Summary = "  \n"
+	if empty.Rememberable() {
+		t.Fatal("a whitespace-only command must never be rememberable")
+	}
+	write := ok
+	write.ToolName = "Write"
+	if write.Rememberable() {
+		t.Fatal("only Bash carries exact-command memory")
+	}
+}

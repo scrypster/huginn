@@ -54,21 +54,30 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// tool_input is deliberately absent. The hook no longer sends it and this
-	// struct no longer names it: it was decoded and discarded here, while the
-	// route's withMaxBody(1 MiB) cap turned a large Write/Edit/Bash payload
-	// into a decode failure and therefore a DENY — a permission decision that
-	// depended on payload size. Unknown fields are ignored by encoding/json,
-	// so an older hook binary still sending it decodes fine (it just has to
-	// fit the cap). If richer policy ever needs the input, forward a bounded
-	// excerpt and raise the cap deliberately.
+	// The raw tool_input is deliberately NOT a field here. The hook derives
+	// Summary and Excerpt from it and truncates them at the source
+	// (summarizeToolInput in cmd_claude_approve.go), and this handler takes
+	// them as given. Truncating in the hook is what keeps a big Write/Edit/Bash
+	// payload from overflowing the route's withMaxBody(64 KiB) cap, failing to
+	// decode, and DENYING — a permission decision that depended on payload
+	// size. Unknown fields are ignored by encoding/json, so an older hook
+	// binary still sending tool_input decodes fine (it just has to fit the
+	// cap). If richer policy ever needs the raw input, forward another bounded
+	// field and raise the cap deliberately — never accept it unbounded.
+	//
+	// SummaryTruncated is a SECURITY input, not a display hint: a clipped
+	// command must never enter command memory, because the bytes past the clip
+	// are unconstrained (see approvals.Request.Rememberable). A hook that lies
+	// about it can only widen ITS OWN memory, and the store independently
+	// refuses an empty command.
 	var req struct {
-		ToolName  string `json:"tool_name"`
-		ToolUseID string `json:"tool_use_id"`
-		SessionID string `json:"session_id"`
-		CWD       string `json:"cwd"`
-		Summary   string `json:"summary"`
-		Excerpt   string `json:"excerpt"`
+		ToolName         string `json:"tool_name"`
+		ToolUseID        string `json:"tool_use_id"`
+		SessionID        string `json:"session_id"`
+		CWD              string `json:"cwd"`
+		Summary          string `json:"summary"`
+		Excerpt          string `json:"excerpt"`
+		SummaryTruncated bool   `json:"summary_truncated"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondApprove(w, "deny", "Huginn could not parse the approval request")
@@ -106,14 +115,16 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pending, err := s.approvals.Register(approvals.Request{
-		AgentName: agent.Name,
-		ToolName:  req.ToolName,
-		Summary:   req.Summary,
-		Excerpt:   req.Excerpt,
-		CWD:       req.CWD,
-		ToolUseID: req.ToolUseID,
-	})
+	pendingReq := approvals.Request{
+		AgentName:        agent.Name,
+		ToolName:         req.ToolName,
+		Summary:          req.Summary,
+		Excerpt:          req.Excerpt,
+		CWD:              req.CWD,
+		ToolUseID:        req.ToolUseID,
+		SummaryTruncated: req.SummaryTruncated,
+	}
+	pending, err := s.approvals.Register(pendingReq)
 	if err != nil {
 		slog.Warn("claudecode: cannot register approval; denying",
 			"agent", agent.Name, "tool", req.ToolName, "err", err)
@@ -129,7 +140,20 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 	s.broadcastApprovalChange()
 
 	if decision == approvals.AllowCommand {
-		s.approvals.Remember(agent.Name, req.ToolName, req.Summary)
+		// Allowing this one call is the human's to give. Remembering it is not
+		// automatic: a truncated or empty command must never become a standing
+		// rule, or a later command that merely shares the visible prefix — or
+		// any call whose tool_input failed to parse — would auto-allow with no
+		// card, no broadcast and no human. Rememberable() is the single place
+		// that rule lives; List()'s CanRemember uses the same predicate, so the
+		// browser never offered the button in the first place.
+		if pendingReq.Rememberable() {
+			s.approvals.Remember(agent.Name, req.ToolName, req.Summary)
+		} else {
+			slog.Warn("claudecode: allowing this call but refusing to remember the command",
+				"agent", agent.Name, "tool", req.ToolName, "id", pending.ID,
+				"summary_truncated", req.SummaryTruncated, "summary_empty", req.Summary == "")
+		}
 	}
 
 	if !decision.Allowed() {

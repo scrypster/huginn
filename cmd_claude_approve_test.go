@@ -168,7 +168,7 @@ func TestClaudeApproveDeniesOnMalformedOrUnexpectedResponses(t *testing.T) {
 }
 
 func TestSummarizeBashSendsCommandVerbatim(t *testing.T) {
-	sum, exc := summarizeToolInput("Bash", map[string]any{
+	sum, exc, _ := summarizeToolInput("Bash", map[string]any{
 		"command":     "go test ./...",
 		"description": "run tests",
 	})
@@ -182,14 +182,14 @@ func TestSummarizeBashSendsCommandVerbatim(t *testing.T) {
 
 func TestSummarizeBashTruncatesLongCommand(t *testing.T) {
 	long := strings.Repeat("x", maxCommandBytes+500)
-	sum, _ := summarizeToolInput("Bash", map[string]any{"command": long})
+	sum, _, _ := summarizeToolInput("Bash", map[string]any{"command": long})
 	if len(sum) > maxCommandBytes {
 		t.Fatalf("summary len = %d, want <= %d", len(sum), maxCommandBytes)
 	}
 }
 
 func TestSummarizeWriteSendsPathAndBoundedContent(t *testing.T) {
-	sum, exc := summarizeToolInput("Write", map[string]any{
+	sum, exc, _ := summarizeToolInput("Write", map[string]any{
 		"file_path": "/tmp/a.ts",
 		"content":   strings.Repeat("y", maxExcerptBytes+500),
 	})
@@ -202,7 +202,7 @@ func TestSummarizeWriteSendsPathAndBoundedContent(t *testing.T) {
 }
 
 func TestSummarizeEditUsesNewString(t *testing.T) {
-	sum, exc := summarizeToolInput("Edit", map[string]any{
+	sum, exc, _ := summarizeToolInput("Edit", map[string]any{
 		"file_path":  "/tmp/b.go",
 		"new_string": "package main",
 	})
@@ -215,7 +215,7 @@ func TestSummarizeEditUsesNewString(t *testing.T) {
 }
 
 func TestSummarizeUnknownToolFallsBackToBoundedJSON(t *testing.T) {
-	sum, exc := summarizeToolInput("Task", map[string]any{
+	sum, exc, _ := summarizeToolInput("Task", map[string]any{
 		"file_path": "/tmp/t.md",
 		"prompt":    strings.Repeat("z", maxExcerptBytes+500),
 	})
@@ -231,7 +231,7 @@ func TestSummarizeUnknownToolFallsBackToBoundedJSON(t *testing.T) {
 }
 
 func TestSummarizeNilInputIsSafe(t *testing.T) {
-	sum, exc := summarizeToolInput("Bash", nil)
+	sum, exc, _ := summarizeToolInput("Bash", nil)
 	if sum != "" || exc != "" {
 		t.Fatalf("got (%q,%q), want empty strings for nil input", sum, exc)
 	}
@@ -260,20 +260,20 @@ func TestRunClaudeApproveForwardsSummary(t *testing.T) {
 }
 
 func TestSummarizeNonStringValuesDoNotPanic(t *testing.T) {
-	sum, exc := summarizeToolInput("Bash", map[string]any{"command": 42})
+	sum, exc, _ := summarizeToolInput("Bash", map[string]any{"command": 42})
 	if sum != "" {
 		t.Fatalf("summary = %q, want empty when command is not a string", sum)
 	}
 	_ = exc
 	// Write with a non-string file_path must also survive.
-	if _, _ = summarizeToolInput("Write", map[string]any{"file_path": []any{1, 2}, "content": "x"}); false {
+	if _, _, _ = summarizeToolInput("Write", map[string]any{"file_path": []any{1, 2}, "content": "x"}); false {
 		t.Fatal("unreachable")
 	}
 }
 
 func TestSummarizeClipsLongFilePath(t *testing.T) {
 	long := strings.Repeat("p", maxCommandBytes+500)
-	sum, _ := summarizeToolInput("Write", map[string]any{"file_path": long, "content": "x"})
+	sum, _, _ := summarizeToolInput("Write", map[string]any{"file_path": long, "content": "x"})
 	if len(sum) > maxCommandBytes {
 		t.Fatalf("summary len = %d, want <= %d", len(sum), maxCommandBytes)
 	}
@@ -298,5 +298,83 @@ func TestRunClaudeApproveToleratesNonObjectToolInput(t *testing.T) {
 	}
 	if sent["tool_name"] != "Bash" {
 		t.Fatalf("tool_name = %v, want Bash — the request must still be forwarded", sent["tool_name"])
+	}
+}
+
+// TestSummarizeReportsBashTruncation is the hook half of the command-memory
+// invariant. The server refuses to remember a clipped command — but it can
+// only do that if the hook TELLS it the command was clipped.
+func TestSummarizeReportsBashTruncation(t *testing.T) {
+	long := strings.Repeat("x", maxCommandBytes+500)
+	sum, _, truncated := summarizeToolInput("Bash", map[string]any{"command": long})
+	if len(sum) != maxCommandBytes {
+		t.Fatalf("summary len = %d, want the clip at %d", len(sum), maxCommandBytes)
+	}
+	if !truncated {
+		t.Fatal("summaryTruncated = false for a clipped command; the server would then " +
+			"remember a PREFIX, auto-allowing every later command that shares it")
+	}
+
+	sum, _, truncated = summarizeToolInput("Bash", map[string]any{"command": "go test ./..."})
+	if sum != "go test ./..." || truncated {
+		t.Fatalf("got (%q, %v), want the command verbatim and truncated=false", sum, truncated)
+	}
+
+	// Exactly at the cap is NOT truncated: clip returns it whole.
+	exact := strings.Repeat("y", maxCommandBytes)
+	if _, _, truncated = summarizeToolInput("Bash", map[string]any{"command": exact}); truncated {
+		t.Fatal("summaryTruncated = true for a command exactly at the cap, which was not clipped")
+	}
+}
+
+// TestSummarizeReportsFilePathTruncation covers the non-Bash summaries too.
+// They are not rememberable today, but the flag must describe the summary it
+// ships with rather than quietly claiming "complete".
+func TestSummarizeReportsFilePathTruncation(t *testing.T) {
+	long := strings.Repeat("p", maxCommandBytes+500)
+	if _, _, truncated := summarizeToolInput("Write", map[string]any{"file_path": long, "content": "x"}); !truncated {
+		t.Fatal("summaryTruncated = false for a clipped Write file_path")
+	}
+	if _, _, truncated := summarizeToolInput("Task", map[string]any{"file_path": long}); !truncated {
+		t.Fatal("summaryTruncated = false for a clipped fallback summary")
+	}
+}
+
+// TestRunClaudeApproveForwardsTruncationFlag proves the flag actually reaches
+// the server on the wire — the server cannot infer clipping on its own.
+func TestRunClaudeApproveForwardsTruncationFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"short command", "ls -la", false},
+		{"clipped command", strings.Repeat("x", maxCommandBytes+10), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				_ = json.NewEncoder(w).Encode(map[string]string{"decision": "allow", "reason": "ok"})
+			}))
+			defer srv.Close()
+
+			payload, _ := json.Marshal(map[string]any{
+				"tool_name":  "Bash",
+				"session_id": "s",
+				"tool_input": map[string]any{"command": tc.command},
+			})
+			var out bytes.Buffer
+			if code := runClaudeApprove(bytes.NewReader(payload), &out, srv.URL, 5*time.Second); code != 0 {
+				t.Fatalf("exit = %d, want 0", code)
+			}
+			var sent map[string]any
+			if err := json.Unmarshal(gotBody, &sent); err != nil {
+				t.Fatalf("server got unparseable body: %v", err)
+			}
+			if got, _ := sent["summary_truncated"].(bool); got != tc.want {
+				t.Fatalf("summary_truncated = %v, want %v", sent["summary_truncated"], tc.want)
+			}
+		})
 	}
 }

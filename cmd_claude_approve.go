@@ -146,10 +146,19 @@ const (
 )
 
 func clip(s string, max int) string {
+	v, _ := clipped(s, max)
+	return v
+}
+
+// clipped is clip plus the fact of clipping. The server refuses to remember a
+// clipped Bash command — the bytes past the cut are unconstrained, so a
+// remembered prefix would auto-allow every later command that shares it — and
+// only this side of the wire can tell whether the cut happened.
+func clipped(s string, max int) (string, bool) {
 	if len(s) <= max {
-		return s
+		return s, false
 	}
-	return s[:max]
+	return s[:max], true
 }
 
 func inputString(in map[string]any, key string) string {
@@ -159,36 +168,45 @@ func inputString(in map[string]any, key string) string {
 
 // summarizeToolInput reduces a tool_input to a bounded, human-readable pair.
 //
+// It also reports whether the SUMMARY was clipped. That fact is a security
+// input, not a cosmetic one: the server refuses to remember a clipped Bash
+// command, because the bytes past the cut are unconstrained and a remembered
+// prefix would auto-allow every later command that shares it.
+//
 // TRUNCATION HAPPENS HERE, IN THE HOOK, ON PURPOSE. An earlier version
 // forwarded the whole tool_input, and a large Write blew the route's body cap,
 // failed to decode, and DENIED an explicitly allowlisted tool — a permission
 // decision that depended on payload size. Bounding it at the source is what
 // makes that impossible. Never forward the raw input, and never let the server
 // reject on size.
-func summarizeToolInput(toolName string, in map[string]any) (summary, excerpt string) {
+func summarizeToolInput(toolName string, in map[string]any) (summary, excerpt string, summaryTruncated bool) {
 	if in == nil {
-		return "", ""
+		return "", "", false
 	}
 	switch toolName {
 	case "Bash":
-		return clip(inputString(in, "command"), maxCommandBytes), ""
+		summary, summaryTruncated = clipped(inputString(in, "command"), maxCommandBytes)
+		return summary, "", summaryTruncated
 	case "Write":
-		return clip(inputString(in, "file_path"), maxCommandBytes), clip(inputString(in, "content"), maxExcerptBytes)
+		summary, summaryTruncated = clipped(inputString(in, "file_path"), maxCommandBytes)
+		return summary, clip(inputString(in, "content"), maxExcerptBytes), summaryTruncated
 	case "Edit", "NotebookEdit":
-		return clip(inputString(in, "file_path"), maxCommandBytes), clip(inputString(in, "new_string"), maxExcerptBytes)
+		summary, summaryTruncated = clipped(inputString(in, "file_path"), maxCommandBytes)
+		return summary, clip(inputString(in, "new_string"), maxExcerptBytes), summaryTruncated
 	case "WebFetch":
-		return clip(inputString(in, "url"), maxCommandBytes), ""
+		summary, summaryTruncated = clipped(inputString(in, "url"), maxCommandBytes)
+		return summary, "", summaryTruncated
 	}
 	summary = inputString(in, "file_path")
 	if summary == "" {
 		summary = inputString(in, "url")
 	}
-	summary = clip(summary, maxCommandBytes)
+	summary, summaryTruncated = clipped(summary, maxCommandBytes)
 	b, err := json.Marshal(in)
 	if err != nil {
-		return summary, ""
+		return summary, "", summaryTruncated
 	}
-	return summary, clip(string(b), maxExcerptBytes)
+	return summary, clip(string(b), maxExcerptBytes), summaryTruncated
 }
 
 // runClaudeApprove is the PreToolUse hook body. Claude Code writes the tool
@@ -237,7 +255,7 @@ func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time
 	if len(hook.ToolInput) > 0 {
 		_ = json.Unmarshal(hook.ToolInput, &toolInput)
 	}
-	summary, excerpt := summarizeToolInput(hook.ToolName, toolInput)
+	summary, excerpt, summaryTruncated := summarizeToolInput(hook.ToolName, toolInput)
 	body, err := json.Marshal(map[string]any{
 		"tool_name":   hook.ToolName,
 		"tool_use_id": hook.ToolUseID,
@@ -245,6 +263,10 @@ func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time
 		"cwd":         hook.CWD,
 		"summary":     summary,
 		"excerpt":     excerpt,
+		// The server refuses to remember a clipped command: everything past
+		// the clip is unconstrained, so remembering it would authorise any
+		// later command sharing only the visible prefix.
+		"summary_truncated": summaryTruncated,
 	})
 	if err != nil {
 		return emitDecision(out, "deny", fmt.Sprintf("Huginn could not encode the request; %s denied", tool))

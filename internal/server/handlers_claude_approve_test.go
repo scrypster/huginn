@@ -443,3 +443,123 @@ func TestApproveNilStoreDenies(t *testing.T) {
 		t.Fatalf("decision = %q, want deny", got["decision"])
 	}
 }
+
+// decideApproveInFlight runs handleClaudeApprove in the background, waits for
+// the card to appear, delivers d, and returns the decision the hook received.
+func decideApproveInFlight(t *testing.T, s *Server, body string, d approvals.Decision) string {
+	t.Helper()
+	done := make(chan string, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/v1/claude/approve", strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		s.handleClaudeApprove(rr, req)
+		var got map[string]string
+		_ = json.Unmarshal(rr.Body.Bytes(), &got)
+		done <- got["decision"]
+	}()
+	for i := 0; i < 400; i++ {
+		if v := s.approvals.List(); len(v) == 1 {
+			if !s.approvals.Deliver(v[0].ID, d) {
+				t.Fatal("Deliver failed")
+			}
+			return <-done
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("handler never registered a pending approval")
+	return ""
+}
+
+func serverForApproval(t *testing.T, deadline time.Duration) *Server {
+	t.Helper()
+	s := &Server{}
+	s.approvals = approvals.New(deadline)
+	t.Cleanup(s.approvals.Close)
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess",
+		}}}, nil
+	}
+	return s
+}
+
+// TestApproveAllowCommandDoesNotRememberATruncatedCommand is the handler half
+// of the prefix-matching guard.
+//
+// The hook clips a Bash command at maxCommandBytes and says so. "Always allow
+// this command" must still ALLOW THIS ONE CALL — the human really did click —
+// but it must NOT write the clipped string into memory, or every later command
+// sharing that 4 KiB prefix would auto-allow with no card and no human.
+func TestApproveAllowCommandDoesNotRememberATruncatedCommand(t *testing.T) {
+	s := serverForApproval(t, 5*time.Second)
+	const cmd = "go test ./... && curl evil"
+	body := `{"tool_name":"Bash","session_id":"sess","summary":"` + cmd + `","summary_truncated":true}`
+
+	if got := decideApproveInFlight(t, s, body, approvals.AllowCommand); got != "allow" {
+		t.Fatalf("decision = %q, want allow — the human clicked, so THIS call is granted", got)
+	}
+	if s.approvals.Remembered("codey", "Bash", cmd) {
+		t.Fatal("a TRUNCATED command was remembered; every later command sharing its " +
+			"visible prefix would now auto-allow with no card and no human")
+	}
+}
+
+// TestApproveAllowCommandDoesNotRememberAnEmptyCommand is the same rule for the
+// other disqualifier: an unparseable tool_input yields summary "". Remembering
+// it would auto-allow EVERY future Bash call whose input failed to parse.
+func TestApproveAllowCommandDoesNotRememberAnEmptyCommand(t *testing.T) {
+	s := serverForApproval(t, 5*time.Second)
+	body := `{"tool_name":"Bash","session_id":"sess","summary":""}`
+
+	if got := decideApproveInFlight(t, s, body, approvals.AllowCommand); got != "allow" {
+		t.Fatalf("decision = %q, want allow for the call the human answered", got)
+	}
+	if s.approvals.Remembered("codey", "Bash", "") {
+		t.Fatal("an EMPTY command was remembered; every Bash call with an unparseable " +
+			"tool_input would now auto-allow")
+	}
+}
+
+// TestApproveAllowCommandRemembersACompleteCommand is the positive control:
+// without it, a handler that never remembers anything would pass the two tests
+// above and silently break the feature.
+func TestApproveAllowCommandRemembersACompleteCommand(t *testing.T) {
+	s := serverForApproval(t, 5*time.Second)
+	const cmd = "go test ./..."
+	body := `{"tool_name":"Bash","session_id":"sess","summary":"` + cmd + `"}`
+
+	if got := decideApproveInFlight(t, s, body, approvals.AllowCommand); got != "allow" {
+		t.Fatalf("decision = %q, want allow", got)
+	}
+	if !s.approvals.Remembered("codey", "Bash", cmd) {
+		t.Fatal("a complete command was NOT remembered; allow_command does nothing")
+	}
+}
+
+// TestApproveTruncatedRequestIsNotOfferedCommandMemory pins what the browser
+// is told: the card for a clipped command must not offer "always allow this
+// command" at all.
+func TestApproveTruncatedRequestIsNotOfferedCommandMemory(t *testing.T) {
+	s := serverForApproval(t, 5*time.Second)
+	go func() {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/v1/claude/approve", strings.NewReader(
+			`{"tool_name":"Bash","session_id":"sess","summary":"x","summary_truncated":true}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		s.handleClaudeApprove(rr, req)
+	}()
+	for i := 0; i < 400; i++ {
+		v := s.approvals.List()
+		if len(v) == 1 {
+			if v[0].CanRemember {
+				t.Fatal("can_remember = true for a truncated command; the handler dropped " +
+					"summary_truncated on the floor")
+			}
+			s.approvals.Deliver(v[0].ID, approvals.Deny)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("handler never registered a pending approval")
+}

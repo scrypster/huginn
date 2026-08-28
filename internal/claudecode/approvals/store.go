@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -62,6 +63,20 @@ type Request struct {
 	Excerpt   string
 	CWD       string
 	ToolUseID string
+	// SummaryTruncated is true when the hook clipped Summary. It disqualifies
+	// the request from command memory; see Rememberable.
+	SummaryTruncated bool
+}
+
+// Rememberable reports whether this request may be remembered as an exact
+// command. A truncated command must never be remembered: the bytes past the
+// clip are unconstrained, so a later command sharing only the visible prefix
+// would match — reintroducing the prefix matching this package exists to
+// forbid. An empty command must never be remembered either, or every call
+// whose input failed to parse would auto-allow.
+func (r Request) Rememberable() bool {
+	return r.ToolName == rememberableTool && !r.SummaryTruncated &&
+		strings.TrimRight(r.Summary, " \t\r\n") != ""
 }
 
 // Pending is a registered request. Callers hold it across Wait.
@@ -245,7 +260,7 @@ func (s *Store) List() []PendingView {
 			Excerpt:     p.Request.Excerpt,
 			CWD:         p.Request.CWD,
 			RemainingMS: remaining,
-			CanRemember: p.Request.ToolName == rememberableTool,
+			CanRemember: p.Request.Rememberable(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RemainingMS < out[j].RemainingMS })
@@ -262,8 +277,21 @@ func (s *Store) Remembered(agentName, toolName, command string) bool {
 }
 
 // Remember records an exact-command allow for this agent.
+//
+// It refuses an empty (or whitespace-only) command regardless of the caller.
+// The hook returns an empty summary whenever tool_input carries no usable
+// `command` — a missing key, a non-string value, an input it could not parse —
+// and memKey trims trailing whitespace, so a remembered "" would MATCH EVERY
+// LATER SUCH CALL and auto-allow it with no card, no broadcast and no human.
+// This guard lives in the store rather than at the call site so the invariant
+// does not depend on any caller, or on the hook, being honest. Truncation is
+// the other disqualifier, but only the caller knows about it: see
+// Request.Rememberable.
 func (s *Store) Remember(agentName, toolName, command string) {
 	if toolName != rememberableTool {
+		return
+	}
+	if strings.TrimRight(command, " \t\r\n") == "" {
 		return
 	}
 	s.memory.add(agentName, toolName, command)
