@@ -52,6 +52,21 @@ func TestPersistStopTurn_AskSteveWall(t *testing.T) {
 	}
 }
 
+
+func TestPersistStopTurn_LeftoverPongOnAskSteveIsWall(t *testing.T) {
+	got := PersistStopTurn("Pong.", "error: Steve isn't in this company.", "Ask Steve for the hostname")
+	if got != "Steve isn't in Lab. Sam is." {
+		t.Fatalf("got %q, want Lab wall (not Pong.)", got)
+	}
+}
+
+func TestPersistStopTurn_LeftoverPongOnFranceEmpty(t *testing.T) {
+	got := PersistStopTurn("Pong.", "", "what's the capital of France")
+	if got != "" {
+		t.Fatalf("got %q, want empty (not Pong.)", got)
+	}
+}
+
 func TestPersistStopTurn_WaitPONG(t *testing.T) {
 	wait := "## Finished threads (1)\n\n## Result from agent \"Reggie\"\n\nPONG\n\nThread ID: `th_1`\n"
 	got := PersistStopTurn("I'll ask Sam again.", wait, "ping Reggie")

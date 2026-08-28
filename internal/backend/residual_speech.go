@@ -1085,6 +1085,9 @@ func IsCompanyWallDeny(content string) bool {
 // PersistStopTurn is the persist filter when the loop ends without another
 // model completion (company-wall deny or wait already answered).
 func PersistStopTurn(speech, toolBlob, userAsk string) string {
+	if isLeftoverPongOnly(speech) && !isTrivialPingAsk(userAsk) {
+		speech = ""
+	}
 	if WaitHasSpecialistAnswer(toolBlob) {
 		if compact := compactWaitSpeech(toolBlob); compact != "" {
 			return compact
@@ -1109,6 +1112,9 @@ func PersistStopTurn(speech, toolBlob, userAsk string) string {
 	}
 	if got := PersistVisibleAssistantContent(speech, userAsk); got != "" {
 		return got
+	}
+	if isLeftoverPongOnly(speech) {
+		return ""
 	}
 	return strings.TrimSpace(speech)
 }

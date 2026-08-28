@@ -124,17 +124,57 @@ func dropLeftoverHireGhost(visible, userAsk string) string {
 	return visible
 }
 
-// fillTrivialPingPersist harness-fills persist `Pong.` when leftover
-// drop emptied a trivial ping/pong ask. Does not fill headcount, hire,
-// thanks, or who-is-here.
+// fillTrivialPingPersist harness-fills persist `Pong.` only when THIS
+// user ask is a trivial ping/pong (after mention strip). Leftover stream
+// or session `Pong.` from a prior ping must not fill a non-ping turn.
 func fillTrivialPingPersist(visible, userAsk string) string {
-	if strings.TrimSpace(visible) != "" {
+	if isTrivialPingAsk(userAsk) {
+		if strings.TrimSpace(visible) == "" || isLeftoverPongOnly(visible) {
+			return "Pong."
+		}
 		return visible
 	}
-	if isTrivialPingAsk(userAsk) {
-		return "Pong."
+	if isLeftoverPongOnly(visible) {
+		return ""
 	}
-	return visible
+	return dropLeftoverPongLines(visible)
+}
+
+func isLeftoverPongOnly(s string) bool {
+	trim := strings.TrimSpace(s)
+	if trim == "" {
+		return false
+	}
+	// Harness fill is "Pong." -- not teammate "PONG" / "X said PONG."
+	switch strings.Trim(trim, ".!?…") {
+	case "Pong", "pong":
+		return true
+	}
+	return false
+}
+
+func dropLeftoverPongLines(visible string) string {
+	if strings.TrimSpace(visible) == "" {
+		return visible
+	}
+	var kept []string
+	dropped := false
+	for _, line := range strings.Split(visible, "\n") {
+		if isLeftoverPongOnly(line) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !dropped {
+		return visible
+	}
+	return collapseBlankRuns(strings.TrimSpace(strings.Join(kept, "\n")))
+}
+
+// IsLeftoverPongSpeech reports persist that is only the ping harness fill.
+func IsLeftoverPongSpeech(s string) bool {
+	return isLeftoverPongOnly(s)
 }
 
 func isTrivialPingAsk(s string) bool {
