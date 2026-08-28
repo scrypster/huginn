@@ -136,8 +136,10 @@ func (o *Orchestrator) AgentChat(
 		OnPermissionDenied: onPermDenied,
 		OnBeforeWrite:      onBeforeWrite,
 		VaultReconnector:   vr.reconnector,
+		SessionID:          GetSessionID(ctx),
 	}
 	if defaultAgent != nil {
+		cfg.AgentName = defaultAgent.Name
 		cfg.MemoryMode = agentMemoryMode
 		cfg.MemoryVault = pinMuninnVault(agentVaultName)
 		cfg.MemoryAgent = agentName

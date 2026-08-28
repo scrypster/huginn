@@ -157,6 +157,10 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 			agents.WatchedProviders(ag.Toolbelt),
 			allowed,
 		)
+		// Pre-seed persisted "always allow" grants (from a prior
+		// "Always allow for <Agent>" decision) so this run doesn't
+		// re-prompt for tools the human already approved for this agent.
+		agentGate.SeedSessionAllowed(ag.ApprovedTools)
 	}
 
 	schemas = filterMuninnSchemas(schemas, ag.MemoryMode)
@@ -761,6 +765,8 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		MemoryUserMsg:      opts.userMsg,
 		MemorySession:      opts.sessionID,
 		MemoryHome:         o.huginnHome,
+		AgentName:          ag.Name,
+		SessionID:          opts.sessionID,
 	}
 
 	start := time.Now().UnixNano()

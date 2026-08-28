@@ -55,6 +55,7 @@ type Agent struct {
 	Toolbelt            []ToolbeltEntry
 	Skills              []string
 	LocalTools          []string // tool names granted to this agent; ["*"] = all builtins
+	ApprovedTools       []string // tool names pre-approved to skip permission prompts
 }
 
 // Rename updates the agent's Name and re-indexes it in the registry under the
@@ -139,9 +140,10 @@ func (a *Agent) cloneUnlocked() Agent {
 		VaultDescription:    a.VaultDescription,
 		// Clone slice-backed fields so request-scoped copies never alias shared
 		// registry state under concurrent workflow execution.
-		Toolbelt:   append([]ToolbeltEntry(nil), a.Toolbelt...),
-		Skills:     append([]string(nil), a.Skills...),
-		LocalTools: append([]string(nil), a.LocalTools...),
+		Toolbelt:      append([]ToolbeltEntry(nil), a.Toolbelt...),
+		Skills:        append([]string(nil), a.Skills...),
+		LocalTools:    append([]string(nil), a.LocalTools...),
+		ApprovedTools: append([]string(nil), a.ApprovedTools...),
 		// History is intentionally not copied — the copy is request-scoped.
 	}
 }

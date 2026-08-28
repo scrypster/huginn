@@ -453,6 +453,22 @@ func (h *WSHub) broadcastToSessionFrom(sessionID string, msg WSMessage, origin *
 	}
 }
 
+// hasSessionSubscribers reports whether any registered client would receive a
+// broadcastToSession for sessionID — an exact session match, or a wildcard
+// client (empty sessionID) that receives every session's traffic. Used by the
+// permission prompt bridge to fail closed immediately instead of blocking on a
+// prompt no one can answer.
+func (h *WSHub) hasSessionSubscribers(sessionID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		if c.sessionID == "" || c.sessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 // WSDroppedMessages returns the total count of messages dropped due to slow
 // client send buffers being full. Monotonically increasing.
 func (h *WSHub) WSDroppedMessages() int64 {
@@ -1812,6 +1828,12 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 				"replayed": len(replayed),
 			},
 		})
+
+	case "permission_response":
+		// Client → server: resolves an in-flight "permission_request" prompt
+		// emitted by PermissionPromptFunc. Payload: {id, scope} where scope is
+		// "once" | "always_agent" | "deny" (legacy clients send {id, approved}).
+		s.handlePermissionResponse(msg)
 
 	case "ping":
 		c.safeSend(WSMessage{Type: "pong"})

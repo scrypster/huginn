@@ -84,10 +84,12 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 		if agentGate != nil {
 			if t, ok := vr.sessionReg.Get(name); ok {
 				if !agentGate.Check(permissions.PermissionRequest{
-					ToolName: name,
-					Level:    t.Permission(),
-					Args:     args,
-					Provider: vr.sessionReg.ProviderFor(name),
+					ToolName:  name,
+					Level:     t.Permission(),
+					Args:      args,
+					Provider:  vr.sessionReg.ProviderFor(name),
+					AgentName: ag.Name,
+					SessionID: GetSessionID(ctx),
 				}) {
 					return "", fmt.Errorf("permission denied")
 				}

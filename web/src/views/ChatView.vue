@@ -900,11 +900,17 @@
             <span class="text-xs text-huginn-yellow font-semibold">Permission required</span>
           </div>
           <p class="text-xs text-huginn-muted mb-3 ml-5.5">{{ permissionDesc }}</p>
-          <div class="flex gap-2 ml-5.5">
-            <button @click="approvePermission(true)"
+          <div class="flex gap-2 ml-5.5 flex-wrap">
+            <button @click="approvePermission('once')" data-testid="permission-allow-once"
               class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
-                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Allow</button>
-            <button @click="approvePermission(false)"
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Allow once</button>
+            <button @click="approvePermission('always_agent')" data-testid="permission-allow-always"
+              class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Always allow for {{ permissionAgentName }}</button>
+            <button @click="approvePermission('always_agent_all')" data-testid="permission-allow-always-all"
+              class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Always allow everything for {{ permissionAgentName }}</button>
+            <button @click="approvePermission('deny')" data-testid="permission-deny"
               class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-red transition-all duration-150
                      border border-huginn-red/30 hover:bg-huginn-red/15 active:scale-95">Deny</button>
           </div>
@@ -2151,7 +2157,14 @@ watch(activeThreadCount, (count) => {
 const permissionDesc = computed(() => {
   if (!pendingPermission.value?.payload) return ''
   const p = pendingPermission.value.payload as Record<string, string>
-  return `${p.tool ?? ''}: ${p.command ?? p.args ?? ''}`
+  const action = p.command || p.args || p.tool || ''
+  if (p.agent) return `${p.agent} wants to run: ${action}`
+  return `${p.tool ?? ''}: ${action}`
+})
+
+const permissionAgentName = computed(() => {
+  const p = pendingPermission.value?.payload as Record<string, string> | undefined
+  return p?.agent || 'this agent'
 })
 
 
@@ -2611,12 +2624,13 @@ function handleThreadFollowUp(_threadId: string, draft?: string) {
 }
 
 
-function approvePermission(approved: boolean) {
+function approvePermission(scope: 'once' | 'always_agent' | 'always_agent_all' | 'deny') {
   const ws = wsRef.value
   if (!ws || !pendingPermission.value) return
+  const id = (pendingPermission.value.payload as Record<string, string>)?.id
   ws.send({
     type: 'permission_response',
-    payload: { id: (pendingPermission.value.payload as Record<string, string>)?.id, approved },
+    payload: { id, scope, approved: scope !== 'deny' },
   })
   pendingPermission.value = null
   if (props.spaceId) pendingPermissionBySpace.delete(props.spaceId)
@@ -2783,6 +2797,21 @@ registerWS(ws, 'permission_request', (msg: WSMessage) => {
     if (ownerSpaceId !== props.spaceId) return
     pendingPermission.value = msg
     scrollToBottom()
+  })
+
+registerWS(ws, 'permission_cancelled', (msg: WSMessage) => {
+    // The server gave up waiting (prompt timed out). Take the banner down —
+    // leaving it up would show live-looking buttons that silently do nothing,
+    // because the server no longer knows this request id.
+    const id = (msg.payload as Record<string, string> | undefined)?.id
+    const matches = (m: WSMessage | null | undefined) =>
+      !!m && (!id || (m.payload as Record<string, string> | undefined)?.id === id)
+
+    if (matches(pendingPermission.value)) pendingPermission.value = null
+    const ownerSpaceId = msg.session_id ? getSessionSpaceId(msg.session_id) : ''
+    if (ownerSpaceId && matches(pendingPermissionBySpace.get(ownerSpaceId))) {
+      pendingPermissionBySpace.delete(ownerSpaceId)
+    }
   })
 
 registerWS(ws, 'done', (msg: WSMessage) => {
