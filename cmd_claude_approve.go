@@ -138,6 +138,58 @@ func endpointFromArgs(args []string) string {
 	return ""
 }
 
+const (
+	// maxCommandBytes bounds a forwarded Bash command.
+	maxCommandBytes = 4 << 10
+	// maxExcerptBytes bounds every other forwarded content excerpt.
+	maxExcerptBytes = 2 << 10
+)
+
+func clip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
+func inputString(in map[string]any, key string) string {
+	v, _ := in[key].(string)
+	return v
+}
+
+// summarizeToolInput reduces a tool_input to a bounded, human-readable pair.
+//
+// TRUNCATION HAPPENS HERE, IN THE HOOK, ON PURPOSE. An earlier version
+// forwarded the whole tool_input, and a large Write blew the route's body cap,
+// failed to decode, and DENIED an explicitly allowlisted tool — a permission
+// decision that depended on payload size. Bounding it at the source is what
+// makes that impossible. Never forward the raw input, and never let the server
+// reject on size.
+func summarizeToolInput(toolName string, in map[string]any) (summary, excerpt string) {
+	if in == nil {
+		return "", ""
+	}
+	switch toolName {
+	case "Bash":
+		return clip(inputString(in, "command"), maxCommandBytes), ""
+	case "Write":
+		return inputString(in, "file_path"), clip(inputString(in, "content"), maxExcerptBytes)
+	case "Edit", "NotebookEdit":
+		return inputString(in, "file_path"), clip(inputString(in, "new_string"), maxExcerptBytes)
+	case "WebFetch":
+		return inputString(in, "url"), ""
+	}
+	summary = inputString(in, "file_path")
+	if summary == "" {
+		summary = inputString(in, "url")
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return summary, ""
+	}
+	return summary, clip(string(b), maxExcerptBytes)
+}
+
 // runClaudeApprove is the PreToolUse hook body. Claude Code writes the tool
 // call to stdin and reads a decision from stdout.
 //
@@ -156,10 +208,11 @@ func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time
 	raw, _ := io.ReadAll(in)
 
 	var hook struct {
-		ToolName  string `json:"tool_name"`
-		ToolUseID string `json:"tool_use_id"`
-		SessionID string `json:"session_id"`
-		CWD       string `json:"cwd"`
+		ToolName  string         `json:"tool_name"`
+		ToolUseID string         `json:"tool_use_id"`
+		SessionID string         `json:"session_id"`
+		CWD       string         `json:"cwd"`
+		ToolInput map[string]any `json:"tool_input"`
 	}
 	if err := json.Unmarshal(raw, &hook); err != nil {
 		return emitDecision(out, "deny", "Huginn could not parse the tool call; denying")
@@ -169,19 +222,17 @@ func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time
 		tool = "tool"
 	}
 
-	// tool_input is DELIBERATELY NOT FORWARDED. The handler decoded it and
-	// discarded it — nothing on the server reads it, no log or audit trail
-	// consumes it — while the route is wrapped in withMaxBody(1 MiB). A Write
-	// of a 2 MB file or a Bash heredoc therefore blew the cap, the decode
-	// failed, and an explicitly allowlisted tool was denied. Permission must
-	// never depend on payload size. If a future policy genuinely needs the
-	// input, send a BOUNDED EXCERPT and raise the cap deliberately — never the
-	// whole payload.
+	// tool_input is forwarded as a BOUNDED SUMMARY, never raw. See
+	// summarizeToolInput for why the truncation lives here rather than on the
+	// server: permission must never depend on payload size.
+	summary, excerpt := summarizeToolInput(hook.ToolName, hook.ToolInput)
 	body, err := json.Marshal(map[string]any{
 		"tool_name":   hook.ToolName,
 		"tool_use_id": hook.ToolUseID,
 		"session_id":  hook.SessionID,
 		"cwd":         hook.CWD,
+		"summary":     summary,
+		"excerpt":     excerpt,
 	})
 	if err != nil {
 		return emitDecision(out, "deny", fmt.Sprintf("Huginn could not encode the request; %s denied", tool))

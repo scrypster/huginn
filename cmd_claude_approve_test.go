@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -163,5 +164,91 @@ func TestClaudeApproveDeniesOnMalformedOrUnexpectedResponses(t *testing.T) {
 				t.Errorf("decision = %q, want deny for response {status:%d body:%q}", d, tt.status, tt.body)
 			}
 		})
+	}
+}
+
+func TestSummarizeBashSendsCommandVerbatim(t *testing.T) {
+	sum, exc := summarizeToolInput("Bash", map[string]any{
+		"command":     "go test ./...",
+		"description": "run tests",
+	})
+	if sum != "go test ./..." {
+		t.Fatalf("summary = %q, want the command verbatim", sum)
+	}
+	if exc != "" {
+		t.Fatalf("excerpt = %q, want empty for Bash", exc)
+	}
+}
+
+func TestSummarizeBashTruncatesLongCommand(t *testing.T) {
+	long := strings.Repeat("x", maxCommandBytes+500)
+	sum, _ := summarizeToolInput("Bash", map[string]any{"command": long})
+	if len(sum) > maxCommandBytes {
+		t.Fatalf("summary len = %d, want <= %d", len(sum), maxCommandBytes)
+	}
+}
+
+func TestSummarizeWriteSendsPathAndBoundedContent(t *testing.T) {
+	sum, exc := summarizeToolInput("Write", map[string]any{
+		"file_path": "/tmp/a.ts",
+		"content":   strings.Repeat("y", maxExcerptBytes+500),
+	})
+	if sum != "/tmp/a.ts" {
+		t.Fatalf("summary = %q, want the file path", sum)
+	}
+	if len(exc) > maxExcerptBytes {
+		t.Fatalf("excerpt len = %d, want <= %d", len(exc), maxExcerptBytes)
+	}
+}
+
+func TestSummarizeEditUsesNewString(t *testing.T) {
+	sum, exc := summarizeToolInput("Edit", map[string]any{
+		"file_path":  "/tmp/b.go",
+		"new_string": "package main",
+	})
+	if sum != "/tmp/b.go" {
+		t.Fatalf("summary = %q, want the file path", sum)
+	}
+	if exc != "package main" {
+		t.Fatalf("excerpt = %q, want the new_string", exc)
+	}
+}
+
+func TestSummarizeUnknownToolFallsBackToBoundedJSON(t *testing.T) {
+	sum, exc := summarizeToolInput("Task", map[string]any{
+		"prompt": strings.Repeat("z", maxExcerptBytes+500),
+	})
+	if len(exc) > maxExcerptBytes {
+		t.Fatalf("excerpt len = %d, want <= %d", len(exc), maxExcerptBytes)
+	}
+	_ = sum
+}
+
+func TestSummarizeNilInputIsSafe(t *testing.T) {
+	sum, exc := summarizeToolInput("Bash", nil)
+	if sum != "" || exc != "" {
+		t.Fatalf("got (%q,%q), want empty strings for nil input", sum, exc)
+	}
+}
+
+func TestRunClaudeApproveForwardsSummary(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "allow", "reason": "ok"})
+	}))
+	defer srv.Close()
+
+	in := strings.NewReader(`{"tool_name":"Bash","session_id":"s","tool_input":{"command":"ls -la"}}`)
+	var out bytes.Buffer
+	if code := runClaudeApprove(in, &out, srv.URL, 5*time.Second); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(gotBody, &sent); err != nil {
+		t.Fatalf("server got unparseable body: %v", err)
+	}
+	if sent["summary"] != "ls -la" {
+		t.Fatalf("summary forwarded = %v, want %q", sent["summary"], "ls -la")
 	}
 }

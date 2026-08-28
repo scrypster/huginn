@@ -22,10 +22,16 @@ import "encoding/json"
 // an exotic one.
 //
 // Stated plainly, because it is easy to assume otherwise: --allowedTools and
-// this hook produce THE SAME effective permission set. The approval endpoint
-// allows exactly the tools in ClaudeAllowedTools, which is also what is passed
-// to --allowedTools. The hook's contribution is a log entry and a
-// human-readable deny reason, not additional restriction.
+// this hook produced the same effective permission set, because the approval
+// endpoint allowed exactly the tools in ClaudeAllowedTools — the same list
+// passed to --allowedTools.
+//
+// THAT IS NO LONGER TRUE. The endpoint can now block on a human, and a human
+// can allow a tool that is NOT in ClaudeAllowedTools. VERIFIED 2026-08-27: a
+// PreToolUse hook returning permissionDecision "allow" grants a tool absent
+// from --allowedTools (probed with --allowedTools Read and a gated Bash; the
+// command ran and permission_denials was empty). So the hook is now a source
+// of ADDITIONAL PERMISSION, not only of deny reasons.
 //
 // A tool in NEITHER list is neither pre-authorised nor gated, and never invokes
 // the hook. That is what keeps fail-closed tolerable: if Huginn is unreachable,
@@ -38,7 +44,12 @@ import "encoding/json"
 // in permission_denials. Callers that run `huginn claude-approve` (see
 // cmd_claude_approve.go) must keep their own client timeout well below this
 // so the hook always gets to print an explicit deny first.
-const ClaudeHookTimeoutSecs = 30
+// It is 300 because a human is now in this loop: the approval endpoint blocks
+// until someone clicks or the store's 285s deadline expires. VERIFIED against
+// the real CLI on 2026-08-27 that a 300s hook timeout is NOT clamped — the
+// hook blocked for 290s and its deny was honoured. See the design doc's "Hook
+// Blocking Budget" section for the probe; re-run it if the CLI version changes.
+const ClaudeHookTimeoutSecs = 300
 
 // Returns "" when nothing is gated, so the caller omits --settings entirely.
 func BuildHookSettings(gatedTools []string, hookCommand string) (string, error) {
