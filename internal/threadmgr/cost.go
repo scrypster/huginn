@@ -2,37 +2,22 @@ package threadmgr
 
 import (
 	"errors"
-	"strings"
 	"sync"
+
+	"github.com/scrypster/huginn/internal/pricing"
 )
 
 var ErrBudgetExceeded = errors.New("session cost budget exceeded")
 
-type pricingEntry struct {
-	inputPerM  float64
-	outputPerM float64
-}
-
-var modelPricing = []struct {
-	substr string
-	price  pricingEntry
-}{
-	{"claude-opus-4", pricingEntry{inputPerM: 15.00, outputPerM: 75.00}},
-	{"claude-sonnet-4", pricingEntry{inputPerM: 3.00, outputPerM: 15.00}},
-	{"claude-haiku-4", pricingEntry{inputPerM: 0.80, outputPerM: 4.00}},
-	{"gpt-4o-mini", pricingEntry{inputPerM: 0.15, outputPerM: 0.60}},
-	{"gpt-4o", pricingEntry{inputPerM: 2.50, outputPerM: 10.00}},
-	{"gpt-4", pricingEntry{inputPerM: 30.00, outputPerM: 60.00}},
-}
-
-func lookupPrice(model string) pricingEntry {
-	lower := strings.ToLower(model)
-	for _, entry := range modelPricing {
-		if strings.Contains(lower, entry.substr) {
-			return entry.price
-		}
-	}
-	return pricingEntry{}
+// lookupPrice resolves per-1M-token pricing for model. This used to be a
+// private substring table that disagreed with internal/pricing/table.go on
+// several entries (most notably claude-opus-4 pricing). It now defers to
+// pricing.Lookup against pricing.DefaultTable — internal/pricing is the
+// single verified source of pricing truth for the whole codebase. Unknown
+// models (e.g. local Ollama models) resolve to a zero entry, same as before.
+func lookupPrice(model string) pricing.PricingEntry {
+	entry, _ := pricing.Lookup(pricing.DefaultTable, model)
+	return entry
 }
 
 // CostSinkFn is an optional callback invoked (under lock-release, non-blocking) each
@@ -65,8 +50,8 @@ func (ca *CostAccumulator) SetCostSink(fn CostSinkFn) {
 
 func (ca *CostAccumulator) Record(threadID string, promptTokens, completionTokens int, model string) {
 	price := lookupPrice(model)
-	cost := price.inputPerM*float64(promptTokens)/1_000_000 +
-		price.outputPerM*float64(completionTokens)/1_000_000
+	cost := price.PromptPer1M*float64(promptTokens)/1_000_000 +
+		price.CompletionPer1M*float64(completionTokens)/1_000_000
 
 	ca.mu.Lock()
 	ca.ThreadCosts[threadID] += cost

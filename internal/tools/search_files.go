@@ -15,8 +15,8 @@ type SearchFilesTool struct {
 	SandboxRoot string
 }
 
-func (t *SearchFilesTool) Name() string        { return "search_files" }
-func (t *SearchFilesTool) Description() string { return "Search for files matching a glob pattern." }
+func (t *SearchFilesTool) Name() string                { return "search_files" }
+func (t *SearchFilesTool) Description() string         { return "Search for files matching a glob pattern." }
 func (t *SearchFilesTool) Permission() PermissionLevel { return PermRead }
 
 func (t *SearchFilesTool) Schema() backend.Tool {
@@ -110,8 +110,15 @@ func (t *SearchFilesTool) Execute(_ context.Context, args map[string]any) ToolRe
 		return ToolResult{Output: fmt.Sprintf("no files matching %q found", pattern)}
 	}
 
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d files matched\n", len(matches))
+	sb.WriteString(strings.Join(matches, "\n"))
+	if len(matches) >= maxResults {
+		fmt.Fprintf(&sb, "\n... [capped at %d results; narrow the pattern for more]\n", maxResults)
+	}
+
 	return ToolResult{
-		Output: strings.Join(matches, "\n"),
+		Output:   sb.String(),
 		Metadata: map[string]any{"count": len(matches)},
 	}
 }

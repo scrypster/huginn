@@ -74,6 +74,24 @@ func AgentSupportsDelegation(ag *Agent) bool {
 	return true
 }
 
+// AgentIsCoS reports whether ag is the "Chief of Staff" — the one agent
+// explicitly granted the hiring tool (local_tools: ["create_agent"]) and,
+// by the same S11 CoS-only convention, the only agent eligible to spawn
+// one-off ephemeral specialists via spawn_specialist. Mirrors the literal
+// tool-name check in agent_dispatcher.go's God-Mode/wildcard exclusion —
+// neither hiring nor spawning specialists is ever implied by "*".
+func AgentIsCoS(ag *Agent) bool {
+	if ag == nil {
+		return false
+	}
+	for _, n := range ag.LocalTools {
+		if n == "create_agent" || n == "spawn_specialist" {
+			return true
+		}
+	}
+	return false
+}
+
 func agentHasImageGeneration(ag *Agent) bool {
 	if ag == nil {
 		return false
@@ -121,4 +139,16 @@ func AppendTeamRoster(base, roster string, canDelegate bool) string {
 		out += "\n\n" + teamRosterDelegateHint
 	}
 	return out
+}
+
+// AppendAvailableModels appends the provider catalog's compact model/cost/
+// strengths reference (models.ProviderCatalog.AvailableModelsBlock) beside
+// the team roster, but only for the CoS (AgentIsCoS) — everyone else has no
+// use for it since only the CoS spawns specialists. Empty block or non-CoS
+// agent is a no-op.
+func AppendAvailableModels(base string, ag *Agent, block string) string {
+	if block == "" || !AgentIsCoS(ag) {
+		return base
+	}
+	return base + "\n\n" + block
 }

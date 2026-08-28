@@ -139,3 +139,35 @@ func TestContextBuilder_WithGitRoot_IncludesGitSection(t *testing.T) {
 		t.Error("expected Branch: in git context")
 	}
 }
+
+// TestContextBuilder_WithGitRoot_IncludesProjectInstructions verifies that
+// .huginn.md project instructions are injected into every Build() output via
+// the git root, so every prompt path (web chat, delegated threads, scheduled
+// agents) receives them consistently instead of only the one call site that
+// used to load them directly.
+func TestContextBuilder_WithGitRoot_IncludesProjectInstructions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".huginn.md"), []byte("Always use tabs."), 0644); err != nil {
+		t.Fatalf("write .huginn.md: %v", err)
+	}
+
+	cb := NewContextBuilder(nil, nil, nil)
+	cb.SetGitRoot(dir)
+	result := cb.Build("query", "test-model")
+
+	if !strings.Contains(result, "## Project Instructions") {
+		t.Error("expected ## Project Instructions section in Build output")
+	}
+	if !strings.Contains(result, "Always use tabs.") {
+		t.Error("expected project instructions content in Build output")
+	}
+}
+
+func TestContextBuilder_NoGitRoot_NoProjectInstructionsSection(t *testing.T) {
+	cb := NewContextBuilder(nil, nil, nil)
+	result := cb.Build("query", "test-model")
+
+	if strings.Contains(result, "## Project Instructions") {
+		t.Error("expected no ## Project Instructions section without a git root")
+	}
+}

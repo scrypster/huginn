@@ -192,6 +192,16 @@ func (cb *ContextBuilder) BuildCtx(ctx context.Context, query string, modelName 
 		result += "\n\n## Skills & Workspace Rules\n" + skillsFragment
 	}
 
+	// Project instructions (.huginn.md / .huginn/instructions.md), loaded here so
+	// every context-build path (web chat, delegated threads, scheduled agents)
+	// gets them consistently — not just the one call site that used to load them
+	// directly (mcp_agent_chat.go).
+	if gitRoot != "" {
+		if projectInstructions := LoadProjectInstructions(gitRoot); projectInstructions != "" {
+			result += "\n\n## Project Instructions\n" + projectInstructions
+		}
+	}
+
 	// Active notepads (persistent user-managed context).
 	if len(notepads) > 0 {
 		const maxNotepadsChars = 32768

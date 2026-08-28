@@ -21,12 +21,23 @@
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-1.5">
           <span class="text-xs font-medium text-huginn-text truncate">{{ thread.AgentID || 'Agent' }}</span>
+          <!-- Temporary pill (one-off spawn_specialist thread — never on the roster) -->
+          <span
+            v-if="thread.IsSpecialist"
+            class="text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0"
+            style="background:rgba(163,113,247,0.12);color:rgba(163,113,247,0.9)"
+            title="One-off specialist — not a hire, archived when this thread finishes"
+          >temporary</span>
           <!-- Status badge -->
           <span
             class="text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0"
             :class="statusBadgeClass"
           >{{ statusLabel }}</span>
         </div>
+        <!-- Specialist model id -->
+        <p v-if="thread.IsSpecialist && thread.ModelID"
+          class="text-[10px] font-mono text-huginn-muted/50 truncate mt-0.5 leading-snug"
+        >{{ thread.ModelID }}</p>
         <p class="text-[11px] text-huginn-muted truncate mt-0.5 leading-snug">{{ thread.Task || 'Running task…' }}</p>
         <!-- Live activity heartbeat (only while running) -->
         <p v-if="isRunning && activityLabel"

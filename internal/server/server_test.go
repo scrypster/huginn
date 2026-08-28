@@ -597,7 +597,7 @@ func TestHandleCost_NilAccumulator_ReturnsZero(t *testing.T) {
 func TestHandleCost_ReturnsSessionTotal(t *testing.T) {
 	srv, ts := newTestServer(t)
 	ca := threadmgr.NewCostAccumulator(0)
-	ca.Record("t-1", 1_000_000, 1_000_000, "claude-sonnet-4")
+	ca.Record("t-1", 1_000_000, 1_000_000, "claude-sonnet-4-6")
 	srv.ca = ca
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/cost", nil)

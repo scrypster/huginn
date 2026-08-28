@@ -11,6 +11,7 @@ import (
 	"github.com/scrypster/huginn/internal/agent/session"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/swarm"
 	"github.com/scrypster/huginn/internal/threadmgr"
@@ -115,22 +116,31 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		}
 	}
 
-	// 4b. create_agent is never implied by God Mode or a toolbelt wildcard.
-	// Only an explicit local_tools: ["create_agent"] grant may keep the schema.
+	// 4b. create_agent and spawn_specialist are never implied by God Mode or
+	// a toolbelt wildcard. Only an explicit local_tools: ["create_agent"] /
+	// ["spawn_specialist"] grant may keep the respective schema (S11:
+	// spawn_specialist is CoS-only, same convention as create_agent).
 	{
 		namedHire := false
+		namedSpawnSpecialist := false
 		for _, n := range ag.LocalTools {
 			if n == tools.CreateAgentName {
 				namedHire = true
-				break
+			}
+			if n == tools.SpawnSpecialistName {
+				namedSpawnSpecialist = true
 			}
 		}
-		if !namedHire {
+		if !namedHire || !namedSpawnSpecialist {
 			filtered := schemas[:0]
 			for _, s := range schemas {
-				if s.Function.Name != tools.CreateAgentName {
-					filtered = append(filtered, s)
+				if !namedHire && s.Function.Name == tools.CreateAgentName {
+					continue
 				}
+				if !namedSpawnSpecialist && s.Function.Name == tools.SpawnSpecialistName {
+					continue
+				}
+				filtered = append(filtered, s)
 			}
 			schemas = filtered
 		}
@@ -940,6 +950,7 @@ func (o *Orchestrator) TaskWithAgent(
 	if agentReg != nil {
 		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
 		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+		systemPromptBase = agents.AppendAvailableModels(systemPromptBase, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
 	}
 
 	history := sess.snapshotHistory()
@@ -1146,6 +1157,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	if agentReg != nil {
 		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
 		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+		systemPromptBase = agents.AppendAvailableModels(systemPromptBase, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
 	}
 
 	// Per-agent skills fragment. Non-default agents (workflow steps, delegated

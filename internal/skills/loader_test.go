@@ -192,3 +192,81 @@ func TestLoader_LoadAll_SkipsInvalidMarkdown(t *testing.T) {
 		t.Errorf("expected only good skill, got %d skills", len(skills))
 	}
 }
+
+func TestLoaderLoadRuleFiles_FindsAgentsMD(t *testing.T) {
+	wsRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wsRoot, "AGENTS.md"), []byte("agents rules here"), 0644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+	loader := NewLoader("")
+	result := loader.LoadRuleFiles(wsRoot)
+	if !strings.Contains(result, "// Rules from: AGENTS.md") {
+		t.Errorf("missing AGENTS.md header in: %q", result)
+	}
+	if !strings.Contains(result, "agents rules here") {
+		t.Errorf("missing AGENTS.md content in: %q", result)
+	}
+}
+
+// TestLoaderLoadRuleFiles_WalksUpToGitRoot verifies that when workspaceRoot
+// is a subdirectory nested inside a git repo (not the repo root itself),
+// LoadRuleFiles still finds rule files at the repo root by walking up — not
+// just files directly inside workspaceRoot as it used to.
+func TestLoaderLoadRuleFiles_WalksUpToGitRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0755); err != nil {
+		t.Fatalf("mkdir repoRoot/.git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "CLAUDE.md"), []byte("repo-root rules"), 0644); err != nil {
+		t.Fatalf("write repoRoot CLAUDE.md: %v", err)
+	}
+
+	sub := filepath.Join(repoRoot, "project")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "CLAUDE.md"), []byte("project-specific rules"), 0644); err != nil {
+		t.Fatalf("write sub CLAUDE.md: %v", err)
+	}
+
+	loader := NewLoader("")
+	result := loader.LoadRuleFiles(sub)
+
+	if !strings.Contains(result, "project-specific rules") {
+		t.Errorf("missing project-level rules in: %q", result)
+	}
+	if !strings.Contains(result, "repo-root rules") {
+		t.Errorf("missing repo-root (ancestor) rules in: %q", result)
+	}
+	if !strings.Contains(result, "// Rules from: CLAUDE.md") {
+		t.Errorf("missing relative header for sub-level CLAUDE.md in: %q", result)
+	}
+	if !strings.Contains(result, filepath.Join("..", "CLAUDE.md")) {
+		t.Errorf("missing '..'-relative header for repo-root-level CLAUDE.md in: %q", result)
+	}
+}
+
+// TestLoaderLoadRuleFiles_StopsAtGitRoot verifies the walk does not continue
+// past the git root into unrelated ancestor directories.
+func TestLoaderLoadRuleFiles_StopsAtGitRoot(t *testing.T) {
+	grandparent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(grandparent, "CLAUDE.md"), []byte("should not be loaded"), 0644); err != nil {
+		t.Fatalf("write grandparent CLAUDE.md: %v", err)
+	}
+
+	repoRoot := filepath.Join(grandparent, "repo")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0755); err != nil {
+		t.Fatalf("mkdir repo/.git: %v", err)
+	}
+
+	sub := filepath.Join(repoRoot, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+
+	loader := NewLoader("")
+	result := loader.LoadRuleFiles(sub)
+	if strings.Contains(result, "should not be loaded") {
+		t.Errorf("walk continued past the git root, got: %q", result)
+	}
+}

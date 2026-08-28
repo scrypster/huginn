@@ -581,13 +581,24 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		TokensUsed      int                      `json:"TokensUsed"`
 		TokenBudget     int                      `json:"TokenBudget"`
 		ParentMessageID string                   `json:"ParentMessageID,omitempty"`
+		// IsSpecialist and ModelID (S4): a one-off spawn_specialist thread
+		// carries these so the frontend's ThreadCard can render a
+		// "temporary" pill and the model id — surfaced only from the
+		// AgentRegistry's ephemeral overlay (agents.AgentRegistry.IsEphemeral),
+		// never a persisted Thread field.
+		IsSpecialist bool   `json:"IsSpecialist,omitempty"`
+		ModelID      string `json:"ModelID,omitempty"`
+	}
+	var agentReg *agents.AgentRegistry
+	if s.orch != nil {
+		agentReg = s.orch.GetAgentRegistry()
 	}
 	out := make([]threadListItem, 0, len(threads))
 	for _, t := range threads {
 		if t == nil {
 			continue
 		}
-		out = append(out, threadListItem{
+		item := threadListItem{
 			ID:              t.ID,
 			SessionID:       t.SessionID,
 			AgentID:         t.AgentID,
@@ -599,7 +610,21 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 			TokensUsed:      t.TokensUsed,
 			TokenBudget:     t.TokenBudget,
 			ParentMessageID: t.ParentMessageID,
-		})
+		}
+		// Prefer the DURABLE thread marker (survives overlay eviction that
+		// fires on terminal status) over the ephemeral-registry lookup, which
+		// goes false the moment the specialist is evicted — a cost reviewer
+		// opening the panel after completion still needs the attribution.
+		if t.Specialist {
+			item.IsSpecialist = true
+			item.ModelID = t.SpecialistModel
+		} else if agentReg != nil && agentReg.IsEphemeral(t.AgentID) {
+			item.IsSpecialist = true
+			if specialist, ok := agentReg.ByName(t.AgentID); ok {
+				item.ModelID = specialist.ModelID
+			}
+		}
+		out = append(out, item)
 	}
 	jsonOK(w, out)
 }

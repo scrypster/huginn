@@ -237,6 +237,83 @@ func TestGrep_ContextLinesAsInt(t *testing.T) {
 	}
 }
 
+// G2: grep output should lead with a file:count summary, then the (capped)
+// matching lines — a verbose line-by-line dump with no summary measured
+// worse than no tool at all.
+
+// TestGrep_SummaryHeader_ListsFileCounts verifies the output leads with a
+// "N files matched" line followed by per-file "path: count" lines, before
+// any actual matching line content.
+func TestGrep_SummaryHeader_ListsFileCounts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("needle\nneedle\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.go"), []byte("needle\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &GrepTool{SandboxRoot: root}
+	result := tool.Execute(nil, map[string]any{"pattern": "needle", "path": "."})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	lines := strings.Split(result.Output, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 header lines, got: %q", result.Output)
+	}
+	if !strings.Contains(lines[0], "2 files matched") {
+		t.Errorf("expected summary count on first line, got: %q", lines[0])
+	}
+	if !strings.Contains(result.Output, "a.go: 2") {
+		t.Errorf("expected 'a.go: 2' in summary, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "b.go: 1") {
+		t.Errorf("expected 'b.go: 1' in summary, got: %s", result.Output)
+	}
+	// The summary must appear before the detail lines.
+	summaryIdx := strings.Index(result.Output, "a.go: 2")
+	detailIdx := strings.Index(result.Output, "a.go:1:needle")
+	if summaryIdx == -1 || detailIdx == -1 || summaryIdx > detailIdx {
+		t.Errorf("expected summary before detail lines, got: %s", result.Output)
+	}
+}
+
+// TestGrep_DetailLinesCapped_WithTruncationNote verifies that when a file has
+// many more matches than the detail cap, the rendered lines are capped and a
+// truncation note reports how many more matches exist (the per-file count in
+// the summary still reflects the true total).
+func TestGrep_DetailLinesCapped_WithTruncationNote(t *testing.T) {
+	root := t.TempDir()
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		sb.WriteString("needle\n")
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &GrepTool{SandboxRoot: root}
+	result := tool.Execute(nil, map[string]any{"pattern": "needle", "path": "."})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	if !strings.Contains(result.Output, "big.txt: 200") {
+		t.Errorf("expected true total count (200) in summary, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "more matching lines not shown") {
+		t.Errorf("expected truncation note when detail is capped, got: %s", result.Output)
+	}
+
+	detailLineCount := strings.Count(result.Output, "big.txt:")
+	// detailLineCount includes the one "big.txt: 200" summary occurrence.
+	if detailLineCount > 60 {
+		t.Errorf("expected detail lines to be capped well below 200, got %d occurrences", detailLineCount)
+	}
+}
+
 // TestGrep_MetadataFilesMatched verifies that metadata reports correct file count.
 func TestGrep_MetadataFilesMatched(t *testing.T) {
 	root := t.TempDir()

@@ -450,6 +450,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.srv.Serve(ln)
 	go s.wsHub.run()
 	go s.evictSwarmSnapshots(ctx)
+	go s.evictStaleSpecialists(ctx)
 
 	// Start stale-binary watcher so the UI can prompt for restart after
 	// `brew upgrade huginn` or any silent binary replacement.

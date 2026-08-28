@@ -44,11 +44,11 @@ func (o *Orchestrator) AgentChat(
 
 	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
 
-	o.mu.Lock()
-	wsRoot := o.workspaceRoot
-	o.mu.Unlock()
 	globalInstructions := LoadGlobalInstructions()
-	projectInstructions := LoadProjectInstructions(wsRoot)
+	// Project instructions (.huginn.md) now flow through ctxText via
+	// ContextBuilder.BuildCtx (internal/agent/context.go), which every prompt
+	// path shares — so they don't need loading again here.
+	projectInstructions := ""
 
 	// Resolve the default agent once — used for vault connection, system prompt, and toolbelt.
 	var defaultAgent *agents.Agent

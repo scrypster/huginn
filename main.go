@@ -653,7 +653,7 @@ func main() {
 		tools.RegisterBuiltins(toolReg, cwd, bashTimeout)
 		tools.RegisterGitTools(toolReg, cwd)
 		tools.RegisterTestsTool(toolReg, cwd, bashTimeout)
-		tools.RegisterGitHubTools(toolReg)
+		tools.RegisterGitHubTools(toolReg, cwd)
 		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, cwd)
@@ -2869,7 +2869,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		tools.RegisterBuiltins(toolReg, srvCWD, srvBashTimeout)
 		tools.RegisterGitTools(toolReg, srvCWD)
 		tools.RegisterTestsTool(toolReg, srvCWD, srvBashTimeout)
-		tools.RegisterGitHubTools(toolReg)
+		tools.RegisterGitHubTools(toolReg, srvCWD)
 		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, srvCWD)
@@ -3043,6 +3043,156 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			},
 		}
 		toolReg.Register(delegateTool)
+
+		// spawn_specialist is grant-gated (named local_tools only, CoS-only
+		// by convention — same as create_agent) and never implied by God
+		// Mode or a toolbelt wildcard (agent_dispatcher.go step 4b). It
+		// brings in a one-off ephemeral specialist for a single thread —
+		// never seated on the roster (agents.AgentRegistry's ephemeral
+		// overlay, S1), never carries the hiring tools forward (S11:
+		// stripHireGrant), always goes through the delegation preview gate
+		// with a DENY-on-timeout default (S10), and auto-evicts the moment
+		// its thread lands terminal (S5, via tm.SetSpecialistEvictor below).
+		spawnSpecialistTool := &tools.SpawnSpecialistTool{Deps: tools.SpawnSpecialistDeps{
+			ValidateName: func(name string) error {
+				return agentslib.AgentDef{Name: name}.Validate()
+			},
+			NameTaken: func(name string) bool {
+				_, ok := agentReg.ByName(name)
+				return ok
+			},
+			ResolveModel: func(model string) (tools.ModelChoice, bool) {
+				canonical := modelslib.GlobalProviderCatalog().Resolve("", model)
+				info := modelslib.GlobalProviderCatalog().Info("", canonical)
+				if info == nil || info.Deprecated {
+					return tools.ModelChoice{}, false
+				}
+				if info.InputCostPerMTok == 0 && info.OutputCostPerMTok == 0 {
+					return tools.ModelChoice{}, false
+				}
+				return tools.ModelChoice{
+					DisplayName:       info.DisplayName,
+					InputCostPerMTok:  info.InputCostPerMTok,
+					OutputCostPerMTok: info.OutputCostPerMTok,
+				}, true
+			},
+			Spawn: func(ctx context.Context, req tools.SpawnSpecialistRequest) (string, error) {
+				sessionID := agent.GetSessionID(ctx)
+				if sessionID == "" {
+					return "", fmt.Errorf("spawn_specialist: no session ID in context")
+				}
+				canonical := modelslib.GlobalProviderCatalog().Resolve("", req.Model)
+				info := modelslib.GlobalProviderCatalog().Info("", canonical)
+
+				specialist := &agentslib.Agent{
+					Name:          req.Name,
+					ModelID:       canonical,
+					SystemPrompt:  fmt.Sprintf("You are %s, a one-off specialist brought in for a single thread: %s. You are not a hire — you will be archived the moment this thread finishes.", req.Name, req.Task),
+					MemoryEnabled: false, // S6: specialists never open a vault
+					VaultName:     "",
+				}
+				if err := agentReg.RegisterEphemeral(specialist); err != nil {
+					return "", err
+				}
+
+				sess, loadErr := session.LoadForDelegate(sessStore, sessionID, agent.GetSpaceID(ctx))
+				if loadErr != nil {
+					agentReg.UnregisterEphemeral(req.Name)
+					return "", loadErr
+				}
+
+				companyID, _ := srv.SpaceCompanyIDForSpawn(sess.SpaceID())
+				tm.SetSpecialistCompany(req.Name, companyID)
+
+				parentMsgID := agent.GetParentMessageID(ctx)
+				t, createErr := tm.Create(threadmgr.CreateParams{
+					SessionID:       sessionID,
+					AgentID:         req.Name,
+					Task:            req.Task,
+					Rationale:       req.Rationale,
+					SpaceID:         sess.SpaceID(),
+					ParentMessageID: parentMsgID,
+					Specialist:      true,
+					SpecialistModel: canonical,
+				})
+				if createErr != nil {
+					agentReg.UnregisterEphemeral(req.Name)
+					tm.ClearSpecialistCompany(req.Name)
+					return "", createErr
+				}
+				tm.RegisterSpecialistThread(t.ID, req.Name)
+				tm.ResolveDependencies(t.ID)
+
+				broadcastFn := func(sid, msgType string, payload map[string]any) {
+					srv.BroadcastToSession(sid, msgType, payload)
+				}
+
+				previewInfo := threadmgr.SpecialistPreviewInfo{Model: canonical}
+				if info != nil {
+					previewInfo.InputCostPerMTok = info.InputCostPerMTok
+					previewInfo.OutputCostPerMTok = info.OutputCostPerMTok
+				}
+				if !previewGate.ApproveSpecialist(ctx, sessionID, t.ID, req.Name, req.Task, parentMsgID, previewInfo, broadcastFn) {
+					tm.Cancel(t.ID)
+					agentReg.UnregisterEphemeral(req.Name)
+					tm.ClearSpecialistCompany(req.Name)
+					return "", fmt.Errorf("spawn_specialist: bringing in %q was not approved", req.Name)
+				}
+
+				spawnCtx := srv.Context()
+				if spawnCtx == nil {
+					spawnCtx = ctx
+				}
+				if sid := agent.GetSessionID(ctx); sid != "" {
+					spawnCtx = agent.SetSessionID(spawnCtx, sid)
+				}
+				if sp := agent.GetSpaceID(ctx); sp != "" {
+					spawnCtx = agent.SetSpaceID(spawnCtx, sp)
+				}
+				spawnCtx = threadmgr.CarryDelegationContext(spawnCtx, ctx)
+
+				if tm.IsReady(t.ID) {
+					tid := t.ID
+					dagFn := func() {
+						tm.EvaluateDAG(spawnCtx, sessionID, sessStore, sess, agentReg, b, broadcastFn, ca)
+					}
+					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
+				}
+				return t.ID, nil
+			},
+		}}
+		toolReg.Register(spawnSpecialistTool)
+
+		// S5: auto-evict a specialist from the ephemeral overlay the moment
+		// its thread lands terminal (or via the TTL sweep fallback below),
+		// and post the deterministic S13 finish line into the owning
+		// session so the specialist's departure is visible, not silent.
+		tm.SetSpecialistEvictor(func(name, threadID string) {
+			// Eviction is unconditional — the overlay entry must go on ANY
+			// terminal status (done, cancelled, error) and on the TTL sweep.
+			agentReg.UnregisterEphemeral(name)
+			th, ok := tm.Get(threadID)
+			if !ok || th.SessionID == "" {
+				return
+			}
+			// The S13 finish line is only true for work that actually
+			// FINISHED. A cancelled thread reaches this hook too — including
+			// the spawn-denied path, which cancels the thread the instant the
+			// human refuses the preview. Saying "<Name> is done and gone."
+			// there would tell the user a specialist they just declined ran
+			// and completed. Stay silent on every non-done terminal status;
+			// the deny/cancel path already reports itself.
+			if th.Status != threadmgr.StatusDone {
+				return
+			}
+			srv.BroadcastToSession(th.SessionID, "thread_result", map[string]any{
+				"session_id": th.SessionID,
+				"thread_id":  threadID,
+				"agent":      name,
+				"summary":    tools.SpecialistFinishSpeech(name),
+				"status":     "archived",
+			})
+		})
 
 		// list_team_status — lets a lead agent see all thread statuses in its session.
 		listTeamTool := &threadmgr.ListTeamStatusTool{

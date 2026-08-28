@@ -21,7 +21,10 @@ func ghAvailable() bool {
 
 // ghBase is embedded in all gh CLI tool structs to share GHPath and command helpers.
 type ghBase struct {
-	GHPath string // absolute path to gh binary, resolved before PATH shims
+	GHPath      string // absolute path to gh binary, resolved before PATH shims
+	SandboxRoot string // working directory for gh invocations — without this, gh
+	// runs in the process's own cwd instead of the project the agent is
+	// operating on, which silently targets the wrong repo/PR.
 }
 
 func (b *ghBase) command(ctx context.Context, args ...string) *exec.Cmd {
@@ -30,6 +33,9 @@ func (b *ghBase) command(ctx context.Context, args ...string) *exec.Cmd {
 		path = "gh" // fallback if not set (no shims active)
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	if b.SandboxRoot != "" {
+		cmd.Dir = b.SandboxRoot
+	}
 	if sessionEnv := session.EnvFrom(ctx); len(sessionEnv) > 0 {
 		cmd.Env = mergeEnv(os.Environ(), sessionEnv)
 	}
@@ -55,8 +61,8 @@ func NewGHPRListTool(ghPath string) *GHPRListTool {
 
 type GHPRListTool struct{ ghBase }
 
-func (t *GHPRListTool) Name() string             { return "gh_pr_list" }
-func (t *GHPRListTool) Description() string      { return "List open pull requests using the gh CLI." }
+func (t *GHPRListTool) Name() string                { return "gh_pr_list" }
+func (t *GHPRListTool) Description() string         { return "List open pull requests using the gh CLI." }
 func (t *GHPRListTool) Permission() PermissionLevel { return PermRead }
 func (t *GHPRListTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -104,8 +110,8 @@ func (t *GHPRListTool) Execute(ctx context.Context, args map[string]any) ToolRes
 
 type GHPRViewTool struct{ ghBase }
 
-func (t *GHPRViewTool) Name() string             { return "gh_pr_view" }
-func (t *GHPRViewTool) Description() string      { return "View a pull request by number using the gh CLI." }
+func (t *GHPRViewTool) Name() string                { return "gh_pr_view" }
+func (t *GHPRViewTool) Description() string         { return "View a pull request by number using the gh CLI." }
 func (t *GHPRViewTool) Permission() PermissionLevel { return PermRead }
 func (t *GHPRViewTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -142,8 +148,8 @@ func (t *GHPRViewTool) Execute(ctx context.Context, args map[string]any) ToolRes
 
 type GHPRDiffTool struct{ ghBase }
 
-func (t *GHPRDiffTool) Name() string             { return "gh_pr_diff" }
-func (t *GHPRDiffTool) Description() string      { return "Show the diff for a pull request." }
+func (t *GHPRDiffTool) Name() string                { return "gh_pr_diff" }
+func (t *GHPRDiffTool) Description() string         { return "Show the diff for a pull request." }
 func (t *GHPRDiffTool) Permission() PermissionLevel { return PermRead }
 func (t *GHPRDiffTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -178,8 +184,8 @@ func (t *GHPRDiffTool) Execute(ctx context.Context, args map[string]any) ToolRes
 
 type GHPRCreateTool struct{ ghBase }
 
-func (t *GHPRCreateTool) Name() string             { return "gh_pr_create" }
-func (t *GHPRCreateTool) Description() string      { return "Create a new pull request using the gh CLI." }
+func (t *GHPRCreateTool) Name() string                { return "gh_pr_create" }
+func (t *GHPRCreateTool) Description() string         { return "Create a new pull request using the gh CLI." }
 func (t *GHPRCreateTool) Permission() PermissionLevel { return PermWrite }
 func (t *GHPRCreateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -225,8 +231,8 @@ func (t *GHPRCreateTool) Execute(ctx context.Context, args map[string]any) ToolR
 
 type GHIssueListTool struct{ ghBase }
 
-func (t *GHIssueListTool) Name() string             { return "gh_issue_list" }
-func (t *GHIssueListTool) Description() string      { return "List issues using the gh CLI." }
+func (t *GHIssueListTool) Name() string                { return "gh_issue_list" }
+func (t *GHIssueListTool) Description() string         { return "List issues using the gh CLI." }
 func (t *GHIssueListTool) Permission() PermissionLevel { return PermRead }
 func (t *GHIssueListTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -279,8 +285,8 @@ func (t *GHIssueListTool) Execute(ctx context.Context, args map[string]any) Tool
 
 type GHIssueViewTool struct{ ghBase }
 
-func (t *GHIssueViewTool) Name() string             { return "gh_issue_view" }
-func (t *GHIssueViewTool) Description() string      { return "View an issue by number using the gh CLI." }
+func (t *GHIssueViewTool) Name() string                { return "gh_issue_view" }
+func (t *GHIssueViewTool) Description() string         { return "View an issue by number using the gh CLI." }
 func (t *GHIssueViewTool) Permission() PermissionLevel { return PermRead }
 func (t *GHIssueViewTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -317,8 +323,8 @@ func (t *GHIssueViewTool) Execute(ctx context.Context, args map[string]any) Tool
 
 type GHIssueCreateTool struct{ ghBase }
 
-func (t *GHIssueCreateTool) Name() string             { return "gh_issue_create" }
-func (t *GHIssueCreateTool) Description() string      { return "Create a new issue using the gh CLI." }
+func (t *GHIssueCreateTool) Name() string                { return "gh_issue_create" }
+func (t *GHIssueCreateTool) Description() string         { return "Create a new issue using the gh CLI." }
 func (t *GHIssueCreateTool) Permission() PermissionLevel { return PermWrite }
 func (t *GHIssueCreateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -356,6 +362,150 @@ func (t *GHIssueCreateTool) Execute(ctx context.Context, args map[string]any) To
 	stdout, stderr, err := runGHCmd(cmd)
 	if err != nil {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("gh issue create: %v\n%s", err, stderr)}
+	}
+	return ToolResult{Output: strings.TrimSpace(stdout)}
+}
+
+// --- gh_pr_checks ---
+
+// ghPRChecksPendingExitCode is the exit code `gh pr checks` uses when checks
+// are still running (not yet passed or failed). It must surface as a
+// distinct "pending" state, not a tool error — a caller retrying/polling
+// should be able to tell "still running" apart from "actually broke".
+const ghPRChecksPendingExitCode = 8
+
+type GHPRChecksTool struct{ ghBase }
+
+func (t *GHPRChecksTool) Name() string { return "gh_pr_checks" }
+func (t *GHPRChecksTool) Description() string {
+	return "Show CI check status for a pull request using the gh CLI. Reports a distinct 'pending' state when checks are still running."
+}
+func (t *GHPRChecksTool) Permission() PermissionLevel { return PermRead }
+func (t *GHPRChecksTool) Schema() backend.Tool {
+	return backend.Tool{
+		Type: "function",
+		Function: backend.ToolFunction{
+			Name:        "gh_pr_checks",
+			Description: t.Description(),
+			Parameters: backend.ToolParameters{
+				Type: "object",
+				Properties: map[string]backend.ToolProperty{
+					"number": {Type: "integer", Description: "PR number (default: PR for the current branch)"},
+				},
+			},
+		},
+	}
+}
+func (t *GHPRChecksTool) Execute(ctx context.Context, args map[string]any) ToolResult {
+	ghArgs := []string{"pr", "checks"}
+	if num, ok := intArg(args, "number"); ok {
+		ghArgs = append(ghArgs, fmt.Sprintf("%d", num))
+	}
+	cmd := t.command(ctx, ghArgs...)
+	stdout, stderr, err := runGHCmd(cmd)
+	if err == nil {
+		return ToolResult{Output: stdout, Metadata: map[string]any{"status": "passed"}}
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == ghPRChecksPendingExitCode {
+		out := strings.TrimSpace(stdout)
+		if out == "" {
+			out = "checks still running"
+		}
+		return ToolResult{
+			Output:   "pending: " + out,
+			Metadata: map[string]any{"status": "pending"},
+		}
+	}
+	return ToolResult{IsError: true, Error: fmt.Sprintf("gh pr checks: %v\n%s", err, stderr)}
+}
+
+// --- gh_run_view_failed ---
+
+// GHRunViewFailedTool wraps `gh run view --log-failed` ONLY — never the full
+// `--log`, which can be enormous and blow the context window for no benefit
+// when all you need is why a run failed.
+type GHRunViewFailedTool struct{ ghBase }
+
+func (t *GHRunViewFailedTool) Name() string { return "gh_run_view_failed" }
+func (t *GHRunViewFailedTool) Description() string {
+	return "Show the failed-step logs for a GitHub Actions run using the gh CLI (--log-failed only, never the full log)."
+}
+func (t *GHRunViewFailedTool) Permission() PermissionLevel { return PermRead }
+func (t *GHRunViewFailedTool) Schema() backend.Tool {
+	return backend.Tool{
+		Type: "function",
+		Function: backend.ToolFunction{
+			Name:        "gh_run_view_failed",
+			Description: t.Description(),
+			Parameters: backend.ToolParameters{
+				Type: "object",
+				Properties: map[string]backend.ToolProperty{
+					"run_id": {Type: "string", Description: "Run ID (default: the most recent run)"},
+				},
+			},
+		},
+	}
+}
+func (t *GHRunViewFailedTool) Execute(ctx context.Context, args map[string]any) ToolResult {
+	ghArgs := []string{"run", "view"}
+	rawRunID, _ := args["run_id"].(string)
+	if runID := strings.TrimSpace(rawRunID); runID != "" {
+		// run_id occupies an argument position, so a leading "-" would be
+		// parsed by gh as a flag rather than a run ID. A real run ID is
+		// always numeric-ish and never starts with a dash.
+		if strings.HasPrefix(runID, "-") {
+			return ToolResult{IsError: true, Error: fmt.Sprintf("gh_run_view_failed: invalid run_id %q (must not begin with '-')", runID)}
+		}
+		ghArgs = append(ghArgs, runID)
+	}
+	ghArgs = append(ghArgs, "--log-failed")
+	cmd := t.command(ctx, ghArgs...)
+	stdout, stderr, err := runGHCmd(cmd)
+	if err != nil {
+		return ToolResult{IsError: true, Error: fmt.Sprintf("gh run view: %v\n%s", err, stderr)}
+	}
+	return ToolResult{Output: truncate(stdout, maxOutputBytes)}
+}
+
+// --- gh_pr_comment ---
+
+type GHPRCommentTool struct{ ghBase }
+
+func (t *GHPRCommentTool) Name() string { return "gh_pr_comment" }
+func (t *GHPRCommentTool) Description() string {
+	return "Post a comment on a pull request using the gh CLI."
+}
+func (t *GHPRCommentTool) Permission() PermissionLevel { return PermWrite }
+func (t *GHPRCommentTool) Schema() backend.Tool {
+	return backend.Tool{
+		Type: "function",
+		Function: backend.ToolFunction{
+			Name:        "gh_pr_comment",
+			Description: t.Description(),
+			Parameters: backend.ToolParameters{
+				Type:     "object",
+				Required: []string{"number", "body"},
+				Properties: map[string]backend.ToolProperty{
+					"number": {Type: "integer", Description: "PR number"},
+					"body":   {Type: "string", Description: "Comment body (markdown)"},
+				},
+			},
+		},
+	}
+}
+func (t *GHPRCommentTool) Execute(ctx context.Context, args map[string]any) ToolResult {
+	num, ok := intArg(args, "number")
+	if !ok {
+		return ToolResult{IsError: true, Error: "gh_pr_comment: 'number' argument required"}
+	}
+	body, _ := args["body"].(string)
+	if strings.TrimSpace(body) == "" {
+		return ToolResult{IsError: true, Error: "gh_pr_comment: 'body' argument required"}
+	}
+	cmd := t.command(ctx, "pr", "comment", fmt.Sprintf("%d", num), "--body", body)
+	stdout, stderr, err := runGHCmd(cmd)
+	if err != nil {
+		return ToolResult{IsError: true, Error: fmt.Sprintf("gh pr comment: %v\n%s", err, stderr)}
 	}
 	return ToolResult{Output: strings.TrimSpace(stdout)}
 }
