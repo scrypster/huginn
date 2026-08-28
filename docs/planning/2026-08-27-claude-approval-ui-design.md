@@ -1,6 +1,6 @@
 # Claude Code Approval UI — Design
 
-**Status:** Draft. One open input (see "Blocking Probe") that can restructure §3.
+**Status:** Draft. Timeout budget VERIFIED 2026-08-27 (see "Hook Blocking Budget").
 **Date:** 2026-08-27
 **Branch:** `feat/claude-code-agent-provider`
 **Builds on:** `docs/planning/2026-08-25-claude-code-agent-provider-design.md` (Phase 0, complete)
@@ -30,25 +30,29 @@ There is no existing web approval surface to extend:
 - `internal/permissions.Gate` is a real permission system, but
   `handleClaudeApprove` never consults it. See §2 for why it stays that way.
 
-## Blocking Probe
+## Hook Blocking Budget (VERIFIED)
 
-**§3's timeout budget is provisional until this probe runs.** Everything else in
-this document is settled and independent of the outcome.
+**Result, 2026-08-27: Claude Code honours a 300s hook timeout, and a deny
+returned after 290s of blocking is respected.** §3 is settled.
 
-We verified empirically that Claude Code enforces a *short* hook timeout: with
-`"timeout": 5` and a hook sleeping 25s, the hook was killed at 5s and **the tool
-ran anyway**. A hook that does not answer in time fails OPEN.
+Two facts, both established empirically:
 
-We have NOT verified that Claude Code honours a *large* timeout. If an internal
-ceiling exists, `"timeout": 300` is silently clamped, the hook is killed
-mid-decision, and the tool executes while the approval card is still on screen
-with minutes left on its clock.
+1. A hook that does not answer within its declared `timeout` is **killed, and
+   the tool runs anyway** — hooks fail OPEN on timeout. Probed with
+   `"timeout": 5` and a hook sleeping 25s.
+2. A hook declaring `"timeout": 300` is **not clamped**. It blocked for the full
+   290s and its deny was honoured. Probe evidence: ticks reached 290/290;
+   `TOOL_RAN` never created; `permission_denials` contained the single `Bash`
+   call; the reason string propagated back to the model; 310s elapsed.
 
-That outcome is strictly worse than shipping nothing. Today a gated tool is
-denied deterministically; a silently-clamped hook produces a permission UI that
-does not gate. The probe is a precondition, not diligence.
+Fact 1 is why the derived-timeout guard in §3 exists at all. Fact 2 is what
+makes a five-minute human wait viable rather than a permission UI that only
+appears to gate.
 
-### Probe
+Re-run the probe below if the Claude Code version changes — fact 2 is a
+behaviour of the CLI, not a documented contract, and it could regress.
+
+### Probe (for re-verification)
 
 Run from a shell. Writes only under `/tmp/hookprobe`. Does not touch Huginn,
 user config, or this branch. Holds one `claude` session for ~5 minutes and costs
@@ -70,20 +74,17 @@ mkdir -p /tmp/hookprobe && cd /tmp/hookprobe && rm -f ticks.log TOOL_RAN \
 
 ### Outcomes
 
-| Last tick | Tool ran | Meaning | Effect on this spec |
-|---|---|---|---|
-| 290 | no | 300s honoured, decision respected | None. Spec stands as written. |
-| 290 | YES | Hook survived, deny ignored | Gating broken at long durations. Stop; redesign. |
-| < 290 | YES | Hard ceiling at that tick | Retune §3 to `ceiling` minus margin. UI unchanged. |
+| Last tick | Tool ran | Meaning |
+|---|---|---|
+| **290** | **no** | **OBSERVED 2026-08-27.** 300s honoured, decision respected. |
+| 290 | YES | Hook survived, deny ignored. Gating broken; stop and redesign. |
+| < 290 | YES | Hard ceiling at that tick. Retune §3 to ceiling minus margin. |
 
-**If the ceiling is >= 60s:** keep this design, retune the two timeout constants.
-You get less time to click; nothing else changes.
-
-**If the ceiling is <= 10s:** live blocking is not viable. Phase 1 becomes a
-different feature — the hook denies immediately, the card reads "Codey wanted to
-run X" with `[Allow and retry]`, and approval re-runs the tool on the next turn
-rather than unblocking a held one. Worse experience, honest mechanism. That
-variant needs its own spec section before any implementation.
+On a regression to either failing row, §3's constants are wrong and the fix is
+not a retune of the UI. If a future ceiling lands below ~10s, live blocking is
+not viable at all and Phase 1 becomes a different feature: the hook denies
+immediately, the card offers `[Allow and retry]`, and approval re-runs the tool
+on the next turn rather than unblocking a held one.
 
 ## 1. Decisions
 
@@ -122,7 +123,7 @@ tested gate. `permissions.Gate` is not modified by this work.
 Peripheral infrastructure IS reused: `WSHub` for push, `auditLogger` for the
 record, `useBrowserNotifications` for reach.
 
-## 3. Timeouts (PROVISIONAL — see Blocking Probe)
+## 3. Timeouts (verified — see Hook Blocking Budget)
 
 | Constant | Value | Where |
 |---|---|---|
@@ -140,8 +141,10 @@ tuned per instance and cannot be shortened in tests without global effects. Do
 not reintroduce that constraint.
 
 **No automated test validates 300s.** Tests prove the store denies on deadline.
-Only the probe proves Claude Code honours a 300s hook. These are different
-claims; do not conflate them in test names or comments.
+Only the probe proves Claude Code honours a 300s hook, and it is a CLI behaviour
+rather than a documented contract. These are different claims; do not conflate
+them in test names or comments, and do not add a test that pretends to cover the
+second one.
 
 A claude-code agent can hold its session semaphore for the full wait. A toolbelt
 agent gives up in 30s. This asymmetry is intentional — approving `rm -rf` is not
