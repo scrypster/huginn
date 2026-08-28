@@ -44,7 +44,7 @@ function mountHarness() {
   })
 
   mount(Harness)
-  return { state, sessions, threadPanelOpen, streaming, inFlightUserContent }
+  return { state, sessions, threadPanelOpen, streaming, inFlightUserContent, activeSpace, agentsList }
 }
 
 describe('useChatViewHeaderAndMembers', () => {
@@ -90,6 +90,13 @@ describe('useChatViewHeaderAndMembers', () => {
     inFlightUserContent.value = '@Sam review this PR'
     await Promise.resolve()
     expect(state.displayAgent.value?.name).toBe('Sam')
+  })
+
+  it('header agent count includes roster names missing from agentsList', () => {
+    const { state, activeSpace } = mountHarness()
+    activeSpace.value = { kind: 'channel', leadAgent: 'Tom', memberAgents: ['Sam', 'driveprobe-1'] }
+    expect(state.spaceAgents.value.map((a: { name: string }) => a.name)).toEqual(['Tom', 'Sam', 'driveprobe-1'])
+    expect(state.spaceAgents.value).toHaveLength(3)
   })
 
   it('displayAgent stays on the lead during an unmentioned in-flight turn', async () => {

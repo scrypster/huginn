@@ -684,3 +684,38 @@ func TestInjectSpaceContext_CapabilityCardsIncludeTier(t *testing.T) {
 		t.Fatalf("expected 7b Sam card to show low tier, got:\n%s", spaceCtx)
 	}
 }
+
+func TestInjectSpaceContext_ChannelNamesCompany(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	co, err := spaceStore.CreateCompany("Huginn", "", []string{"Winston"}, "", "")
+	if err != nil {
+		t.Fatalf("create company: %v", err)
+	}
+	ch, err := spaceStore.CreateChannelForCompany("Huginn", "Winston", []string{"Steve"}, "", "", co.ID)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Winston"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{Name: "Winston"}, {Name: "Steve"}}}, nil
+	}
+	ctx := srv.InjectSpaceContext(context.Background(), sess.ID, &agents.Agent{Name: "Winston"})
+	spaceCtx := workforce.GetSpaceContext(ctx)
+	if !strings.Contains(spaceCtx, "**Company:** Huginn") {
+		t.Fatalf("expected company name in space context, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "This channel is in the Huginn company") {
+		t.Fatalf("expected company sentence, got:\n%s", spaceCtx)
+	}
+}

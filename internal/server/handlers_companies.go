@@ -33,6 +33,22 @@ func (s *Server) companyAPI() companyAPI {
 	return cs
 }
 
+func (s *Server) lookupCompanyName(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	cs := s.companyAPI()
+	if cs == nil {
+		return ""
+	}
+	c, err := cs.GetCompany(id)
+	if err != nil || c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Name)
+}
+
 func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request) {
 	cs := s.companyAPI()
 	if cs == nil {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractLeadMention, resolveDisplayAgent, type DisplayAgentLike } from '../respondingAgent'
+import { extractLeadMention, hallwayAuthorName, resolveDisplayAgent, type DisplayAgentLike } from '../respondingAgent'
 
 const tess: DisplayAgentLike = { name: 'Tess', icon: 'T', color: '#58a6ff' }
 const steve: DisplayAgentLike = { name: 'Steve', icon: 'S', color: '#3fb950' }
@@ -119,5 +119,17 @@ describe('resolveDisplayAgent', () => {
       inFlightUserContent: '@Tess hi',
     })
     expect(agent?.name).toBe('Steve')
+  })
+})
+
+describe('hallwayAuthorName', () => {
+  it('uses the full agent name when present', () => {
+    expect(hallwayAuthorName('Winston', 'Steve')).toBe('Winston')
+  })
+
+  it('falls back when the live bubble is nameless or a bare initial', () => {
+    expect(hallwayAuthorName('', 'Winston')).toBe('Winston')
+    expect(hallwayAuthorName('W', 'Winston')).toBe('Winston')
+    expect(hallwayAuthorName(undefined, 'Winston')).toBe('Winston')
   })
 })

@@ -16,6 +16,13 @@ All notable changes to Huginn are documented here.
 - Fail UX reads as people in a room: **I couldn't do that.** / **I asked Tesla and they haven't come back yet.** / sidebar **Couldn't do that** or **Still waiting on Tesla** — never `TOOL_FAIL` or a debug panel; hover keeps the raw token, tool, and reason
 
 ### Fixed
+- Persist leftover `Pong.` only when THIS user ask is a trivial ping/pong after mention strip; leftover stream or a cancelled prior ping must not fill Lab ask-Steve, hire, France, team, or company turns
+- Hallway and thread-drawer bubbles name the speaking agent (never a bare initial or "Teammate") even while the stream placeholder has an empty author
+- Channel header agent count matches the space roster, including members not yet in the agents list
+- Hard-refresh / WS resume no longer mints a second assistant bubble for speech that is already persisted
+- Stats ACTIVE SESSIONS only counts sessions updated in the last 24h (stale `status=active` rows are not "active")
+- Delivery-queue badge waits for the logged-in token so `/api/v1/delivery-queue/badge` is not 401 on first paint
+- Channel company name is injected into team context so "what company is this channel in?" names the company
 - A direct image ask to an agent with no image grant now teammate-denies (`I don't have image.`) before `create_agent` can hire a specialist, and thread persist applies the same rewrite
 - Persist leftover `create_agent` harness-name lines the same way as `bash` / `wait_for_threads` so a helpdesk + clock leftover row cannot keep the tool name in the bubble
 - `wait_for_threads` with no thread_ids now includes uncollected terminal threads (finished before wait was called) so a fast specialist that replies before wait runs is no longer lost to the race; immediately returns their result and never reports "No matching threads"
@@ -79,6 +86,7 @@ All notable changes to Huginn are documented here.
 - Follow-up synthesis is status-honest — it reports delegate failures and unfinished work instead of always claiming completion, and includes files modified, key decisions, and artifacts
 - OpenAI-compatible endpoint URLs are now version-aware (an endpoint already ending in `/v1`, `/v4`, etc. is no longer broken by an appended `/v1`)
 
+- Persist leftover `Pong.` only when THIS user ask is a trivial ping/pong after mention strip; leftover stream or a cancelled prior ping must not fill Lab ask-Steve, hire, France, team, or company turns
 ### Fixed
 - Agents created/updated/deleted via the API now refresh the live registry immediately, instead of being invisible to delegation and rosters until restart (#124)
 - Duplicate follow-up synthesis when a lead agent collected a delegate's result via `wait_for_threads`

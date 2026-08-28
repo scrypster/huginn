@@ -291,6 +291,22 @@ describe('ReplyThread live stream', () => {
   })
 })
 
+describe('ReplyThread author', () => {
+  it('names the parent agent live when the bubble has no agent', async () => {
+    const w = mount(ReplyThread, {
+      props: {
+        visible: true,
+        spaceId: 'sp-1',
+        parent: { id: 'root-1', role: 'assistant', content: 'Pong.', agent: '' },
+        fallbackAgent: 'Winston',
+      },
+    })
+    await flushPromises()
+    expect(w.find('[data-testid="reply-thread-author"]').text()).toBe('Winston')
+    expect(w.text()).not.toContain('Teammate')
+  })
+})
+
 describe('ReplyThread mention picker', () => {
   it('Lab space picker does not offer Reggie', async () => {
     const w = mount(ReplyThread, {
