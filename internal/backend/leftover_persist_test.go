@@ -67,6 +67,12 @@ func TestFillTrivialPingPersist_PingOnly(t *testing.T) {
 	if got := PersistVisibleAssistantContent("", "pong"); got != "Pong." {
 		t.Fatalf("empty pong persist: %q, want Pong.", got)
 	}
+	if got := PersistVisibleAssistantContent("", "@Winston ping one"); got != "Pong." {
+		t.Fatalf("empty ping one persist: %q, want Pong.", got)
+	}
+	if got := PersistVisibleAssistantContent("", "@Winston ping three"); got != "Pong." {
+		t.Fatalf("empty ping three persist: %q, want Pong.", got)
+	}
 	for _, ask := range []string{
 		"how many people",
 		"hire Steve",

@@ -703,7 +703,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		s.spawnAdditionalUserMentions(spawnCtx, id, body.Content, userMsgID, ag)
 	}
 
-	chatCtx, run := s.beginChatRun(id)
+	chatCtx, run := s.beginChatRun(id, "")
 	defer s.endChatRun(id, run)
 	chatCtx = s.InjectSpaceContext(chatCtx, id, ag)
 	chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)

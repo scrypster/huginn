@@ -10,7 +10,7 @@ var (
 	leftoverDelegatedHireRE = regexp.MustCompile(`(?i)^delegated to @?[A-Za-z][\w.-]*(:|$)`)
 	hireTurnRE              = regexp.MustCompile(`(?i)\b(?:hire|create(?:\s+an)?\s+agent|add(?:\s+a)?\s+teammate|create(?:\s+a)?\s+teammate|create_agent)\b`)
 	mentionOnlyRE           = regexp.MustCompile(`(?i)@[\p{L}\p{N}_.-]+`)
-	trivialPingRE           = regexp.MustCompile(`(?i)^(ping|pong)[.!?…]*$`)
+	trivialPingRE           = regexp.MustCompile(`(?i)^(ping|pong)(?:\s+(?:one|two|three|\d{1,2}))?[.!?…]*$`)
 	leftoverDateLeadRE      = regexp.MustCompile(`(?i)^it'?s\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4},(?:\s+and\s+)?`)
 	leftoverTimeLeadRE      = regexp.MustCompile(`(?i)^(?:it'?s\s+)?\d{1,2}:\d{2}(?:\s*[ap]m)?(?:\s+et)?\.?\s+`)
 )
