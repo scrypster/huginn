@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/claudecode/approvals"
 )
 
 func postApprove(t *testing.T, s *Server, body string) (int, string, string) {
@@ -302,5 +304,142 @@ func TestApproveDeniesUnknownSessionWithAgentsOnDisk(t *testing.T) {
 	}
 	if !strings.Contains(reason, "No Huginn agent is bound") {
 		t.Errorf("reason = %q, want it to name the unbound session", reason)
+	}
+}
+
+func TestApproveBlocksThenAllowsOnDeliver(t *testing.T) {
+	s := &Server{}
+	s.approvals = approvals.New(2 * time.Second)
+	defer s.approvals.Close()
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess", ClaudeAllowedTools: []string{"Read"},
+		}}}, nil
+	}
+
+	done := make(chan string, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/v1/claude/approve",
+			strings.NewReader(`{"tool_name":"Bash","session_id":"sess","summary":"ls"}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		s.handleClaudeApprove(rr, req)
+		var got map[string]string
+		_ = json.Unmarshal(rr.Body.Bytes(), &got)
+		done <- got["decision"]
+	}()
+
+	var id string
+	for i := 0; i < 200; i++ {
+		if v := s.approvals.List(); len(v) == 1 {
+			id = v[0].ID
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if id == "" {
+		t.Fatal("handler never registered a pending approval")
+	}
+	if !s.approvals.Deliver(id, approvals.Allow) {
+		t.Fatal("Deliver failed")
+	}
+	if got := <-done; got != "allow" {
+		t.Fatalf("decision = %q, want allow", got)
+	}
+}
+
+func TestApproveDeniesOnDeadline(t *testing.T) {
+	s := &Server{}
+	// Non-zero: a zero deadline denies instantly for the wrong reason and this
+	// test would pass against a handler that never blocks at all.
+	s.approvals = approvals.New(80 * time.Millisecond)
+	defer s.approvals.Close()
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess",
+		}}}, nil
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/claude/approve",
+		strings.NewReader(`{"tool_name":"Bash","session_id":"sess","summary":"ls"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	start := time.Now()
+	s.handleClaudeApprove(rr, req)
+	if elapsed := time.Since(start); elapsed < 60*time.Millisecond {
+		t.Fatalf("handler returned after %v; it did not block", elapsed)
+	}
+	var got map[string]string
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if got["decision"] != "deny" {
+		t.Fatalf("decision = %q, want deny", got["decision"])
+	}
+}
+
+func TestApproveAllowlistedToolNeverRegisters(t *testing.T) {
+	s := &Server{}
+	s.approvals = approvals.New(time.Minute)
+	defer s.approvals.Close()
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess", ClaudeAllowedTools: []string{"Bash"},
+		}}}, nil
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/claude/approve",
+		strings.NewReader(`{"tool_name":"Bash","session_id":"sess"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	s.handleClaudeApprove(rr, req)
+	var got map[string]string
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if got["decision"] != "allow" {
+		t.Fatalf("decision = %q, want allow", got["decision"])
+	}
+	if v := s.approvals.List(); len(v) != 0 {
+		t.Fatalf("allowlisted tool registered %d pending approvals, want 0", len(v))
+	}
+}
+
+func TestApproveRememberedCommandNeverRegisters(t *testing.T) {
+	s := &Server{}
+	s.approvals = approvals.New(time.Minute)
+	defer s.approvals.Close()
+	s.approvals.Remember("codey", "Bash", "ls -la")
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess",
+		}}}, nil
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/claude/approve",
+		strings.NewReader(`{"tool_name":"Bash","session_id":"sess","summary":"ls -la"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	s.handleClaudeApprove(rr, req)
+	var got map[string]string
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if got["decision"] != "allow" {
+		t.Fatalf("decision = %q, want allow", got["decision"])
+	}
+	if v := s.approvals.List(); len(v) != 0 {
+		t.Fatalf("remembered command registered %d pending approvals, want 0", len(v))
+	}
+}
+
+func TestApproveNilStoreDenies(t *testing.T) {
+	s := &Server{}
+	s.approvals = nil // production misconfiguration: must fail CLOSED
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess",
+		}}}, nil
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/claude/approve",
+		strings.NewReader(`{"tool_name":"Bash","session_id":"sess"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	s.handleClaudeApprove(rr, req)
+	var got map[string]string
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if got["decision"] != "deny" {
+		t.Fatalf("decision = %q, want deny", got["decision"])
 	}
 }

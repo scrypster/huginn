@@ -17,6 +17,7 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/claudecode"
+	"github.com/scrypster/huginn/internal/claudecode/approvals"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
 	catalogpkg "github.com/scrypster/huginn/internal/connections/catalog"
@@ -207,6 +208,11 @@ type Server struct {
 	// nil if not configured.
 	auditLog *auditLogger
 
+	// approvals holds Claude Code tool-approval requests waiting on a human.
+	// Nil means the feature is unwired, and a nil store DENIES — never allow
+	// because the store is missing.
+	approvals *approvals.Store
+
 	// workstreamStore is the workstream store wired for the /api/v1/workstreams endpoints.
 	// nil if workstreams are not configured.
 	workstreamStore workstreamStore
@@ -301,6 +307,16 @@ func (s *Server) evictSwarmSnapshots(ctx context.Context) {
 	}
 }
 
+// approvalDeadline is how long a tool approval waits for a human.
+//
+// It MUST stay below the hook's client timeout (claudeApproveTimeout, derived
+// as ClaudeHookTimeoutSecs-10 = 290s) so the server answers before the hook
+// gives up, and that in turn stays below ClaudeHookTimeoutSecs = 300s so the
+// hook prints an explicit deny before Claude Code kills it. Ordering:
+// 285 < 290 < 300. A hook killed by Claude Code fails OPEN, so this ordering
+// is a security property, not a nicety.
+const approvalDeadline = 285 * time.Second
+
 // New creates a new Server. Call Start() to begin serving.
 func New(
 	cfg config.Config,
@@ -323,6 +339,7 @@ func New(
 		token:          token,
 		huginnDir:      huginnDir,
 		wsHub:          newWSHub(),
+		approvals:      approvals.New(approvalDeadline),
 		connMgr:        connMgr,
 		connStore:      connStore,
 		connProviders:  pm,

@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/claudecode/approvals"
 )
 
 // handleClaudeApprove answers a PreToolUse hook from a Claude Code agent.
@@ -15,10 +16,15 @@ import (
 // a non-200 would make it fall back to its own deny with a less useful reason.
 // Refusal is expressed in the payload, not the status code.
 //
-// This handler must never block on anything unbounded — see cmd_claude_approve.go
-// for the client-side timing constraint (claudeApproveTimeout, currently
-// ClaudeHookTimeoutSecs-10 = 20s) that this response has to beat. Everything
-// here is in-memory config lookups, so there is nothing to bound.
+// This handler DOES block, for up to approvalDeadline (285s), while a human
+// decides. That is the point of the feature and it inverts this function's
+// previous contract. The bound is what keeps it safe: 285s is below the hook's
+// own client timeout of 290s, which is below Claude Code's 300s hook timeout.
+// A hook killed by Claude Code fails OPEN, so the handler must always answer
+// first. Never introduce a wait here that is not bounded by approvalDeadline.
+//
+// Consequence worth knowing: the agent's session semaphore is held for the
+// whole wait. One agent can be frozen for five minutes; others are unaffected.
 func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 	// This route is intentionally unauthenticated (see its registration in
 	// server.go) because the hook client never sends a token. That safety
@@ -48,6 +54,8 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		ToolUseID string `json:"tool_use_id"`
 		SessionID string `json:"session_id"`
 		CWD       string `json:"cwd"`
+		Summary   string `json:"summary"`
+		Excerpt   string `json:"excerpt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondApprove(w, "deny", "Huginn could not parse the approval request")
@@ -71,10 +79,74 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("claudecode: tool call requires approval",
-		"agent", agent.Name, "tool", req.ToolName, "tool_use_id", req.ToolUseID)
-	respondApprove(w, "deny",
-		"Huginn: "+req.ToolName+" is not in this agent's allowed tools")
+	if s.approvals == nil {
+		slog.Error("claudecode: approval store is not wired; denying",
+			"agent", agent.Name, "tool", req.ToolName)
+		respondApprove(w, "deny", "Huginn: approvals are unavailable; denying "+req.ToolName)
+		return
+	}
+
+	if s.approvals.Remembered(agent.Name, req.ToolName, req.Summary) {
+		slog.Info("claudecode: tool call allowed by a remembered command",
+			"agent", agent.Name, "tool", req.ToolName)
+		respondApprove(w, "allow", "Huginn: you previously always-allowed this exact command")
+		return
+	}
+
+	pending, err := s.approvals.Register(approvals.Request{
+		AgentName: agent.Name,
+		ToolName:  req.ToolName,
+		Summary:   req.Summary,
+		Excerpt:   req.Excerpt,
+		CWD:       req.CWD,
+		ToolUseID: req.ToolUseID,
+	})
+	if err != nil {
+		slog.Warn("claudecode: cannot register approval; denying",
+			"agent", agent.Name, "tool", req.ToolName, "err", err)
+		respondApprove(w, "deny", "Huginn: too many approvals are already pending")
+		return
+	}
+
+	slog.Info("claudecode: tool call awaiting approval",
+		"agent", agent.Name, "tool", req.ToolName, "id", pending.ID)
+	s.broadcastApprovalChange()
+
+	decision := s.approvals.Wait(r.Context(), pending)
+	s.broadcastApprovalChange()
+
+	if decision == approvals.AllowCommand {
+		s.approvals.Remember(agent.Name, req.ToolName, req.Summary)
+	}
+
+	if !decision.Allowed() {
+		if s.auditLog != nil {
+			s.auditLog.Log("tool_permission", req.ToolName, false, "claude_approval_denied")
+		}
+		slog.Info("claudecode: tool call denied",
+			"agent", agent.Name, "tool", req.ToolName, "id", pending.ID)
+		respondApprove(w, "deny", "Huginn: "+req.ToolName+" was not approved")
+		return
+	}
+
+	slog.Info("claudecode: tool call approved by a human",
+		"agent", agent.Name, "tool", req.ToolName, "id", pending.ID)
+	respondApprove(w, "allow", "Huginn: "+req.ToolName+" was approved")
+}
+
+// broadcastApprovalChange tells every connected client that the pending set
+// changed. The message is a HINT, not the data: clients respond by re-fetching
+// GET /api/v1/claude/approvals, which is authoritative.
+//
+// This matters because WSHub.broadcast DROPS on a full channel. If the message
+// carried the card itself, a drop would lose a card until the next reconnect.
+// As a hint, any later message heals the drift, and a dropped hint only costs
+// a delayed card — which then ages out to a deny, the safe direction.
+func (s *Server) broadcastApprovalChange() {
+	if s.wsHub == nil {
+		return
+	}
+	s.wsHub.broadcast(WSMessage{Type: "claude_approvals_changed"})
 }
 
 func respondApprove(w http.ResponseWriter, decision, reason string) {
