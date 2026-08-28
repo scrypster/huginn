@@ -28,9 +28,10 @@ func IsTrivialAsk(s string) bool {
 	}
 	return isTrivialTimeAsk(s, norm) ||
 		isTrivialPing(norm) ||
-		isTrivialAck(norm) ||
+		backend.IsTrivialAckAsk(s) ||
 		isTrivialRoster(norm) ||
-		isTrivialHeadcount(norm)
+		isTrivialHeadcount(norm) ||
+		backend.IsNamedCompanyRosterAsk(s)
 }
 
 var (
@@ -90,7 +91,8 @@ func IsTrivialPingAsk(s string) bool {
 func isTrivialAck(norm string) bool {
 	switch norm {
 	case "thanks", "thank you", "thx", "ty", "ok", "okay", "k", "got it",
-		"cool", "cheers", "np", "no problem", "sounds good", "roger", "ack":
+		"cool", "cheers", "np", "no problem", "sounds good", "roger", "ack",
+		"good morning", "morning", "gm":
 		return true
 	default:
 		return false
@@ -147,4 +149,25 @@ func channelMembersLine(userMsg string, names []string) string {
 		return ""
 	}
 	return "this channel members: " + strings.Join(uniq, ", ")
+}
+
+func namedCompanyMembersLine(company string, names []string) string {
+	company = strings.TrimSpace(company)
+	if company == "" {
+		return ""
+	}
+	seen := map[string]bool{}
+	var uniq []string
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[strings.ToLower(n)] {
+			continue
+		}
+		seen[strings.ToLower(n)] = true
+		uniq = append(uniq, n)
+	}
+	if len(uniq) == 0 {
+		return ""
+	}
+	return company + " members: " + strings.Join(uniq, ", ")
 }

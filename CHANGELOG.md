@@ -16,6 +16,8 @@ All notable changes to Huginn are documented here.
 - Fail UX reads as people in a room: **I couldn't do that.** / **I asked Tesla and they haven't come back yet.** / sidebar **Couldn't do that** or **Still waiting on Tesla** — never `TOOL_FAIL` or a debug panel; hover keeps the raw token, tool, and reason
 
 ### Fixed
+- Trivial `ok` / thanks / good morning leftover-empty persist now harness-fills `Got it.` / `You're welcome.` / `Good morning.` (same path as ping → `Pong.`)
+- `who is in Lab` / `who's in Lab` is a named-company roster ask: inject Lab members and persist `Sam and Winston are in Lab.` on the fast path — not empty, not `Pong.`
 - Persist leftover `Pong.` only when THIS user ask is a trivial ping/pong after mention strip; leftover stream or a cancelled prior ping must not fill Lab ask-Steve, hire, France, team, or company turns
 - persistAccumulated binds leftover persist to THIS turn's user id/text so a prior ping in the same session cannot re-fill `Pong.`
 - Space headcount / who-is-here answers from this channel's members (injected roster line), not the whole desk

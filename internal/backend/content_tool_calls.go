@@ -546,7 +546,7 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 	visible = dropLeftoverClockWhenNotTimeAsk(visible, ask)
 	visible = dropLeftoverHireGhost(visible, ask)
 	visible = dropLeftoverDelegatedHire(visible, ask)
-	return closeIncompletePersist(fillTrivialPingPersist(visible, ask))
+	return closeIncompletePersist(fillTrivialAckPersist(fillTrivialPingPersist(visible, ask), ask))
 }
 
 // closeIncompletePersist adds a period when persist would otherwise stop

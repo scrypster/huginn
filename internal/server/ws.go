@@ -1280,6 +1280,9 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 		}
 		block += "**Company:** " + name + "\nThis channel is in the " + name + " company. When asked what company this channel is in, name it.\n"
 	}
+	if rosters := s.companyRosterMap(); len(rosters) > 0 {
+		ctx = workforce.WithCompanyRosters(ctx, rosters)
+	}
 	if block != "" {
 		ctx = workforce.WithSpaceContext(ctx, block)
 	}
@@ -1858,12 +1861,8 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if !write && errContent == "" {
 			return
 		}
-		if early == "" && s.spaceStore != nil {
-			if spaceID := sess.SpaceID(); spaceID != "" {
-				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
-					early = backend.FillTrivialHeadcountPersist(early, thisTurnAsk, sp.Members)
-				}
-			}
+		if early == "" {
+			early = s.fillEmptyHarnessPersist(early, thisTurnAsk, sess)
 		}
 		if superseded && errContent == "" {
 			if !backend.IsHarnessFillAsk(thisTurnAsk) || early == "" {
@@ -1894,12 +1893,8 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if persistedContent == "" {
 			persistedContent, _ = backend.BindPersistToThisTurn(thisTurnUserID, thisTurnAsk, latestUserID, latestUserAsk, assistantBuf.String())
 		}
-		if persistedContent == "" && s.spaceStore != nil {
-			if spaceID := sess.SpaceID(); spaceID != "" {
-				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
-					persistedContent = backend.FillTrivialHeadcountPersist(persistedContent, thisTurnAsk, sp.Members)
-				}
-			}
+		if persistedContent == "" {
+			persistedContent = s.fillEmptyHarnessPersist(persistedContent, thisTurnAsk, sess)
 		}
 		if persistedContent != "" || len(collectedToolCalls) > 0 {
 			// Turn is over: leftover deny/helpdesk speech is residue even

@@ -184,6 +184,119 @@ func isTrivialPingAsk(s string) bool {
 	return trivialPingRE.MatchString(norm)
 }
 
+func normalizePersistAsk(s string) string {
+	norm := mentionOnlyRE.ReplaceAllString(s, " ")
+	norm = strings.ToLower(strings.TrimSpace(norm))
+	norm = strings.Join(strings.Fields(norm), " ")
+	return strings.Trim(norm, " \t.!?…")
+}
+
+// IsTrivialAckAsk is thanks/ok/morning after mention strip.
+func IsTrivialAckAsk(s string) bool {
+	return trivialAckSpeech(normalizePersistAsk(s)) != ""
+}
+
+// TrivialAckSpeech is the harness fill for a trivial ack, or "".
+func TrivialAckSpeech(s string) string {
+	return trivialAckSpeech(normalizePersistAsk(s))
+}
+
+func trivialAckSpeech(norm string) string {
+	switch norm {
+	case "thanks", "thank you", "thx", "ty", "cheers", "np", "no problem":
+		return "You're welcome."
+	case "ok", "okay", "k", "got it", "cool", "sounds good", "roger", "ack":
+		return "Got it."
+	case "good morning", "morning", "gm":
+		return "Good morning."
+	default:
+		return ""
+	}
+}
+
+func fillTrivialAckPersist(visible, userAsk string) string {
+	if strings.TrimSpace(visible) != "" {
+		return visible
+	}
+	return TrivialAckSpeech(userAsk)
+}
+
+var namedCompanyRosterRE = regexp.MustCompile(`(?i)^who(?:'s| is) in (?:the )?([A-Za-z][\w.-]+)$`)
+
+// NamedCompanyRosterAsk extracts the company from "who is in Lab" / "who's in Lab".
+// "who is in this channel" / "who is here" are headcount, not a named company.
+func NamedCompanyRosterAsk(s string) (company string, ok bool) {
+	stripped := mentionOnlyRE.ReplaceAllString(s, " ")
+	stripped = strings.Join(strings.Fields(strings.TrimSpace(stripped)), " ")
+	stripped = strings.Trim(stripped, " \t.!?…")
+	m := namedCompanyRosterRE.FindStringSubmatch(stripped)
+	if len(m) < 2 {
+		return "", false
+	}
+	name := strings.TrimSpace(m[1])
+	switch strings.ToLower(name) {
+	case "", "this", "here", "channel", "the":
+		return "", false
+	}
+	return name, true
+}
+
+// IsNamedCompanyRosterAsk is "who is in Lab" / "who's in Lab".
+func IsNamedCompanyRosterAsk(s string) bool {
+	_, ok := NamedCompanyRosterAsk(s)
+	return ok
+}
+
+// FillNamedCompanyRosterPersist harness-fills a named-company roster sentence
+// when leftover drop emptied the persist. names are that company's members.
+func FillNamedCompanyRosterPersist(visible, userAsk, company string, names []string) string {
+	if strings.TrimSpace(visible) != "" {
+		return visible
+	}
+	want, ok := NamedCompanyRosterAsk(userAsk)
+	if !ok {
+		return visible
+	}
+	if company != "" && !strings.EqualFold(strings.TrimSpace(company), want) {
+		return visible
+	}
+	display := strings.TrimSpace(company)
+	if display == "" {
+		display = strings.ToUpper(want[:1]) + want[1:]
+	}
+	seen := map[string]bool{}
+	var uniq []string
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[strings.ToLower(n)] {
+			continue
+		}
+		seen[strings.ToLower(n)] = true
+		uniq = append(uniq, n)
+	}
+	if len(uniq) == 0 {
+		return visible
+	}
+	return formatCompanyRosterSpeech(uniq, display)
+}
+
+func formatCompanyRosterSpeech(names []string, company string) string {
+	n := len(names)
+	list := ""
+	switch n {
+	case 1:
+		list = names[0]
+	case 2:
+		list = names[0] + " and " + names[1]
+	default:
+		list = strings.Join(names[:n-1], ", ") + ", and " + names[n-1]
+	}
+	if n == 1 {
+		return list + " is in " + company + "."
+	}
+	return list + " are in " + company + "."
+}
+
 var trivialHeadcountAskRE = regexp.MustCompile(`(?i)\b(?:how many people(?: are(?: in this channel| here)?)?|who(?:'?s| is) (?:in this channel|here)|who(?:'?s| is) on the (?:team|roster)|roster)\b`)
 
 func isTrivialHeadcountAsk(s string) bool {
@@ -272,7 +385,7 @@ func PendingHarnessClockPrefix(s string) bool {
 // IsHarnessFillAsk reports a ping/headcount turn whose harness fill
 // should persist even when a newer request superseded the run.
 func IsHarnessFillAsk(s string) bool {
-	return isTrivialPingAsk(s) || isTrivialHeadcountAsk(s)
+	return isTrivialPingAsk(s) || isTrivialHeadcountAsk(s) || IsTrivialAckAsk(s) || IsNamedCompanyRosterAsk(s)
 }
 
 // BindPersistToThisTurn filters persistAccumulated with THIS turn's user

@@ -250,7 +250,6 @@ func TestBindPersistToThisTurn_SessionLeftoverPong(t *testing.T) {
 		"what company is this channel in?",
 		"hire a teammate",
 		"Ask Steve for the hostname",
-		"thanks",
 	} {
 		content, write := BindPersistToThisTurn("u-ping", "ping", "u-next", ask, "Pong.")
 		if write || content != "" {
@@ -264,7 +263,15 @@ func TestBindPersistToThisTurn_SessionLeftoverPong(t *testing.T) {
 			t.Errorf("same-turn leftover Pong on %q: %q, want empty", ask, content)
 		}
 	}
-	content, write := BindPersistToThisTurn("u-ping", "ping", "u-ping", "ping", "Pong.")
+	content, write := BindPersistToThisTurn("u-ping", "ping", "u-next", "thanks", "Pong.")
+	if write || content != "" {
+		t.Errorf("leftover ping persist onto thanks: write=%v content=%q", write, content)
+	}
+	content, write = BindPersistToThisTurn("u-thanks", "thanks", "u-thanks", "thanks", "Pong.")
+	if !write || content != "You're welcome." {
+		t.Errorf("same-turn leftover Pong on thanks: write=%v content=%q, want You're welcome.", write, content)
+	}
+	content, write = BindPersistToThisTurn("u-ping", "ping", "u-ping", "ping", "Pong.")
 	if !write || content != "Pong." {
 		t.Fatalf("isolated ping: write=%v content=%q, want Pong.", write, content)
 	}
@@ -284,5 +291,67 @@ func TestFillTrivialHeadcountPersist_WhoIsHere(t *testing.T) {
 	}
 	if got := FillTrivialHeadcountPersist("", "who is in Lab", names); got != "" {
 		t.Fatalf("Lab roster must not headcount-fill: %q", got)
+	}
+}
+
+func TestFillTrivialAckPersist_LeftoverPongAndClock(t *testing.T) {
+	for _, leftover := range []string{"", leftoverClockOnly, leftoverClockSpeech, "Pong.", "Pong", "pong."} {
+		if got := PersistVisibleAssistantContent(leftover, "ok"); got != "Got it." {
+			t.Errorf("leftover %q on ok: %q, want Got it.", leftover, got)
+		}
+		if got := PersistVisibleAssistantContent(leftover, "@Winston ok"); got != "Got it." {
+			t.Errorf("leftover %q on @Winston ok: %q, want Got it.", leftover, got)
+		}
+		if got := PersistVisibleAssistantContent(leftover, "thanks"); got != "You're welcome." {
+			t.Errorf("leftover %q on thanks: %q, want You're welcome.", leftover, got)
+		}
+		if got := PersistVisibleAssistantContent(leftover, "good morning"); got != "Good morning." {
+			t.Errorf("leftover %q on good morning: %q, want Good morning.", leftover, got)
+		}
+	}
+	if got := PersistVisibleAssistantContent("Pong.", "ping"); got != "Pong." {
+		t.Fatalf("ping leftover-pong: %q", got)
+	}
+	if got := PersistVisibleAssistantContent("Pong.", "hire Steve"); got != "" {
+		t.Fatalf("hire leftover-pong: %q, want empty", got)
+	}
+	if isLeftoverPongOnly(PersistVisibleAssistantContent("Pong.", "ok")) {
+		t.Fatal("ok leftover-pong filled Pong.")
+	}
+}
+
+func TestFillNamedCompanyRosterPersist_Lab(t *testing.T) {
+	names := []string{"Sam", "Winston"}
+	for _, ask := range []string{"who is in Lab", "who's in Lab", "@Winston who is in Lab", "who is in the Lab"} {
+		got := FillNamedCompanyRosterPersist("", ask, "Lab", names)
+		if got != "Sam and Winston are in Lab." {
+			t.Errorf("ask %q: %q, want Sam and Winston are in Lab.", ask, got)
+		}
+	}
+	if got := FillNamedCompanyRosterPersist("Pong.", "who is in Lab", "Lab", names); got != "Pong." {
+		t.Fatalf("non-empty should stay: %q", got)
+	}
+	if got := FillNamedCompanyRosterPersist("", "who is here", "Lab", names); got != "" {
+		t.Fatalf("who-is-here must not company-fill: %q", got)
+	}
+	if got := FillNamedCompanyRosterPersist("", "who is in Lab", "Lab", nil); got != "" {
+		t.Fatalf("no names should stay empty: %q", got)
+	}
+	if got := FillNamedCompanyRosterPersist("", "ping", "Lab", names); got != "" {
+		t.Fatalf("ping must not company-fill: %q", got)
+	}
+}
+
+func TestNamedCompanyRosterAsk(t *testing.T) {
+	for _, ask := range []string{"who is in Lab", "who's in Lab", "@Winston who is in Lab", "Who is in the Lab?"} {
+		got, ok := NamedCompanyRosterAsk(ask)
+		if !ok || !strings.EqualFold(got, "lab") {
+			t.Errorf("NamedCompanyRosterAsk(%q) = %q, %v", ask, got, ok)
+		}
+	}
+	for _, ask := range []string{"who is here", "who is in this channel", "how many people", "ping", "ok"} {
+		if _, ok := NamedCompanyRosterAsk(ask); ok {
+			t.Errorf("NamedCompanyRosterAsk(%q) = true, want false", ask)
+		}
 	}
 }

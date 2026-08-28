@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,46 @@ func GetChannelMembers(ctx context.Context) []string {
 	}
 	names, _ := ctx.Value(channelMembersKey{}).([]string)
 	return names
+}
+
+// companyRostersKey is name→members for every company (Lab, Huginn, …).
+type companyRostersKey struct{}
+
+// WithCompanyRosters attaches company name → seated members.
+func WithCompanyRosters(ctx context.Context, rosters map[string][]string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	copied := make(map[string][]string, len(rosters))
+	for k, v := range rosters {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		copied[k] = append([]string(nil), v...)
+	}
+	return context.WithValue(ctx, companyRostersKey{}, copied)
+}
+
+// GetCompanyRoster returns seated members of the named company, or nil.
+func GetCompanyRoster(ctx context.Context, name string) []string {
+	if ctx == nil {
+		return nil
+	}
+	rosters, _ := ctx.Value(companyRostersKey{}).(map[string][]string)
+	if len(rosters) == 0 {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if names, ok := rosters[name]; ok {
+		return names
+	}
+	for k, v := range rosters {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return nil
 }
 
 // channelRecentKey is the context key for the channel-recent summary block.
