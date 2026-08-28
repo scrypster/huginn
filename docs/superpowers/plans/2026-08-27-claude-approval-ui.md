@@ -1723,6 +1723,16 @@ git commit -m "feat(server): add approval listing and decision endpoints"
 - Create: `web/src/composables/useClaudeApprovals.ts`
 - Test: `web/src/composables/__tests__/useClaudeApprovals.test.ts`
 
+> **CORRECTION applied during execution.** The code below originally used raw
+> `fetch()`. That was wrong: both endpoints sit behind the server's authenticated
+> `api(...)` wrapper, so raw `fetch` sends no bearer token, 401s on every call, and
+> leaves the approval list silently empty forever — a UI that looks fine and gates
+> nothing. Use `apiFetch` from `web/src/composables/useApi.ts:214`, which attaches the
+> token, retries once on 401, returns PARSED JSON, and THROWS on non-ok (so error
+> handling is try/catch, not `if (!res.ok)`). Tests mock the module with
+> `vi.mock('../useApi')` rather than stubbing `globalThis.fetch`. The shipped
+> implementation is commit b8d562f; read that, not the snippets below, for the tests.
+
 **Interfaces:**
 - Consumes: `GET /api/v1/claude/approvals`, `POST /api/v1/claude/approve/decide`, WS message type `claude_approvals_changed` from Tasks 3-4.
 - Produces:
@@ -1848,6 +1858,7 @@ Create `web/src/composables/useClaudeApprovals.ts`:
 
 ```ts
 import { ref, computed, type Ref, type ComputedRef } from 'vue'
+import { apiFetch } from './useApi'
 
 export interface ClaudeApproval {
   id: string
@@ -1879,9 +1890,7 @@ export function useClaudeApprovals() {
    */
   async function refresh(): Promise<void> {
     try {
-      const res = await fetch('/api/v1/claude/approvals')
-      if (!res.ok) return
-      const body = await res.json()
+      const body = await apiFetch<{ approvals?: ClaudeApproval[] }>('/api/v1/claude/approvals')
       approvals.value = Array.isArray(body?.approvals) ? body.approvals : []
     } catch {
       // Keep the last known list on a transient failure rather than blanking
@@ -1891,11 +1900,14 @@ export function useClaudeApprovals() {
 
   async function decide(id: string, decision: ApprovalDecision): Promise<void> {
     try {
-      await fetch('/api/v1/claude/approve/decide', {
+      await apiFetch('/api/v1/claude/approve/decide', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, decision }),
       })
+    } catch {
+      // decide() is called straight from a click handler, so a propagating
+      // rejection becomes an unhandled promise rejection. The refresh below
+      // re-syncs with server truth either way.
     } finally {
       await refresh()
     }
