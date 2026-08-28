@@ -238,8 +238,19 @@ present, plus a 2 KiB JSON excerpt of the remaining input.
 **`internal/server/handlers_claude_approve.go`** — after the allowlist check
 fails, register a pending entry, broadcast, block on `Wait`, respond.
 
-**`internal/server/ws.go`** — two outbound message types:
-`claude_approval_pending`, `claude_approval_resolved`.
+**Websocket** — ONE outbound message type, `claude_approvals_changed`, carrying
+no payload.
+
+It is a **hint, not the data**. Clients respond by re-fetching
+`GET /api/v1/claude/approvals`, which is authoritative. This matters because
+`WSHub.broadcast` DROPS on a full channel (`ws.go:383`): if the message carried
+the card itself, a drop would lose that card until the next reconnect. As a
+hint, any later message heals the drift, and a dropped hint costs only a delayed
+card — which then ages out to a deny, the safe direction.
+
+This replaces the earlier two-message design (`claude_approval_pending` /
+`claude_approval_resolved`), which would have made the client reconcile push
+payloads against fetched state — two sources of truth for one list.
 
 **`internal/server/server.go`** — two new routes in the **authenticated** block;
 lower this route's body cap (see §6).
@@ -284,7 +295,10 @@ re-fetches. There is no stale-card path.
 ### Reconnect
 
 On every WS connect the frontend calls `GET /api/v1/claude/approvals` and
-**replaces** its list wholesale — server authoritative, no merge logic.
+**replaces** its list wholesale — server authoritative, no merge logic. "On
+connect" means watching the websocket's connection state, not just `onMounted`:
+a dropped-and-restored socket does not remount the component, and after a server
+restart there may be no further hint to prompt a refetch.
 
 The response returns `remaining_ms` computed server-side, **never an absolute
 wall-clock expiry**. Client clock skew must not be able to make a card look
