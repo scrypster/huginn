@@ -838,6 +838,16 @@
         </div>
       </div>
 
+      <!-- ── Pending Claude tool approvals ──────────────────────── -->
+      <div v-if="visibleApprovals.length > 0" class="px-4 pb-2 flex flex-col gap-1.5">
+        <ClaudeApprovalCard
+          v-for="approval in visibleApprovals"
+          :key="approval.id"
+          :approval="approval"
+          @decide="d => onApprovalDecide(approval.id, d)"
+        />
+      </div>
+
       <!-- ── Swarm status panel ─────────────────────────────────── -->
       <Transition
         enter-active-class="transition-all duration-200 ease-out"
@@ -1086,6 +1096,8 @@ import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
 import MessageActions from '../components/MessageActions.vue'
+import ClaudeApprovalCard from '../components/ClaudeApprovalCard.vue'
+import { useClaudeApprovals, type ApprovalDecision } from '../composables/useClaudeApprovals'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
 import { api, apiFetch } from '../composables/useApi'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
@@ -1195,6 +1207,23 @@ let previewTicker: ReturnType<typeof setInterval> | null = null
 
 const autoApproveNotices = ref<{ id: string; agentName: string }[]>([])
 const autoApproveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+// Cards belong to the conversation whose agent raised them. `approvals` is a
+// module-level singleton shared with App.vue (which owns fetching/refresh —
+// see App.vue's websocket + reconnect wiring), so this view only filters and
+// renders. Falls back to showing ALL approvals when no agent is selected yet:
+// an over-strict filter would make a card invisible, and an invisible card
+// silently ages out to a deny — misplaced beats invisible.
+const { approvals: claudeApprovals, decide: decideApproval } = useClaudeApprovals()
+const visibleApprovals = computed(() => {
+  const name = selectedAgentName.value
+  if (!name) return claudeApprovals.value
+  return claudeApprovals.value.filter(a => a.agent_name === name)
+})
+
+async function onApprovalDecide(id: string, d: ApprovalDecision): Promise<void> {
+  await decideApproval(id, d)
+}
 
 function showAutoApproveNotice(agentName: string) {
   const id = `aa-${Date.now()}`

@@ -83,6 +83,12 @@
           {{ chatDoneCount > 9 ? '9+' : chatDoneCount }}
         </span>
 
+        <!-- Badge overlay for pending Claude tool approvals -->
+        <span v-if="item.section === 'chat' && approvalCount > 0"
+          class="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-huginn-red text-white text-[8px] font-bold flex items-center justify-center leading-none">
+          {{ approvalCount > 9 ? '9+' : approvalCount }}
+        </span>
+
         <!-- Badge overlay for automation (delivery issues) -->
         <span v-if="item.section === 'automation' && hasIssues"
           class="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-huginn-red text-white text-[8px] font-bold flex items-center justify-center leading-none"
@@ -916,6 +922,8 @@ import SpaceCreateModal from './components/SpaceCreateModal.vue'
 import { useAgents } from './composables/useAgents'
 import { useThreads } from './composables/useThreads'
 import { useDeliveryQueue } from './composables/useDeliveryQueue'
+import { useClaudeApprovals } from './composables/useClaudeApprovals'
+import { useBrowserNotifications } from './composables/useBrowserNotifications'
 
 const route = useRoute()
 const router = useRouter()
@@ -924,6 +932,8 @@ const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } 
 const { wireWS: wireWorkflowsWS } = useWorkflows()
 const { isAgentActive } = useThreads()
 const { badgeCount, actionableEntries, hasIssues, fetchBadge, fetchActionable, retryEntry, dismissEntry, handleBadgeUpdate } = useDeliveryQueue()
+const { pendingCount: approvalCount, refresh: refreshApprovals, handleApprovalsChanged: onApprovalsChanged } = useClaudeApprovals()
+const { notify: notifyBrowser } = useBrowserNotifications()
 
 const drawerOpen = ref(false)
 watch(drawerOpen, (open) => {
@@ -1133,6 +1143,14 @@ const wsLastError = computed(() => wsRef.value?.lastError?.value ?? null)
 function wsReconnectNow() { wsRef.value?.reconnectNow?.() }
 function reloadPage() { window.location.reload() }
 
+// A dropped-and-restored websocket reuses the same wsRef object (no remount),
+// and after a server restart there may be no further `claude_approvals_changed`
+// hint at all — so refetch on every transition into connected, not on wsRef
+// itself changing (which only happens on route/session switches).
+watch(wsConnected, (isConnected) => {
+  if (isConnected) void refreshApprovals()
+})
+
 // Keep the WS layer informed of the active session so it can re-subscribe and
 // resume missed events (replay) after a reconnect.
 watch(activeSessionId, (id) => { wsRef.value?.setActiveSession(id || null) })
@@ -1202,6 +1220,12 @@ async function initApp() {
     ws.on('delivery_badge_update', (msg) => {
       handleBadgeUpdate((msg as unknown as { count: number }).count ?? 0)
     })
+    // Payload-free hint — the server's pending-approval list is the data, so
+    // any hint just re-fetches it. Registered here (not in ChatView) because
+    // `approvals` is a module-level singleton and App.vue is always mounted;
+    // ChatView tears down and re-registers its WS handlers on every
+    // route/session switch.
+    ws.on('claude_approvals_changed', () => onApprovalsChanged())
     // Resume recovery: after a reconnect the WS layer sends "resume" for the
     // sessions it was tracking. gap=true means the server's replay buffer
     // could not cover the disconnect window — re-fetch history via REST.
@@ -1477,8 +1501,19 @@ onMounted(() => {
   // on its arrival, and useVersion swallows errors gracefully.
   void loadVersion()
   startPolling()
+  // Shows cards raised before this tab connected.
+  void refreshApprovals()
   document.addEventListener('click', onDocClick, true)
   document.addEventListener('keydown', handleGlobalAppKeydown)
+})
+
+// Rising pending-approval count means a NEW tool call needs a human — notify
+// even when the user is on another view. useBrowserNotifications() itself
+// no-ops unless the tab is hidden and notifications are enabled/granted.
+watch(approvalCount, (now, before) => {
+  if (now > (before ?? 0)) {
+    notifyBrowser('Huginn', 'A tool call needs approval', 'claude-approval-pending')
+  }
 })
 onUnmounted(() => {
   stopPolling()
