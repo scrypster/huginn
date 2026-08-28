@@ -2637,6 +2637,17 @@ watch(wsRef, (ws) => {
       flushPendingToolResults(sid)
       const msgs = getMessages(sid)
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
+      // A replace-correction can race the 'done' that closed the streaming
+      // bubble. If no bubble is streaming any more, repaint the last
+      // assistant bubble in place — never mint a second bubble for it.
+      if (msg.payload?.replace && !streamMsg?.streaming) {
+        const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
+        if (lastAssistant) {
+          lastAssistant.content = visibleAssistantContent(msg.content ?? '')
+          scrollToBottom()
+          return
+        }
+      }
       if (streamMsg?.streaming) {
         // A server-side rewrite (e.g. the harness clock label settling into
         // "It's {stamp}." once the stamp finishes streaming) can change text
