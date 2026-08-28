@@ -1035,3 +1035,57 @@ func TestStripLoadingModelAndThirdPersonNoted(t *testing.T) {
 		t.Fatalf("third-person noted persist leak: %q", got)
 	}
 }
+
+func TestStripResidualSpeechAfterTools_SelfCorrectionGlue(t *testing.T) {
+	// Live repro 2026-08-27: self-referential correction narration a small
+	// model emits after a failed/aborted delegation attempt. Never teammate
+	// speech — the human never asked "did you make a mistake?".
+	literal := "It seems there was a mistake in my response. I will address the issue directly in this session without delegation."
+	if got := StripResidualSpeechAfterTools(literal); got != "" {
+		t.Fatalf("self-correction glue leaked: %q", got)
+	}
+
+	// Variants: "appears" instead of "seems", "previous response", filler
+	// between "directly" and "without delegation", "this" instead of "the
+	// issue".
+	for _, glue := range []string{
+		"It appears there was a mistake in my response.",
+		"It seems there was a mistake in my previous response.",
+		"It appears there was a mistake in my previous response!",
+		"I will address the issue directly in this session without delegation.",
+		"I will address this directly without delegation.",
+		"I will address the issue directly, without further delegation.",
+	} {
+		if got := StripResidualSpeechAfterTools(glue); got != "" {
+			t.Errorf("%q not treated as self-correction glue: %q", glue, got)
+		}
+	}
+
+	// Glue followed by real content: the real sentence survives, the glue
+	// does not appear in the result.
+	withAnswer := "It seems there was a mistake in my response. I will address the issue directly in this session without delegation. The hostname is MJs-MacBook-Pro."
+	got := StripResidualSpeechAfterTools(withAnswer)
+	if strings.Contains(got, "mistake") || strings.Contains(got, "without delegation") {
+		t.Fatalf("self-correction glue leaked alongside real answer: %q", got)
+	}
+	if !strings.Contains(got, "MJs-MacBook-Pro") {
+		t.Fatalf("real answer stripped along with glue: %q", got)
+	}
+
+	// Legitimate sentences about mistakes/delegation in a different context
+	// must not be stripped.
+	for _, keep := range []string{
+		"Delegation of authority was a common mistake in early management theory.",
+		"The team reviewed past mistakes in delegation during the retro.",
+		"I will address the budget concerns directly with finance.",
+		// Contains the trigger phrase but continues past it — the glue
+		// regex is end-anchored so this whole sentence survives.
+		"I will address the issue directly in this session without delegation to a subcontractor, per the contract.",
+		"There was a mistake in my previous calculation, the correct total is 42.",
+		"It appears there was a mistake in the invoice, not in my response.",
+	} {
+		if got := StripResidualSpeechAfterTools(keep); got != keep {
+			t.Errorf("legitimate sentence over-matched: %q -> %q", keep, got)
+		}
+	}
+}

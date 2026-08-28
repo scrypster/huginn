@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/scrypster/huginn/internal/backend"
@@ -46,11 +47,15 @@ type CreateAgentDeps struct {
 	// server wires agents.ResolveAgentVaultName. When nil (tests, TUI
 	// harnesses), the legacy "<name>-huginn" slug is used as a fallback.
 	ResolveVaultName func(agentName string) string
-	ValidateName    func(name string) error
-	CallerFromCtx   func(ctx context.Context) string
-	SpaceFromCtx    func(ctx context.Context) string
-	CallerModel     func(ctx context.Context) string
-	MachineModel    string
+	ValidateName     func(name string) error
+	CallerFromCtx    func(ctx context.Context) string
+	SpaceFromCtx     func(ctx context.Context) string
+	CallerModel      func(ctx context.Context) string
+	MachineModel     string
+	// Registry is used to infer LocalTools for coding/engineering hires when
+	// the caller didn't pass local_tools explicitly. Optional — nil skips
+	// inference (LocalTools stays nil, matching prior behavior).
+	Registry *Registry
 }
 
 // CreateAgentTool is grant-gated: register it, do not tag "builtin", do not
@@ -194,6 +199,13 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) Tool
 
 	localTools := stringSliceArg(args["local_tools"])
 	localTools = stripHireGrant(localTools)
+	inferredTools := false
+	if len(localTools) == 0 && t.Deps.Registry != nil && roleLooksCoding(role) {
+		if inferred := defaultCodingLocalTools(t.Deps.Registry); len(inferred) > 0 {
+			localTools = inferred
+			inferredTools = true
+		}
+	}
 
 	model := strings.TrimSpace(asToolString(args["model"]))
 	if model == "" && t.Deps.CallerModel != nil {
@@ -209,6 +221,12 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) Tool
 	systemPrompt := strings.TrimSpace(asToolString(args["system_prompt"]))
 	if systemPrompt == "" {
 		systemPrompt = fmt.Sprintf("You are %s, %s.", name, role)
+		if roleLooksCoding(role) {
+			// Small local models mistype long paths and quit after one failed
+			// tool call. Bake the self-correction discipline into the default
+			// coding-hire prompt so a miss becomes a retry, not a shrug.
+			systemPrompt += " Use your tools directly. If a file path fails, run list_dir or bash to find the correct path and retry — never report failure after a single attempt without checking the directory."
+		}
 	}
 
 	memory := true
@@ -270,10 +288,71 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) Tool
 		_ = t.Deps.SeatSpaceMember(spaceID, name)
 	}
 
-	return ToolResult{Output: hireSpeech(name, role, localTools, belt, vaultOK, vaultName, seatedWhere, desk)}
+	return ToolResult{Output: hireSpeech(name, role, localTools, belt, vaultOK, vaultName, seatedWhere, desk, inferredTools)}
 }
 
-func hireSpeech(name, role string, local []string, belt []CreateAgentBeltEntry, vaultOK bool, vaultName, seated string, desk bool) string {
+// hireCodingRoleRE matches role/description text that signals a
+// coding/engineering hire, triggering default LocalTools inference.
+//
+// Inference hands a hire bash + write_file + edit_file without the human
+// asking, so this deliberately favours precision over recall: a missed
+// coding hire is fixed by passing local_tools explicitly, but a false
+// positive silently arms a shell for someone who was hired to write
+// marketing copy. Matching is therefore on word boundaries and on phrases,
+// never bare substrings — a naive `strings.Contains` list of
+// {code, test, fix, ...} fired on "Zip code data entry", "Barcode
+// inventory clerk", "manages the latest news digest", "prefix/suffix
+// naming specialist", "Greatest hits curator" and "fixes the coffee
+// machine and tests recipes".
+//
+// Ambiguous single words are excluded on purpose: "code" (dress code, zip
+// code), "test" (tests recipes, user testing), "fix" (fixture, fixes the
+// espresso machine) and "software" (a poet who writes about software) only
+// count inside an unambiguous compound or phrase.
+var hireCodingRoleRE = regexp.MustCompile(`(?i)\b(?:` +
+	// Unambiguous single words.
+	`coding|codebase|code ?base|developer|developers|development|` +
+	`engineer|engineers|engineering|programmer|programmers|programming|` +
+	`debug|debugs|debugging|debugger|refactor|refactors|refactoring|` +
+	`devops|sysadmin|compiler|repository|repositories|repo|repos|` +
+	// Unambiguous phrases built from otherwise-ambiguous words.
+	`(?:write|writes|writing|read|reads|reading|review|reviews|reviewing|ship|ships|shipping|maintain|maintains|maintaining|our|the|source|legacy|production) code|` +
+	`code review|code reviews|pull request|pull requests|` +
+	`(?:fix|fixes|fixing|squash|squashes|squashing|triage|triages|triaging|hunt|hunts|hunting) (?:the |a |our |these |those )?bugs?|` +
+	`bug ?fix|bug ?fixes|bug ?fixing|` +
+	`unit test|unit tests|unit testing|integration test|integration tests|` +
+	`test suite|test suites|test coverage|` +
+	`(?:write|writes|writing) tests` +
+	`)\b`)
+
+// roleLooksCoding reports whether role/description text signals a
+// coding/engineering hire. See hireCodingRoleRE for the precision rationale.
+func roleLooksCoding(role string) bool {
+	return hireCodingRoleRE.MatchString(role)
+}
+
+// defaultCodingLocalToolNames are the builtin tools a coding/engineering
+// hire is granted by default: read a file, write a file, edit a file, run a
+// shell command, list a directory.
+var defaultCodingLocalToolNames = []string{"read_file", "write_file", "edit_file", "bash", "list_dir"}
+
+// defaultCodingLocalTools returns defaultCodingLocalToolNames filtered down
+// to tool names that actually exist in reg — defensive against a registry
+// that doesn't carry one of these (e.g. a stripped-down deployment).
+func defaultCodingLocalTools(reg *Registry) []string {
+	if reg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(defaultCodingLocalToolNames))
+	for _, name := range defaultCodingLocalToolNames {
+		if _, ok := reg.Get(name); ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func hireSpeech(name, role string, local []string, belt []CreateAgentBeltEntry, vaultOK bool, vaultName, seated string, desk bool, inferredTools bool) string {
 	var b strings.Builder
 	b.WriteString(name)
 	if isVerbPhraseRole(role) {
@@ -295,6 +374,9 @@ func hireSpeech(name, role string, local []string, belt []CreateAgentBeltEntry, 
 	if len(tools) > 0 {
 		b.WriteString(" with ")
 		b.WriteString(strings.Join(tools, ", "))
+		if inferredTools {
+			b.WriteString(" (auto-granted for coding work)")
+		}
 	}
 	b.WriteString(". ")
 	if vaultOK {
@@ -403,7 +485,7 @@ func hireVaultName(name string) string {
 }
 
 func stripHireGrant(tools []string) []string {
-	out := make([]string, 0, len(tools))
+	var out []string
 	for _, t := range tools {
 		t = strings.TrimSpace(t)
 		if t == "" || strings.EqualFold(t, CreateAgentName) {

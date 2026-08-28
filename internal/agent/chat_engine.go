@@ -223,7 +223,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			},
 			OnToolDone: func(callID string, name string, result tools.ToolResult) {
 				if onToolEvent != nil {
-					onToolEvent("tool_result", map[string]any{"tool": name, "result": result.Output})
+					onToolEvent("tool_result", map[string]any{"tool": name, "result": toolResultDisplayText(result)})
 				}
 			},
 		}

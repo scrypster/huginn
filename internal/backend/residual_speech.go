@@ -107,6 +107,18 @@ var (
 	// Future-tense wait glue spoken as a whole sentence after tools already ran:
 	// "Once Reggie has replied with PONG, I will let you know …"
 	futureWaitGlueSentenceRE = regexp.MustCompile(`(?i)^(?:once|after|when|as soon as|to complete)\b.{0,160}?\b(?:replied|responds?|responded|finished|done|complete|completed|await|waiting|comes? back|gets? back)\b.{0,160}?\b(?:i will|i'll)\b`)
+	// Self-correction glue: a small model narrating that it just made a
+	// mistake and is now going to "handle it directly" instead of
+	// delegating. Live repro 2026-08-27: "It seems there was a mistake in
+	// my response. I will address the issue directly in this session
+	// without delegation." Never teammate speech — the human never asked
+	// whether the model erred.
+	selfCorrectionMistakeSentenceRE = regexp.MustCompile(`(?i)^it (?:seems|appears)(?: that)? there (?:was|has been) a mistake in my (?:previous\s+)?response\b`)
+	// Anchored at the end so the glue sentence must *end* on "without
+	// delegation" — otherwise a real sentence that merely contains the
+	// phrase ("I will address the issue directly in this session without
+	// delegation to a subcontractor, per the contract.") is dropped whole.
+	selfCorrectionNoDelegationSentenceRE = regexp.MustCompile(`(?i)^i will address (?:the issue|this)\b[^.!?]{0,80}?\bwithout(?: further)? delegation\s*[.!?]*\s*$`)
 )
 
 // StripResidualSpeech removes wait tags and playbook glue lines from
@@ -270,6 +282,7 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 			line = leadingBracketStageRE.ReplaceAllString(line, "")
 			line = stripOrphanFenceTicks(line)
 			line = dropFutureWaitGlueSentences(line)
+			line = dropSelfCorrectionGlueSentences(line)
 			line = dropPlaybookInstructionSentences(line)
 			line = dropToolPlanNarrationSentences(line)
 			line = dropHelpdeskCloserSentences(line)
@@ -316,6 +329,30 @@ func dropFutureWaitGlueSentences(line string) string {
 	var kept []string
 	for _, sent := range splitSentences(trim) {
 		if futureWaitGlueSentenceRE.MatchString(sent) {
+			continue
+		}
+		kept = append(kept, sent)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	indent := len(line) - len(strings.TrimLeft(line, " \t"))
+	return line[:indent] + strings.Join(kept, " ")
+}
+
+// dropSelfCorrectionGlueSentences removes self-referential correction
+// narration ("It seems there was a mistake in my response. I will address
+// the issue directly in this session without delegation.") — a small model
+// narrating its own course-correction after a failed/aborted delegation
+// attempt. That never belongs in teammate speech.
+func dropSelfCorrectionGlueSentences(line string) string {
+	trim := strings.TrimSpace(line)
+	if trim == "" {
+		return line
+	}
+	var kept []string
+	for _, sent := range splitSentences(trim) {
+		if selfCorrectionMistakeSentenceRE.MatchString(sent) || selfCorrectionNoDelegationSentenceRE.MatchString(sent) {
 			continue
 		}
 		kept = append(kept, sent)

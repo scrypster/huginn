@@ -2841,7 +2841,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
 		// create_agent is grant-gated (named local_tools only). Do not tag
 		// builtin — God Mode ["*"] must not receive it.
-		toolReg.Register(srv.NewCreateAgentTool())
+		createAgentTool := srv.NewCreateAgentTool()
+		createAgentTool.Deps.Registry = toolReg
+		toolReg.Register(createAgentTool)
 		// Honor AllowedTools/DisallowedTools config filters (parity with TUI mode).
 		if len(cfg.AllowedTools) > 0 {
 			toolReg.SetAllowed(cfg.AllowedTools)

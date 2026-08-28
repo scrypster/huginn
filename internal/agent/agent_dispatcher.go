@@ -518,6 +518,22 @@ func (o *Orchestrator) Dispatch(
 // completion without tools.
 var errToolsNotSupported = fmt.Errorf("model does not support tools")
 
+// toolResultDisplayText returns the text a UI/onEvent consumer should show for
+// a tool call's result. A successful call shows its Output; a failed call
+// shows Error (falling back to Output if Error is somehow empty) so a failure
+// never renders as a blank "result" — matching what the model itself sees in
+// its own next-turn context (loop.go prefixes IsError results with "error: ").
+// Without this, a live-captured tool_result wire payload for a failed
+// read_file call showed {"result":"","success":false} — the real error text
+// ("no such file or directory") was silently dropped, leaving only the model's
+// own guess about what went wrong visible anywhere.
+func toolResultDisplayText(result tools.ToolResult) string {
+	if result.IsError && result.Error != "" {
+		return result.Error
+	}
+	return result.Output
+}
+
 // agentTurnOpts captures the parameters that differ between ChatWithAgent and
 // TaskWithAgent so that both can delegate their shared core logic to
 // runAgentTurn. Fields that are common to every turn (agent, userMsg, session,
@@ -1194,7 +1210,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			}
 			slog.Debug("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 			if onToolEvent != nil {
-				payload := map[string]any{"tool": name, "result": result.Output}
+				payload := map[string]any{"tool": name, "result": toolResultDisplayText(result)}
 				if result.Metadata != nil {
 					payload["metadata"] = result.Metadata
 				}
@@ -1209,7 +1225,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 					"id":      callID,
 					"tool":    name,
 					"success": result.Error == "",
-					"result":  result.Output,
+					"result":  toolResultDisplayText(result),
 					"args":    capturedArgs,
 				}
 				if result.Metadata != nil {
