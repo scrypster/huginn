@@ -29,7 +29,7 @@
         <div class="flex-1 h-px bg-huginn-border/40" />
       </div>
       <div v-if="parent" data-testid="reply-thread-parent" class="pb-3 border-b border-huginn-border/60">
-        <div class="text-[11px] font-semibold text-huginn-muted mb-1">{{ speaker(parent) }}</div>
+        <div class="text-[11px] font-semibold text-huginn-muted mb-1" data-testid="reply-thread-author">{{ speaker(parent) }}</div>
         <MsgTimeReveal :created-at="createdAtOf(parent)" :revealed="threadTimesRevealed">
           <SystemFailLine v-if="classifyReplySpeech(parent.content).kind === 'fail'" :content="parent.content" />
           <p v-else-if="classifyReplySpeech(parent.content).kind === 'speech'" data-testid="reply-speech" class="text-sm text-huginn-text leading-relaxed whitespace-pre-wrap break-words">{{ classifyReplySpeech(parent.content).text }}</p>
@@ -65,7 +65,7 @@
         data-testid="reply-thread-stream"
         class="space-y-0.5"
       >
-        <div class="text-[11px] font-semibold text-huginn-muted">{{ streamAgent || typingAgent || 'Teammate' }}</div>
+        <div class="text-[11px] font-semibold text-huginn-muted">{{ streamAgent || typingAgent || fallbackAgent || 'Teammate' }}</div>
         <p data-testid="reply-speech" class="text-sm text-huginn-text leading-relaxed whitespace-pre-wrap break-words">{{ streamSpeech }}</p>
       </div>
       <div v-else-if="typingAgent" data-testid="reply-thread-writing" class="text-xs text-huginn-muted italic">
@@ -144,6 +144,7 @@ const props = defineProps<{
   streamAgent?: string
   streamText?: string
   memberNames?: string[]
+  fallbackAgent?: string
   snagAgent?: string
   snagReason?: string
 }>()
@@ -194,7 +195,9 @@ function showUnknownMentionHint(name: string) {
 
 function speaker(msg: { role: string; agent?: string }): string {
   if (msg.role === 'user') return 'You'
-  return msg.agent || 'Teammate'
+  const a = (msg.agent || '').trim()
+  if (a && a.length > 1) return a
+  return (props.fallbackAgent || '').trim() || a || 'Teammate'
 }
 
 function createdAtOf(msg: { created_at?: string; ts?: string; createdAt?: string } | null | undefined): string {

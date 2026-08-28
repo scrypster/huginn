@@ -578,10 +578,10 @@
               <div class="flex-1 min-w-0 pt-0.5">
                 <!-- Per-message agent attribution header (only on first message of a run) -->
                 <AgentMessageHeader
-                  v-if="msg.showHeader && msg.agent"
-                  :agent-name="msg.agent"
+                  v-if="msg.showHeader && hallwayName(msg)"
+                  :agent-name="hallwayName(msg)"
                   :created-at="msg.createdAt"
-                  :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
+                  :agent-description="agentsList.find(a => a.name === hallwayName(msg))?.description"
                 />
                 <!-- Message text — system-fail prefixes are not teammate speech -->
                 <SystemFailLine
@@ -1132,6 +1132,7 @@
         :stream-agent="replyThreadParent ? spaceReplyStream[replyThreadParent.id]?.agent : ''"
         :stream-text="replyThreadParent ? spaceReplyStream[replyThreadParent.id]?.text : ''"
         :member-names="mentionMemberNames"
+        :fallback-agent="displayAgent?.name || activeSpace?.leadAgent || ''"
         :snag-agent="replyThreadParent ? spaceReplySnag[replyThreadParent.id]?.agent : ''"
         :snag-reason="replyThreadParent ? spaceReplySnag[replyThreadParent.id]?.reason : ''"
         @close="closeReplyThread"
@@ -1246,6 +1247,7 @@ import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
+import { hallwayAuthorName } from './chat/respondingAgent'
 import { visibleAssistantContent } from '../utils/visibleAssistantContent'
 import { isTrivialAsk } from '../utils/trivialAsk'
 import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
@@ -1632,10 +1634,15 @@ function diagnoseMessage(msg: any) {
   if (d) openThreadDetail(d)
 }
 
+function hallwayName(msg: { agent?: string } | null | undefined): string {
+  return hallwayAuthorName(msg?.agent, displayAgent.value?.name || activeSpace.value?.leadAgent || selectedAgentName.value)
+}
+
 function openReplyThread(msg: any) {
   if (!props.spaceId || !msg?.id) return
   closeThreadDetail()
-  replyThreadParent.value = msg
+  const named = hallwayName(msg)
+  replyThreadParent.value = named && !msg.agent ? { ...msg, agent: named } : msg
 }
 
 function closeReplyThread() {

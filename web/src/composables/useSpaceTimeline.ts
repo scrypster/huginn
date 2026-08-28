@@ -80,35 +80,47 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   // any tokens are emitted). Flushed when onToken creates the placeholder.
   const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string }[]>()
 
+  const wireAgent = (msg: WSMessage): string => {
+    const raw = msg as unknown as Record<string, unknown>
+    return typeof raw.agent === 'string' ? raw.agent.trim() : ''
+  }
+
+  const sessionMsgs = (st: TimelineState, sessionId: string): SpaceMessage[] =>
+    st.messages.filter(m => m.session_id === sessionId)
+
+  const shouldMintStream = (st: TimelineState, sessionId: string, incoming: string): boolean => {
+    const text = incoming.trim()
+    if (!text) return false
+    const msgs = sessionMsgs(st, sessionId)
+    const last = msgs[msgs.length - 1]
+    if (last?.role === 'user') return true
+    if (last?.role === 'assistant' && !last.id.startsWith('stream-') && (last.content || '').includes(text)) {
+      return false
+    }
+    return !msgs.some(m =>
+      m.role === 'assistant' && !m.id.startsWith('stream-') && (m.content || '').trim() === text,
+    )
+  }
+
   const onStatus = (msg: WSMessage): void => {
     const sessionId = msg.session_id
     if (!sessionId) return
     const statusText = (msg.content ?? '').trim()
-    // "Loading model, please wait..." is a status, not Winston speech.
-    if (/^loading model/i.test(statusText)) {
+    // Status is never teammate speech. Loading-model and resume "thinking"
+    // must not mint hallway bubbles (SNAP-0).
+    if (/^loading model/i.test(statusText) || /^thinking$/i.test(statusText)) {
+      loadingSessionIds.add(sessionId)
       return
     }
     for (const [, st] of stateMap.entries()) {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
-      // Find an existing streaming placeholder — a prior *persisted* assistant
-      // message does NOT count (different id prefix).
       const streamPlaceholder = [...st.messages].reverse().find(
         (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
       )
       if (streamPlaceholder) {
-        streamPlaceholder.content = msg.content ?? ''
-      } else {
-        st.messages.push({
-          id: `stream-${sessionId}-${Date.now()}`,
-          session_id: sessionId,
-          seq: -1,
-          ts: new Date().toISOString(),
-          role: 'assistant',
-          content: msg.content ?? '',
-          agent: '',
-        })
+        const named = wireAgent(msg)
+        if (named && !streamPlaceholder.agent) streamPlaceholder.agent = named
       }
-      // Unconditional: any path that creates/updates a placeholder marks loading.
       loadingSessionIds.add(sessionId)
       break
     }
@@ -127,6 +139,8 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
           (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && m.id.startsWith('stream-'),
         )
         if (existing) {
+          const named = wireAgent(msg)
+          if (named && !existing.agent) existing.agent = named
           if (loadingSessionIds.has(sessionId)) {
             // Replace the status placeholder content with the first real token.
             // cancelStatus() fires in Go before this message arrives, so the
@@ -138,16 +152,12 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
           }
         } else {
           // Resume/replay of an already-persisted hire ("They're here.")
-          // must not mint a second hallway bubble.
+          // must not mint a second hallway bubble — including when the last
+          // row is a different persist (SNAP-0 / 0.5 hard-refresh).
           const incoming = (msg.content ?? '').trim()
-          const lastPersisted = [...st.messages].reverse().find(
-            (m: SpaceMessage) => m.session_id === sessionId && m.role === 'assistant' && !m.id.startsWith('stream-'),
-          )
-          if (incoming && lastPersisted && lastPersisted.content.includes(incoming)) {
+          if (!shouldMintStream(st, sessionId, incoming)) {
             break
           }
-          // Start a new streaming message placeholder, flushing any tool
-          // results that arrived as prefetch (before this first token).
           const pending = pendingToolResults.get(sessionId) ?? []
           pendingToolResults.delete(sessionId)
           st.messages.push({
@@ -157,7 +167,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
             ts: new Date().toISOString(),
             role: 'assistant',
             content: visibleAssistantContent(msg.content ?? ''),
-            agent: ((msg as unknown as Record<string, unknown>).agent as string) ?? '',
+            agent: wireAgent(msg),
             toolCalls: pending.length > 0 ? pending.map(p => ({ ...p, done: true })) : undefined,
           })
         }

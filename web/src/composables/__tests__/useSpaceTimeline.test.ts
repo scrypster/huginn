@@ -935,6 +935,51 @@ describe('stale turn / loading model', () => {
     expect(state.messages.filter(m => /loading model/i.test(m.content))).toHaveLength(0)
   })
 
+  it('does not mint a thinking status bubble', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    ws.emit('status', { type: 'status', session_id: SESSION_ID, content: 'thinking', agent: 'Winston' })
+    await nextTick()
+    expect(state.messages.filter(m => m.role === 'assistant')).toHaveLength(0)
+  })
+
+  it('does not replay an older persist when the last row is a different assistant', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    state.messages.push({
+      id: 'old-hire', session_id: SESSION_ID, seq: 2, ts: new Date().toISOString(),
+      role: 'assistant', content: "They're here.", agent: 'Winston',
+    })
+    state.messages.push({
+      id: 'later', session_id: SESSION_ID, seq: 5, ts: new Date().toISOString(),
+      role: 'assistant', content: 'There are 7 people in this channel.', agent: 'Winston',
+    })
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: "They're here.", agent: 'Winston' })
+    await nextTick()
+    expect(state.messages.filter(m => m.id.startsWith('stream-'))).toHaveLength(0)
+    expect(state.messages.filter(m => m.content.includes("They're here."))).toHaveLength(1)
+  })
+
+  it('stamps Winston on a new stream bubble from the WS agent field', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+    state.messages.push({
+      id: 'u-new', session_id: SESSION_ID, seq: 6, ts: new Date().toISOString(),
+      role: 'user', content: '@Winston ping', agent: '',
+    })
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Pong.', agent: 'Winston' })
+    await nextTick()
+    const stream = state.messages.filter(m => m.id.startsWith('stream-'))
+    expect(stream).toHaveLength(1)
+    expect(stream[0].agent).toBe('Winston')
+  })
+
   it('does not emit a ghost They\'re here. for an already-persisted hire', async () => {
     const { state } = setupSpace()
     state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)

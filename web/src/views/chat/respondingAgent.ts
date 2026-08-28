@@ -29,6 +29,15 @@ function isAgentNameChar(c: string): boolean {
 }
 
 /** Leading @Name at the start of content. Empty string when none. */
+/** Name on a hallway/drawer bubble. Prefer the message author; never a bare initial. */
+export function hallwayAuthorName(msgAgent?: string, fallback?: string): string {
+  const a = (msgAgent || '').trim()
+  if (a && a.length > 1) return a
+  const f = (fallback || '').trim()
+  if (f) return f
+  return a
+}
+
 export function extractLeadMention(content: string): string {
   const trimmed = content.trim()
   if (!trimmed.startsWith('@')) return ''

@@ -103,7 +103,19 @@ describe('StatsView', () => {
   it('shows active sessions count', async () => {
     const w = mountView()
     await flushPromises()
-    // 2 sessions with status 'active'
+    // 2 sessions with status 'active' and no updated_at (legacy)
+    expect(w.text()).toContain('2')
+  })
+
+  it('does not count stale status=active sessions as ACTIVE', async () => {
+    mockApiSessionsList.mockResolvedValueOnce([
+      { session_id: 'a', status: 'active', updated_at: '2026-06-10T13:54:41Z', message_count: 1 },
+      { session_id: 'b', status: 'active', updated_at: new Date().toISOString(), message_count: 2 },
+      { session_id: 'c', status: 'active', updated_at: new Date().toISOString(), message_count: 3 },
+    ])
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('3')
     expect(w.text()).toContain('2')
   })
 

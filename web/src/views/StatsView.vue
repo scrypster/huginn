@@ -190,8 +190,19 @@ const serverVersionLabel = computed(() => formatVersionLabel(healthData.value?.v
 
 const totalSessions = computed(() => sessionsData.value.length)
 
+const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+function isActiveSession(s: SessionManifest, now = Date.now()): boolean {
+  const status = (s.status || '').toLowerCase()
+  if (status === 'idle' || status === 'archived' || status === 'closed') return false
+  if (!s.updated_at) return status === 'active'
+  const t = Date.parse(s.updated_at)
+  if (!Number.isFinite(t)) return status === 'active'
+  return now - t <= ACTIVE_WINDOW_MS
+}
+
 const activeSessions = computed(() =>
-  sessionsData.value.filter((s) => s.status === 'active').length
+  sessionsData.value.filter((s) => isActiveSession(s)).length
 )
 
 const totalMessages = computed(() =>

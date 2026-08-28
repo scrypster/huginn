@@ -1790,8 +1790,7 @@ function handleGlobalAppKeydown(e: KeyboardEvent) {
 }
 
 onMounted(() => {
-  initApp()
-  fetchBadge()
+  void initApp().then(() => { fetchBadge() })
   // Fire-and-forget: the version is purely informational, no UI flow gates
   // on its arrival, and useVersion swallows errors gracefully.
   void loadVersion()

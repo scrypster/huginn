@@ -61,8 +61,19 @@ export function useChatViewHeaderAndMembers(params: Params) {
   const spaceAgents = computed(() => {
     const space = params.activeSpace.value
     if (!space) return []
-    const names = [space.leadAgent, ...space.memberAgents.filter(m => m !== space.leadAgent)]
-    return names.map(n => params.agentsList.value.find(a => a.name === n)).filter((a): a is AgentLike => !!a)
+    const names = [space.leadAgent, ...space.memberAgents.filter(m => m !== space.leadAgent)].filter(Boolean)
+    const seen = new Set<string>()
+    const unique: string[] = []
+    for (const n of names) {
+      const k = n.toLowerCase()
+      if (seen.has(k)) continue
+      seen.add(k)
+      unique.push(n)
+    }
+    return unique.map(n => {
+      const agent = params.agentsList.value.find(a => a.name === n)
+      return (agent ?? { name: n, color: '#58a6ff', icon: (n[0] || '?').toUpperCase() }) as AgentLike
+    })
   })
 
   const spaceAgentPreviews = computed(() => spaceAgents.value.slice(0, 3))

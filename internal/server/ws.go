@@ -111,6 +111,7 @@ type WSMessage struct {
 	// RunID ties a streaming event to the specific agent run that produced it,
 	// allowing the frontend to discard stale events from previous runs.
 	RunID string `json:"run_id,omitempty"`
+	Agent string `json:"agent,omitempty"`
 }
 
 type wsClient struct {
@@ -1264,6 +1265,12 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	}
 
 	block := agent.BuildSpaceContextBlock(sp.Name, sp.Kind, selfName, sp.LeadAgent, members)
+	if name := s.lookupCompanyName(sp.CompanyID); name != "" {
+		if block == "" {
+			block = "\n\n[Team Context]\n"
+		}
+		block += "**Company:** " + name + "\nThis channel is in the " + name + " company. When asked what company this channel is in, name it.\n"
+	}
 	if block != "" {
 		ctx = workforce.WithSpaceContext(ctx, block)
 	}
@@ -1641,8 +1648,17 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	// Pre-generate assistant message ID so done payload + persistence agree.
 	assistantMsgID := session.NewID()
 
+	ag := s.resolveAgentForMessage(sessionID, userMsg)
+	agentName := ""
+	if ag != nil {
+		agentName = strings.TrimSpace(ag.Name)
+	}
+
 	// emit streams a run event to all clients subscribed to this session.
 	emit := func(msg WSMessage) {
+		if strings.TrimSpace(msg.Agent) == "" && agentName != "" {
+			msg.Agent = agentName
+		}
 		s.wsHub.broadcastToSessionFrom(sessionID, msg, c)
 	}
 	var lastVisible string
@@ -1654,6 +1670,9 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		visible := backend.VisibleAssistantContent(raw)
 		if !backend.IsTimeAsk(userMsg) && backend.IsLeftoverClockSpeech(visible) {
+			visible = ""
+		}
+		if !agent.IsTrivialPingAsk(userMsg) && backend.IsLeftoverPongSpeech(visible) {
 			visible = ""
 		}
 		if visible == lastVisible {
@@ -1697,7 +1716,6 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	// during context prep / model load (before the first token).
 	emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
 
-	ag := s.resolveAgentForMessage(sessionID, userMsg)
 	// Hallway / desk-DM ChatWithAgent never went through wakeSpaceThreadAgent,
 	// so space_reply_typing never fired and left-nav rows stayed still during
 	// "Winston is responding… Preparing context…". Put thinking on the wire.
@@ -1820,6 +1838,11 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		if superseded && errContent == "" {
 			if !backend.IsHarnessFillAsk(userMsg) || early == "" {
+				return
+			}
+			// FIFO burst pings finish normally (successor queued). A non-ping
+			// successor cancels this run — do not leftover-persist Pong onto the next ask.
+			if chatCtx.Err() != nil {
 				return
 			}
 		}
