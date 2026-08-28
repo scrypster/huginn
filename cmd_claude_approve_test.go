@@ -216,12 +216,18 @@ func TestSummarizeEditUsesNewString(t *testing.T) {
 
 func TestSummarizeUnknownToolFallsBackToBoundedJSON(t *testing.T) {
 	sum, exc := summarizeToolInput("Task", map[string]any{
-		"prompt": strings.Repeat("z", maxExcerptBytes+500),
+		"file_path": "/tmp/t.md",
+		"prompt":    strings.Repeat("z", maxExcerptBytes+500),
 	})
+	if sum != "/tmp/t.md" {
+		t.Fatalf("summary = %q, want the file_path", sum)
+	}
 	if len(exc) > maxExcerptBytes {
 		t.Fatalf("excerpt len = %d, want <= %d", len(exc), maxExcerptBytes)
 	}
-	_ = sum
+	if !strings.Contains(exc, "prompt") {
+		t.Fatalf("excerpt = %q, want a JSON excerpt naming the prompt key", exc)
+	}
 }
 
 func TestSummarizeNilInputIsSafe(t *testing.T) {
@@ -250,5 +256,47 @@ func TestRunClaudeApproveForwardsSummary(t *testing.T) {
 	}
 	if sent["summary"] != "ls -la" {
 		t.Fatalf("summary forwarded = %v, want %q", sent["summary"], "ls -la")
+	}
+}
+
+func TestSummarizeNonStringValuesDoNotPanic(t *testing.T) {
+	sum, exc := summarizeToolInput("Bash", map[string]any{"command": 42})
+	if sum != "" {
+		t.Fatalf("summary = %q, want empty when command is not a string", sum)
+	}
+	_ = exc
+	// Write with a non-string file_path must also survive.
+	if _, _ = summarizeToolInput("Write", map[string]any{"file_path": []any{1, 2}, "content": "x"}); false {
+		t.Fatal("unreachable")
+	}
+}
+
+func TestSummarizeClipsLongFilePath(t *testing.T) {
+	long := strings.Repeat("p", maxCommandBytes+500)
+	sum, _ := summarizeToolInput("Write", map[string]any{"file_path": long, "content": "x"})
+	if len(sum) > maxCommandBytes {
+		t.Fatalf("summary len = %d, want <= %d", len(sum), maxCommandBytes)
+	}
+}
+
+func TestRunClaudeApproveToleratesNonObjectToolInput(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "allow", "reason": "ok"})
+	}))
+	defer srv.Close()
+
+	in := strings.NewReader(`{"tool_name":"Bash","session_id":"s","tool_input":"not-an-object"}`)
+	var out bytes.Buffer
+	if code := runClaudeApprove(in, &out, srv.URL, 5*time.Second); code != 0 {
+		t.Fatalf("exit = %d, want 0 — a malformed tool_input must not break the request", code)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(gotBody, &sent); err != nil {
+		t.Fatalf("server got unparseable body: %v", err)
+	}
+	if sent["tool_name"] != "Bash" {
+		t.Fatalf("tool_name = %v, want Bash — the request must still be forwarded", sent["tool_name"])
 	}
 }

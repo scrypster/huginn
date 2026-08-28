@@ -173,16 +173,17 @@ func summarizeToolInput(toolName string, in map[string]any) (summary, excerpt st
 	case "Bash":
 		return clip(inputString(in, "command"), maxCommandBytes), ""
 	case "Write":
-		return inputString(in, "file_path"), clip(inputString(in, "content"), maxExcerptBytes)
+		return clip(inputString(in, "file_path"), maxCommandBytes), clip(inputString(in, "content"), maxExcerptBytes)
 	case "Edit", "NotebookEdit":
-		return inputString(in, "file_path"), clip(inputString(in, "new_string"), maxExcerptBytes)
+		return clip(inputString(in, "file_path"), maxCommandBytes), clip(inputString(in, "new_string"), maxExcerptBytes)
 	case "WebFetch":
-		return inputString(in, "url"), ""
+		return clip(inputString(in, "url"), maxCommandBytes), ""
 	}
 	summary = inputString(in, "file_path")
 	if summary == "" {
 		summary = inputString(in, "url")
 	}
+	summary = clip(summary, maxCommandBytes)
 	b, err := json.Marshal(in)
 	if err != nil {
 		return summary, ""
@@ -208,11 +209,11 @@ func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time
 	raw, _ := io.ReadAll(in)
 
 	var hook struct {
-		ToolName  string         `json:"tool_name"`
-		ToolUseID string         `json:"tool_use_id"`
-		SessionID string         `json:"session_id"`
-		CWD       string         `json:"cwd"`
-		ToolInput map[string]any `json:"tool_input"`
+		ToolName  string          `json:"tool_name"`
+		ToolUseID string          `json:"tool_use_id"`
+		SessionID string          `json:"session_id"`
+		CWD       string          `json:"cwd"`
+		ToolInput json.RawMessage `json:"tool_input"`
 	}
 	if err := json.Unmarshal(raw, &hook); err != nil {
 		return emitDecision(out, "deny", "Huginn could not parse the tool call; denying")
@@ -225,7 +226,18 @@ func runClaudeApprove(in io.Reader, out io.Writer, endpoint string, timeout time
 	// tool_input is forwarded as a BOUNDED SUMMARY, never raw. See
 	// summarizeToolInput for why the truncation lives here rather than on the
 	// server: permission must never depend on payload size.
-	summary, excerpt := summarizeToolInput(hook.ToolName, hook.ToolInput)
+	//
+	// tool_input is decoded SEPARATELY and best-effort. Folding it into the
+	// main struct as map[string]any made a non-object tool_input fail the whole
+	// decode, which denies. That fails safe for one call but would deny every
+	// gated call forever if the CLI ever changed this field's shape — a silent
+	// outage of the approval feature. A malformed input should cost us the
+	// summary, not the entire gate.
+	var toolInput map[string]any
+	if len(hook.ToolInput) > 0 {
+		_ = json.Unmarshal(hook.ToolInput, &toolInput)
+	}
+	summary, excerpt := summarizeToolInput(hook.ToolName, toolInput)
 	body, err := json.Marshal(map[string]any{
 		"tool_name":   hook.ToolName,
 		"tool_use_id": hook.ToolUseID,
