@@ -42,6 +42,7 @@ interface AgentForm {
   toolbelt: ToolbeltEntry[]
   skills: string[]
   local_tools: string[]
+  approved_tools: string[]
   heartbeat_enabled: boolean
   heartbeat_cron: string
 }
@@ -196,6 +197,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     toolbelt: [],
     skills: [],
     local_tools: [],
+    approved_tools: [],
     heartbeat_enabled: false,
     heartbeat_cron: '',
   })
@@ -734,6 +736,26 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     showLocalAllowAllConfirm.value = false
   }
 
+  // Approved-without-asking tools: persisted "Always allow for <Agent>"
+  // grants from the serve-mode permission banner. Displayed as removable
+  // chips near Local Access; removing one here (then saving) means the next
+  // time this agent calls that tool, it prompts again.
+  // addApprovedTool grants a tool for unattended runs (e.g. scheduled
+  // workflows, where no human is present to click Allow) — the write-path
+  // counterpart to removeApprovedTool. Takes effect on save.
+  function addApprovedTool(name: string) {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    if (form.value.approved_tools.includes(trimmed)) return
+    form.value.approved_tools = [...form.value.approved_tools, trimmed]
+    markDirty()
+  }
+
+  function removeApprovedTool(name: string) {
+    form.value.approved_tools = form.value.approved_tools.filter(n => n !== name)
+    markDirty()
+  }
+
   const showLocalAccessModal = ref(false)
   const modalLocalTools = ref<string[]>([])
   const hoveredGrantedIdx = ref(-1)
@@ -851,6 +873,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         toolbelt: ((data as any).toolbelt || []).filter((e: any) => e.provider !== '*'),
         skills: (data as any).skills || [],
         local_tools: (data as any).local_tools ?? [],
+        approved_tools: (data as any).approved_tools ?? [],
         heartbeat_enabled: (data as any).heartbeat_enabled ?? false,
         heartbeat_cron: (data as any).heartbeat_cron ?? '',
       }
@@ -1015,6 +1038,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           toolbelt: [],
           skills: [],
           local_tools: [],
+    approved_tools: [],
           heartbeat_enabled: false,
           heartbeat_cron: '',
         }
@@ -1109,6 +1133,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     localAccessSummary,
     showLocalAccessModal,
     modalLocalTools,
+    addApprovedTool,
+    removeApprovedTool,
     hoveredGrantedIdx,
     hoveredAvailableName,
     hoveredAvailableConn,

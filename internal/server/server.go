@@ -107,6 +107,11 @@ type Server struct {
 	previewGate *threadmgr.DelegationPreviewGate // may be nil if preview not configured
 	ca          *threadmgr.CostAccumulator       // may be nil if cost tracking not configured
 
+	// permPrompts tracks in-flight WS permission_request round-trips for
+	// PermissionPromptFunc / handlePermissionResponse. Always non-nil after
+	// NewServer.
+	permPrompts *permissionPrompts
+
 	// delegationStore persists agent delegation records. nil if the underlying
 	// store doesn't implement session.DelegationStore (e.g. in-memory store in tests).
 	delegationStore session.DelegationStore
@@ -348,6 +353,7 @@ func New(
 		relayKeys:       make(map[string]string),
 		spaceWakeCounts: make(map[string]int),
 		entityAudit:     newEntityAuditLogger(huginnDir),
+		permPrompts:     newPermissionPrompts(),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
 		sessionCreateLimiter: newEndpointRateLimiter(10, time.Minute),

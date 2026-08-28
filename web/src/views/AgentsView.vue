@@ -375,6 +375,40 @@
                 style="border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,0.55)">
                 <span>✏</span> Manage local access
               </button>
+
+              <!-- Approved without asking: persisted "Always allow for <Agent>"
+                   grants from the serve-mode permission banner. -->
+              <div data-testid="approved-tools-section" class="pt-2 space-y-2">
+                <p class="text-[11px] text-huginn-muted leading-relaxed">Approved without asking — these tools no longer prompt for this agent. Grant here for unattended runs (scheduled workflows have no one to click Allow).</p>
+                <div class="flex flex-wrap gap-2 items-center">
+                  <span
+                    v-for="name in form.approved_tools" :key="name"
+                    data-testid="approved-tool-chip"
+                    class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono"
+                    style="background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.3);color:#3fb950"
+                  >
+                    {{ name }}
+                    <button
+                      data-testid="approved-tool-remove-btn"
+                      @click="removeApprovedTool(name)"
+                      class="hover:opacity-70"
+                      :aria-label="`Remove ${name} from approved tools`"
+                    >✕</button>
+                  </span>
+                  <input
+                    v-model="newApprovedTool"
+                    data-testid="approved-tool-add-input"
+                    placeholder="tool name (e.g. bash)"
+                    class="px-2 py-1 rounded-lg text-[11px] font-mono bg-huginn-surface border border-huginn-border w-40"
+                    @keydown.enter.prevent="addApprovedTool(newApprovedTool); newApprovedTool = ''"
+                  />
+                  <button
+                    data-testid="approved-tool-add-btn"
+                    class="px-2 py-1 rounded-lg text-[11px] border border-huginn-green/30 text-huginn-green hover:bg-huginn-green/10"
+                    @click="addApprovedTool(newApprovedTool); newApprovedTool = ''"
+                  >add</button>
+                </div>
+              </div>
             </section>
 
             <div class="border-t border-huginn-border" />
@@ -1353,7 +1387,7 @@
 </template>
 
 <script setup lang="ts">
-import { toRef } from 'vue'
+import { ref, toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import AgentCard from '../components/AgentCard.vue'
 import ModelToolWarning from '../components/ModelToolWarning.vue'
@@ -1434,6 +1468,8 @@ const {
   LOCAL_TOOL_CATALOG,
   SHELL_TOOLS,
   modalLocalTools,
+  addApprovedTool,
+  removeApprovedTool,
   hoveredGrantedIdx,
   hoveredAvailableName,
   hoveredAvailableConn,
@@ -1460,6 +1496,8 @@ const {
   advertiseMemory,
   onColorInputChange,
 } = useAgentsViewState(toRef(props, 'agentName'), router)
+
+const newApprovedTool = ref('')
 </script>
 
 <style scoped>

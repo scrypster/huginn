@@ -731,7 +731,7 @@ describe('ChatView', () => {
     expect(html).toContain('AgentB')
   })
 
-  it('approvePermission(true): sends permission_response with approved=true and clears banner', async () => {
+  it('approvePermission("once"): sends permission_response scope=once and clears banner', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []
 
@@ -741,22 +741,22 @@ describe('ChatView', () => {
     // Trigger permission request
     mockWs.simulateMessage({
       type: 'permission_request',
-      payload: { id: 'perm-42', tool: 'bash', command: 'echo hi' },
+      payload: { id: 'perm-42', tool: 'bash', command: 'echo hi', agent: 'Codey' },
     })
     await nextTick()
     expect(wrapper.html()).toContain('Permission required')
 
-    // Click Allow
-    const allowBtn = wrapper.findAll('button').find(b => b.text().includes('Allow'))
-    expect(allowBtn).toBeDefined()
-    await allowBtn!.trigger('click')
+    // Click "Allow once"
+    const allowBtn = wrapper.find('[data-testid="permission-allow-once"]')
+    expect(allowBtn.exists()).toBe(true)
+    await allowBtn.trigger('click')
     await nextTick()
 
     // Should have sent permission_response
     expect(mockWs.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'permission_response',
-        payload: { id: 'perm-42', approved: true },
+        payload: { id: 'perm-42', scope: 'once', approved: true },
       })
     )
 
@@ -764,7 +764,7 @@ describe('ChatView', () => {
     expect(wrapper.html()).not.toContain('Permission required')
   })
 
-  it('approvePermission(false): sends permission_response with approved=false', async () => {
+  it('approvePermission("deny"): sends permission_response scope=deny', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []
 
@@ -773,22 +773,127 @@ describe('ChatView', () => {
 
     mockWs.simulateMessage({
       type: 'permission_request',
-      payload: { id: 'perm-99', tool: 'write_file', command: '/etc/passwd' },
+      payload: { id: 'perm-99', tool: 'write_file', command: '/etc/passwd', agent: 'Codey' },
     })
     await nextTick()
 
     // Click Deny
-    const denyBtn = wrapper.findAll('button').find(b => b.text().includes('Deny'))
-    expect(denyBtn).toBeDefined()
-    await denyBtn!.trigger('click')
+    const denyBtn = wrapper.find('[data-testid="permission-deny"]')
+    expect(denyBtn.exists()).toBe(true)
+    await denyBtn.trigger('click')
     await nextTick()
 
     expect(mockWs.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'permission_response',
-        payload: { id: 'perm-99', approved: false },
+        payload: { id: 'perm-99', scope: 'deny', approved: false },
       })
     )
+  })
+
+  it('approvePermission("always_agent"): sends permission_response scope=always_agent and clears banner', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-7', tool: 'bash', command: 'go test ./...', agent: 'Codey' },
+    })
+    await nextTick()
+
+    const alwaysBtn = wrapper.find('[data-testid="permission-allow-always"]')
+    expect(alwaysBtn.exists()).toBe(true)
+    expect(alwaysBtn.text()).toContain('Codey')
+    await alwaysBtn.trigger('click')
+    await nextTick()
+
+    expect(mockWs.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'permission_response',
+        payload: { id: 'perm-7', scope: 'always_agent', approved: true },
+      })
+    )
+    expect(wrapper.html()).not.toContain('Permission required')
+  })
+
+  it('permission banner shows the agent name and the actual command', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-8', tool: 'bash', command: 'go test ./...', agent: 'Codey' },
+    })
+    await nextTick()
+
+    expect(wrapper.text()).toContain('Codey wants to run: go test ./...')
+  })
+
+  it('permission banner renders exactly three action buttons', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-9', tool: 'bash', command: 'ls', agent: 'Codey' },
+    })
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="permission-allow-once"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="permission-allow-always"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="permission-deny"]').exists()).toBe(true)
+  })
+
+  it('permission_cancelled: clears the banner when the prompt times out server-side', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-timeout', tool: 'bash', command: 'sleep 999', agent: 'Codey' },
+    })
+    await nextTick()
+    expect(wrapper.html()).toContain('Permission required')
+
+    mockWs.simulateMessage({
+      type: 'permission_cancelled',
+      payload: { id: 'perm-timeout', reason: 'timeout' },
+    })
+    await nextTick()
+    expect(wrapper.html()).not.toContain('Permission required')
+  })
+
+  it('permission_cancelled: leaves a different pending request alone', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-live', tool: 'bash', command: 'go build ./...', agent: 'Codey' },
+    })
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_cancelled',
+      payload: { id: 'perm-stale', reason: 'timeout' },
+    })
+    await nextTick()
+    expect(wrapper.html()).toContain('Permission required')
   })
 
   it('handleEditorSend: allows queued send while streaming', async () => {

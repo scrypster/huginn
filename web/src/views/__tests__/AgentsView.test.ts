@@ -174,6 +174,72 @@ describe('AgentsView', () => {
     expect(router.currentRoute.value.path).toBe('/agents/Alpha')
   })
 
+  it('renders approved-tools chips from a persisted always-allow grant', async () => {
+    mockAgentsGet.mockResolvedValueOnce({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: ['bash'],
+      approved_tools: ['bash'],
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const section = wrapper.find('[data-testid="approved-tools-section"]')
+    expect(section.exists()).toBe(true)
+    const chips = wrapper.findAll('[data-testid="approved-tool-chip"]')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].text()).toContain('bash')
+  })
+
+  // Section is now ALWAYS rendered: it carries the add-grant input needed for
+  // unattended runs (scheduled workflows have no human to click Allow).
+  it('renders the approved-tools section with the add affordance even with no grants', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="approved-tools-section"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="approved-tool-chip"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="approved-tool-add-input"]').exists()).toBe(true)
+  })
+
+  it('removing an approved-tool chip clears it from the form and marks dirty', async () => {
+    mockAgentsGet.mockResolvedValueOnce({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: ['bash'],
+      approved_tools: ['bash'],
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="approved-tool-remove-btn"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="approved-tool-chip"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Unsaved changes')
+  })
+
   it('local access Allow all warning click must confirm first', async () => {
     await router.push('/agents/Alpha')
     await router.isReady()

@@ -2237,6 +2237,21 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// fails closed. Also used by the relay dispatcher to deliver remote
 	// permission responses.
 	serverGate := permissions.NewGate(true, nil)
+	// PermExec-level tools (bash) always require a human approval prompt in
+	// serve mode, regardless of skipAll — skipAll otherwise auto-approves
+	// every non-read tool call with nobody watching. The prompt itself is
+	// wired below (serverGate.SetPromptFunc(srv.PermissionPromptFunc()))
+	// once the WS hub (srv) exists; until then bash calls fail closed
+	// (promptFunc nil → ReasonPromptUnavailable) rather than silently running.
+	serverGate.SetExecRequiresPrompt(true)
+	// delegate_to_agent is PermExec too, but it runs no code itself and
+	// already has its own approval step (DelegationPreviewGate, manual by
+	// default). Without this exemption every delegation would raise a second,
+	// redundant "wants to run" banner ahead of the delegation preview card,
+	// and any run with no human attached (scheduled workflow, heartbeat)
+	// could not delegate at all. The delegated agent's own bash calls still
+	// prompt — they are checked against that agent's forked gate.
+	serverGate.SetExecPromptExempt([]string{"delegate_to_agent"})
 
 	// Orchestrator (minimal setup for serve mode)
 	registry := modelconfig.NewRegistry(models)
@@ -2350,6 +2365,12 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	}
 
 	srv = newServerWithRuntime(*cfg, orch, sessStore, token, huginnHome, connMgr, connStore, connProviders)
+
+	// Bridge PermExec (bash) permission prompts to the web UI: emits
+	// permission_request over the session's WS connection and blocks until
+	// the browser answers (or the gate's own timeout denies). See
+	// serverGate.SetExecRequiresPrompt(true) above for why this is needed.
+	serverGate.SetPromptFunc(srv.PermissionPromptFunc())
 
 	// Wire the BackendCache into the server so handleUpdateConfig can push key
 	// changes into running backends without requiring a restart.

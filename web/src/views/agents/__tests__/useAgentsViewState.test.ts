@@ -375,3 +375,14 @@ describe('useAgentsViewState', () => {
     })
   })
 })
+
+describe('addApprovedTool', () => {
+  it('adds a trimmed unique grant (unattended-run escape hatch)', () => {
+    const { state } = mountHarness()
+    state.form.value.approved_tools = ['bash']
+    state.addApprovedTool('  run_tests  ')
+    state.addApprovedTool('bash') // duplicate ignored
+    state.addApprovedTool('   ') // blank ignored
+    expect(state.form.value.approved_tools).toEqual(['bash', 'run_tests'])
+  })
+})

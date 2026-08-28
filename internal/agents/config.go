@@ -77,6 +77,16 @@ type AgentDef struct {
 	// Named list = only those specific tools.
 	LocalTools []string `json:"local_tools,omitempty"           yaml:"local_tools,omitempty"`
 
+	// ApprovedTools is the allowlist of tool names this agent may run
+	// without a permission prompt, persisted from "Always allow for
+	// <Agent>" decisions made in the permission banner (serve mode). Unlike
+	// LocalTools (which grants tool *visibility*), ApprovedTools only
+	// affects the permission gate: a tool must already be visible via
+	// LocalTools/Toolbelt to be called at all. Names are seeded into the
+	// per-run forked gate's session-allowed set (see applyToolbelt), so
+	// future runs skip prompting for these specific tools.
+	ApprovedTools []string `json:"approved_tools,omitempty"        yaml:"approved_tools,omitempty"`
+
 	// Description is a short (max 500 bytes) human-readable summary of what this agent does.
 	// Visible to other agents in channel contexts for intelligent task delegation.
 	Description string `json:"description,omitempty"           yaml:"description,omitempty"`
@@ -310,6 +320,7 @@ func FromDef(def AgentDef) *Agent {
 		Toolbelt:            def.Toolbelt,
 		Skills:              def.Skills,
 		LocalTools:          def.LocalTools,
+		ApprovedTools:       def.ApprovedTools,
 	}
 }
 

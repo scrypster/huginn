@@ -391,6 +391,8 @@ func (o *Orchestrator) CodeWithAgent(
 		OnPermissionDenied: onPermDenied,
 		OnEvent:            onEvent,
 		VaultReconnector:   vr.reconnector,
+		AgentName:          ag.Name,
+		SessionID:          GetSessionID(ctx),
 	}
 
 	agentLoopStart := time.Now().UnixNano()

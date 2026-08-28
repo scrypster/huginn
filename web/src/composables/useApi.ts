@@ -87,6 +87,7 @@ export interface Agent {
   description?: string          // one-line description shown in member panels and tooltips
   toolbelt?: ToolbeltEntry[]
   local_tools?: string[]   // tool names; ["*"] = all builtins; undefined/[] = none
+  approved_tools?: string[] // tool names pre-approved to skip the permission prompt
   skills?: unknown[]
   is_default?: boolean
   [key: string]: unknown

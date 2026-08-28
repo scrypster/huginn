@@ -81,6 +81,14 @@ type RunLoopConfig struct {
 	MemoryUserMsg string
 	MemorySession string
 	MemoryHome    string // ~/.huginn; MD fallback when Muninn is off
+
+	// AgentName and SessionID identify the run for permission-prompt routing.
+	// Propagated onto every permissions.PermissionRequest built by
+	// executeSingle so a serve-mode promptFunc bridge can target the right
+	// WS session and agent. Optional — empty for callers that don't track
+	// this (e.g. some tests).
+	AgentName string
+	SessionID string
 }
 
 // LoopResult is the final state after the loop ends.
@@ -179,10 +187,12 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 
 	if cfg.Gate != nil {
 		req := permissions.PermissionRequest{
-			ToolName: toolName,
-			Level:    tool.Permission(),
-			Args:     argsMap,
-			Provider: cfg.Tools.ProviderFor(toolName),
+			ToolName:  toolName,
+			Level:     tool.Permission(),
+			Args:      argsMap,
+			Provider:  cfg.Tools.ProviderFor(toolName),
+			AgentName: cfg.AgentName,
+			SessionID: cfg.SessionID,
 		}
 		checkResult := cfg.Gate.CheckDetailed(req)
 		if !checkResult.Allowed {
