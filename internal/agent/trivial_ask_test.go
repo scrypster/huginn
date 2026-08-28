@@ -10,6 +10,7 @@ import (
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/workforce"
 )
 
 func delegationTestRegistry() *tools.Registry {
@@ -115,7 +116,11 @@ func TestIsTrivialAsk_True(t *testing.T) {
 		"ok",
 		"okay",
 		"got it",
+		"good morning",
 		"who is here",
+		"who is in Lab",
+		"who's in Lab",
+		"@Winston who is in Lab",
 		"who's here",
 		"who is on the team",
 		"who's on the team",
@@ -235,5 +240,65 @@ func TestChannelMembersLine_HeadcountAndWhoIsHere(t *testing.T) {
 	}
 	if got := channelMembersLine("how many people", nil); got != "" {
 		t.Fatalf("empty names: %q", got)
+	}
+	if got := channelMembersLine("who is in Lab", names); got != "" {
+		t.Fatalf("Lab roster must not get this-channel line: %q", got)
+	}
+}
+
+func TestChatWithAgent_AckShortCircuitNoLLM(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should-not-run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	ag := &agents.Agent{Name: "Winston", ModelID: "claude-sonnet-4", SystemPrompt: "You are Winston."}
+	var tokens strings.Builder
+	if err := o.ChatWithAgent(context.Background(), ag, "ok", "", func(tkn string) { tokens.WriteString(tkn) }, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) != 0 {
+		t.Fatalf("ok must not call the LLM, got %d requests", len(mb.lastRequests))
+	}
+	if tokens.String() != "Got it." {
+		t.Fatalf("ok tokens %q, want Got it.", tokens.String())
+	}
+}
+
+func TestChatWithAgent_ThanksShortCircuitNoLLM(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should-not-run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	ag := &agents.Agent{Name: "Winston", ModelID: "claude-sonnet-4", SystemPrompt: "You are Winston."}
+	var tokens strings.Builder
+	if err := o.ChatWithAgent(context.Background(), ag, "@Winston thanks", "", func(tkn string) { tokens.WriteString(tkn) }, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) != 0 {
+		t.Fatalf("thanks must not call the LLM, got %d requests", len(mb.lastRequests))
+	}
+	if tokens.String() != "You're welcome." {
+		t.Fatalf("thanks tokens %q, want You're welcome.", tokens.String())
+	}
+}
+
+func TestChatWithAgent_LabRosterShortCircuitNoLLM(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should-not-run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	ag := &agents.Agent{Name: "Winston", ModelID: "claude-sonnet-4", SystemPrompt: "You are Winston."}
+	ctx := workforce.WithCompanyRosters(context.Background(), map[string][]string{
+		"Lab": {"Sam", "Winston"},
+	})
+	var tokens strings.Builder
+	if err := o.ChatWithAgent(ctx, ag, "who is in Lab", "", func(tkn string) { tokens.WriteString(tkn) }, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) != 0 {
+		t.Fatalf("Lab roster must not call the LLM, got %d requests", len(mb.lastRequests))
+	}
+	if tokens.String() != "Sam and Winston are in Lab." {
+		t.Fatalf("Lab roster tokens %q, want Sam and Winston are in Lab.", tokens.String())
 	}
 }

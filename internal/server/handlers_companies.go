@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/session"
 	"github.com/scrypster/huginn/internal/spaces"
 )
 
@@ -47,6 +49,66 @@ func (s *Server) lookupCompanyName(id string) string {
 		return ""
 	}
 	return strings.TrimSpace(c.Name)
+}
+
+func (s *Server) companyRosterMap() map[string][]string {
+	cs := s.companyAPI()
+	if cs == nil {
+		return nil
+	}
+	list, err := cs.ListCompanies()
+	if err != nil {
+		return nil
+	}
+	out := make(map[string][]string, len(list))
+	for _, c := range list {
+		if c == nil || strings.TrimSpace(c.Name) == "" {
+			continue
+		}
+		out[c.Name] = append([]string(nil), c.Members...)
+	}
+	return out
+}
+
+func (s *Server) lookupCompanyMembers(name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	for k, v := range s.companyRosterMap() {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return nil
+}
+
+// fillEmptyHarnessPersist harness-fills leftover-empty persist for named-company
+// roster (Lab) and this-channel headcount. Ack/ping fills already ran in
+// PersistVisibleAssistantContent.
+func (s *Server) fillEmptyHarnessPersist(content, ask string, sess *session.Session) string {
+	if strings.TrimSpace(content) != "" {
+		return content
+	}
+	if company, ok := backend.NamedCompanyRosterAsk(ask); ok {
+		if names := s.lookupCompanyMembers(company); len(names) > 0 {
+			if filled := backend.FillNamedCompanyRosterPersist("", ask, company, names); filled != "" {
+				return filled
+			}
+		}
+	}
+	var members []string
+	if sess != nil && s.spaceStore != nil {
+		if spaceID := sess.SpaceID(); spaceID != "" {
+			if sp, err := s.spaceStore.GetSpace(spaceID); err == nil && sp != nil {
+				members = append(members, sp.Members...)
+				if lead := strings.TrimSpace(sp.LeadAgent); lead != "" {
+					members = append(members, lead)
+				}
+			}
+		}
+	}
+	return backend.FillTrivialHeadcountPersist(content, ask, members)
 }
 
 func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request) {

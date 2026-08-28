@@ -716,6 +716,11 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 		if line := channelMembersLine(opts.userMsg, workforce.GetChannelMembers(ctx)); line != "" {
 			messages[0].Content += "\n\n" + line + ". Answer who-is-here / how many people from this list only, not the desk."
 		}
+		if company, ok := backend.NamedCompanyRosterAsk(opts.userMsg); ok {
+			if line := namedCompanyMembersLine(company, workforce.GetCompanyRoster(ctx, company)); line != "" {
+				messages[0].Content += "\n\n" + line + ". Answer who-is-in-" + company + " from this list only, not this channel."
+			}
+		}
 	}
 	if !backend.IsTimeAsk(opts.userMsg) {
 		kept := messages[:0]
@@ -746,6 +751,25 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 		appendHistoryHonoringGate(opts.sess, opts.userMsg, pong, nil, false)
 		o.compactHistory(ctx, opts.sess)
 		return nil
+	}
+	if speech := backend.TrivialAckSpeech(opts.userMsg); speech != "" {
+		if opts.onToken != nil {
+			opts.onToken(speech)
+		}
+		appendHistoryHonoringGate(opts.sess, opts.userMsg, speech, nil, false)
+		o.compactHistory(ctx, opts.sess)
+		return nil
+	}
+	if company, ok := backend.NamedCompanyRosterAsk(opts.userMsg); ok {
+		names := workforce.GetCompanyRoster(ctx, company)
+		if speech := backend.FillNamedCompanyRosterPersist("", opts.userMsg, company, names); speech != "" {
+			if opts.onToken != nil {
+				opts.onToken(speech)
+			}
+			appendHistoryHonoringGate(opts.sess, opts.userMsg, speech, nil, false)
+			o.compactHistory(ctx, opts.sess)
+			return nil
+		}
 	}
 	b, backendErr := o.backendFor(ag)
 	if backendErr != nil {
@@ -931,6 +955,25 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		appendHistoryHonoringGate(sess, userMsg, pong, nil, false)
 		o.compactHistory(ctx, sess)
 		return nil
+	}
+	if speech := backend.TrivialAckSpeech(userMsg); speech != "" {
+		if onToken != nil {
+			onToken(speech)
+		}
+		appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
+		o.compactHistory(ctx, sess)
+		return nil
+	}
+	if company, ok := backend.NamedCompanyRosterAsk(userMsg); ok {
+		names := workforce.GetCompanyRoster(ctx, company)
+		if speech := backend.FillNamedCompanyRosterPersist("", userMsg, company, names); speech != "" {
+			if onToken != nil {
+				onToken(speech)
+			}
+			appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
+			o.compactHistory(ctx, sess)
+			return nil
+		}
 	}
 	if o.tryNamedHireFastPath(ctx, ag, userMsg, sess, reg, onToken, onEvent) {
 		return nil

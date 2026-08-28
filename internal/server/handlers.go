@@ -744,6 +744,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			// turn involved Sam on a hostname-style ask, persist the teammate
 			// line. Never persist an empty assistant row.
 			visible := backend.PersistVisibleAssistantContent(buf.String(), body.Content)
+			if visible == "" {
+				visible = s.fillEmptyHarnessPersist(visible, body.Content, sess)
+			}
 			if visible != "" {
 				assistantMsg := session.SessionMessage{
 					ID: session.NewID(), Role: "assistant", Content: visible, Agent: agentName, Ts: time.Now().UTC(),

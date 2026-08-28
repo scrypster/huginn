@@ -114,6 +114,45 @@ func TestInjectSpaceContext_ChannelSession_InjectsTeamContext(t *testing.T) {
 	}
 }
 
+func TestInjectSpaceContext_AttachesCompanyRosters(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	if _, err := spaceStore.CreateCompany("Lab", "", []string{"Sam", "Winston"}, "", ""); err != nil {
+		t.Fatalf("create Lab: %v", err)
+	}
+	ch, err := spaceStore.CreateChannel("Huginn", "Winston", []string{"Reggie", "Steve"}, "", "")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sess := sessStore.New("test-lab-roster", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Winston"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	ag := &agents.Agent{Name: "Winston"}
+	enriched := srv.InjectSpaceContext(context.Background(), sess.ID, ag)
+	got := workforce.GetCompanyRoster(enriched, "Lab")
+	joined := strings.Join(got, ",")
+	for _, want := range []string{"Sam", "Winston"} {
+		found := false
+		for _, n := range got {
+			if strings.EqualFold(n, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Lab roster missing %s: %s", want, joined)
+		}
+	}
+}
+
 func TestInjectSpaceContext_DMSession_NoTeamContext(t *testing.T) {
 	srv, _ := newTestServer(t)
 	db := openSpaceDB(t)
