@@ -21,6 +21,8 @@ import {
   failChipLabel,
   failDisplayFor,
   stripResidualSpeech,
+  toolTickerLabel,
+  toolTickerEntries,
 } from '../honesty'
 
 describe('parseSystemFailSpeech', () => {
@@ -250,6 +252,72 @@ describe('visibleToolCalls / A2A filter', () => {
       { name: 'delegate_to_agent' },
       { name: 'wait_for_threads' },
     ])).toEqual([])
+  })
+})
+
+describe('toolTickerLabel', () => {
+  it('labels read_file with the basename', () => {
+    expect(toolTickerLabel('read_file', { file_path: 'internal/mathutil/mathutil.go' })).toBe('read mathutil.go')
+  })
+
+  it('labels write_file and edit_file with the basename', () => {
+    expect(toolTickerLabel('write_file', { file_path: 'a/b/mathutil.go' })).toBe('write mathutil.go')
+    expect(toolTickerLabel('edit_file', { file_path: 'a/b/mathutil.go' })).toBe('edit mathutil.go')
+  })
+
+  it('falls back generically when the path arg is missing', () => {
+    expect(toolTickerLabel('read_file', {})).toBe('read a file')
+    expect(toolTickerLabel('edit_file', undefined)).toBe('edit a file')
+  })
+
+  it('labels list_dir as exploring files', () => {
+    expect(toolTickerLabel('list_dir', { path: 'internal/server' })).toBe('explore files')
+  })
+
+  it('labels bash with a truncated single-line command', () => {
+    expect(toolTickerLabel('bash', { command: 'go test ./...' })).toBe('go test ./...')
+    expect(toolTickerLabel('bash', { command: 'echo hi\nrm -rf /' })).toBe('echo hi')
+    expect(toolTickerLabel('bash', { command: 'go test ./... -run TestSomethingVeryLong -v' }))
+      .toBe('go test ./... -run TestS…')
+  })
+
+  it('labels memory and delegate tools distinctly', () => {
+    expect(toolTickerLabel('muninn_recall', {})).toBe('recall memory')
+    expect(toolTickerLabel('muninn_remember', {})).toBe('save memory')
+    expect(toolTickerLabel('delegate_to_agent', { agent: 'Steve' })).toBe('ask Steve')
+    expect(toolTickerLabel('delegate_to_agent', {})).toBe('ask a teammate')
+  })
+
+  it('falls back to the raw tool name for anything else', () => {
+    expect(toolTickerLabel('search_files', {})).toBe('search files')
+    expect(toolTickerLabel('some_other_tool', {})).toBe('some other tool')
+  })
+})
+
+describe('toolTickerEntries', () => {
+  it('marks completed calls done and in-flight calls not done, in order', () => {
+    const completed = [{ id: 'c1', name: 'read_file', args: { file_path: 'a/mathutil.go' } }]
+    const active = [{ id: 'a1', name: 'bash', args: { command: 'go test ./...' } }]
+    expect(toolTickerEntries(completed, active)).toEqual([
+      { id: 'c1', label: 'read mathutil.go', done: true },
+      { id: 'a1', label: 'go test ./...', done: false },
+    ])
+  })
+
+  it('excludes A2A tools from the ticker', () => {
+    expect(toolTickerEntries([{ id: 'c1', name: 'delegate_to_agent', args: {} }], [])).toEqual([])
+  })
+
+  it('prefers the completed entry over a stale in-flight one with the same id', () => {
+    const completed = [{ id: 'x', name: 'read_file', args: { file_path: 'a.go' } }]
+    const active = [{ id: 'x', name: 'read_file', args: { file_path: 'a.go' } }]
+    expect(toolTickerEntries(completed, active)).toEqual([
+      { id: 'x', label: 'read a.go', done: true },
+    ])
+  })
+
+  it('handles null/undefined inputs as empty', () => {
+    expect(toolTickerEntries(null, undefined)).toEqual([])
   })
 })
 
@@ -496,5 +564,39 @@ describe('deduplicateSentencesInLastLine dotted identifiers', () => {
     const out = stripResidualSpeech(input, { afterTools: true })
     expect(out).toContain('mathutil.go')
     expect(out).not.toContain('mathutil. go')
+  })
+})
+
+
+describe('toolTickerLabel - untrusted arg hardening', () => {
+  it('scrubs control characters and caps a very long basename', () => {
+    const label = toolTickerLabel('read_file', { file_path: 'a/b/we\nird\u001b[31mname.go' })
+    expect(label).not.toMatch(/[\n\r]/)
+    expect(label).toBe('read we ird [31mname.go')
+
+    const long = toolTickerLabel('read_file', { file_path: `/tmp/${'x'.repeat(400)}.go` })
+    expect(long.length).toBeLessThanOrEqual('read '.length + 41)
+    expect(long.endsWith('\u2026')).toBe(true)
+  })
+
+  it('scrubs a multiline bash command down to one capped line', () => {
+    expect(toolTickerLabel('bash', { command: 'echo hi\nrm -rf /' })).toBe('echo hi')
+    expect(toolTickerLabel('bash', { command: '      ' })).toBe('run a command')
+  })
+
+  it('caps an over-long delegate target and normalizes an unknown tool name', () => {
+    expect(toolTickerLabel('delegate_to_agent', { agent: 'S'.repeat(80) })).toBe('ask ' + 'S'.repeat(32) + '\u2026')
+    expect(toolTickerLabel('some_unknown_tool', {})).toBe('some unknown tool')
+  })
+})
+
+describe('toolTickerEntries cap', () => {
+  it('collapses long runs to +N more, keeping in-flight and recent done', () => {
+    const completed = Array.from({ length: 20 }, (_, i) => ({ id: `c${i}`, name: 'read_file', args: { file_path: `f${i}.go` }, done: true }))
+    const active = [{ id: 'a1', name: 'bash', args: { command: 'go test' } }]
+    const rows = toolTickerEntries(completed as never, active as never)
+    expect(rows.length).toBeLessThanOrEqual(7)
+    expect(rows[0]!.label).toMatch(/^\+\d+ more$/)
+    expect(rows.some(r => !r.done)).toBe(true)
   })
 })

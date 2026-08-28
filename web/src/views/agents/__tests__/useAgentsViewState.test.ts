@@ -310,4 +310,68 @@ describe('useAgentsViewState', () => {
     expect(mockValidateCapabilityMatrix).not.toHaveBeenCalled()
     expect(mockAgentsUpdate).toHaveBeenCalled()
   })
+
+  describe('delete agent', () => {
+    let fetchMock: ReturnType<typeof vi.fn>
+    let deleteResponse: { ok: boolean; status: number; json: () => Promise<unknown> }
+
+    beforeEach(() => {
+      deleteResponse = { ok: true, status: 200, json: async () => ({ deleted: true }) }
+      fetchMock = vi.fn((url: string) => {
+        // loadMuninnInfo's vault-status probe also runs on mount for an
+        // existing agent name; give it a harmless default so it doesn't
+        // consume the delete response the test configured.
+        if (typeof url === 'string' && url.includes('/vault-status')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
+        }
+        return Promise.resolve(deleteResponse)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+    })
+
+    it('confirmDelete opens the confirm banner without calling the delete API', async () => {
+      const { state } = mountHarness('Alpha')
+      state.form.value.name = 'Alpha'
+      await flushPromises()
+      fetchMock.mockClear()
+      expect(state.showDeleteConfirm.value).toBe(false)
+
+      state.confirmDelete()
+
+      expect(state.showDeleteConfirm.value).toBe(true)
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        '/api/v1/agents/Alpha',
+        expect.objectContaining({ method: 'DELETE' }),
+      )
+    })
+
+    it('deleteAgent calls DELETE /api/v1/agents/{name} and routes away on success', async () => {
+      const { state } = mountHarness('Alpha')
+      state.form.value.name = 'Alpha'
+      state.confirmDelete()
+
+      await state.deleteAgent()
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/agents/Alpha',
+        expect.objectContaining({ method: 'DELETE' }),
+      )
+      expect(mockRouterPush).toHaveBeenCalledWith('/agents')
+    })
+
+    it('deleteAgent surfaces the 409 lead-block message verbatim and keeps the agent', async () => {
+      const leadBlockMsg = 'cannot delete agent "Alpha": assigned as lead agent in spaces: [general]'
+      deleteResponse = { ok: false, status: 409, json: async () => ({ error: leadBlockMsg }) }
+      const { state } = mountHarness('Alpha')
+      state.form.value.name = 'Alpha'
+      state.confirmDelete()
+
+      await state.deleteAgent()
+
+      expect(state.saveMsg.value).toBe(leadBlockMsg)
+      expect(state.saveError.value).toBe(true)
+      expect(state.showDeleteConfirm.value).toBe(false)
+      expect(mockRouterPush).not.toHaveBeenCalledWith('/agents')
+    })
+  })
 })

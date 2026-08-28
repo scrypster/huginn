@@ -55,6 +55,15 @@ type CreateAgentDeps struct {
 	// Registry is used to infer LocalTools for coding/engineering hires when
 	// the caller didn't pass local_tools explicitly. Optional — nil skips
 	// inference (LocalTools stays nil, matching prior behavior).
+	//
+	// Wiring (verified 2026-08-28): the only production call site that
+	// constructs CreateAgentTool is internal/server/create_agent.go's
+	// NewCreateAgentTool, invoked from startServer (main.go) in server/tray
+	// mode; it sets both Registry and ResolveVaultName. The TUI (init_tools.go
+	// initTools) and internal/oneshot never construct a CreateAgentTool at
+	// all — no RegisterCreateAgentTool/CreateAgentTool{} call site exists
+	// outside server.go and tests — so there is no TUI/oneshot hire path
+	// missing this dep; the hire tool simply isn't offered there today.
 	Registry *Registry
 }
 

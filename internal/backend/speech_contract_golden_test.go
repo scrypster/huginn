@@ -165,6 +165,21 @@ func TestFinalizeSpeech_ContractGoldenTable(t *testing.T) {
 			want: "I checked the logs and everything looks fine.",
 		},
 		{
+			name: "stream stage: leading tool-call JSON stripped, trailing prose kept",
+			raw:  liveMixedJSONProse,
+			want: "PONG",
+		},
+		{
+			name: "stream stage: pure tool-call JSON hidden entirely",
+			raw:  qwen14bContentJSON,
+			want: "",
+		},
+		{
+			name: "stream stage: harness clock label stripped, bare stamp becomes teammate speech",
+			raw:  "Local time now: Thursday, August 27, 2026, 12:00 PM ET",
+			want: "It's Thursday, August 27, 2026, 12:00 PM ET.",
+		},
+		{
 			name:       "ordinary teammate prose is never touched by the contract",
 			raw:        "The build passed and I merged the branch.",
 			userAsk:    "how'd the build go?",

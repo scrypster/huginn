@@ -608,22 +608,24 @@
                     @click="spaceId && openReplyThread(msg)"
                     v-html="renderWithMentions(visibleAssistantText(msg))" />
                 </MsgTimeReveal>
-                <!-- Active (in-flight) tool calls — anchored inside this message bubble so
-                     it always appears below the content, never floating above it. -->
-                <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2">
-                  <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50">
-                    <div class="flex gap-0.5 flex-shrink-0">
-                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:0ms" />
-                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:120ms" />
-                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:240ms" />
-                    </div>
-                    <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                      <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-                    </svg>
-                    <span class="text-xs text-huginn-text">
-                      {{ activeMemoryChipText || `${visibleToolCalls(activeToolCalls).length} tool call${visibleToolCalls(activeToolCalls).length === 1 ? '' : 's'}` }}
-                    </span>
-                    <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
+                <!-- Live tool ticker: tool calls as they happen, anchored inside this
+                     message bubble so it always appears below the content, never
+                     floating above it. Spinner on the in-flight call, ✓ on completed
+                     ones. Collapses into the "N tool calls · done" chip below once no
+                     tool call is still in flight (no duplicate surfaces). -->
+                <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2" data-testid="tool-ticker">
+                  <div class="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50 text-xs text-huginn-text">
+                    <template v-for="(entry, i) in toolTicker(msg)" :key="entry.id">
+                      <span v-if="i > 0" class="text-huginn-muted">·</span>
+                      <span class="inline-flex items-center gap-1"
+                        :data-testid="entry.done ? 'tool-ticker-done-entry' : 'tool-ticker-active-entry'">
+                        <svg v-if="!entry.done" class="w-3 h-3 flex-shrink-0 animate-spin text-huginn-yellow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" d="M12 3a9 9 0 100 18" />
+                        </svg>
+                        <span v-else class="text-huginn-green flex-shrink-0">✓</span>
+                        {{ entry.label }}
+                      </span>
+                    </template>
                   </div>
                 </div>
                 <!-- Follow-up thinking indicator: lead agent is preparing their synthesis -->
@@ -1278,7 +1280,7 @@ import { visibleAssistantContent } from '../utils/visibleAssistantContent'
 import { isTrivialAsk } from '../utils/trivialAsk'
 import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
-import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, visibleToolCalls } from '../utils/honesty'
+import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, toolTickerEntries, visibleToolCalls } from '../utils/honesty'
 
 interface Agent {
   name: string
@@ -2205,11 +2207,11 @@ function changedFilesLineFor(msg: ChatMessage): string {
   return changedFilesLine(visibleAssistantText(msg), diffs)
 }
 
-const activeMemoryChipText = computed(() => {
-  if (!activeToolCalls.value.length) return ''
-  if (!activeToolCalls.value.every(tc => isMemoryToolName(tc.name))) return ''
-  return `🧠 Memory: ${summarizeMemoryToolCalls(activeToolCalls.value)}`
-})
+// toolTicker returns the merged completed+in-flight tool call list for a
+// streaming message's live activity line — see toolTickerEntries (honesty.ts).
+function toolTicker(msg: { toolCalls?: ToolCallRecord[] }) {
+  return toolTickerEntries(msg.toolCalls, activeToolCalls.value)
+}
 
 // ── Thread helpers ────────────────────────────────────────────────────
 function getThreadById(threadId: string) {

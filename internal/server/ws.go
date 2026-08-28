@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -869,9 +870,104 @@ func statusForToolCall(payload map[string]any) (string, bool) {
 		return "asking a teammate…", true
 	case "muninn_where_left_off", "muninn_recall":
 		return "recalling memory", true
+	case "read_file":
+		if name := argBasename(payload, "file_path"); name != "" {
+			return fmt.Sprintf("reading %s…", name), true
+		}
+		return "reading a file…", true
+	case "write_file":
+		if name := argBasename(payload, "file_path"); name != "" {
+			return fmt.Sprintf("writing %s…", name), true
+		}
+		return "writing a file…", true
+	case "edit_file":
+		if name := argBasename(payload, "file_path"); name != "" {
+			return fmt.Sprintf("editing %s…", name), true
+		}
+		return "editing a file…", true
+	case "bash":
+		if args, ok := payload["args"].(map[string]any); ok {
+			if cmd, ok := args["command"].(string); ok {
+				if snippet := sanitizeCommandSnippet(cmd); snippet != "" {
+					return fmt.Sprintf("running: %s…", snippet), true
+				}
+			}
+		}
+		return "running a command…", true
+	case "list_dir":
+		return "exploring files…", true
 	default:
 		return "", false
 	}
+}
+
+// maxStatusBasename caps how much of a model-supplied path may reach the
+// status line. Everything statusForToolCall interpolates is model/tool
+// output, so it is bounded and scrubbed here rather than trusted.
+const maxStatusBasename = 40
+
+// sanitizeStatusText makes an arbitrary model-supplied string safe to
+// interpolate into a one-line status message: C0/C1 control characters
+// (newlines, NUL, ANSI escape introducers, BEL) become spaces, runs of
+// whitespace collapse to one, and the result is truncated to maxLen runes
+// (rune-wise, so multi-byte characters are never split). The client renders
+// status as text ({{ latestRunStatus }} — no v-html), so this is about
+// keeping the line one line and bounded, not about markup escaping.
+func sanitizeStatusText(s string, maxLen int) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	if r := []rune(s); len(r) > maxLen {
+		return string(r[:maxLen])
+	}
+	return s
+}
+
+// argBasename extracts a string argument by key from a tool_call payload's
+// "args" map and returns just its basename (e.g. "internal/tools/bash.go"
+// -> "bash.go"), suitable for compact phase text. The basename is scrubbed
+// and length-capped by sanitizeStatusText — a model can pass a path with
+// embedded newlines or a 400-character filename, and neither may become the
+// status line. Returns "" if the arg is missing, not a string, or blank.
+func argBasename(payload map[string]any, argKey string) string {
+	args, ok := payload["args"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	v, ok := args[argKey].(string)
+	if !ok {
+		return ""
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	return sanitizeStatusText(filepath.Base(v), maxStatusBasename)
+}
+
+// sanitizeCommandSnippet collapses a shell command to a single line and
+// truncates it to a short, safe-to-display prefix for status text (e.g.
+// "go test ./...\nother" -> "go test ./..."). Returns "" for a blank command.
+func sanitizeCommandSnippet(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	// Collapse to a single line: take everything up to the first newline,
+	// then scrub remaining control characters (a command may carry ANSI
+	// escapes or a BEL), collapse whitespace, and cap the length.
+	if idx := strings.IndexByte(cmd, '\n'); idx >= 0 {
+		cmd = cmd[:idx]
+	}
+	const maxLen = 30
+	return sanitizeStatusText(cmd, maxLen)
 }
 
 func streamEventToWS(ev backend.StreamEvent, sessionID string) WSMessage {

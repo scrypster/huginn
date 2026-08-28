@@ -218,9 +218,107 @@ func TestStatusForToolCall_MemoryTools_MapToRecallingMemory(t *testing.T) {
 }
 
 func TestStatusForToolCall_OrdinaryLocalTool_NoStatusPhase(t *testing.T) {
-	_, ok := statusForToolCall(map[string]any{"tool": "read_file", "args": map[string]any{"file_path": "x.go"}})
+	_, ok := statusForToolCall(map[string]any{"tool": "search_files", "args": map[string]any{"query": "TODO"}})
 	if ok {
-		t.Errorf("read_file should not map to a status phase (falls back to the last status already on the wire)")
+		t.Errorf("search_files should not map to a status phase (falls back to the last status already on the wire)")
+	}
+}
+
+func TestStatusForToolCall_ReadFile_NamesBasename(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "read_file",
+		"args": map[string]any{"file_path": "internal/mathutil/mathutil.go"},
+	})
+	if !ok {
+		t.Fatalf("expected read_file to map to a status phase")
+	}
+	if content != "reading mathutil.go…" {
+		t.Errorf("content = %q, want %q", content, "reading mathutil.go…")
+	}
+}
+
+func TestStatusForToolCall_ReadFile_MissingArgFallsBackGenerically(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{"tool": "read_file"})
+	if !ok {
+		t.Fatalf("expected read_file to map to a status phase even without a resolvable path")
+	}
+	if content != "reading a file…" {
+		t.Errorf("content = %q, want %q", content, "reading a file…")
+	}
+}
+
+func TestStatusForToolCall_WriteFile_NamesBasename(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "write_file",
+		"args": map[string]any{"file_path": "internal/mathutil/mathutil.go"},
+	})
+	if !ok {
+		t.Fatalf("expected write_file to map to a status phase")
+	}
+	if content != "writing mathutil.go…" {
+		t.Errorf("content = %q, want %q", content, "writing mathutil.go…")
+	}
+}
+
+func TestStatusForToolCall_EditFile_NamesBasename(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "edit_file",
+		"args": map[string]any{"file_path": "internal/mathutil/mathutil.go"},
+	})
+	if !ok {
+		t.Fatalf("expected edit_file to map to a status phase")
+	}
+	if content != "editing mathutil.go…" {
+		t.Errorf("content = %q, want %q", content, "editing mathutil.go…")
+	}
+}
+
+func TestStatusForToolCall_Bash_NamesTruncatedCommand(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "bash",
+		"args": map[string]any{"command": "go test ./... -run TestSomethingLong -v"},
+	})
+	if !ok {
+		t.Fatalf("expected bash to map to a status phase")
+	}
+	if content != "running: go test ./... -run TestSomethi…" {
+		t.Errorf("content = %q, want %q", content, "running: go test ./... -run TestSomethi…")
+	}
+}
+
+func TestStatusForToolCall_Bash_SanitizesMultilineCommand(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "bash",
+		"args": map[string]any{"command": "echo hi\nrm -rf /"},
+	})
+	if !ok {
+		t.Fatalf("expected bash to map to a status phase")
+	}
+	if content != "running: echo hi…" {
+		t.Errorf("content = %q, want %q", content, "running: echo hi…")
+	}
+}
+
+func TestStatusForToolCall_Bash_MissingArgFallsBackGenerically(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{"tool": "bash"})
+	if !ok {
+		t.Fatalf("expected bash to map to a status phase even without a resolvable command")
+	}
+	if content != "running a command…" {
+		t.Errorf("content = %q, want %q", content, "running a command…")
+	}
+}
+
+func TestStatusForToolCall_ListDir_ExploringFiles(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "list_dir",
+		"args": map[string]any{"path": "internal/server"},
+	})
+	if !ok {
+		t.Fatalf("expected list_dir to map to a status phase")
+	}
+	if content != "exploring files…" {
+		t.Errorf("content = %q, want %q", content, "exploring files…")
 	}
 }
 
@@ -516,4 +614,56 @@ func waitForAssistantPersisted(t *testing.T, srv *Server, sessionID string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("assistant message never persisted for session %s", sessionID)
+}
+
+// TestStatusForToolCall_PathArgIsSanitizedAndBounded locks down that the
+// model-supplied file_path reaching the status line is scrubbed of control
+// characters and length-capped. statusForToolCall interpolates tool args
+// into a line every session subscriber sees; an embedded newline must not
+// make the status two lines, and a 400-character filename must not become a
+// 400-character status.
+func TestStatusForToolCall_PathArgIsSanitizedAndBounded(t *testing.T) {
+	content, ok := statusForToolCall(map[string]any{
+		"tool": "read_file",
+		"args": map[string]any{"file_path": "dir/we\nird\x1b[31m\x07name.go"},
+	})
+	if !ok {
+		t.Fatalf("expected read_file to map to a status phase")
+	}
+	if strings.ContainsAny(content, "\n\r\x1b\x07") {
+		t.Errorf("control characters survived into status text: %q", content)
+	}
+	// The ESC byte becomes a space; the inert "[31m" remainder is left as
+	// plain text (the client renders status via {{ }}, not v-html).
+	if content != "reading we ird [31m name.go…" {
+		t.Errorf("content = %q, want %q", content, "reading we ird [31m name.go…")
+	}
+
+	long := strings.Repeat("x", 400) + ".go"
+	content, ok = statusForToolCall(map[string]any{
+		"tool": "edit_file",
+		"args": map[string]any{"file_path": "/tmp/" + long},
+	})
+	if !ok {
+		t.Fatalf("expected edit_file to map to a status phase")
+	}
+	if got := len([]rune(content)); got > len([]rune("editing …"))+maxStatusBasename {
+		t.Errorf("status line not bounded: %d runes (%q)", got, content)
+	}
+}
+
+// TestSanitizeCommandSnippet_StripsControlCharacters guards the bash arm of
+// the same concern: a command carrying ANSI escapes or a BEL must not put
+// them on the wire as status text.
+func TestSanitizeCommandSnippet_StripsControlCharacters(t *testing.T) {
+	got := sanitizeCommandSnippet("echo \x1b[31mred\x07 done")
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Errorf("control characters survived: %q", got)
+	}
+	if got != "echo [31mred done" {
+		t.Errorf("got %q, want %q", got, "echo [31mred done")
+	}
+	if got := sanitizeCommandSnippet("   \x00\x07  "); got != "" {
+		t.Errorf("all-control command should sanitize to empty, got %q", got)
+	}
 }

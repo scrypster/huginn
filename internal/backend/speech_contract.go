@@ -48,6 +48,14 @@ import (
 //     3. residual-speech           — wait tags, glue, tool-plan narration, playbook
 //     4. harness-clock-label       — drop the injected "Local time now:" label
 //
+//   No production caller actually reaches this stage through FinalizeSpeech —
+//   every stream-stage call site (content_tool_calls.go, residual_speech.go,
+//   the live UI's mid-turn render) calls VisibleAssistantContent directly.
+//   FinalizeSpeech's `!input.AfterTools` branch below documents the same
+//   four passes, in the same order, by delegating straight to
+//   VisibleAssistantContent — this doc comment describes what actually
+//   executes on that path, not a parallel implementation.
+//
 //   Stage "display" (afterTools == true, persist == false — tools already
 //   ran or were denied this turn, speech is being shown but not yet stored):
 //     1. leading-tool-call-strip
@@ -308,12 +316,6 @@ func truncateForLog(s string) string {
 // ============================================================================
 // THIN ADAPTERS — existing entry points now call FinalizeSpeech.
 // ============================================================================
-
-// finalizeStreamSpeech is VisibleAssistantContent's body, expressed as a
-// FinalizeSpeech call (stage "stream").
-func finalizeStreamSpeech(content string) string {
-	return FinalizeSpeech(SpeechInput{Raw: content}).Speech
-}
 
 // finalizeDisplaySpeech is VisibleAssistantContentAfterTools's body,
 // expressed as a FinalizeSpeech call (stage "display").

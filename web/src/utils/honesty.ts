@@ -33,6 +33,140 @@ export function visibleToolCalls<T extends { name: string }>(calls?: T[] | null)
   return (calls ?? []).filter(tc => !isA2ATool(tc.name))
 }
 
+// ── Live tool ticker ──────────────────────────────────────────────────────
+// While a run streams, the hallway/session bubble shows a compact activity
+// line of tool calls as they happen: "✓ read mathutil.go · ✓ edit
+// mathutil.go · ⟳ go test". toolTickerLabel derives the short per-tool label;
+// toolTickerEntries merges completed + in-flight calls into the ordered list
+// the ticker renders (see internal/server/ws.go's statusForToolCall for the
+// backend-side analog of this arg-name mapping).
+
+// Tool args are model output: a path may carry embedded newlines or run to
+// hundreds of characters. The ticker is a one-line activity strip, so a
+// basename is scrubbed of control characters and capped here — the mirror of
+// sanitizeStatusText/argBasename in internal/server/ws.go.
+const MAX_TICKER_BASENAME = 40
+
+function sanitizeTickerText(s: string, maxLen: number): string {
+  // eslint-disable-next-line no-control-regex
+  const scrubbed = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!scrubbed) return ''
+  const chars = [...scrubbed]
+  return chars.length > maxLen ? `${chars.slice(0, maxLen).join('')}…` : scrubbed
+}
+
+function basenameOf(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) return ''
+  const parts = trimmed.split('/')
+  return sanitizeTickerText(parts[parts.length - 1] || trimmed, MAX_TICKER_BASENAME)
+}
+
+export function toolTickerLabel(name: string, args?: Record<string, unknown> | null): string {
+  const a = args ?? {}
+  switch (name) {
+    case 'read_file': {
+      const p = typeof a.file_path === 'string' ? basenameOf(a.file_path) : ''
+      return p ? `read ${p}` : 'read a file'
+    }
+    case 'write_file': {
+      const p = typeof a.file_path === 'string' ? basenameOf(a.file_path) : ''
+      return p ? `write ${p}` : 'write a file'
+    }
+    case 'edit_file': {
+      const p = typeof a.file_path === 'string' ? basenameOf(a.file_path) : ''
+      return p ? `edit ${p}` : 'edit a file'
+    }
+    case 'list_dir':
+      return 'explore files'
+    case 'bash': {
+      const cmd = typeof a.command === 'string' ? a.command.trim() : ''
+      if (!cmd) return 'run a command'
+      const line = sanitizeTickerText(cmd.split('\n')[0]!, 24)
+      return line || 'run a command'
+    }
+    case 'muninn_recall':
+    case 'muninn_where_left_off':
+      return 'recall memory'
+    case 'muninn_remember':
+    case 'muninn_remember_batch':
+    case 'muninn_remember_tree':
+      return 'save memory'
+    case 'delegate_to_agent': {
+      const agent = typeof a.agent === 'string' ? sanitizeTickerText(a.agent, 32) : ''
+      return agent ? `ask ${agent}` : 'ask a teammate'
+    }
+    case 'grep':
+    case 'search_files':
+      return 'search files'
+    default:
+      return sanitizeTickerText(name.replace(/_/g, ' '), MAX_TICKER_BASENAME) || 'working'
+  }
+}
+
+export interface ToolTickerEntry {
+  id: string
+  label: string
+  done: boolean
+}
+
+interface TickerToolCall {
+  id: string
+  name: string
+  args?: Record<string, unknown> | null
+}
+
+/**
+ * Merges completed tool calls (already attached to a message, done: true)
+ * with in-flight ones (still in activeToolCalls) into the ordered list a
+ * ticker renders. A2A tools (delegate_to_agent etc.) are excluded — they get
+ * their own status/announcement surfaces. Completed entries win on id
+ * collision (a tool_result can attach to the message before its activeToolCalls
+ * entry is pruned).
+ */
+function toolTickerEntriesAll(
+  completed: TickerToolCall[] | undefined | null,
+  active: TickerToolCall[] | undefined | null,
+): ToolTickerEntry[] {
+  const done = visibleToolCalls(completed ?? []).map(tc => ({
+    id: tc.id,
+    label: toolTickerLabel(tc.name, tc.args),
+    done: true,
+  }))
+  const doneIds = new Set(done.map(d => d.id))
+  const inFlight = visibleToolCalls(active ?? [])
+    .filter(tc => !doneIds.has(tc.id))
+    .map(tc => ({ id: tc.id, label: toolTickerLabel(tc.name, tc.args), done: false }))
+  return [...done, ...inFlight]
+}
+
+/** Max ticker chips rendered; older completed entries collapse to "+N more". */
+export const TOOL_TICKER_MAX = 6
+
+/**
+ * toolTickerEntries returns the visible ticker rows: at most TOOL_TICKER_MAX,
+ * keeping every in-flight entry and the most recent completed ones, with a
+ * synthetic leading "+N more" row when older completed entries were elided.
+ * A 200-read_file coding run must render ~7 chips, not 200 (Opus vet,
+ * wave 6 — "the biggest remaining UX risk in Package A").
+ */
+export function toolTickerEntries(
+  completed: Parameters<typeof toolTickerEntriesAll>[0],
+  active: Parameters<typeof toolTickerEntriesAll>[1],
+): ReturnType<typeof toolTickerEntriesAll> {
+  const all = toolTickerEntriesAll(completed, active)
+  if (all.length <= TOOL_TICKER_MAX) return all
+  const inflight = all.filter(e => !e.done)
+  const doneEntries = all.filter(e => e.done)
+  const doneBudget = Math.max(0, TOOL_TICKER_MAX - inflight.length)
+  const keptDone = doneBudget > 0 ? doneEntries.slice(-doneBudget) : []
+  const elided = all.length - inflight.length - keptDone.length
+  const rows = [...keptDone, ...inflight]
+  if (elided > 0) rows.unshift({ id: '__elided__', label: `+${elided} more`, done: true })
+  return rows
+}
+
+
 export type SystemFailKind = 'TOOL_FAIL' | 'DELEGATE_FAIL' | 'announcement'
 
 export interface SystemFailSpeech {

@@ -2,6 +2,7 @@ package backend
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -807,7 +808,56 @@ func deduplicateTeammateSentences(s string) string {
 	return outS
 }
 
+// qualifiedIdentifierRE matches a candidate qualified identifier such as
+// "strings.Contains", "os.Exit" or "strings.Builder.WriteString" — a
+// lowercase package-style prefix followed by one or more uppercase-led
+// segments. isSentenceBoundary's punct+Uppercase rule (needed for a genuine
+// run-on like "Done.Next step") would otherwise treat the '.' inside one of
+// these as a sentence break. splitSentences masks every match whose prefix
+// is a known package name to a punctuation-free placeholder before
+// splitting, then restores the original text after.
+//
+// The prefix MUST be checked against knownQualifierPrefixes: "word.Word" is
+// genuinely ambiguous in prose, and matching any lowercase word would mask
+// the overwhelmingly common run-on shape ("The build is done.Next step is
+// testing." — "done.Next"), silently undoing the punct+Uppercase split this
+// package relies on to strip glue and narration sentence-by-sentence. A
+// prefix that is not on the list simply keeps the pre-existing behavior
+// (split, as before), so the list is safe to grow — but every addition
+// trades a run-on split away for that word, so only add tokens that are
+// package names far more often than they are sentence-ending English words.
+var qualifiedIdentifierRE = regexp.MustCompile(`\b([a-z][a-z0-9_]{0,20})((?:\.[A-Z][A-Za-z0-9_]*)+)`)
+
+// knownQualifierPrefixes are the package-style prefixes whose dotted
+// identifiers must survive sentence splitting intact. See
+// qualifiedIdentifierRE for why this is a list and not a general rule.
+var knownQualifierPrefixes = map[string]bool{
+	"atomic": true, "base64": true, "bufio": true, "csv": true,
+	"exec": true, "filepath": true, "fmt": true, "gzip": true,
+	"hex": true, "http": true, "io": true, "ioutil": true,
+	"json": true, "md5": true, "os": true, "regexp": true,
+	"sha1": true, "sha256": true, "strconv": true, "strings": true,
+	"sync": true, "tar": true, "tls": true, "toml": true,
+	"unicode": true, "utf8": true, "x509": true, "xml": true,
+	"yaml": true, "zip": true,
+}
+
 func splitSentences(s string) []string {
+	// NUL is the placeholder delimiter below; strip any that arrived in the
+	// input so a literal "\x000\x00" in the text cannot collide with (and be
+	// overwritten by) a mask placeholder during the restore pass.
+	s = strings.ReplaceAll(s, "\x00", "")
+
+	var masked []string
+	s = qualifiedIdentifierRE.ReplaceAllStringFunc(s, func(m string) string {
+		prefix := m[:strings.IndexByte(m, '.')]
+		if !knownQualifierPrefixes[prefix] {
+			return m
+		}
+		masked = append(masked, m)
+		return fmt.Sprintf("\x00%d\x00", len(masked)-1)
+	})
+
 	var sentences []string
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
@@ -822,6 +872,16 @@ func splitSentences(s string) []string {
 	}
 	if rest := strings.Join(strings.Fields(b.String()), " "); rest != "" {
 		sentences = append(sentences, rest)
+	}
+
+	if len(masked) == 0 {
+		return sentences
+	}
+	for i, sent := range sentences {
+		for j, orig := range masked {
+			sent = strings.ReplaceAll(sent, fmt.Sprintf("\x00%d\x00", j), orig)
+		}
+		sentences[i] = sent
 	}
 	return sentences
 }
