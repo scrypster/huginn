@@ -112,7 +112,7 @@ describe('AgentsView', () => {
       props: { agentName: undefined },
     })
     await flushPromises()
-    expect(wrapper.text()).toContain('Select an agent')
+    expect(wrapper.text()).toContain('No teammates yet')
     expect(wrapper.find('[data-testid="agent-card"]').exists()).toBe(false)
   })
 
@@ -127,7 +127,7 @@ describe('AgentsView', () => {
     })
     await flushPromises()
     expect(wrapper.findAll('[data-testid="agent-card"]')).toHaveLength(2)
-    expect(wrapper.text()).not.toContain('Select an agent')
+    expect(wrapper.text()).not.toContain('No teammates yet')
     expect(wrapper.text()).not.toContain('No description')
   })
 

@@ -17,7 +17,7 @@
               <path d="M3 11v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6" />
             </svg>
             <span class="text-sm font-semibold text-huginn-text flex-1">where we left off</span>
-            <span class="text-[10px] text-huginn-muted/60">injected into system prompt</span>
+            <span class="text-[10px] text-huginn-muted/60">used to prime this chat</span>
             <button
               @click="$emit('close')"
               class="text-huginn-muted hover:text-huginn-text transition-colors text-xl leading-none ml-2"
@@ -27,8 +27,8 @@
           <!-- Body -->
           <div class="overflow-y-auto p-5">
             <p v-if="isHistoryOnly" class="text-xs text-huginn-muted leading-relaxed">
-              Memory context was pre-loaded for this session before the first message was sent.
-              The injected content is not stored — send a new message to see what's loaded fresh.
+              Memory context was pre-loaded for this conversation before the first message was sent.
+              This content isn't stored — send a new message to see what's loaded fresh.
             </p>
             <pre v-else class="text-xs text-huginn-text bg-huginn-bg border border-huginn-border rounded-lg p-3.5 overflow-x-auto whitespace-pre-wrap leading-relaxed">{{ formattedContent }}</pre>
           </div>

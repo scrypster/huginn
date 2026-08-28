@@ -2371,6 +2371,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// the browser answers (or the gate's own timeout denies). See
 	// serverGate.SetExecRequiresPrompt(true) above for why this is needed.
 	serverGate.SetPromptFunc(srv.PermissionPromptFunc())
+	// Ctx-aware variant: lets a cancelled chat_cancel unblock the WS round
+	// trip itself instead of only being abandoned by the gate's own wait.
+	serverGate.SetPromptFuncCtx(srv.PermissionPromptFuncCtx())
 
 	// Wire the BackendCache into the server so handleUpdateConfig can push key
 	// changes into running backends without requiring a restart.

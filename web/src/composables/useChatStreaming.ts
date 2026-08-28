@@ -4,6 +4,12 @@ export interface ActiveToolCall {
   id: string
   name: string
   args: Record<string, unknown>
+  // agent is the name of the agent whose run produced this call. Optional —
+  // absent on legacy/no-agent chat sessions. When two agents stream
+  // concurrently in the same space, each message bubble's ticker filters
+  // activeToolCalls down to its own agent so calls aren't misattributed
+  // (see ChatView.vue's activeToolCallsFor).
+  agent?: string
 }
 
 /**

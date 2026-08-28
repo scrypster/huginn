@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,6 +247,82 @@ func TestPermissionPrompts_TimeoutDeniesAndCleansUp(t *testing.T) {
 	p.mu.Unlock()
 	if stillPending {
 		t.Error("expected pending entry to be removed after timeout")
+	}
+}
+
+// TestPermissionPromptFuncCtx_CancelledDeniesImmediatelyAndClearsBanner
+// verifies that cancelling the caller's context while a WS permission prompt
+// is pending (e.g. chat_cancel arriving mid-prompt) unblocks the bridge right
+// away with Deny — instead of waiting out permissionPromptTimeout — and
+// broadcasts permission_cancelled with reason "cancelled" so the banner
+// clears on the client.
+func TestPermissionPromptFuncCtx_CancelledDeniesImmediatelyAndClearsBanner(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HUGINN_HOME", fakeHome)
+	t.Setenv("HOME", fakeHome)
+
+	srv, ts := newTestServer(t)
+	defer ts.Close()
+
+	out := subscribePermissionPrompt(t, srv, "sess-1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	resultCh := make(chan permissions.Decision, 1)
+	go func() {
+		resultCh <- srv.PermissionPromptFuncCtx()(ctx, permissions.PermissionRequest{
+			ToolName: "bash", AgentName: "codey", SessionID: "sess-1",
+		})
+	}()
+
+	// Wait for the permission_request banner, then cancel mid-prompt.
+	var reqID string
+	select {
+	case msg := <-out:
+		if msg.Type != "permission_request" {
+			t.Fatalf("expected permission_request, got %q", msg.Type)
+		}
+		reqID, _ = msg.Payload["id"].(string)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no permission_request broadcast")
+	}
+	if reqID == "" {
+		t.Fatal("expected a request id in the permission_request payload")
+	}
+
+	cancel()
+
+	select {
+	case d := <-resultCh:
+		if d != permissions.Deny {
+			t.Errorf("expected Deny on cancellation, got %v", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("promptFunc did not unblock promptly after ctx cancellation")
+	}
+
+	select {
+	case msg := <-out:
+		if msg.Type != "permission_cancelled" {
+			t.Fatalf("expected permission_cancelled, got %q", msg.Type)
+		}
+		if got, _ := msg.Payload["id"].(string); got != reqID {
+			t.Errorf("cancelled id %q does not match request id %q", got, reqID)
+		}
+		if got, _ := msg.Payload["reason"].(string); got != "cancelled" {
+			t.Errorf("expected reason=cancelled, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no permission_cancelled broadcast after ctx cancellation")
+	}
+
+	// The pending entry must be gone — otherwise a stale timeout sweep would
+	// later double-broadcast permission_cancelled for the same id.
+	srv.permPrompts.mu.Lock()
+	_, stillPending := srv.permPrompts.pending[reqID]
+	srv.permPrompts.mu.Unlock()
+	if stillPending {
+		t.Error("expected pending entry to be removed after ctx cancellation")
 	}
 }
 

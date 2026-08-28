@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -110,7 +111,20 @@ func (s *Server) BroadcastWSToSession(sessionID string, msg WSMessage) {
 // empty, there's no session to target, so this denies immediately with a
 // clear reason rather than blocking forever with no way to reach the user.
 func (s *Server) PermissionPromptFunc() func(permissions.PermissionRequest) permissions.Decision {
+	promptCtx := s.PermissionPromptFuncCtx()
 	return func(req permissions.PermissionRequest) permissions.Decision {
+		return promptCtx(context.Background(), req)
+	}
+}
+
+// PermissionPromptFuncCtx is PermissionPromptFunc with a caller context
+// threaded through the blocking wait for the browser's answer. When ctx is
+// cancelled (e.g. an in-flight chat_cancel), the wait unblocks immediately
+// with Deny instead of sitting until permissionPromptTimeout / the gate's own
+// promptFuncTimeout elapses, and the pending WS banner is torn down with a
+// "cancelled" reason so the UI doesn't show a live prompt nobody can answer.
+func (s *Server) PermissionPromptFuncCtx() func(context.Context, permissions.PermissionRequest) permissions.Decision {
+	return func(ctx context.Context, req permissions.PermissionRequest) permissions.Decision {
 		if req.SessionID == "" {
 			slog.Warn("permission prompt: no session_id on request; denying", "tool", req.ToolName, "agent", req.AgentName)
 			return permissions.Deny
@@ -153,7 +167,22 @@ func (s *Server) PermissionPromptFunc() func(permissions.PermissionRequest) perm
 			},
 		})
 
-		return <-ch
+		select {
+		case decision := <-ch:
+			return decision
+		case <-ctx.Done():
+			// The turn was cancelled while this prompt was pending (e.g.
+			// chat_cancel). Remove the pending entry ourselves so the
+			// permissionPromptTimeout sweep doesn't also fire and double
+			// -broadcast, then tell the UI to take the banner down now
+			// rather than leaving it live and unanswerable.
+			if _, ok := s.permPrompts.resolve(id, permissions.Deny); ok {
+				s.broadcastPermissionCancelledReason(id, req, "cancelled")
+			}
+			slog.Info("permission prompt: cancelled while pending, denying",
+				"tool", req.ToolName, "agent", req.AgentName, "session", req.SessionID)
+			return permissions.Deny
+		}
 	}
 }
 
@@ -188,6 +217,13 @@ func sanitizePromptText(s string) string {
 // nothing (handlePermissionResponse no longer knows the ID) — the worst kind of
 // approval UI, one that looks live and isn't.
 func (s *Server) broadcastPermissionCancelled(id string, req permissions.PermissionRequest) {
+	s.broadcastPermissionCancelledReason(id, req, "timeout")
+}
+
+// broadcastPermissionCancelledReason is broadcastPermissionCancelled with an
+// explicit reason ("timeout" or "cancelled") so the UI banner can be told
+// why it was torn down without guessing.
+func (s *Server) broadcastPermissionCancelledReason(id string, req permissions.PermissionRequest, reason string) {
 	s.BroadcastWSToSession(req.SessionID, WSMessage{
 		Type:      "permission_cancelled",
 		SessionID: req.SessionID,
@@ -196,7 +232,7 @@ func (s *Server) broadcastPermissionCancelled(id string, req permissions.Permiss
 			"request_id": id,
 			"tool":       req.ToolName,
 			"agent":      req.AgentName,
-			"reason":     "timeout",
+			"reason":     reason,
 		},
 	})
 }

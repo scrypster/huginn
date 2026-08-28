@@ -71,6 +71,7 @@ const (
 	ReasonPromptUnavailable  = "prompt_unavailable"
 	ReasonPromptTimeout      = "prompt_timeout"
 	ReasonUserDenied         = "user_denied"
+	ReasonCancelled          = "cancelled"
 )
 
 // CheckResult describes a gate decision with machine-readable denial context.
@@ -93,6 +94,13 @@ type Gate struct {
 	// lruItems maps tool name → *list.Element for O(1) touch/eviction.
 	lruItems   map[string]*list.Element
 	promptFunc func(PermissionRequest) Decision
+	// promptFuncCtx is an optional context-aware variant of promptFunc. When
+	// set, CheckDetailedCtx calls it instead of promptFunc, passing through
+	// the caller's context so the bridge (e.g. server mode's WS round trip)
+	// can itself stop blocking on cancellation rather than only being
+	// abandoned by the gate. Set via SetPromptFuncCtx; promptFunc remains the
+	// fallback for callers that never wire a ctx-aware bridge.
+	promptFuncCtx func(context.Context, PermissionRequest) Decision
 
 	// execRequiresPrompt makes PermExec-level requests (bash) fall through to
 	// promptFunc even when skipAll is true. Unlike watchedProviders (which is
@@ -251,6 +259,18 @@ func (g *Gate) SetPromptFunc(fn func(PermissionRequest) Decision) {
 	g.promptFunc = fn
 }
 
+// SetPromptFuncCtx (re)binds the gate's context-aware prompt callback.
+// CheckDetailedCtx prefers this over the plain promptFunc set via
+// SetPromptFunc so a cancelled caller context can propagate into the bridge
+// itself (e.g. the server mode WS round trip) instead of only being
+// abandoned by the gate. Safe to call concurrently; takes effect on the next
+// CheckDetailedCtx.
+func (g *Gate) SetPromptFuncCtx(fn func(context.Context, PermissionRequest) Decision) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.promptFuncCtx = fn
+}
+
 // SetExecRequiresPrompt controls whether PermExec-level tool calls (bash)
 // always fall through to promptFunc, even when skipAll is true. Serve mode
 // sets this so bash requires human approval by default while other
@@ -336,6 +356,7 @@ func (g *Gate) Fork(watchedProviders, allowedProviders map[string]bool) *Gate {
 	}
 	skipAll := g.skipAll
 	promptFunc := g.promptFunc
+	promptFuncCtx := g.promptFuncCtx
 	execRequiresPrompt := g.execRequiresPrompt
 	// Share the exempt set by value: it is replaced wholesale by
 	// SetExecPromptExempt, never mutated in place, so a copy of the map
@@ -363,6 +384,7 @@ func (g *Gate) Fork(watchedProviders, allowedProviders map[string]bool) *Gate {
 		lruList:            newList,
 		lruItems:           newItems,
 		promptFunc:         promptFunc,
+		promptFuncCtx:      promptFuncCtx,
 		execRequiresPrompt: execRequiresPrompt,
 		execPromptExempt:   execPromptExempt,
 		relayChans:         make(map[string]relayEntry),
@@ -442,8 +464,22 @@ func (g *Gate) Check(req PermissionRequest) bool {
 }
 
 // CheckDetailed returns the gate decision plus denial reason metadata.
-// Callers that only need a bool can use Check.
+// Callers that only need a bool can use Check. Equivalent to
+// CheckDetailedCtx(context.Background(), req) — a background context never
+// cancels, so this behaves exactly as before ctx support was added.
 func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
+	return g.CheckDetailedCtx(context.Background(), req)
+}
+
+// CheckDetailedCtx is CheckDetailed with a caller context threaded through
+// the promptFunc wait. When ctx is cancelled while a permission prompt is
+// pending (e.g. a chat_cancel arrives mid-prompt), the wait unblocks
+// immediately with ReasonCancelled instead of waiting out the full
+// promptFuncTimeout. If a context-aware bridge was wired via
+// SetPromptFuncCtx, ctx is also passed into it so the bridge itself (e.g.
+// the server's WS round trip) can stop blocking rather than being merely
+// abandoned here.
+func (g *Gate) CheckDetailedCtx(ctx context.Context, req PermissionRequest) CheckResult {
 	// Toolbelt enforcement: reject calls from providers not in the allowed set.
 	// Applies when allowedProviders is non-nil (an agent-scoped gate) and
 	// req.Provider is non-empty (connection tool, not an untagged builtin).
@@ -484,10 +520,11 @@ func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 		return CheckResult{Allowed: true}
 	}
 	promptFunc := g.promptFunc
+	promptFuncCtx := g.promptFuncCtx
 	g.mu.Unlock()
 
 	// No prompt function — deny by default
-	if promptFunc == nil {
+	if promptFunc == nil && promptFuncCtx == nil {
 		return CheckResult{
 			Allowed:    false,
 			ReasonCode: ReasonPromptUnavailable,
@@ -497,9 +534,16 @@ func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 
 	// Call promptFunc with a timeout. If it doesn't respond within
 	// promptFuncTimeout, treat as denied (safe default) and log a warning.
+	// Prefer the context-aware bridge when one is wired so cancellation can
+	// unblock the bridge itself (e.g. the server's WS round trip), not just
+	// this wait.
 	type result struct{ d Decision }
 	ch := make(chan result, 1)
 	go func() {
+		if promptFuncCtx != nil {
+			ch <- result{promptFuncCtx(ctx, req)}
+			return
+		}
 		ch <- result{promptFunc(req)}
 	}()
 
@@ -516,6 +560,14 @@ func (g *Gate) CheckDetailed(req PermissionRequest) CheckResult {
 			Allowed:    false,
 			ReasonCode: ReasonPromptTimeout,
 			Reason:     "Permission request timed out.",
+		}
+	case <-ctx.Done():
+		slog.Info("permissions: request cancelled while prompt pending, denying",
+			"tool", req.ToolName)
+		return CheckResult{
+			Allowed:    false,
+			ReasonCode: ReasonCancelled,
+			Reason:     "Permission request was cancelled.",
 		}
 	}
 

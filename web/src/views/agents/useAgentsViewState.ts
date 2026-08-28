@@ -202,6 +202,14 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     heartbeat_cron: '',
   })
   const original = ref('')
+  // loadedApprovedTools snapshots form.value.approved_tools as of the last
+  // load/save round trip. Echoed back on save as loaded_approved_tools so
+  // the server can tell "user edited the chips" apart from "form still
+  // holds its as-loaded snapshot" — see persistAgent's approved-tools RMW
+  // race fix (vet E). Without this, a grant landing via the permission
+  // banner while this tab sits open is silently clobbered by an untouched
+  // save.
+  const loadedApprovedTools = ref<string[]>([])
   const dirty = ref(false)
   const saving = ref(false)
   const saveMsg = ref('')
@@ -879,6 +887,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
       }
       const hadWildcards = ((data as any).toolbelt || []).some((e: any) => e.provider === '*')
       wildcardStripped.value = hadWildcards
+      loadedApprovedTools.value = [...form.value.approved_tools]
       original.value = JSON.stringify(form.value)
       dirty.value = false
       saveMsg.value = ''
@@ -947,12 +956,16 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     try {
       await ensureVault()
       const originalName = (agentName.value && agentName.value !== 'new') ? agentName.value : form.value.name
-      await api.agents.update(originalName, form.value)
+      // loaded_approved_tools lets the server distinguish an untouched save
+      // (preserve disk — a grant may have landed since load) from a real
+      // chip edit (this client's approved_tools is authoritative).
+      await api.agents.update(originalName, { ...form.value, loaded_approved_tools: loadedApprovedTools.value })
       updateAgent(form.value.name, { ...form.value })
       if (agentName.value && form.value.name !== agentName.value) {
         removeFromList(agentName.value)
         router.replace(`/agents/${form.value.name}`)
       }
+      loadedApprovedTools.value = [...form.value.approved_tools]
       original.value = JSON.stringify(form.value)
       dirty.value = false
       saveMsg.value = 'Saved successfully'
@@ -1042,6 +1055,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           heartbeat_enabled: false,
           heartbeat_cron: '',
         }
+        loadedApprovedTools.value = []
         original.value = JSON.stringify(form.value)
         dirty.value = false
       }
