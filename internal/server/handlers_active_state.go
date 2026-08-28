@@ -4,16 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/huginn/internal/config"
 )
 
 // sessionActiveState is the JSON response for GET /api/v1/sessions/{id}/active-state.
 // It gives clients enough information to reconstruct display state after a WS reconnect.
 type sessionActiveState struct {
-	SessionID      string             `json:"session_id"`
-	ActiveThreads  []threadMessageRow `json:"active_threads"`
-	LastSeq        int64              `json:"last_seq"`
-	InFlightTasks  []any              `json:"in_flight_tasks"`
-	SwarmState     any                `json:"swarm_state"`
+	SessionID     string             `json:"session_id"`
+	ActiveThreads []threadMessageRow `json:"active_threads"`
+	LastSeq       int64              `json:"last_seq"`
+	InFlightTasks []any              `json:"in_flight_tasks"`
+	SwarmState    any                `json:"swarm_state"`
 }
 
 // handleSessionActiveState returns the current session state for WS reconnect.
@@ -147,10 +149,15 @@ func (s *Server) handleRestoreActiveState(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Persist active session to config under the server mutex.
+	// Persist active session to config under the server mutex. Only the
+	// active_session_id field is written back — a fresh disk read/write via
+	// updateConfig avoids clobbering fields another writer (e.g. the TUI)
+	// changed on disk since s.cfg was last loaded.
 	s.mu.Lock()
 	s.cfg.ActiveSessionID = body.SessionID
-	saveErr := s.cfg.Save()
+	saveErr := s.updateConfig(func(c *config.Config) {
+		c.ActiveSessionID = body.SessionID
+	})
 	s.mu.Unlock()
 	if saveErr != nil {
 		jsonError(w, http.StatusInternalServerError, "persist config: "+saveErr.Error())

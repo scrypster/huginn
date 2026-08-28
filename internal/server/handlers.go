@@ -226,6 +226,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.invalidateSessionCountsCache()
 	jsonOK(w, map[string]string{"session_id": sess.ID})
 }
 
@@ -287,6 +288,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, 500, "archive session: "+err.Error())
 			return
 		}
+		s.invalidateSessionCountsCache()
 		jsonOK(w, map[string]any{"deleted": true, "permanent": false, "archived": true})
 		return
 	}
@@ -304,6 +306,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	// so a recycled session ID starts fresh.
 	s.cancelChatRun(id)
 	s.wsHub.DeleteSessionSeq(id)
+	s.invalidateSessionCountsCache()
 	jsonOK(w, map[string]any{"deleted": true})
 }
 
@@ -1052,6 +1055,29 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // the human sense of "someone is here right now", not "ever used".
 const activeSessionWindow = 15 * time.Minute
 
+// sessionCountsTTL bounds how often computeSessionCounts actually reloads
+// and reparses every session manifest. /api/v1/stats is polled frequently
+// by the UI; without this a poll storm turns into a full manifest scan per
+// request. 10s keeps counts fresh enough for a "who's active" display
+// without re-reading the store on every poll.
+const sessionCountsTTL = 10 * time.Second
+
+// sessionCountsCacheState holds the memoized result of computeSessionCounts.
+type sessionCountsCacheState struct {
+	total, active int
+	computedAt    time.Time
+}
+
+// invalidateSessionCountsCache forces the next computeSessionCounts call to
+// reload from the store rather than serve a stale cached count. Called on
+// session create/delete so the TTL window doesn't hide an immediate count
+// change; between those events the TTL alone bounds staleness.
+func (s *Server) invalidateSessionCountsCache() {
+	s.sessionCountsMu.Lock()
+	s.sessionCountsCache = sessionCountsCacheState{}
+	s.sessionCountsMu.Unlock()
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var prompt, completion any
 	if s.orch != nil {
@@ -1078,10 +1104,30 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // "active" at creation and never meaningfully transitions, so it cannot
 // distinguish a live session from one that has been quiet for days.
 func (s *Server) computeSessionCounts() (total, active int) {
-	if s.store == nil {
-		return 0, 0
+	s.sessionCountsMu.Lock()
+	defer s.sessionCountsMu.Unlock()
+
+	if !s.sessionCountsCache.computedAt.IsZero() && time.Since(s.sessionCountsCache.computedAt) < sessionCountsTTL {
+		return s.sessionCountsCache.total, s.sessionCountsCache.active
 	}
-	manifests, err := s.store.List()
+
+	total, active = s.computeSessionCountsUncached()
+	s.sessionCountsCache = sessionCountsCacheState{total: total, active: active, computedAt: time.Now()}
+	return total, active
+}
+
+// computeSessionCountsUncached does the actual manifest scan. Split out from
+// computeSessionCounts so the TTL-cache wrapper stays simple and this half
+// stays independently testable.
+func (s *Server) computeSessionCountsUncached() (total, active int) {
+	list := s.sessionCountsLoader
+	if list == nil {
+		if s.store == nil {
+			return 0, 0
+		}
+		list = s.store.List
+	}
+	manifests, err := list()
 	if err != nil {
 		return 0, 0
 	}
@@ -1238,6 +1284,21 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if newCfg.Backend.APIKey == "[REDACTED]" {
 		newCfg.Backend.APIKey = s.cfg.Backend.APIKey
 	}
+	// Restore redacted OAuth client secrets. GET redacts all five
+	// integrations.*.client_secret; the shipped Settings form loads that
+	// redacted value and sends it straight back — without this restore,
+	// opening Settings and clicking Save wrote the literal string
+	// "[REDACTED]" over every OAuth secret (Opus vet, 2026-08-28).
+	restoreSecret := func(sent *string, live string) {
+		if *sent == "[REDACTED]" {
+			*sent = live
+		}
+	}
+	restoreSecret(&newCfg.Integrations.Google.ClientSecret, s.cfg.Integrations.Google.ClientSecret)
+	restoreSecret(&newCfg.Integrations.GitHub.ClientSecret, s.cfg.Integrations.GitHub.ClientSecret)
+	restoreSecret(&newCfg.Integrations.Slack.ClientSecret, s.cfg.Integrations.Slack.ClientSecret)
+	restoreSecret(&newCfg.Integrations.Jira.ClientSecret, s.cfg.Integrations.Jira.ClientSecret)
+	restoreSecret(&newCfg.Integrations.Bitbucket.ClientSecret, s.cfg.Integrations.Bitbucket.ClientSecret)
 	// Restore redacted MCP env var values from the live config.
 	// When a client GETs config, secret env vars are returned as KEY=[REDACTED].
 	// If the client sends those values back unchanged, restore the real secrets.
@@ -1290,8 +1351,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if s.backendCache != nil && newCfg.Backend.Provider != "" && newCfg.Backend.APIKey != "" {
 		s.backendCache.SetProviderKey(newCfg.Backend.Provider, newCfg.Backend.APIKey)
 	}
-	// Save config to disk
-	if err := s.cfg.Save(); err != nil {
+	// Save config to disk. active_session_id is deliberately excluded from
+	// the copy and preserved from the fresh disk read: it is owned by
+	// handleSessionActiveState (and the TUI), not by this settings form, so
+	// a settings PUT built from a stale GET must not revert a session
+	// switch that happened in between.
+	if err := s.updateConfig(func(c *config.Config) {
+		activeSessionID := c.ActiveSessionID
+		*c = newCfg
+		c.ActiveSessionID = activeSessionID
+	}); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())
 		return
 	}

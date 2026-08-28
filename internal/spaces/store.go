@@ -355,7 +355,17 @@ func (s *SQLiteSpaceStore) ArchiveSpace(id string) error {
 
 // MarkRead records that the user has read all messages in the space up to now.
 func (s *SQLiteSpaceStore) MarkRead(spaceID string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// Must match the precision sessions.updated_at is written with
+	// (time.RFC3339, second precision — see session.SQLiteSessionStore.Append
+	// and SaveManifest) and the epoch fallback literal UnseenCount compares
+	// against ("1970-01-01T00:00:00Z", also no fractional seconds).
+	// RFC3339Nano's fractional seconds sort lexicographically BEFORE a bare
+	// "Z" at the same second (e.g. "...00.5Z" < "...00Z", since '.' < 'Z'),
+	// so mixing precisions made any read-then-write within the same
+	// wall-clock second compare backwards: the string comparison in
+	// UnseenCount's WHERE clause treated a message's already-read update as
+	// still-unseen. Same precision on both sides keeps that comparison correct.
+	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.Write().Exec(
 		`INSERT INTO space_read_positions(space_id, last_read_at) VALUES(?,?)
 		 ON CONFLICT(space_id) DO UPDATE SET last_read_at=excluded.last_read_at`,

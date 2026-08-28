@@ -602,7 +602,6 @@ func TestNotesFallbackPath_UsesAgentFile(t *testing.T) {
 	}
 }
 
-
 func TestVaultPinnedTool_OmitVaultRewrittenToHuginn(t *testing.T) {
 	// Model-shaped muninn_recall: empty / default (Lab company vault) must
 	// never reach Muninn as omit-or-default.
@@ -721,6 +720,123 @@ func TestConversational_DeclarativeFactWithoutRememberVerb_HarnessPersist(t *tes
 	}
 }
 
+// gateRecallStubTool returns a canned recall payload instead of recording
+// generic calls — the contradiction/evolve path needs muninn_recall to
+// answer with a scored hit before harnessPersist decides evolve vs remember.
+type gateRecallStubTool struct {
+	name   string
+	output string
+	mu     sync.Mutex
+	calls  []map[string]any
+}
+
+func (t *gateRecallStubTool) Name() string                      { return t.name }
+func (t *gateRecallStubTool) Description() string               { return t.name }
+func (t *gateRecallStubTool) Permission() tools.PermissionLevel { return tools.PermRead }
+func (t *gateRecallStubTool) Schema() backend.Tool {
+	return backend.Tool{Type: "function", Function: backend.ToolFunction{Name: t.name}}
+}
+func (t *gateRecallStubTool) Execute(_ context.Context, args map[string]any) tools.ToolResult {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, args)
+	return tools.ToolResult{Output: t.output}
+}
+func (t *gateRecallStubTool) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.calls)
+}
+
+func TestContradiction_StrongRecallHitSameSubject_Evolves(t *testing.T) {
+	recall := &gateRecallStubTool{name: "muninn_recall", output: `{"results":[{"id":"mem_odin","content":"my dog is named Odin","score":0.92}]}`}
+	remember := &gateStubTool{name: "muninn_remember"}
+	evolve := &gateStubTool{name: "muninn_evolve"}
+	reg := tools.NewRegistry()
+	reg.Register(recall)
+	reg.Register(remember)
+	reg.Register(evolve)
+
+	dec := applyMemoryGate(context.Background(), memoryGateInput{
+		Mode:      "conversational",
+		Vault:     "huginn",
+		UserMsg:   "actually my dog is named Loki.",
+		Assistant: "Got it, updating your dog's name to Loki.",
+		Registry:  reg,
+	})
+	if !dec.Receipt || dec.Source != "harness" {
+		t.Fatalf("decision = %+v, want harness receipt", dec)
+	}
+	if evolve.callCount() != 1 {
+		t.Fatalf("evolve called %d times, want 1", evolve.callCount())
+	}
+	if remember.callCount() != 0 {
+		t.Fatalf("remember called %d times, want 0 (must evolve not duplicate)", remember.callCount())
+	}
+	id, _ := evolve.calls[0]["id"].(string)
+	if id != "mem_odin" {
+		t.Fatalf("evolve id = %q, want mem_odin", id)
+	}
+	content, _ := evolve.calls[0]["content"].(string)
+	if !strings.Contains(strings.ToLower(content), "loki") {
+		t.Fatalf("evolve content missing new fact: %q", content)
+	}
+}
+
+func TestContradiction_NoPriorMemory_RemembersFirstTime(t *testing.T) {
+	recall := &gateRecallStubTool{name: "muninn_recall", output: `{"results":[]}`}
+	remember := &gateStubTool{name: "muninn_remember"}
+	evolve := &gateStubTool{name: "muninn_evolve"}
+	reg := tools.NewRegistry()
+	reg.Register(recall)
+	reg.Register(remember)
+	reg.Register(evolve)
+
+	dec := applyMemoryGate(context.Background(), memoryGateInput{
+		Mode:      "conversational",
+		Vault:     "huginn",
+		UserMsg:   "my dog is named Odin.",
+		Assistant: "Got it, your dog is named Odin.",
+		Registry:  reg,
+	})
+	if !dec.Receipt || dec.Source != "harness" {
+		t.Fatalf("decision = %+v, want harness receipt", dec)
+	}
+	if remember.callCount() != 1 {
+		t.Fatalf("remember called %d times, want 1", remember.callCount())
+	}
+	if evolve.callCount() != 0 {
+		t.Fatalf("evolve called %d times, want 0", evolve.callCount())
+	}
+}
+
+func TestContradiction_UnrelatedRecallHit_RemembersNotEvolve(t *testing.T) {
+	recall := &gateRecallStubTool{name: "muninn_recall", output: `{"results":[{"id":"mem_cat","content":"my cat is named Whiskers","score":0.95}]}`}
+	remember := &gateStubTool{name: "muninn_remember"}
+	evolve := &gateStubTool{name: "muninn_evolve"}
+	reg := tools.NewRegistry()
+	reg.Register(recall)
+	reg.Register(remember)
+	reg.Register(evolve)
+
+	dec := applyMemoryGate(context.Background(), memoryGateInput{
+		Mode:      "conversational",
+		Vault:     "huginn",
+		UserMsg:   "my dog is named Odin.",
+		Assistant: "Got it, your dog is named Odin.",
+		Registry:  reg,
+	})
+	if !dec.Receipt || dec.Source != "harness" {
+		t.Fatalf("decision = %+v, want harness receipt", dec)
+	}
+	if remember.callCount() != 1 {
+		t.Fatalf("unrelated recall hit must still remember, calls=%d", remember.callCount())
+	}
+	if evolve.callCount() != 0 {
+		t.Fatalf("unrelated recall hit must not evolve, calls=%d", evolve.callCount())
+	}
+}
+
 func TestDistillFactContent_StripsRememberWrapperAndInstructionCruft(t *testing.T) {
 	got := distillFactContent("Please remember this: the wringer tag is immersion-gates-2026. Confirm in one short sentence. Do not invent other vaults.")
 	want := "the wringer tag is immersion-gates-2026."
@@ -781,5 +897,29 @@ func TestIsQuestionShaped_TrailingMarkAndInterrogativeOpeners(t *testing.T) {
 		if isQuestionShaped(s) {
 			t.Errorf("isQuestionShaped(%q) = true, want false", s)
 		}
+	}
+}
+
+// Opus-vet data-loss findings 2026-08-28.
+func TestBestSubjectHit_WordBoundaryAndBand(t *testing.T) {
+	hits := []recallHit{
+		{ID: "dogma", Content: "my dogma is stoicism", Score: 0.9},
+		{ID: "dog", Content: "my dog is named Odin", Score: 0.8},
+		{ID: "weakdog", Content: "my dog likes parks", Score: 0.9, Band: "weak"},
+	}
+	got, ok := bestSubjectHit(hits, "my dog")
+	if !ok || got.ID != "dog" {
+		t.Fatalf("bestSubjectHit = %+v ok=%v, want id dog (dogma must not word-boundary-match; weak band excluded)", got, ok)
+	}
+}
+
+func TestHarnessPersist_ComplementaryFactRemembersNotEvolve(t *testing.T) {
+	// "my dog is a golden retriever" after "my dog is named Odin" is
+	// complementary, not a correction — must ADD, never evolve-destroy.
+	if looksLikeCorrection("my dog is a golden retriever") {
+		t.Fatal("complementary fact misread as correction")
+	}
+	if !looksLikeCorrection("actually my dog is named Loki") {
+		t.Fatal("explicit correction not detected")
 	}
 }

@@ -166,6 +166,18 @@ type Server struct {
 
 	spaceStore spaces.StoreInterface // nil if spaces not configured
 
+	// sessionCountsCache memoizes computeSessionCounts for sessionCountsTTL so
+	// a burst of /api/v1/stats polls doesn't reload+reparse every session
+	// manifest on every request. Guarded by its own mutex (not s.mu) since
+	// it's read/written far more often than other server state.
+	sessionCountsCache sessionCountsCacheState
+	sessionCountsMu    sync.Mutex
+
+	// sessionCountsLoader lists session manifests for computeSessionCounts.
+	// Nil (production) uses s.store.List directly. Tests may override this
+	// to count invocations without needing a real store.
+	sessionCountsLoader func() ([]session.Manifest, error)
+
 	// spaceThreadRunner wakes a mentioned agent inside a Slack-style thread.
 	// New wires RunSpaceThreadAgent. Tests may inject a fake so they never
 	// hit live models.
@@ -1060,11 +1072,31 @@ func (s *Server) MakeThreadEventEmitter() *threadmgr.EventEmitter {
 
 // saveConfig persists cfg to disk. When s.configPath is set (tests), it writes
 // to that path instead of the default ~/.huginn/config.json.
+//
+// Deprecated: this does a full-struct overwrite of whatever is currently on
+// disk, which clobbers any field another process (e.g. the TUI, or a
+// concurrent request in this process) changed since cfg was last loaded.
+// Prefer updateConfig, which re-reads disk immediately before writing and
+// only mutates the fields that actually changed.
 func (s *Server) saveConfig(cfg *config.Config) error {
 	if s.configPath != "" {
 		return cfg.SaveTo(s.configPath)
 	}
 	return cfg.Save()
+}
+
+// updateConfig performs a read-modify-write update of the on-disk config:
+// it re-reads the current config from disk (never a possibly-stale
+// in-memory copy), applies mutate to that fresh copy, and writes only the
+// result back. This avoids clobbering fields another writer (the TUI, or a
+// concurrent request in this process) changed on disk since s.cfg was last
+// loaded. Callers should still update s.cfg in memory themselves — this
+// only handles the disk side. Honors s.configPath (tests) like saveConfig.
+func (s *Server) updateConfig(mutate func(*config.Config)) error {
+	if s.configPath != "" {
+		return config.UpdateAt(s.configPath, mutate)
+	}
+	return config.UpdateDefault(mutate)
 }
 
 // storeAPIKey stores an API key in the OS keychain (or test double).

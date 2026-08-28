@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -232,8 +234,16 @@ func harnessPersist(ctx context.Context, reg *tools.Registry, vault, content, ki
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	id := firstPrefetchID(prefetch)
+	id := recallEvolveTargetID(ctx, reg, vault, content)
+	// Evolve only on an explicit correction ("actually", "not X", "I was
+	// wrong") — a complementary fact about the same subject ("my dog is a
+	// golden retriever" after "my dog is named Odin") must ADD a memory,
+	// never destroy the old one (Opus vet 2026-08-28: data-loss finding).
 	useEvolve := id != "" && looksLikeCorrection(content)
+	if id == "" {
+		id = firstPrefetchID(prefetch)
+		useEvolve = id != "" && looksLikeCorrection(content)
+	}
 	call := func() (tools.ToolResult, bool) {
 		if useEvolve {
 			if t, has := reg.Get("muninn_evolve"); has {
@@ -289,6 +299,175 @@ func harnessPersist(ctx context.Context, reg *tools.Registry, vault, content, ki
 		return false, muninnResultDown(res2)
 	}
 	return false, false
+}
+
+// factSubjectRE captures the possessive/definite subject phrase of a
+// declarative fact — "my dog", "our staging server", "the deploy window" —
+// so a contradiction ("actually my dog is named Loki") can be checked
+// against what's already stored about the SAME subject before writing.
+var factSubjectRE = regexp.MustCompile(`(?i)\b((?:our|my|the)\s+[a-z][\w'-]*(?:\s+[a-z][\w'-]*){0,3})\s+(?:is|are|was|were)\s+`)
+
+// factSubject extracts the possessive/definite subject phrase from a
+// distilled fact, lowercased for substring matching against recalled
+// memory content. Returns "" when the content isn't subject+copula shaped.
+func factSubject(content string) string {
+	m := factSubjectRE.FindStringSubmatch(content)
+	if len(m) < 2 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(m[1]))
+}
+
+// recallHit is one scored memory returned by muninn_recall.
+type recallHit struct {
+	ID      string
+	Content string
+	Score   float64
+	// Band is muninn_recall's calibrated relevance_band (strong|moderate|
+	// weak|...). Preferred over Score when present — raw scores are
+	// query-relative and on some vaults use a 0-100 scale, making every hit
+	// look "strong" against a 0.75 float threshold.
+	Band string
+}
+
+// strongRecallBand is the relevance floor above which a recall hit is
+// trusted to be about the same thing, not just a loosely related memory.
+const strongRecallBand = 0.75
+
+// parseRecallHits best-effort parses a muninn_recall tool output into scored
+// hits. Accepts a bare array, or an object wrapping the array under a
+// results/memories/items/matches key, or a single hit object.
+func parseRecallHits(raw string) []recallHit {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var generic any
+	if err := json.Unmarshal([]byte(raw), &generic); err != nil {
+		return nil
+	}
+	return recallHitsFromJSON(generic)
+}
+
+func recallHitsFromJSON(v any) []recallHit {
+	switch t := v.(type) {
+	case []any:
+		var out []recallHit
+		for _, item := range t {
+			if h, ok := recallHitFromMap(item); ok {
+				out = append(out, h)
+			}
+		}
+		return out
+	case map[string]any:
+		for _, key := range []string{"results", "memories", "items", "matches", "hits"} {
+			if arr, ok := t[key]; ok {
+				return recallHitsFromJSON(arr)
+			}
+		}
+		if h, ok := recallHitFromMap(t); ok {
+			return []recallHit{h}
+		}
+	}
+	return nil
+}
+
+func recallHitFromMap(v any) (recallHit, bool) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return recallHit{}, false
+	}
+	id, _ := m["id"].(string)
+	content, _ := m["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		content, _ = m["summary"].(string)
+	}
+	if id == "" || strings.TrimSpace(content) == "" {
+		return recallHit{}, false
+	}
+	score := numFromAny(m["score"])
+	if score == 0 {
+		score = numFromAny(m["relevance"])
+	}
+	band, _ := m["relevance_band"].(string)
+	return recallHit{ID: id, Content: content, Score: score, Band: strings.ToLower(strings.TrimSpace(band))}, true
+}
+
+func numFromAny(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f
+	}
+	return 0
+}
+
+// bestSubjectHit picks the highest-scoring hit at/above strongRecallBand
+// whose content mentions subject. Used both by the contradiction-evolve
+// path (memory_gates.go) and the forget path (forget_ask.go).
+func bestSubjectHit(hits []recallHit, subject string) (recallHit, bool) {
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	if subject == "" {
+		return recallHit{}, false
+	}
+	subjectRE, reErr := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(subject) + `\b`)
+	var best recallHit
+	found := false
+	for _, h := range hits {
+		// Prefer the calibrated relevance_band when the server sent one;
+		// fall back to the raw score threshold. Bare Contains matched
+		// "my dog" inside "my dogma" (Opus vet) — require word boundaries.
+		if h.Band != "" {
+			if h.Band != "strong" {
+				continue
+			}
+		} else if h.Score < strongRecallBand {
+			continue
+		}
+		if reErr != nil || !subjectRE.MatchString(h.Content) {
+			continue
+		}
+		if !found || h.Score > best.Score {
+			best = h
+			found = true
+		}
+	}
+	return best, found
+}
+
+// recallEvolveTargetID recalls the fact's subject and returns the id of an
+// existing strong-band memory about the same subject whose content differs
+// from the new content — i.e. a contradiction to evolve rather than a
+// rival fact to add. Returns "" when there's nothing to evolve (new
+// subject, no strong hit, or the recalled memory already says the same
+// thing).
+func recallEvolveTargetID(ctx context.Context, reg *tools.Registry, vault, content string) string {
+	if reg == nil {
+		return ""
+	}
+	subject := factSubject(content)
+	if subject == "" {
+		return ""
+	}
+	recallTool, has := reg.Get("muninn_recall")
+	if !has {
+		return ""
+	}
+	res := recallTool.Execute(ctx, map[string]any{"vault": vault, "context": subject})
+	if res.IsError {
+		return ""
+	}
+	hits := parseRecallHits(res.Output)
+	hit, found := bestSubjectHit(hits, subject)
+	if !found {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(hit.Content), strings.TrimSpace(content)) {
+		return "" // identical fact already stored — nothing to evolve
+	}
+	return hit.ID
 }
 
 func persistSucceeded(res tools.ToolResult) bool {
