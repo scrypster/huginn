@@ -547,6 +547,7 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 	visible = dropLeftoverHireGhost(visible, ask)
 	visible = dropLeftoverDelegatedHire(visible, ask)
 	visible = EchoAckRewrite(visible, ask)
+	visible = StatementFragmentAckRewrite(visible, ask)
 	return closeIncompletePersist(fillTrivialAckPersist(fillTrivialPingPersist(visible, ask), ask))
 }
 

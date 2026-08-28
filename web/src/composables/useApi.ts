@@ -218,16 +218,34 @@ export async function fetchToken(): Promise<string> {
   return data.token
 }
 
+/**
+ * ensureToken resolves once a token is available, fetching one first if
+ * App.vue's initApp() hasn't set it yet (or a caller polls independently of
+ * the main boot sequence — e.g. delivery-queue badge). Callers that build
+ * their own request instead of going through apiFetch should await this
+ * before their first request so it doesn't fire pre-auth and log a spurious
+ * 401 (the failure is swallowed here; the caller's own request will surface
+ * it if the token still can't be fetched).
+ */
+export async function ensureToken(): Promise<string> {
+  if (!token.value) {
+    try {
+      setToken(await fetchToken())
+    } catch { /* leave empty; caller's request will 401 */ }
+  }
+  return token.value
+}
+
 export async function apiFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   // Auto-fetch token on first use if App.vue hasn't initialized it yet.
   // Vue 3 fires child onMounted() before parent onMounted(), so views that
   // make API calls on mount can race ahead of initApp()/setToken().
-  if (!token.value) {
-    try {
-      const tok = await fetchToken()
-      setToken(tok)
-    } catch { /* proceed; 401 retry below will recover */ }
-  }
+  // Guarded by `if` (not an unconditional `await ensureToken()`) so the
+  // common case — token already set — falls straight through to fetch()
+  // in the same microtask tick. Callers such as useVersion.ts rely on that
+  // synchronous-until-the-real-fetch behavior to dedupe concurrent calls
+  // into a single in-flight request.
+  if (!token.value) await ensureToken()
 
   const res = await fetch(path, {
     ...opts,

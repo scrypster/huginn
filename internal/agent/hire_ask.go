@@ -98,10 +98,14 @@ func (o *Orchestrator) tryNamedHireFastPath(ctx context.Context, ag *agents.Agen
 	if onToken != nil {
 		onToken(first)
 	}
+	// memory:true — the fast path must assign a vault the same way a hire
+	// that goes through the model does (create_agent's own default). A
+	// hardcoded memory:false here previously left the new agent with no
+	// vault at all until someone manually assigned one.
 	res := tool.Execute(ctx, map[string]any{
 		"name":        name,
 		"description": role,
-		"memory":      false,
+		"memory":      true,
 	})
 	speech := strings.TrimSpace(res.Output)
 	if res.IsError {

@@ -271,8 +271,16 @@ func stripResidualUnfenced(s string, afterTools bool, isFenced bool) string {
 			line = stripOrphanFenceTicks(line)
 			line = dropFutureWaitGlueSentences(line)
 			line = dropPlaybookInstructionSentences(line)
+			line = dropToolPlanNarrationSentences(line)
 			line = dropHelpdeskCloserSentences(line)
 			line = rewriteMissingAgentHelpdesk(line, s)
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+		} else if !isFenced {
+			// Streaming path (before tools ran): tool-plan narration ("I'll
+			// use the muninn_recall function…") is never teammate speech.
+			line = dropToolPlanNarrationSentences(line)
 			if strings.TrimSpace(line) == "" {
 				continue
 			}

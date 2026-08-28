@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/spaces"
@@ -919,5 +920,121 @@ func TestSpaceThreadUserTurn_TrivialPingIgnoresTranscript(t *testing.T) {
 	}
 	if got := spaceThreadUserTurn("@Steve what is 2+2?", prompt); !strings.Contains(got, "drawer-parent-5a") {
 		t.Fatalf("non-trivial should keep transcript, got %q", got)
+	}
+}
+
+// dialTestWS opens a real WebSocket connection against ts, optionally scoped
+// to sessionID (empty = wildcard, receives every broadcast — this is what the
+// space/thread drawer's browser connection uses).
+func dialTestWS(t *testing.T, ts *httptest.Server, sessionID string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?token=" + testToken
+	if sessionID != "" {
+		wsURL += "&session_id=" + sessionID
+	}
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v (resp=%v)", err, resp)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// collectSpaceReplyTokens reads from conn until deadline, returning every
+// space_reply_token payload's token in delivery order (including any
+// duplicates — that is exactly what this test is checking for).
+func collectSpaceReplyTokens(t *testing.T, conn *websocket.Conn, deadline time.Duration) []string {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(deadline))
+	var tokens []string
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return tokens
+		}
+		var msg WSMessage
+		if json.Unmarshal(data, &msg) != nil {
+			continue
+		}
+		if msg.Type != "space_reply_token" {
+			continue
+		}
+		if tok, _ := msg.Payload["token"].(string); tok != "" {
+			tokens = append(tokens, tok)
+		}
+	}
+}
+
+// TestEmitSpaceReplyToken_SingleClientReceivesEachTokenOnce reproduces the
+// thread-drawer doubled-token defect: emitSpaceScoped fanned a space_reply_token
+// out to a session's clients via BroadcastToSession AND, again, to every
+// connected client via BroadcastWS. A wildcard client (session_id="" — what the
+// space/thread drawer's browser connection actually uses) sits in both delivery
+// paths and received every token twice ("WaitingWaiting for for the the...").
+func TestEmitSpaceReplyToken_SingleClientReceivesEachTokenOnce(t *testing.T) {
+	srv, ts := newTestServer(t)
+	// newTestServer wires routes via httptest.Server directly and never calls
+	// Server.Start, so wsHub.run() — the goroutine that drains BroadcastWS's
+	// global broadcastC channel — never runs in the default test harness. The
+	// production server (Start) does start it, and that is exactly the path
+	// that double-delivers to wildcard/session clients. Start it explicitly so
+	// this test exercises the real production wiring instead of a harness gap
+	// that would hide the bug.
+	go srv.wsHub.run()
+	db := openTestSQLiteDB(t)
+	if err := db.Migrate(spaces.Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	store := spaces.NewSQLiteSpaceStore(db)
+	srv.SetSpaceStore(store)
+	ch, err := store.CreateChannel("Chat", "atlas", nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.PostSpaceMessage(ch.ID, "root", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The thread drawer's browser WS connection is wildcard (no session_id) —
+	// this is the client that saw doubled tokens live.
+	wildcard := dialTestWS(t, ts, "")
+	// A session-scoped connection (e.g. a hallway/session-bound client).
+	scoped := dialTestWS(t, ts, root.SessionID)
+
+	// Drain each connection's initial handshake noise (if any) isn't needed;
+	// start reading concurrently so neither connection's OS buffer stalls the
+	// other while emitSpaceReplyToken fires synchronously below.
+	type result struct{ tokens []string }
+	wildcardCh := make(chan result, 1)
+	scopedCh := make(chan result, 1)
+	go func() { wildcardCh <- result{collectSpaceReplyTokens(t, wildcard, 1500*time.Millisecond)} }()
+	go func() { scopedCh <- result{collectSpaceReplyTokens(t, scoped, 1500*time.Millisecond)} }()
+
+	// Give both readers a moment to establish their read loop before emitting.
+	time.Sleep(100 * time.Millisecond)
+	srv.emitSpaceReplyToken(ch.ID, root.ID, "Winston", "Waiting ")
+	srv.emitSpaceReplyToken(ch.ID, root.ID, "Winston", "for ")
+	srv.emitSpaceReplyToken(ch.ID, root.ID, "Winston", "the ")
+	srv.emitSpaceReplyToken(ch.ID, root.ID, "Winston", "recall.")
+
+	want := []string{"Waiting ", "for ", "the ", "recall."}
+
+	wildcardTokens := (<-wildcardCh).tokens
+	scopedTokens := (<-scopedCh).tokens
+
+	assertNoDoubledTokens(t, "wildcard (space drawer) client", wildcardTokens, want)
+	assertNoDoubledTokens(t, "session-scoped client", scopedTokens, want)
+}
+
+func assertNoDoubledTokens(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: got %d tokens %q, want %d %q (doubled delivery?)", label, len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s: token[%d]=%q want %q (all: %q)", label, i, got[i], want[i], got)
+		}
 	}
 }

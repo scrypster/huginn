@@ -7,17 +7,17 @@ import (
 )
 
 type hireRec struct {
-	persisted []CreateAgentRequest
-	vaults    []string
+	persisted   []CreateAgentRequest
+	vaults      []string
 	seated      []string
 	spaceSeated []string
-	exists    map[string]bool
-	conns     map[string]string
-	spaceCo   string
-	inCompany map[string]bool
-	coName    string
-	persistErr error
-	nameErr    error
+	exists      map[string]bool
+	conns       map[string]string
+	spaceCo     string
+	inCompany   map[string]bool
+	coName      string
+	persistErr  error
+	nameErr     error
 }
 
 func (r *hireRec) deps() CreateAgentDeps {
@@ -289,6 +289,83 @@ func TestCreateAgent_CreateAnAgentHitsSamePersist(t *testing.T) {
 	}
 	if jargon(res.Output) {
 		t.Errorf("jargon: %q", res.Output)
+	}
+}
+
+// TestCreateAgent_HireAckGrammarVerbPhraseRole covers defect #2: a verb-phrase
+// description ("researches the web") was spliced verbatim after "is on the
+// roster as", producing "fableprobe is on the roster as researches the web."
+// It must now read as a grammatical sentence.
+func TestCreateAgent_HireAckGrammarVerbPhraseRole(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "fableprobe", "description": "researches the web",
+	})
+	if res.IsError {
+		t.Fatal(res.Error)
+	}
+	if strings.Contains(res.Output, "on the roster as researches") {
+		t.Fatalf("verbatim splice leaked ungrammatical phrase: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "fableprobe joined the roster to research the web") {
+		t.Errorf("want a grammatical role phrase, got %q", res.Output)
+	}
+}
+
+// TestCreateAgent_HireAckGrammarNounPhraseRole covers the other branch: a
+// noun/role-phrase description keeps the original, already-grammatical
+// "is on the roster as <role>" wording.
+func TestCreateAgent_HireAckGrammarNounPhraseRole(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	tool := &CreateAgentTool{Deps: r.deps()}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{
+		"name": "Morgan", "description": "researcher",
+	})
+	if res.IsError {
+		t.Fatal(res.Error)
+	}
+	if !strings.Contains(res.Output, "Morgan is on the roster as researcher") {
+		t.Errorf("want noun-phrase role wording, got %q", res.Output)
+	}
+}
+
+func TestIsVerbPhraseRole(t *testing.T) {
+	cases := []struct {
+		role string
+		want bool
+	}{
+		{"researches the web", true},
+		{"manages the calendar", true},
+		{"writes code", true},
+		{"handles support tickets", true},
+		{"researcher", false},
+		{"bookkeeper", false},
+		{"customer support", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isVerbPhraseRole(tc.role); got != tc.want {
+			t.Errorf("isVerbPhraseRole(%q) = %v, want %v", tc.role, got, tc.want)
+		}
+	}
+}
+
+func TestBaseVerbForm(t *testing.T) {
+	cases := []struct {
+		word, want string
+	}{
+		{"researches", "research"},
+		{"manages", "manage"},
+		{"writes", "write"},
+		{"helps", "help"},
+		{"goes", "go"},
+		{"studies", "study"},
+	}
+	for _, tc := range cases {
+		if got := baseVerbForm(tc.word); got != tc.want {
+			t.Errorf("baseVerbForm(%q) = %q, want %q", tc.word, got, tc.want)
+		}
 	}
 }
 

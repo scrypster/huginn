@@ -43,8 +43,33 @@ const agents = ref<Array<Record<string, unknown>>>([])
 const unknownMentionHint = ref('')
 let unknownMentionTimer: ReturnType<typeof setTimeout> | null = null
 
+// agentsReady resolves once the roster fetch below has settled (success or
+// exhausted retries). The @ mention suggestion's items() awaits it before
+// its first lookup — see useEditor.ts — so a user who types "@" the instant
+// the composer mounts (autofocus) gets the real roster once it lands
+// instead of a picker that opens empty and never updates (tiptap-suggestion
+// only re-runs items() on the next keystroke, so a stale-empty open would
+// otherwise stick until the user typed more).
+const AGENTS_FETCH_MAX_ATTEMPTS = 3
+const AGENTS_FETCH_RETRY_DELAY_MS = 400
+let resolveAgentsReady!: () => void
+const agentsReady = new Promise<void>(resolve => { resolveAgentsReady = resolve })
+
 onMounted(async () => {
-  try { agents.value = await api.agents.list() } catch { /* ignore */ }
+  for (let attempt = 1; attempt <= AGENTS_FETCH_MAX_ATTEMPTS; attempt++) {
+    try {
+      agents.value = await api.agents.list()
+      break
+    } catch {
+      // Transient failure (e.g. a 503 while the backend is warming up) would
+      // otherwise leave agents.value permanently empty for this page load —
+      // the mention picker would then never have anyone to suggest.
+      if (attempt < AGENTS_FETCH_MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, AGENTS_FETCH_RETRY_DELAY_MS))
+      }
+    }
+  }
+  resolveAgentsReady()
 })
 
 // Pass a reactive ref to useEditor so the Placeholder extension re-reads
@@ -58,6 +83,7 @@ const { editor, init, getMarkdown, clear, focus, setText, isEmpty } = useEditor(
   placeholder: props.placeholder ?? 'Message huginn...',
   placeholderRef,
   memberNames: memberNamesRef,
+  agentsReady,
 })
 
 const editorInstance = computed(() => editor.value as Editor | null)
@@ -114,7 +140,10 @@ function handleSend() {
   focus()
 }
 
-defineExpose({ focus, setText, clear })
+// `editor` (the raw Tiptap instance) is exposed alongside the public API
+// mainly so component tests can drive real ProseMirror transactions — jsdom
+// doesn't support the DOM input pipeline tiptap relies on for real typing.
+defineExpose({ focus, setText, clear, editor: editorInstance })
 </script>
 
 <style>

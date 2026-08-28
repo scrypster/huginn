@@ -70,3 +70,46 @@ func TestEchoAckRewrite_NearVerbatimWithMinorRewordingRewritten(t *testing.T) {
 		t.Fatalf("got %q, want a short ack", got)
 	}
 }
+
+// liveWinstonNotHelpful is the observed persist: a statement turn (not a
+// question) whose final visible speech collapsed to a bare quality-judgment
+// fragment instead of an actual acknowledgment.
+const liveWinstonNotHelpfulAsk = "@Winston that answer wasn't helpful."
+
+func TestStatementFragmentAckRewrite_BareNotHelpfulRewritten(t *testing.T) {
+	got := StatementFragmentAckRewrite("Not helpful", liveWinstonNotHelpfulAsk)
+	if got != "Noted." {
+		t.Fatalf("got %q, want a short ack", got)
+	}
+}
+
+func TestStatementFragmentAckRewrite_BareHelpfulRewritten(t *testing.T) {
+	got := StatementFragmentAckRewrite("helpful.", "@Winston thanks, that was great.")
+	if got != "Noted." {
+		t.Fatalf("got %q, want a short ack", got)
+	}
+}
+
+func TestStatementFragmentAckRewrite_QuestionTurnUnchanged(t *testing.T) {
+	// A real question turn can legitimately have a short one-word answer —
+	// only statement turns get the rewrite.
+	got := StatementFragmentAckRewrite("Helpful.", "@Winston was that guide helpful?")
+	if got != "Helpful." {
+		t.Fatalf("question-turn short answer rewritten: got %q", got)
+	}
+}
+
+func TestStatementFragmentAckRewrite_RealAnswerUnchanged(t *testing.T) {
+	got := StatementFragmentAckRewrite("Our staging server is called valkyrie.", "@Winston noted for the record.")
+	want := "Our staging server is called valkyrie."
+	if got != want {
+		t.Fatalf("real answer rewritten: got %q, want %q", got, want)
+	}
+}
+
+func TestPersistVisibleAssistantContent_NotHelpfulFragmentRewrittenToAck(t *testing.T) {
+	got := PersistVisibleAssistantContent("Not helpful", liveWinstonNotHelpfulAsk)
+	if got != "Noted." {
+		t.Fatalf("got %q, want a short ack", got)
+	}
+}

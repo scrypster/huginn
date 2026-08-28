@@ -21,6 +21,7 @@ import (
 	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
@@ -802,11 +803,51 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check if the agent leads any company. Deleting the lead out from under
+	// a company would orphan it (UnseatMember reassigns the lead when a
+	// non-lead member is removed, but there is no seated member left to
+	// reassign to here) — block with a clear, actionable error instead.
+	cs := s.companyAPI()
+	var companies []*spaces.Company
+	if cs != nil {
+		if list, err := cs.ListCompanies(); err == nil {
+			companies = list
+		}
+		var leadOf []string
+		for _, c := range companies {
+			if c != nil && strings.EqualFold(strings.TrimSpace(c.Lead), name) {
+				leadOf = append(leadOf, c.Name)
+			}
+		}
+		if len(leadOf) > 0 {
+			jsonError(w, 409, fmt.Sprintf("cannot delete agent %q: reassign the lead in %v before deleting", name, leadOf))
+			return
+		}
+	}
+
 	if err := agents.DeleteAgentDefault(name); err != nil {
 		jsonError(w, 404, err.Error())
 		return
 	}
 	_ = agents.DeleteHeartbeatYAMLDefault(name) // best effort; ignore error
+
+	// Remove the agent from every company roster it was seated in so it does
+	// not linger as a ghost member (and thus in the UI rail) after deletion.
+	if cs != nil {
+		for _, c := range companies {
+			if c == nil {
+				continue
+			}
+			for _, m := range c.Members {
+				if strings.EqualFold(strings.TrimSpace(m), name) {
+					if err := cs.UnseatMember(c.ID, name); err != nil {
+						slog.Warn("handleDeleteAgent: failed to unseat from company", "agent", name, "company_id", c.ID, "err", err)
+					}
+					break
+				}
+			}
+		}
+	}
 	// Refresh the live agent registry so the deleted agent immediately stops
 	// resolving for delegation and mention parsing (issue #124).
 	s.notifyAgentsChanged()

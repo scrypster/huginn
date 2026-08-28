@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -552,15 +551,24 @@ func sendPersistenceError(c *wsClient, errCtx string, _ error) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Validate token via query param (WebSocket upgrades can't set headers from browser).
-	// Use constant-time comparison to prevent timing-based token oracle attacks.
-	tok := r.URL.Query().Get("token")
-	if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+	// Validate the token via the "huginn-token.<token>" Sec-WebSocket-Protocol
+	// subprotocol (used by the web client) or, failing that, the legacy
+	// ?token= query param (TUI client / back-compat). See wsAuthorizeToken.
+	ok, subprotocol := wsAuthorizeToken(r, s.token)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	// RFC 6455: a server that accepts a subprotocol MUST echo it back in the
+	// response, or the browser rejects the handshake. The upgrader has no
+	// static Subprotocols list (the token varies per request), so it's set
+	// directly on the response header here.
+	var respHeader http.Header
+	if subprotocol != "" {
+		respHeader = http.Header{"Sec-WebSocket-Protocol": []string{subprotocol}}
+	}
+	conn, err := s.upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
 		return
 	}

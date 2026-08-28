@@ -9,6 +9,7 @@ class MockWebSocket {
 
   readyState = MockWebSocket.CONNECTING
   url: string
+  protocols: string | string[] | undefined
   onopen: (() => void) | null = null
   onclose: ((ev: { code: number; reason: string; wasClean: boolean }) => void) | null = null
   onerror: (() => void) | null = null
@@ -16,8 +17,9 @@ class MockWebSocket {
   sentMessages: string[] = []
   closed = false
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url
+    this.protocols = protocols
     MockWebSocket.instances.push(this)
   }
 
@@ -78,8 +80,20 @@ describe('useHuginnWS', () => {
   it('connects immediately on creation and uses ws: protocol for http', async () => {
     const ws = await createWS('mytoken')
     expect(MockWebSocket.instances).toHaveLength(1)
-    expect(MockWebSocket.latest().url).toBe('ws://localhost:3000/ws?token=mytoken')
+    expect(MockWebSocket.latest().url).toBe('ws://localhost:3000/ws')
     expect(ws.connected.value).toBe(false)
+    ws.destroy()
+  })
+
+  it('authenticates via the Sec-WebSocket-Protocol subprotocol, never the URL', async () => {
+    const ws = await createWS('super-secret-token')
+    const sock = MockWebSocket.latest()
+    // The token must never appear in the URL — a failed connection attempt
+    // logs the URL verbatim to the browser console/network panel, which
+    // would leak the token. It must be carried in the subprotocol instead.
+    expect(sock.url).not.toContain('super-secret-token')
+    expect(sock.url).not.toContain('token=')
+    expect(sock.protocols).toBe('huginn-token.super-secret-token')
     ws.destroy()
   })
 

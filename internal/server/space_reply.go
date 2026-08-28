@@ -310,12 +310,25 @@ func (s *Server) emitSpaceReplyMention(spaceID, parentID, preview string) {
 	})
 }
 
-// emitSpaceScoped broadcasts to sessions in the space AND globally with space_id
-// so a space-mode client hears it. Also SendRelay the same type + payload so a
-// remote puppet on the HuginnCloud satellite can render thinking pulse / live
-// replies. Cloud hub is a transparent pipe (unknown types ForwardToOwner).
-// Clients not viewing that space must ignore it.
+// emitSpaceScoped broadcasts to sessions in the space so a space-mode client
+// hears it. Also SendRelay the same type + payload so a remote puppet on the
+// HuginnCloud satellite can render thinking pulse / live replies. Cloud hub is
+// a transparent pipe (unknown types ForwardToOwner). Clients not viewing that
+// space must ignore it (they filter locally on payload space_id).
 // Nil hub / empty space_id / nil or disconnected satellite must not panic.
+//
+// BroadcastToSession(ref) already reaches every wildcard client (session_id
+// omitted — what every browser tab's single WS connection actually is; see
+// web/src/composables/useHuginnWS.ts) as well as any client scoped to that
+// exact session. Falling through to a second, unconditional BroadcastWS on
+// top of that double-delivers the same message to the same live connection —
+// harmless for one-shot events (an idempotent re-set of reply_count/typing
+// state) but fatal for a streaming token: every space_reply_token landed
+// twice on the wildcard client, rendering doubled words in the thread drawer
+// live stream ("WaitingWaiting for for the the..."). BroadcastWS is now only
+// the fallback for when no session exists yet to broadcast to (spaceStore
+// nil, a lookup error, or a space with no session rows at all) — the one case
+// BroadcastToSession(refs...) cannot reach a wildcard client on its own.
 func (s *Server) emitSpaceScoped(eventType, spaceID string, payload map[string]any) {
 	if strings.TrimSpace(spaceID) == "" {
 		return
@@ -330,14 +343,18 @@ func (s *Server) emitSpaceScoped(eventType, spaceID string, payload map[string]a
 	if s.onSpaceWS != nil {
 		s.onSpaceWS(msg)
 	}
+	delivered := false
 	if s.spaceStore != nil {
-		if refs, err := s.spaceStore.ListSessionsForSpace(spaceID); err == nil {
+		if refs, err := s.spaceStore.ListSessionsForSpace(spaceID); err == nil && len(refs) > 0 {
 			for _, r := range refs {
 				s.BroadcastToSession(r.ID, eventType, payload)
 			}
+			delivered = true
 		}
 	}
-	s.BroadcastWS(msg)
+	if !delivered {
+		s.BroadcastWS(msg)
+	}
 	// Same type string + payload as local WS. SpaceID is set on the envelope
 	// so a remote puppet can scope the event without parsing payload.
 	s.SendRelay(relay.Message{

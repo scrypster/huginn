@@ -266,8 +266,13 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) Tool
 func hireSpeech(name, role string, local []string, belt []CreateAgentBeltEntry, vaultOK bool, vaultName, seated string, desk bool) string {
 	var b strings.Builder
 	b.WriteString(name)
-	b.WriteString(" is on the roster as ")
-	b.WriteString(role)
+	if isVerbPhraseRole(role) {
+		b.WriteString(" joined the roster to ")
+		b.WriteString(roleAsBaseVerbPhrase(role))
+	} else {
+		b.WriteString(" is on the roster as ")
+		b.WriteString(role)
+	}
 	tools := make([]string, 0, len(local)+len(belt))
 	tools = append(tools, local...)
 	for _, e := range belt {
@@ -297,6 +302,53 @@ func hireSpeech(name, role string, local []string, belt []CreateAgentBeltEntry, 
 		b.WriteString(".")
 	}
 	return b.String()
+}
+
+// isVerbPhraseRole reports whether role reads as a 3rd-person-singular verb
+// phrase ("researches the web") rather than a noun/role phrase
+// ("researcher"). It's a best-effort heuristic (not full NLP): a role whose
+// first word ends in "s" (but not "ss") is treated as a verb phrase.
+func isVerbPhraseRole(role string) bool {
+	fields := strings.Fields(role)
+	if len(fields) == 0 {
+		return false
+	}
+	w := strings.ToLower(fields[0])
+	if len(w) < 3 {
+		return false
+	}
+	return strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss")
+}
+
+// roleAsBaseVerbPhrase de-conjugates the first word of role from 3rd-person
+// singular ("researches") to base form ("research") so it reads naturally
+// after "joined the roster to". Best-effort; unusual verbs fall through
+// unchanged rather than mangled.
+func roleAsBaseVerbPhrase(role string) string {
+	fields := strings.Fields(role)
+	if len(fields) == 0 {
+		return role
+	}
+	fields[0] = baseVerbForm(fields[0])
+	return strings.Join(fields, " ")
+}
+
+func baseVerbForm(word string) string {
+	w := strings.ToLower(word)
+	switch {
+	case strings.HasSuffix(w, "ies") && len(w) > 3:
+		return word[:len(word)-3] + "y"
+	case strings.HasSuffix(w, "ches"), strings.HasSuffix(w, "shes"),
+		strings.HasSuffix(w, "xes"), strings.HasSuffix(w, "zes"),
+		strings.HasSuffix(w, "sses"), strings.HasSuffix(w, "oes"):
+		return word[:len(word)-2]
+	case strings.HasSuffix(w, "es") && len(w) > 3:
+		return word[:len(word)-1]
+	case strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") && len(w) > 2:
+		return word[:len(word)-1]
+	default:
+		return word
+	}
 }
 
 func hireErr(msg string) ToolResult {
