@@ -41,6 +41,11 @@ type CreateAgentDeps struct {
 	SeatMember      func(companyID, agentName string) error
 	SeatSpaceMember func(spaceID, agentName string) error
 	ResolveConn     func(id string) (provider string, ok bool)
+	// ResolveVaultName returns the canonical vault name for a new hire.
+	// Standard (MJ, 2026-08-28): "huginn:agent:<user>:<name>" — the live
+	// server wires agents.ResolveAgentVaultName. When nil (tests, TUI
+	// harnesses), the legacy "<name>-huginn" slug is used as a fallback.
+	ResolveVaultName func(agentName string) string
 	ValidateName    func(name string) error
 	CallerFromCtx   func(ctx context.Context) string
 	SpaceFromCtx    func(ctx context.Context) string
@@ -213,7 +218,12 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args map[string]any) Tool
 
 	vaultName := strings.TrimSpace(asToolString(args["vault_name"]))
 	if memory && vaultName == "" {
-		vaultName = hireVaultName(name)
+		if t.Deps.ResolveVaultName != nil {
+			vaultName = t.Deps.ResolveVaultName(name)
+		}
+		if vaultName == "" {
+			vaultName = hireVaultName(name)
+		}
 	}
 	if !memory {
 		vaultName = ""

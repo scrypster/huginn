@@ -150,6 +150,31 @@ func TestCreateAgent_MuninnDownStillCreates(t *testing.T) {
 	}
 }
 
+// Canonical standard (MJ, 2026-08-28): when the server wires ResolveVaultName,
+// hires get "huginn:agent:<user>:<name>". The "<name>-huginn" slug is only the
+// unwired fallback (covered by TestCreateAgent_VaultDefaultNameHuginn).
+func TestCreateAgent_VaultUsesCanonicalResolver(t *testing.T) {
+	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
+	d := r.deps()
+	d.ResolveVaultName = func(agentName string) string {
+		return "huginn:agent:tester:" + strings.ToLower(agentName)
+	}
+	tool := &CreateAgentTool{Deps: d}
+	res := tool.Execute(hireCtx("Winston", "space-1"), map[string]any{"name": "Morgan", "description": "researcher"})
+	if res.IsError {
+		t.Fatal(res.Error)
+	}
+	if len(r.vaults) != 1 || r.vaults[0] != "huginn:agent:tester:morgan" {
+		t.Fatalf("vaults=%v, want huginn:agent:tester:morgan", r.vaults)
+	}
+	if r.persisted[0].VaultName != "huginn:agent:tester:morgan" {
+		t.Errorf("persisted vault %q", r.persisted[0].VaultName)
+	}
+	if !strings.Contains(res.Output, "huginn:agent:tester:morgan") {
+		t.Errorf("speech missing canonical vault: %q", res.Output)
+	}
+}
+
 func TestCreateAgent_VaultDefaultNameHuginn(t *testing.T) {
 	r := &hireRec{spaceCo: "co1", inCompany: map[string]bool{"winston": true}, coName: "Huginn"}
 	tool := &CreateAgentTool{Deps: r.deps()}

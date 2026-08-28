@@ -1341,48 +1341,94 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	return ctx
 }
 
-// chatRunHandle tracks the cancel func of an in-flight WS chat run so that an
-// explicit "chat_cancel" message (or server shutdown) can stop it. Handles are
-// compared by pointer identity so a finished run never deregisters a newer run
-// that replaced it for the same session.
+// chatQueueBehindThreshold is the FIFO queue depth (admitted-but-not-finished
+// chat runs for one session, this one included) past which runWSChat tells
+// the user honestly that it is behind, rather than leaving a deep backlog to
+// read as a hang. Messages are never dropped regardless of depth.
+const chatQueueBehindThreshold = 5
+
+// chatRunHandle tracks the context/cancel func of an in-flight or
+// admitted-but-not-yet-started WS chat run so that an explicit "chat_cancel"
+// message (or server shutdown) can stop it. Handles are compared by pointer
+// identity so a finished run never deregisters a newer run that replaced it
+// for the same session.
 type chatRunHandle struct {
+	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-// beginChatRun derives a connection-independent context for a chat run from
-// the server lifecycle context (NOT the originating client's connection
-// context), so a client disconnect or tab close no longer cancels an in-flight
-// LLM run mid-stream. The returned handle is registered as the session's
-// active run; cancel it via cancelChatRun and release it via endChatRun.
-func (s *Server) beginChatRun(sessionID, userMsg string) (context.Context, *chatRunHandle) {
+// reserveChatRun admits a new chat run for sessionID into the session's
+// strict FIFO queue and returns immediately (it never blocks). Admission
+// order is the caller's call order — the WS read pump calls this
+// synchronously, once per "chat" frame, before spawning that turn's
+// goroutine, so admission order always matches wire arrival order rather
+// than goroutine-scheduling order. The returned handle is registered as the
+// session's active/queued run immediately; a run is NEVER cancelled just
+// because a newer message was admitted behind it — supersede/cancel only
+// happens via an explicit "chat_cancel" (cancelChatRun) or server shutdown.
+//
+// waitCh is the previous run's done channel (nil if none is queued ahead of
+// this one) — callers MUST wait on it via awaitChatTurn before starting
+// their turn's work, then MUST call endChatRun when finished. depth is the
+// number of runs (including this one) currently admitted-but-not-finished
+// for this session, so callers can give an honest "I'm behind" notice once
+// a session's backlog grows large instead of ever dropping an ask.
+func (s *Server) reserveChatRun(sessionID string) (run *chatRunHandle, waitCh <-chan struct{}, depth int) {
 	base := s.ctx
 	if base == nil {
 		base = context.Background()
 	}
 	ctx, cancel := context.WithCancel(base)
-	run := &chatRunHandle{cancel: cancel, done: make(chan struct{})}
+	run = &chatRunHandle{ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	s.chatRunsMu.Lock()
 	if s.chatRunCancels == nil {
 		s.chatRunCancels = make(map[string]*chatRunHandle)
 	}
+	if s.chatQueueDepth == nil {
+		s.chatQueueDepth = make(map[string]int)
+	}
 	prev := s.chatRunCancels[sessionID]
-	queue := prev != nil && prev != run && agent.IsTrivialPingAsk(userMsg)
-	if prev != nil && prev != run && !queue {
-		// Non-trivial new_request still supersedes leftover hire/clock (SNAP-0).
-		prev.cancel()
-	}
 	s.chatRunCancels[sessionID] = run
+	s.chatQueueDepth[sessionID]++
+	depth = s.chatQueueDepth[sessionID]
 	s.chatRunsMu.Unlock()
-	if queue {
-		// Burst "@Winston ping one/two/three" FIFO so all three persist (SNAP-0.8).
-		select {
-		case <-prev.done:
-		case <-time.After(120 * time.Second):
-		case <-ctx.Done():
-		}
+	if prev != nil {
+		waitCh = prev.done
 	}
-	return ctx, run
+	return run, waitCh, depth
+}
+
+// awaitChatTurn blocks until it is run's turn to execute: the prior run in
+// the FIFO chain finished (waitCh closed), run's own context was cancelled
+// (explicit chat_cancel / shutdown while queued), or a generous ceiling
+// elapses so a stuck predecessor can never wedge the session forever.
+// A nil waitCh (nothing queued ahead) returns immediately.
+func (s *Server) awaitChatTurn(run *chatRunHandle, waitCh <-chan struct{}) {
+	if waitCh == nil {
+		return
+	}
+	select {
+	case <-waitCh:
+	case <-time.After(120 * time.Second):
+	case <-run.ctx.Done():
+	}
+}
+
+// beginChatRun derives a connection-independent context for a chat run from
+// the server lifecycle context (NOT the originating client's connection
+// context), so a client disconnect or tab close no longer cancels an
+// in-flight LLM run mid-stream. It reserves this session's next FIFO slot
+// and immediately waits for it — the combination reserveChatRun +
+// awaitChatTurn split out below is what lets the WS read pump reserve a
+// slot synchronously (preserving wire arrival order) while waiting inside
+// the run's own goroutine. Cancel via cancelChatRun, release via
+// endChatRun.
+func (s *Server) beginChatRun(sessionID, userMsg string) (context.Context, *chatRunHandle) {
+	_ = userMsg // admission is unconditional FIFO now; kept for call-site compatibility.
+	run, waitCh, _ := s.reserveChatRun(sessionID)
+	s.awaitChatTurn(run, waitCh)
+	return run.ctx, run
 }
 
 // endChatRun releases run's context resources and deregisters it if it is
@@ -1391,6 +1437,14 @@ func (s *Server) endChatRun(sessionID string, run *chatRunHandle) {
 	s.chatRunsMu.Lock()
 	if s.chatRunCancels[sessionID] == run {
 		delete(s.chatRunCancels, sessionID)
+	}
+	if s.chatQueueDepth != nil {
+		if s.chatQueueDepth[sessionID] > 0 {
+			s.chatQueueDepth[sessionID]--
+		}
+		if s.chatQueueDepth[sessionID] <= 0 {
+			delete(s.chatQueueDepth, sessionID)
+		}
 	}
 	s.chatRunsMu.Unlock()
 	if run.done != nil {
@@ -1446,7 +1500,14 @@ func (s *Server) handleWSMessage(c *wsClient, msg WSMessage) {
 		if rawTarget, ok := msg.Payload["target_agent"].(string); ok {
 			targetAgent = strings.TrimSpace(rawTarget)
 		}
-		go s.runWSChat(c, sessionID, userMsg, runID, intent, updateRoute, targetAgent)
+		// Reserve this turn's FIFO slot synchronously, on the read pump,
+		// BEFORE spawning its goroutine. handleWSMessage is called once
+		// per inbound frame from a single-threaded read loop (see
+		// wsReadPump), so admission order here always matches wire
+		// arrival order — a fast burst of messages can never race the Go
+		// scheduler into running turns out of order.
+		run, waitCh, depth := s.reserveChatRun(sessionID)
+		go s.runWSChat(c, sessionID, userMsg, runID, intent, updateRoute, targetAgent, run, waitCh, depth)
 
 	case "chat_cancel":
 		// Explicit user-initiated cancellation of the session's in-flight chat
@@ -1697,7 +1758,12 @@ func (g *visibleTokenGate) next(visible string) (delta string, replace bool, emi
 // the session — including clients that reconnect mid-run — with a direct-send
 // fallback to the originating client when it is not registered with the hub.
 // Persistence of accumulated content runs on every exit path.
-func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updateRoute, targetAgent string) {
+// run/waitCh/queueDepth come from a reserveChatRun call made synchronously
+// on the WS read pump before this goroutine was spawned (see
+// handleWSMessage's "chat" case), so this turn's FIFO position is fixed by
+// wire arrival order before any of the work below (agent resolution, space
+// context injection, LLM call) begins.
+func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updateRoute, targetAgent string, run *chatRunHandle, waitCh <-chan struct{}, queueDepth int) {
 	// assistantBuf accumulates response tokens for persistence after completion.
 	var assistantBuf strings.Builder
 	// collectedToolCalls accumulates tool results for persistence with the assistant message.
@@ -1770,6 +1836,17 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 	// during context prep / model load (before the first token).
 	emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
 
+	// A deep FIFO backlog is queued, never dropped — but silence past a few
+	// messages reads as broken, not busy. Say so honestly once the backlog
+	// is more than chatQueueBehindThreshold turns deep (this one included).
+	if queueDepth > chatQueueBehindThreshold {
+		emit(WSMessage{
+			Type:    "warning",
+			Content: "I'm behind — answering in order.",
+			RunID:   runID,
+		})
+	}
+
 	// Hallway / desk-DM ChatWithAgent never went through wakeSpaceThreadAgent,
 	// so space_reply_typing never fired and left-nav rows stayed still during
 	// "Winston is responding… Preparing context…". Put thinking on the wire.
@@ -1795,9 +1872,13 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		s.spawnAdditionalUserMentions(spawnCtx, sessionID, userMsg, userMsgID, ag)
 	}
 
-	// Derive the run context from the server lifetime and register it as the
-	// session's active run so a "chat_cancel" message can stop it explicitly.
-	chatCtx, run := s.beginChatRun(sessionID, userMsg)
+	// Wait for this session's FIFO turn (reserved synchronously by
+	// handleWSMessage before this goroutine was spawned — see runWSChat's
+	// doc comment). The run's context derives from the server lifetime, not
+	// this client's connection, and is registered as the session's active
+	// run so a "chat_cancel" message can stop it explicitly.
+	s.awaitChatTurn(run, waitCh)
+	chatCtx := run.ctx
 	defer s.endChatRun(sessionID, run)
 
 	// Build space context (channel team roster + descriptions) and inject
@@ -1893,12 +1974,12 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		// Bind persist to THIS inbound user row — never a leftover ping ask
 		// or leftover assistant stream from an earlier turn in the session.
+		// This run is never superseded by a fast-follow message anymore
+		// (reserveChatRun always queues FIFO, it never cancels an earlier
+		// run) — the only way chatCtx.Err() is non-nil here is an explicit
+		// chat_cancel or server shutdown, handled below.
 		thisTurnAsk := userMsg
 		thisTurnUserID := userMsgID
-		s.chatRunsMu.Lock()
-		current := s.chatRunCancels[sessionID]
-		superseded := current != nil && current != run
-		s.chatRunsMu.Unlock()
 		sess, loadErr := s.store.Load(sessionID)
 		if loadErr != nil {
 			return
@@ -1916,24 +1997,20 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 				}
 			}
 		}
-		// Compute persist first so a superseded ping/headcount still keeps
+		// Compute persist first so a cancelled ping/headcount still keeps
 		// its harness fill. Leftover-clock-only stays empty and is skipped.
+		// BindPersistToThisTurn already drops a leftover-Pong-only stream
+		// when a later, non-queued-ping user row is already the tail (a
+		// cancelled ping followed by a real ask) — real content it returns
+		// always persists here, whether or not this run was cancelled, per
+		// this function's contract: it must run regardless of client
+		// disconnects, cancellation, or real errors.
 		early, write := backend.BindPersistToThisTurn(thisTurnUserID, thisTurnAsk, latestUserID, latestUserAsk, assistantBuf.String())
 		if !write && errContent == "" {
 			return
 		}
 		if early == "" {
 			early = s.fillEmptyHarnessPersist(early, thisTurnAsk, sess)
-		}
-		if superseded && errContent == "" {
-			if !backend.IsHarnessFillAsk(thisTurnAsk) || early == "" {
-				return
-			}
-			// FIFO burst pings finish normally (successor queued). A non-ping
-			// successor already accepted — do not leftover-persist Pong onto that ask.
-			if chatCtx.Err() != nil && latestUserID != thisTurnUserID && !agent.IsTrivialPingAsk(latestUserAsk) {
-				return
-			}
 		}
 		agentName := ""
 		if ag != nil {

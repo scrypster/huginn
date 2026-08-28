@@ -7,6 +7,7 @@ import (
 
 	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/memory"
 	"github.com/scrypster/huginn/internal/spaces"
 	"github.com/scrypster/huginn/internal/threadmgr"
 	"github.com/scrypster/huginn/internal/tools"
@@ -84,6 +85,9 @@ func (s *Server) NewCreateAgentTool() *tools.CreateAgentTool {
 			}
 			s.emitSpaceMemberEvents(spaceID, old, members)
 			return nil
+		},
+		ResolveVaultName: func(agentName string) string {
+			return agents.ResolveAgentVaultName(agentName, memory.ResolveUsername(""))
 		},
 		ResolveConn: func(id string) (string, bool) {
 			if s.connStore == nil {

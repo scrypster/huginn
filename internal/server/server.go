@@ -194,12 +194,18 @@ type Server struct {
 	// goroutines (e.g. SpawnThread) that must outlive individual HTTP requests.
 	ctx context.Context
 
-	// chatRunsMu guards chatRunCancels — the per-session cancel handles for
-	// in-flight WS chat runs. Runs derive from the server lifecycle context so
-	// they survive client disconnects; "chat_cancel" stops them explicitly.
-	// See beginChatRun / cancelChatRun in ws.go.
+	// chatRunsMu guards chatRunCancels and chatQueueDepth — the per-session
+	// FIFO admission state for WS chat runs. Runs derive from the server
+	// lifecycle context so they survive client disconnects; "chat_cancel"
+	// stops them explicitly. A run is never silently superseded by a
+	// fast-follow message — see reserveChatRun / beginChatRun / cancelChatRun
+	// in ws.go.
 	chatRunsMu     sync.Mutex
 	chatRunCancels map[string]*chatRunHandle
+	// chatQueueDepth counts admitted-but-not-finished chat runs per session
+	// (the FIFO queue depth), used to give an honest "I'm behind" notice
+	// once a session's backlog grows large instead of dropping asks.
+	chatQueueDepth map[string]int
 
 	// spawnWg tracks in-flight SpawnThread goroutines so Stop() can drain them.
 	spawnWg sync.WaitGroup
