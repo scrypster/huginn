@@ -1210,16 +1210,12 @@ const autoApproveTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 // Cards belong to the conversation whose agent raised them. `approvals` is a
 // module-level singleton shared with App.vue (which owns fetching/refresh —
-// see App.vue's websocket + reconnect wiring), so this view only filters and
-// renders. Falls back to showing ALL approvals when no agent is selected yet:
-// an over-strict filter would make a card invisible, and an invisible card
-// silently ages out to a deny — misplaced beats invisible.
-const { approvals: claudeApprovals, decide: decideApproval } = useClaudeApprovals()
-const visibleApprovals = computed(() => {
-  const name = selectedAgentName.value
-  if (!name) return claudeApprovals.value
-  return claudeApprovals.value.filter(a => a.agent_name === name)
-})
+// see App.vue's websocket + reconnect wiring), so this view only renders.
+// The filter itself — including the fallback that shows ALL approvals when no
+// agent is selected yet — lives in approvalsFor, so it is written and tested
+// once rather than reimplemented here.
+const { approvalsFor: claudeApprovalsFor, decide: decideApproval } = useClaudeApprovals()
+const visibleApprovals = computed(() => claudeApprovalsFor(selectedAgentName.value))
 
 async function onApprovalDecide(id: string, d: ApprovalDecision): Promise<void> {
   await decideApproval(id, d)

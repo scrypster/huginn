@@ -4,11 +4,20 @@
     style="background:rgba(210,153,34,0.10);border:1px solid rgba(210,153,34,0.35)"
     data-testid="approval-card"
   >
-    <div class="flex items-center gap-2">
-      <span class="font-semibold">{{ approval.tool_name }}</span>
-      <span class="opacity-60">·</span>
-      <span class="font-mono truncate">{{ approval.summary }}</span>
-      <span class="ml-auto font-mono opacity-70" data-testid="approval-countdown">{{ countdown }}</span>
+    <div class="flex items-start gap-2">
+      <span class="font-semibold flex-shrink-0">{{ approval.tool_name }}</span>
+      <span class="opacity-60 flex-shrink-0">·</span>
+      <!-- The command is the thing being approved. For Bash the excerpt is
+           always empty, so this is its ONLY rendering anywhere: it wraps and
+           scrolls inside a bounded box rather than being clipped to one line,
+           because an Allow button next to an unreadable command is worse than
+           no card at all. -->
+      <span
+        class="font-mono break-all whitespace-pre-wrap max-h-24 overflow-auto min-w-0 flex-1"
+        data-testid="approval-summary"
+        :title="approval.summary"
+      >{{ approval.summary }}</span>
+      <span class="ml-auto font-mono opacity-70 flex-shrink-0" data-testid="approval-countdown">{{ countdown }}</span>
     </div>
 
     <div v-if="approval.cwd" class="mt-1 opacity-60 font-mono">cwd {{ approval.cwd }}</div>
@@ -60,7 +69,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { ClaudeApproval, ApprovalDecision } from '../composables/useClaudeApprovals'
 
 const props = defineProps<{ approval: ClaudeApproval }>()
@@ -79,8 +88,32 @@ const confirmingTool = ref(false)
 // every future caller to key the list correctly.
 watch(() => props.approval.id, () => { confirmingTool.value = false })
 
+// The countdown ticks LOCALLY, for display only. The server stays
+// authoritative: every refresh delivers a fresh remaining_ms, and the elapsed
+// baseline resets to it below. Without a local tick a lone pending card showed
+// one frozen number for the full 285s and then vanished — no sense of urgency,
+// which is the one thing this card exists to convey.
+const baseline = ref(Date.now())
+const now = ref(Date.now())
+let ticker: ReturnType<typeof setInterval> | undefined
+
+onMounted(() => {
+  ticker = setInterval(() => { now.value = Date.now() }, 1000)
+})
+onUnmounted(() => {
+  if (ticker !== undefined) clearInterval(ticker)
+})
+
+// A fresh server value restarts the local clock rather than continuing to
+// subtract from a stale baseline.
+watch(() => props.approval.remaining_ms, () => {
+  baseline.value = Date.now()
+  now.value = baseline.value
+})
+
 const countdown = computed(() => {
-  const total = Math.max(0, Math.floor(props.approval.remaining_ms / 1000))
+  const remaining = props.approval.remaining_ms - (now.value - baseline.value)
+  const total = Math.max(0, Math.floor(remaining / 1000))
   const m = Math.floor(total / 60)
   const s = total % 60
   return `${m}:${String(s).padStart(2, '0')}`

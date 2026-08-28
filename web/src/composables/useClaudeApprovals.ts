@@ -65,7 +65,17 @@ export function useClaudeApprovals() {
 
   const pendingCount: ComputedRef<number> = computed(() => approvals.value.length)
 
-  function approvalsFor(agentName: string): ClaudeApproval[] {
+  /**
+   * approvalsFor returns the cards belonging to one agent's conversation.
+   *
+   * With no agent selected yet it returns EVERY approval rather than none: an
+   * over-strict filter makes a card invisible, and an invisible card silently
+   * ages out to a deny with no human ever seeing it. Misplaced beats invisible.
+   * This fallback lives here, in the one exported filter, so no caller has to
+   * remember to reimplement it.
+   */
+  function approvalsFor(agentName: string | null | undefined): ClaudeApproval[] {
+    if (!agentName) return approvals.value
     return approvals.value.filter(a => a.agent_name === agentName)
   }
 

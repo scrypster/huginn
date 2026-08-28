@@ -80,6 +80,21 @@ describe('useClaudeApprovals', () => {
     expect(approvalsFor('other').map(a => a.id)).toEqual(['a2'])
   })
 
+  it('approvalsFor shows EVERY approval when no agent is selected', async () => {
+    // Misplaced beats invisible: an over-strict filter hides a card, and a
+    // hidden card silently ages out to a deny with no human ever seeing it.
+    // This fallback used to live inline in ChatView while the exported helper
+    // went uncalled — a green test for a function nothing used.
+    const { approvalsFor, refresh } = useClaudeApprovals()
+    mockApiFetch.mockResolvedValue({
+      approvals: [card(), card({ id: 'a2', agent_name: 'other' })],
+    })
+    await refresh()
+    expect(approvalsFor('').map(a => a.id)).toEqual(['a1', 'a2'])
+    expect(approvalsFor(undefined).map(a => a.id)).toEqual(['a1', 'a2'])
+    expect(approvalsFor(null).map(a => a.id)).toEqual(['a1', 'a2'])
+  })
+
   it('decide posts the decision and refreshes', async () => {
     const { decide } = useClaudeApprovals()
     mockApiFetch
