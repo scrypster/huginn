@@ -1265,6 +1265,15 @@ func (s *Server) InjectSpaceContext(ctx context.Context, sessionID string, ag *a
 	}
 
 	block := agent.BuildSpaceContextBlock(sp.Name, sp.Kind, selfName, sp.LeadAgent, members)
+	var channelNames []string
+	for _, m := range members {
+		if n := strings.TrimSpace(m.Name); n != "" {
+			channelNames = append(channelNames, n)
+		}
+	}
+	if len(channelNames) > 0 {
+		ctx = workforce.WithChannelMembers(ctx, channelNames)
+	}
 	if name := s.lookupCompanyName(sp.CompanyID); name != "" {
 		if block == "" {
 			block = "\n\n[Team Context]\n"
@@ -1818,6 +1827,10 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if s.store == nil || sessionID == "" {
 			return
 		}
+		// Bind persist to THIS inbound user row — never a leftover ping ask
+		// or leftover assistant stream from an earlier turn in the session.
+		thisTurnAsk := userMsg
+		thisTurnUserID := userMsgID
 		s.chatRunsMu.Lock()
 		current := s.chatRunCancels[sessionID]
 		superseded := current != nil && current != run
@@ -1826,23 +1839,39 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if loadErr != nil {
 			return
 		}
+		latestUserID, latestUserAsk := thisTurnUserID, thisTurnAsk
+		if tailer, ok := s.store.(interface {
+			TailMessages(string, int) ([]session.SessionMessage, error)
+		}); ok {
+			if tail, err := tailer.TailMessages(sessionID, 24); err == nil {
+				for i := len(tail) - 1; i >= 0; i-- {
+					if tail[i].Role == "user" {
+						latestUserID, latestUserAsk = tail[i].ID, tail[i].Content
+						break
+					}
+				}
+			}
+		}
 		// Compute persist first so a superseded ping/headcount still keeps
 		// its harness fill. Leftover-clock-only stays empty and is skipped.
-		early := backend.PersistVisibleAssistantContent(assistantBuf.String(), userMsg)
+		early, write := backend.BindPersistToThisTurn(thisTurnUserID, thisTurnAsk, latestUserID, latestUserAsk, assistantBuf.String())
+		if !write && errContent == "" {
+			return
+		}
 		if early == "" && s.spaceStore != nil {
 			if spaceID := sess.SpaceID(); spaceID != "" {
 				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
-					early = backend.FillTrivialHeadcountPersist(early, userMsg, sp.Members)
+					early = backend.FillTrivialHeadcountPersist(early, thisTurnAsk, sp.Members)
 				}
 			}
 		}
 		if superseded && errContent == "" {
-			if !backend.IsHarnessFillAsk(userMsg) || early == "" {
+			if !backend.IsHarnessFillAsk(thisTurnAsk) || early == "" {
 				return
 			}
 			// FIFO burst pings finish normally (successor queued). A non-ping
-			// successor cancels this run — do not leftover-persist Pong onto the next ask.
-			if chatCtx.Err() != nil {
+			// successor already accepted — do not leftover-persist Pong onto that ask.
+			if chatCtx.Err() != nil && latestUserID != thisTurnUserID && !agent.IsTrivialPingAsk(latestUserAsk) {
 				return
 			}
 		}
@@ -1852,7 +1881,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		if !userPersisted {
 			if appendErr := s.store.Append(sess, session.SessionMessage{
-				ID: userMsgID, Role: "user", Content: userMsg, Ts: time.Now().UTC(),
+				ID: thisTurnUserID, Role: "user", Content: thisTurnAsk, Ts: time.Now().UTC(),
 			}); appendErr != nil {
 				logger.Error("ws chat: failed to persist user message", "session_id", sessionID, "err", appendErr)
 			} else {
@@ -1861,11 +1890,14 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		}
 		// When we have sayable leftover (or leftover-empty teammate rewrite)
 		// or tool calls, persist them. Never persist an empty leftover-only row.
-		persistedContent := backend.PersistVisibleAssistantContent(assistantBuf.String(), userMsg)
+		persistedContent := early
+		if persistedContent == "" {
+			persistedContent, _ = backend.BindPersistToThisTurn(thisTurnUserID, thisTurnAsk, latestUserID, latestUserAsk, assistantBuf.String())
+		}
 		if persistedContent == "" && s.spaceStore != nil {
 			if spaceID := sess.SpaceID(); spaceID != "" {
 				if sp, spErr := s.spaceStore.GetSpace(spaceID); spErr == nil && sp != nil {
-					persistedContent = backend.FillTrivialHeadcountPersist(persistedContent, userMsg, sp.Members)
+					persistedContent = backend.FillTrivialHeadcountPersist(persistedContent, thisTurnAsk, sp.Members)
 				}
 			}
 		}

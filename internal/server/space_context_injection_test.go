@@ -97,6 +97,21 @@ func TestInjectSpaceContext_ChannelSession_InjectsTeamContext(t *testing.T) {
 	if !strings.Contains(spaceCtx, "Delegation protocol") {
 		t.Errorf("expected delegation protocol instructions, got:\n%s", spaceCtx)
 	}
+
+	gotNames := workforce.GetChannelMembers(enrichedCtx)
+	joined := strings.Join(gotNames, ",")
+	for _, want := range []string{"Tom", "Sam", "Dave"} {
+		found := false
+		for _, n := range gotNames {
+			if strings.EqualFold(n, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("channel members missing %s: %s", want, joined)
+		}
+	}
 }
 
 func TestInjectSpaceContext_DMSession_NoTeamContext(t *testing.T) {

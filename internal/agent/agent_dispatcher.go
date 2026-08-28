@@ -713,6 +713,9 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 	}
 	if len(messages) > 0 && messages[0].Role == "system" {
 		messages[0].Content += "\n\nAnswer the current user message only. If they asked who is here or how many people are in this channel, name the teammates from the roster. Do not repeat the local clock unless they asked the time. Do not repeat Pong unless they pinged."
+		if line := channelMembersLine(opts.userMsg, workforce.GetChannelMembers(ctx)); line != "" {
+			messages[0].Content += "\n\n" + line + ". Answer who-is-here / how many people from this list only, not the desk."
+		}
 	}
 	if !backend.IsTimeAsk(opts.userMsg) {
 		kept := messages[:0]

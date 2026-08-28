@@ -43,6 +43,27 @@ func GetSpaceContext(ctx context.Context) string {
 	return block
 }
 
+// channelMembersKey is the injected roster for THIS channel (not the desk).
+type channelMembersKey struct{}
+
+// WithChannelMembers attaches this channel's member names for headcount / who-is-here.
+func WithChannelMembers(ctx context.Context, names []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	copied := append([]string(nil), names...)
+	return context.WithValue(ctx, channelMembersKey{}, copied)
+}
+
+// GetChannelMembers returns this channel's member names, or nil.
+func GetChannelMembers(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	names, _ := ctx.Value(channelMembersKey{}).([]string)
+	return names
+}
+
 // channelRecentKey is the context key for the channel-recent summary block.
 type channelRecentKey struct{}
 

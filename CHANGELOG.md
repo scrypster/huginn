@@ -17,6 +17,8 @@ All notable changes to Huginn are documented here.
 
 ### Fixed
 - Persist leftover `Pong.` only when THIS user ask is a trivial ping/pong after mention strip; leftover stream or a cancelled prior ping must not fill Lab ask-Steve, hire, France, team, or company turns
+- persistAccumulated binds leftover persist to THIS turn's user id/text so a prior ping in the same session cannot re-fill `Pong.`
+- Space headcount / who-is-here answers from this channel's members (injected roster line), not the whole desk
 - Hallway and thread-drawer bubbles name the speaking agent (never a bare initial or "Teammate") even while the stream placeholder has an empty author
 - Channel header agent count matches the space roster, including members not yet in the agents list
 - Hard-refresh / WS resume no longer mints a second assistant bubble for speech that is already persisted

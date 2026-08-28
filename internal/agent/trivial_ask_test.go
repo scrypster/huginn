@@ -213,3 +213,27 @@ func TestIsTrivialPingAsk(t *testing.T) {
 		}
 	}
 }
+
+func TestChannelMembersLine_HeadcountAndWhoIsHere(t *testing.T) {
+	names := []string{"Winston", "Reggie", "Steve"}
+	for _, ask := range []string{
+		"how many people are in this channel?",
+		"who is here",
+		"@Winston who is here",
+		"who's on the team",
+	} {
+		got := channelMembersLine(ask, names)
+		if got != "this channel members: Winston, Reggie, Steve" {
+			t.Errorf("ask %q: %q", ask, got)
+		}
+	}
+	if got := channelMembersLine("ping", names); got != "" {
+		t.Fatalf("ping must not get roster line: %q", got)
+	}
+	if got := channelMembersLine("what company is this channel in?", names); got != "" {
+		t.Fatalf("company ask must not get roster line: %q", got)
+	}
+	if got := channelMembersLine("how many people", nil); got != "" {
+		t.Fatalf("empty names: %q", got)
+	}
+}

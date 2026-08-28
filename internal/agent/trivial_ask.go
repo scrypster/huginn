@@ -125,3 +125,26 @@ func stripTrivialAskDelegationTools(schemas []backend.Tool) []backend.Tool {
 	}
 	return out
 }
+
+// channelMembersLine is the one-line injected roster for trivial
+// headcount / who-is-here so 14b answers from THIS channel, not the desk.
+func channelMembersLine(userMsg string, names []string) string {
+	norm := normalizeTrivialAsk(userMsg)
+	if !isTrivialRoster(norm) && !isTrivialHeadcount(norm) {
+		return ""
+	}
+	seen := map[string]bool{}
+	var uniq []string
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[strings.ToLower(n)] {
+			continue
+		}
+		seen[strings.ToLower(n)] = true
+		uniq = append(uniq, n)
+	}
+	if len(uniq) == 0 {
+		return ""
+	}
+	return "this channel members: " + strings.Join(uniq, ", ")
+}

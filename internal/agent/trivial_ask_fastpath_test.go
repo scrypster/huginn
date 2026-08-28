@@ -10,6 +10,7 @@ import (
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/workforce"
 )
 
 func leadWithDelegationTools(t *testing.T) (*Orchestrator, *mockBackend, *agents.Agent) {
@@ -155,5 +156,42 @@ func TestStripTrivialDelegationTools(t *testing.T) {
 	}
 	if stripTrivialAskDelegationTools(nil) != nil && len(stripTrivialAskDelegationTools(nil)) != 0 {
 		t.Fatalf("nil belt should stay empty")
+	}
+}
+
+func TestChatWithAgent_HeadcountInjectsThisChannelMembers(t *testing.T) {
+	o, mb, ag := leadWithDelegationTools(t)
+	ctx := workforce.WithChannelMembers(context.Background(), []string{"Winston", "Reggie", "Steve"})
+	if err := o.ChatWithAgent(ctx, ag, "@Winston how many people are in this channel?", "sess-hc-roster", nil, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) == 0 {
+		t.Fatal("backend received no requests")
+	}
+	sys := ""
+	if len(mb.lastRequests[0].Messages) > 0 {
+		sys = mb.lastRequests[0].Messages[0].Content
+	}
+	if !strings.Contains(sys, "this channel members: Winston, Reggie, Steve") {
+		t.Fatalf("headcount missing this-channel roster line:\n%s", sys)
+	}
+}
+
+func TestChatWithAgent_WhoIsHereInjectsThisChannelMembers(t *testing.T) {
+	o, mb, ag := leadWithDelegationTools(t)
+	ctx := workforce.WithChannelMembers(context.Background(), []string{"Winston", "Reggie", "Steve"})
+	if err := o.ChatWithAgent(ctx, ag, "who is here", "sess-who-roster", nil, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) == 0 {
+		t.Fatal("backend received no requests")
+	}
+	sys := mb.lastRequests[0].Messages[0].Content
+	if !strings.Contains(sys, "this channel members: Winston, Reggie, Steve") {
+		t.Fatalf("who-is-here missing this-channel roster line:\n%s", sys)
 	}
 }
