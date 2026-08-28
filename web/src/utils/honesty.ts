@@ -358,18 +358,11 @@ function deduplicateSentencesInLastLine(kept: string[], _original: string): stri
   const trim = line.trim()
 
   // Split by sentence-final punctuation to identify individual sentences.
-  const sentences: string[] = []
-  let currentSentence = ''
-  for (let i = 0; i < trim.length; i++) {
-    currentSentence += trim[i]
-    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
-      sentences.push(currentSentence.trim())
-      currentSentence = ''
-    }
-  }
-  if (currentSentence) {
-    sentences.push(currentSentence.trim())
-  }
+  // Boundary rule mirrors backend isSentenceBoundary (wave-4 fix): split only
+  // at end-of-string, before whitespace, or punct followed by an uppercase
+  // letter — never inside dotted identifiers ("mathutil.go", ".tmp-dir"),
+  // which used to rejoin as "mathutil. go".
+  const sentences = splitSentencesBoundaryAware(trim)
 
   if (sentences.length <= 1) return kept
 
@@ -481,17 +474,7 @@ function rewriteMissingAgentHelpdesk(line: string, original: string): string {
   const trim = line.trim()
   if (!trim) return line
   const present = presentAgentFromSpeech(original)
-  const sentences: string[] = []
-  let cur = ''
-  for (let i = 0; i < trim.length; i++) {
-    cur += trim[i]
-    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
-      const sent = cur.trim()
-      if (sent) sentences.push(sent)
-      cur = ''
-    }
-  }
-  if (cur.trim()) sentences.push(cur.trim())
+  const sentences = splitSentencesBoundaryAware(trim)
   const kept: string[] = []
   let rewrote = false
   let missing = ''
@@ -513,6 +496,9 @@ function rewriteMissingAgentHelpdesk(line: string, original: string): string {
   }
   if (rewrote && missing) kept.unshift(teammateNotInCompanyLine(missing, present))
   if (!kept.length) return ''
+  // Nothing rewritten and nothing dropped — return the line verbatim so the
+  // split/rejoin can never disturb spacing it had no business touching.
+  if (!rewrote && kept.length === sentences.length) return line
   const indent = line.length - line.trimLeft().length
   return line.slice(0, indent) + kept.join(' ')
 }
@@ -525,21 +511,42 @@ function isPlaybookInstructionSentence(sent: string): boolean {
     TASK_DELEGATED_SENTENCE_RE.test(sent)
 }
 
-function dropPlaybookInstructionSentences(line: string): string {
-  const trim = line.trim()
-  if (!trim) return line
+
+// splitSentencesBoundaryAware mirrors backend isSentenceBoundary (wave-4 fix):
+// a '.'/'!'/'?' ends a sentence only at end-of-string, before whitespace, or
+// immediately before an uppercase letter — never inside dotted identifiers
+// ("mathutil.go", ".tmp-t5sandbox", "v1.2.3"), which the old per-character
+// splitters tore apart and rejoined as "mathutil. go" (live falsification on
+// v0.4.0-fable15, flagship screenshot).
+function splitSentencesBoundaryAware(trim: string): string[] {
+  const isBoundary = (t: string, i: number): boolean => {
+    const c = t[i]
+    if (c !== '.' && c !== '!' && c !== '?') return false
+    if (i === t.length - 1) return true
+    const next = t[i + 1]!
+    if (/\s/.test(next)) return true
+    return /[A-Z]/.test(next)
+  }
   const sentences: string[] = []
   let cur = ''
   for (let i = 0; i < trim.length; i++) {
     cur += trim[i]
-    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
+    if (isBoundary(trim, i)) {
       const sent = cur.trim()
       if (sent) sentences.push(sent)
       cur = ''
     }
   }
   if (cur.trim()) sentences.push(cur.trim())
+  return sentences
+}
+
+function dropPlaybookInstructionSentences(line: string): string {
+  const trim = line.trim()
+  if (!trim) return line
+  const sentences = splitSentencesBoundaryAware(trim)
   const kept = sentences.filter(s => !isPlaybookInstructionSentence(s))
+  if (kept.length === sentences.length) return line
   if (!kept.length) return ''
   const indent = line.length - line.trimLeft().length
   return line.slice(0, indent) + kept.join(' ')
@@ -548,18 +555,9 @@ function dropPlaybookInstructionSentences(line: string): string {
 function dropHelpdeskCloserSentences(line: string): string {
   const trim = line.trim()
   if (!trim) return line
-  const sentences: string[] = []
-  let cur = ''
-  for (let i = 0; i < trim.length; i++) {
-    cur += trim[i]
-    if (trim[i] === '.' || trim[i] === '!' || trim[i] === '?') {
-      const sent = cur.trim()
-      if (sent) sentences.push(sent)
-      cur = ''
-    }
-  }
-  if (cur.trim()) sentences.push(cur.trim())
+  const sentences = splitSentencesBoundaryAware(trim)
   const kept = sentences.filter(s => hasTeammateAnswer(s) || !(HELPDESK_CLOSER_SENTENCE_RE.test(s) || LEFTOVER_HELPDESK_SENTENCE_RE.test(s)))
+  if (kept.length === sentences.length) return line
   if (!kept.length) return ''
   const indent = line.length - line.trimLeft().length
   return line.slice(0, indent) + kept.join(' ')
