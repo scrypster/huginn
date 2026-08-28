@@ -122,7 +122,7 @@ func TestRegisterGitHubTools_SkipsWhenGHNotInPath(t *testing.T) {
 	// not panic regardless of gh availability.
 	reg := NewRegistry()
 	// Should not panic.
-	RegisterGitHubTools(reg)
+	RegisterGitHubTools(reg, "/tmp")
 	// If gh is in PATH, tools should be registered; if not, registry stays empty.
 	// Both outcomes are valid — we just verify no panic.
 }
@@ -137,10 +137,13 @@ func TestRegisterGitHubTools_CountsTools(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	reg := NewRegistry()
-	RegisterGitHubTools(reg)
+	RegisterGitHubTools(reg, "/tmp")
 
 	registered := reg.All()
-	expectedCount := 7 // GHPRListTool, GHPRViewTool, GHPRDiffTool, GHPRCreateTool, GHIssueListTool, GHIssueViewTool, GHIssueCreateTool
+	// GHPRListTool, GHPRViewTool, GHPRDiffTool, GHPRCreateTool, GHPRChecksTool,
+	// GHPRCommentTool, GHRunViewFailedTool, GHIssueListTool, GHIssueViewTool,
+	// GHIssueCreateTool. Deliberately no pr-merge tool: humans merge.
+	expectedCount := 10
 	if len(registered) != expectedCount {
 		t.Errorf("expected %d tools to be registered when gh is in PATH, got %d", expectedCount, len(registered))
 	}
@@ -151,7 +154,7 @@ func TestRegisterGitHubTools_ZeroWhenGHAbsent(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	reg := NewRegistry()
-	RegisterGitHubTools(reg)
+	RegisterGitHubTools(reg, "/tmp")
 
 	if len(reg.All()) != 0 {
 		t.Errorf("expected 0 tools when gh not in PATH, got %d", len(reg.All()))
@@ -272,5 +275,184 @@ func TestGHPRListTool_Execute_CommandFailure(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "gh pr list") {
 		t.Errorf("expected error to mention 'gh pr list', got: %s", result.Error)
+	}
+}
+
+// fakeGHBinaryEchoArgs creates a fake gh binary that prints its own working
+// directory (line 1) and its argv (line 2), then exits with exitCode.
+func fakeGHBinaryEchoArgs(t *testing.T, exitCode int) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "gh")
+	script := fmt.Sprintf("#!/bin/sh\npwd\necho \"$@\"\nexit %d\n", exitCode)
+	if err := os.WriteFile(binPath, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write fake gh binary: %v", err)
+	}
+	return binPath
+}
+
+// G3: all gh_* tools must run in SandboxRoot (github.go previously never set
+// cmd.Dir, so gh always ran in the process's own cwd instead of the project
+// the agent was operating on).
+func TestGHPRListTool_RunsInSandboxRoot(t *testing.T) {
+	ghPath := fakeGHBinaryEchoArgs(t, 0)
+	sandbox := t.TempDir()
+	resolvedSandbox, err := filepath.EvalSymlinks(sandbox)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	tool := &GHPRListTool{ghBase: ghBase{GHPath: ghPath, SandboxRoot: sandbox}}
+	result := tool.Execute(context.Background(), map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	pwdLine := strings.SplitN(result.Output, "\n", 2)[0]
+	resolvedPwd, err := filepath.EvalSymlinks(strings.TrimSpace(pwdLine))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(pwd output): %v", err)
+	}
+	if resolvedPwd != resolvedSandbox {
+		t.Errorf("gh ran in %q, want SandboxRoot %q", resolvedPwd, resolvedSandbox)
+	}
+}
+
+// G3: gh_pr_checks — exit code 8 ("still running") must surface as a
+// distinct "pending" state, not a tool error.
+func TestGHPRChecksTool_ExitCode8_IsPendingNotError(t *testing.T) {
+	ghPath := fakeGHBinary(t, "some-check\tpending\t0s\thttps://example.com", "", ghPRChecksPendingExitCode)
+	tool := &GHPRChecksTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{"number": float64(42)})
+	if result.IsError {
+		t.Errorf("exit code 8 (pending) must not surface as an error, got: %s", result.Error)
+	}
+	if status, _ := result.Metadata["status"].(string); status != "pending" {
+		t.Errorf("expected metadata status=pending, got %v", result.Metadata["status"])
+	}
+	if !strings.Contains(result.Output, "pending") {
+		t.Errorf("expected 'pending' in output, got: %s", result.Output)
+	}
+}
+
+func TestGHPRChecksTool_ExitCode0_IsPassed(t *testing.T) {
+	ghPath := fakeGHBinary(t, "some-check\tpass\t1s\thttps://example.com", "", 0)
+	tool := &GHPRChecksTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{"number": float64(42)})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if status, _ := result.Metadata["status"].(string); status != "passed" {
+		t.Errorf("expected metadata status=passed, got %v", result.Metadata["status"])
+	}
+}
+
+func TestGHPRChecksTool_ExitCode1_IsRealError(t *testing.T) {
+	// A non-8, non-zero exit (e.g. 1 = checks failed) must remain a real error,
+	// distinct from the pending state.
+	ghPath := fakeGHBinary(t, "some-check\tfail\t1s\thttps://example.com", "checks failed", 1)
+	tool := &GHPRChecksTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{"number": float64(42)})
+	if !result.IsError {
+		t.Error("expected a real error for exit code 1 (checks failed)")
+	}
+}
+
+// G3: gh_run_view_failed must wrap `gh run view --log-failed` ONLY — never
+// the full --log, which can be enormous.
+func TestGHRunViewFailedTool_UsesLogFailedOnly(t *testing.T) {
+	ghPath := fakeGHBinaryEchoArgs(t, 0)
+	tool := &GHRunViewFailedTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{"run_id": "12345"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	argsLine := strings.SplitN(result.Output, "\n", 2)
+	if len(argsLine) < 2 {
+		t.Fatalf("expected two output lines, got: %q", result.Output)
+	}
+	gotArgs := argsLine[1]
+	if !strings.Contains(gotArgs, "--log-failed") {
+		t.Errorf("expected --log-failed in args, got: %q", gotArgs)
+	}
+	if strings.Contains(gotArgs, "--log ") || strings.HasSuffix(strings.TrimSpace(gotArgs), "--log") {
+		t.Errorf("must never pass the full --log flag, got: %q", gotArgs)
+	}
+	if !strings.Contains(gotArgs, "12345") {
+		t.Errorf("expected run_id in args, got: %q", gotArgs)
+	}
+}
+
+func TestGHRunViewFailedTool_NoRunID_StillUsesLogFailed(t *testing.T) {
+	ghPath := fakeGHBinaryEchoArgs(t, 0)
+	tool := &GHRunViewFailedTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	argsLine := strings.SplitN(result.Output, "\n", 2)
+	if len(argsLine) < 2 || !strings.Contains(argsLine[1], "--log-failed") {
+		t.Errorf("expected --log-failed even with no run_id, got: %q", result.Output)
+	}
+}
+
+// G3: gh_pr_comment.
+func TestGHPRCommentTool_MissingNumber(t *testing.T) {
+	tool := &GHPRCommentTool{}
+	result := tool.Execute(context.Background(), map[string]any{"body": "hi"})
+	if !result.IsError {
+		t.Error("expected error for missing number")
+	}
+}
+
+func TestGHPRCommentTool_MissingBody(t *testing.T) {
+	tool := &GHPRCommentTool{}
+	result := tool.Execute(context.Background(), map[string]any{"number": float64(1)})
+	if !result.IsError {
+		t.Error("expected error for missing body")
+	}
+}
+
+func TestGHPRCommentTool_Execute_HappyPath(t *testing.T) {
+	ghPath := fakeGHBinary(t, "https://github.com/owner/repo/pull/1#issuecomment-1", "", 0)
+	tool := &GHPRCommentTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{"number": float64(1), "body": "nice work"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "issuecomment") {
+		t.Errorf("expected comment URL in output, got: %s", result.Output)
+	}
+}
+
+func TestGHPRCommentTool_Execute_CommandFailure(t *testing.T) {
+	ghPath := fakeGHBinary(t, "", "pull request not found", 1)
+	tool := &GHPRCommentTool{ghBase: ghBase{GHPath: ghPath}}
+	result := tool.Execute(context.Background(), map[string]any{"number": float64(999), "body": "hi"})
+	if !result.IsError {
+		t.Error("expected error")
+	}
+	if !strings.Contains(result.Error, "pull request not found") {
+		t.Errorf("expected stderr in error, got: %s", result.Error)
+	}
+}
+
+func TestGHTools_NewTools_NamesAndPermissions(t *testing.T) {
+	if (&GHPRChecksTool{}).Name() != "gh_pr_checks" {
+		t.Error("expected gh_pr_checks")
+	}
+	if (&GHPRChecksTool{}).Permission() != PermRead {
+		t.Error("gh_pr_checks should be PermRead")
+	}
+	if (&GHRunViewFailedTool{}).Name() != "gh_run_view_failed" {
+		t.Error("expected gh_run_view_failed")
+	}
+	if (&GHRunViewFailedTool{}).Permission() != PermRead {
+		t.Error("gh_run_view_failed should be PermRead")
+	}
+	if (&GHPRCommentTool{}).Name() != "gh_pr_comment" {
+		t.Error("expected gh_pr_comment")
+	}
+	if (&GHPRCommentTool{}).Permission() != PermWrite {
+		t.Error("gh_pr_comment should be PermWrite")
 	}
 }

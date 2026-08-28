@@ -146,11 +146,11 @@ func TestWSChat_RapidBurst_FIFOTurnsAllPersistInOrder(t *testing.T) {
 		t.Fatalf("backend ChatCompletion called %d times, want 3 (no dropped/duplicated turns)", got)
 	}
 
-	// "done" is emitted to the client just before persistAccumulated runs
-	// (see runWSChat), so the last turn's own persistAccumulated+endChatRun
-	// may still be finishing microseconds after its "done" is observed here
-	// (nothing waits on the LAST turn's completion the way turn N+1 waits on
-	// turn N's). Poll briefly rather than asserting on a single snapshot.
+	// runWSChat persists before emitting "done", but the last turn's
+	// endChatRun (and any async store work) may still be finishing
+	// microseconds after its "done" is observed here — nothing waits on the
+	// LAST turn's completion the way turn N+1 waits on turn N's. Poll
+	// briefly rather than asserting on a single snapshot.
 	var msgs []session.SessionMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for {

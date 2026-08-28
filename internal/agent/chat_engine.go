@@ -12,6 +12,7 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	mem "github.com/scrypster/huginn/internal/memory"
+	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/tools"
 )
 
@@ -153,6 +154,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 		if agentReg := o.GetAgentRegistry(); agentReg != nil {
 			roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
 			systemPrompt = agents.AppendTeamRoster(systemPrompt, roster, agents.AgentSupportsDelegation(ag))
+			systemPrompt = agents.AppendAvailableModels(systemPrompt, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
 		}
 
 		msgs := []backend.Message{{Role: "system", Content: systemPrompt}}

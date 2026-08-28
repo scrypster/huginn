@@ -243,3 +243,81 @@ func TestParseGoTestJSON_EmptyInput(t *testing.T) {
 		t.Errorf("expected no failures")
 	}
 }
+
+// G9: run_tests remembers the last command that exited 0 in
+// .huginn/workspace.json, and surfaces it in the tool description so the
+// model doesn't have to keep guessing between `make test` and `go test ./...`.
+
+func TestRunTestsTool_SuccessfulCommand_RememberedInWorkspaceConfig(t *testing.T) {
+	root := t.TempDir()
+	tool := &RunTestsTool{SandboxRoot: root, Timeout: 5 * time.Second}
+
+	result := tool.Execute(context.Background(), map[string]any{"command": "echo hello"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, ".huginn", "workspace.json"))
+	if err != nil {
+		t.Fatalf("expected .huginn/workspace.json to be written: %v", err)
+	}
+	if !strings.Contains(string(data), "echo hello") {
+		t.Errorf("workspace.json should remember the command, got: %s", data)
+	}
+}
+
+func TestRunTestsTool_FailedCommand_NotRemembered(t *testing.T) {
+	root := t.TempDir()
+	tool := &RunTestsTool{SandboxRoot: root, Timeout: 5 * time.Second}
+
+	tool.Execute(context.Background(), map[string]any{"command": "exit 1"})
+
+	if _, err := os.Stat(filepath.Join(root, ".huginn", "workspace.json")); err == nil {
+		t.Error("failed command should not create/remember a workspace.json entry")
+	}
+}
+
+func TestRunTestsTool_Description_SurfacesRememberedCommand(t *testing.T) {
+	root := t.TempDir()
+	tool := &RunTestsTool{SandboxRoot: root, Timeout: 5 * time.Second}
+
+	// Before any run, no remembered command should appear.
+	if strings.Contains(tool.Description(), "Last command that passed") {
+		t.Error("description should not mention a remembered command before any run")
+	}
+
+	tool.Execute(context.Background(), map[string]any{"command": "echo hello"})
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "echo hello") {
+		t.Errorf("description should surface the remembered command, got: %q", desc)
+	}
+}
+
+func TestRunTestsTool_RememberedCommand_PreservesOtherWorkspaceConfigFields(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".huginn"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".huginn", "workspace.json"),
+		[]byte(`{"name":"my-project","exclude":["vendor"]}`), 0o644); err != nil {
+		t.Fatalf("write workspace.json: %v", err)
+	}
+
+	tool := &RunTestsTool{SandboxRoot: root, Timeout: 5 * time.Second}
+	tool.Execute(context.Background(), map[string]any{"command": "echo hello"})
+
+	data, err := os.ReadFile(filepath.Join(root, ".huginn", "workspace.json"))
+	if err != nil {
+		t.Fatalf("read workspace.json: %v", err)
+	}
+	if !strings.Contains(string(data), "my-project") {
+		t.Errorf("existing 'name' field should be preserved, got: %s", data)
+	}
+	if !strings.Contains(string(data), "vendor") {
+		t.Errorf("existing 'exclude' field should be preserved, got: %s", data)
+	}
+	if !strings.Contains(string(data), "echo hello") {
+		t.Errorf("new command should be remembered, got: %s", data)
+	}
+}

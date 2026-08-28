@@ -100,7 +100,7 @@ func TestClipResult_TruncatesLong(t *testing.T) {
 func TestWaitForInputOnce_ContextCancelled(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 
 	thread, _ := tm.Create(CreateParams{SessionID: sess.ID, AgentID: "Bot", Task: "test"})
 	// Manually set thread to Blocked so InputCh exists
@@ -129,7 +129,7 @@ func TestWaitForInputOnce_NonExistentThread(t *testing.T) {
 func TestWaitForInputOnce_ReceivesInput(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 
 	thread, _ := tm.Create(CreateParams{SessionID: sess.ID, AgentID: "Bot", Task: "test"})
 	tm.mu.Lock()
@@ -156,7 +156,7 @@ func TestWaitForInputOnce_ReceivesInput(t *testing.T) {
 func TestSetBlocked_SetsStatus(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 	thread, _ := tm.Create(CreateParams{SessionID: sess.ID, AgentID: "Bot", Task: "test"})
 
 	tm.setBlocked(thread.ID, "need help")
@@ -190,15 +190,15 @@ func TestGetThread_ReturnsNilForMissing(t *testing.T) {
 func TestResolveModelID_FallsBackToSession(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-sonnet-4")
-	sess.Manifest.Model = "claude-sonnet-4"
+	sess := store.New("test", "/tmp", "claude-sonnet-4-6")
+	sess.Manifest.Model = "claude-sonnet-4-6"
 
 	thread, _ := tm.Create(CreateParams{SessionID: sess.ID, AgentID: "Unknown", Task: "test"})
 	reg := agents.NewRegistry() // empty registry
 
 	modelID := tm.resolveModelID(thread.ID, reg, sess)
-	if modelID != "claude-sonnet-4" {
-		t.Errorf("expected session model 'claude-sonnet-4', got %q", modelID)
+	if modelID != "claude-sonnet-4-6" {
+		t.Errorf("expected session model 'claude-sonnet-4-6', got %q", modelID)
 	}
 }
 
@@ -237,7 +237,7 @@ func TestResolveModelID_NilRegistry(t *testing.T) {
 func TestSpawnThread_LLMErrorMarksThreadError(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 	reg := agents.NewRegistry()
 
 	errBackend := &fakeBackend{err: errors.New("connection refused")}
@@ -292,13 +292,13 @@ func TestSpawnThread_LLMErrorMarksThreadError(t *testing.T) {
 func TestSpawnThread_BudgetExceededStopsThread(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 	reg := agents.NewRegistry()
 
 	// budget of $0.00001 — exceeded immediately after first real call would record
 	ca := NewCostAccumulator(0.00001)
 	// Pre-exceed the budget
-	ca.Record("prior-thread", 1_000_000, 1_000_000, "claude-haiku-4")
+	ca.Record("prior-thread", 1_000_000, 1_000_000, "claude-haiku-4-5")
 
 	fb := &fakeBackend{
 		response: &backend.ChatResponse{
@@ -353,7 +353,7 @@ func TestSpawnThread_BudgetExceededStopsThread(t *testing.T) {
 func TestSpawnThread_DagFnCalledOnCompletion(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 	reg := agents.NewRegistry()
 
 	fb := &fakeBackend{
@@ -394,7 +394,7 @@ func TestSpawnThread_DagFnCalledOnCompletion(t *testing.T) {
 func TestSpawnThread_UnknownToolContinues(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 	reg := agents.NewRegistry()
 
 	callCount := 0
@@ -492,7 +492,7 @@ func (m *multiResponseBackend) ContextWindow() int               { return 8192 }
 func TestSpawnThread_StopWithNoToolCalls(t *testing.T) {
 	tm := New()
 	store := session.NewStore(t.TempDir())
-	sess := store.New("test", "/tmp", "claude-haiku-4")
+	sess := store.New("test", "/tmp", "claude-haiku-4-5")
 	reg := agents.NewRegistry()
 
 	fb := &fakeBackend{
@@ -551,7 +551,7 @@ func TestCostAccumulator_ConcurrentRecordAndCheck(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				ca.Record("thread", 1000, 500, "claude-haiku-4")
+				ca.Record("thread", 1000, 500, "claude-haiku-4-5")
 				_ = ca.CheckBudget()
 				_ = ca.Total()
 			}
@@ -569,7 +569,7 @@ func TestCostAccumulator_ZeroBudgetNeverExceeds(t *testing.T) {
 	ca := NewCostAccumulator(0)
 	// Record a lot of cost
 	for i := 0; i < 100; i++ {
-		ca.Record("t", 1_000_000, 1_000_000, "claude-opus-4")
+		ca.Record("t", 1_000_000, 1_000_000, "claude-opus-4-6")
 	}
 	if err := ca.CheckBudget(); err != nil {
 		t.Errorf("zero budget should never exceed: %v", err)
@@ -578,7 +578,7 @@ func TestCostAccumulator_ZeroBudgetNeverExceeds(t *testing.T) {
 
 func TestCostAccumulator_BudgetExceededAfterRecord(t *testing.T) {
 	ca := NewCostAccumulator(0.001) // very small budget
-	ca.Record("t", 1_000_000, 1_000_000, "claude-opus-4")
+	ca.Record("t", 1_000_000, 1_000_000, "claude-opus-4-6")
 	if err := ca.CheckBudget(); err == nil {
 		t.Error("expected ErrBudgetExceeded after large record")
 	}

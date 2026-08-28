@@ -429,11 +429,11 @@ func TestWSChat_DelegateToAgentToolCall_EmitsAskingStatus(t *testing.T) {
 				if sawOldStaticString {
 					t.Fatalf("status wire content must never carry the removed static string")
 				}
-				// runWSChat emits "done" BEFORE persistAccumulated writes the
-				// assistant row (see internal/server/ws.go). Returning here
-				// would race that write against t.TempDir()'s RemoveAll and
-				// fail the whole package with "directory not empty". Wait for
-				// the assistant row to land before letting cleanup run.
+				// runWSChat now persists the assistant row BEFORE emitting
+				// "done" (see internal/server/ws.go), but other writes on this
+				// session can still be in flight when "done" is observed here.
+				// Waiting for the row keeps t.TempDir()'s RemoveAll from racing
+				// a straggler and failing the package with "directory not empty".
 				waitForAssistantPersisted(t, srv, sess.ID)
 				return
 			}

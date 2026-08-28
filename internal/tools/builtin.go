@@ -33,6 +33,7 @@ func RegisterGitTools(reg *Registry, sandboxRoot string) {
 	reg.Register(&GitBranchTool{SandboxRoot: sandboxRoot})
 	reg.Register(&GitCommitTool{SandboxRoot: sandboxRoot})
 	reg.Register(&GitStashTool{SandboxRoot: sandboxRoot})
+	reg.Register(&GitPushTool{SandboxRoot: sandboxRoot})
 }
 
 // RegisterTestsTool adds the run_tests tool. Called separately to keep builtin count at 7.
@@ -60,16 +61,23 @@ func RegisterWorktreeTools(reg *Registry, sandboxRoot string) {
 
 // RegisterGitHubTools registers all gh CLI tools.
 // Only called if exec.LookPath("gh") succeeds.
-func RegisterGitHubTools(reg *Registry) {
+// sandboxRoot is set as the working directory for every gh invocation —
+// without it, gh runs in the process's own cwd instead of the project the
+// agent is operating on, silently targeting the wrong repo/PR. Deliberately
+// no pr-merge tool: humans merge.
+func RegisterGitHubTools(reg *Registry, sandboxRoot string) {
 	ghPath, err := exec.LookPath("gh")
 	if err != nil {
 		return
 	}
-	base := ghBase{GHPath: ghPath}
+	base := ghBase{GHPath: ghPath, SandboxRoot: sandboxRoot}
 	reg.Register(&GHPRListTool{ghBase: base})
 	reg.Register(&GHPRViewTool{ghBase: base})
 	reg.Register(&GHPRDiffTool{ghBase: base})
 	reg.Register(&GHPRCreateTool{ghBase: base})
+	reg.Register(&GHPRChecksTool{ghBase: base})
+	reg.Register(&GHPRCommentTool{ghBase: base})
+	reg.Register(&GHRunViewFailedTool{ghBase: base})
 	reg.Register(&GHIssueListTool{ghBase: base})
 	reg.Register(&GHIssueViewTool{ghBase: base})
 	reg.Register(&GHIssueCreateTool{ghBase: base})
@@ -80,6 +88,7 @@ func RegisterGitHubTools(reg *Registry) {
 func GitHubCLIToolNames() []string {
 	return []string{
 		"gh_pr_list", "gh_pr_view", "gh_pr_diff", "gh_pr_create",
+		"gh_pr_checks", "gh_pr_comment", "gh_run_view_failed",
 		"gh_issue_list", "gh_issue_view", "gh_issue_create",
 	}
 }
@@ -93,7 +102,7 @@ func BuiltinToolNames() []string {
 		// RegisterBuiltins
 		"bash", "read_file", "write_file", "edit_file", "list_dir", "search_files", "grep",
 		// RegisterGitTools
-		"git_status", "git_diff", "git_log", "git_blame", "git_branch", "git_commit", "git_stash",
+		"git_status", "git_diff", "git_log", "git_blame", "git_branch", "git_commit", "git_stash", "git_push",
 		// RegisterTestsTool
 		"run_tests",
 		// RegisterWebTools

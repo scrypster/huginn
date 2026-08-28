@@ -163,7 +163,6 @@ func TestGitWorktreeCreateTool_DefaultPath(t *testing.T) {
 		t.Skip("git not in PATH")
 	}
 	repoDir := initGitRepo(t)
-	repoName := filepath.Base(repoDir)
 
 	tool := &GitWorktreeCreateTool{SandboxRoot: repoDir}
 	result := tool.Execute(context.Background(), map[string]any{
@@ -173,9 +172,17 @@ func TestGitWorktreeCreateTool_DefaultPath(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
 	wtPath, _ := result.Metadata["path"].(string)
-	expectedSuffix := repoName + "-auto-path"
-	if !strings.HasSuffix(wtPath, expectedSuffix) {
-		t.Errorf("default path %q should end with %q", wtPath, expectedSuffix)
+
+	// The default path must land INSIDE SandboxRoot (under .huginn/worktrees) —
+	// a sibling directory outside the sandbox is unreachable by every
+	// structured file tool once the agent switches into the new worktree.
+	expected := filepath.Join(repoDir, ".huginn", "worktrees", "auto-path")
+	if wtPath != expected {
+		t.Errorf("default path = %q, want %q (inside SandboxRoot)", wtPath, expected)
+	}
+	rel, err := filepath.Rel(repoDir, wtPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Errorf("default worktree path %q is not inside SandboxRoot %q (rel=%q)", wtPath, repoDir, rel)
 	}
 
 	// Cleanup.

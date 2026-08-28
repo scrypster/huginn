@@ -171,6 +171,33 @@ type ThreadManager struct {
 	// space's company. Empty company_id keeps the space-roster check.
 	companyGate CompanyGate
 
+	// specialistCompany fixes the company a one-off ephemeral specialist
+	// (spawned via spawn_specialist) may be delegated within, keyed by
+	// lowercased agent name. Ephemeral specialists are never seated in a
+	// company roster, so CompanyGate.AgentInCompany would always reject
+	// them; Create() consults this map first and bypasses the roster
+	// lookup for names present here. Fixed once at spawn time via
+	// SetSpecialistCompany and cleared via ClearSpecialistCompany when the
+	// specialist's thread lands terminal.
+	specialistCompany map[string]string
+
+	// specialistThreads maps a specialist's own thread ID to its (lowercased)
+	// agent name and spawn time, so the internal terminal-status hook
+	// (registered once in New()) knows which ephemeral overlay entry to
+	// evict when that specific thread finishes. See RegisterSpecialistThread,
+	// SetSpecialistEvictor, and EvictStaleSpecialists (TTL sweep fallback).
+	specialistThreads map[string]specialistThreadEntry
+
+	// specialistEvictFn, if set, is invoked with the specialist's agent name
+	// and thread ID when its thread lands terminal (or on TTL sweep). Wired
+	// once by the spawn_specialist tool's server-side wiring to call
+	// AgentRegistry.UnregisterEphemeral and post the S13 finish line
+	// ("<Name> is done and gone.") into the owning session — the threadID
+	// lets that wiring call tm.Get(threadID) for the SessionID. Kept as a
+	// callback (not an *agents.AgentRegistry field) to avoid growing
+	// threadmgr's import surface for a single-purpose hook.
+	specialistEvictFn func(agentName, threadID string)
+
 	// auditMu guards auditLog.
 	auditMu sync.Mutex
 	// auditLog is a bounded ring-buffer of lifecycle events (max maxAuditEntries).
@@ -183,14 +210,18 @@ type ThreadManager struct {
 
 // New returns a ready-to-use ThreadManager with default limits.
 func New() *ThreadManager {
-	return &ThreadManager{
+	tm := &ThreadManager{
 		threads:              make(map[string]*Thread),
 		fileLocks:            make(map[string]string),
 		MaxThreadsPerSession: DefaultMaxThreadsPerSession,
 		auditLog:             make([]AuditEntry, 0, maxAuditEntries),
 		threadBus:            NewThreadBus(DefaultThreadBusCapacity),
 		proposalRegistry:     NewProposalRegistry(),
+		specialistCompany:    make(map[string]string),
+		specialistThreads:    make(map[string]specialistThreadEntry),
 	}
+	tm.OnStatusChange(tm.handleSpecialistThreadStatusChange)
+	return tm
 }
 
 // SetHelpResolver configures automatic help resolution for blocked threads.
@@ -343,6 +374,140 @@ func (tm *ThreadManager) SetCompanyGate(g CompanyGate) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.companyGate = g
+}
+
+// SetSpecialistCompany fixes the company an ephemeral specialist (spawned
+// via spawn_specialist) may be delegated within, for the lifetime of its
+// thread. companyID may be empty (desk-level specialist, no company). Call
+// once at spawn time, before the spawning thread's Create() runs.
+func (tm *ThreadManager) SetSpecialistCompany(agentName, companyID string) {
+	if strings.TrimSpace(agentName) == "" {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.specialistCompany == nil {
+		tm.specialistCompany = make(map[string]string)
+	}
+	tm.specialistCompany[strings.ToLower(agentName)] = companyID
+}
+
+// ClearSpecialistCompany removes the fixed-company record for a specialist.
+// Call when the specialist's thread lands terminal (or on TTL sweep
+// eviction) so the entry does not linger after the overlay agent is gone.
+func (tm *ThreadManager) ClearSpecialistCompany(agentName string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	delete(tm.specialistCompany, strings.ToLower(agentName))
+}
+
+// specialistCompanyLocked returns the fixed company for agentName and
+// whether it is a known specialist. Caller must hold tm.mu (read or write).
+func (tm *ThreadManager) specialistCompanyLocked(agentName string) (string, bool) {
+	companyID, ok := tm.specialistCompany[strings.ToLower(agentName)]
+	return companyID, ok
+}
+
+// specialistThreadEntry tracks which ephemeral specialist owns a thread, and
+// when it was registered — the registeredAt timestamp backs the TTL sweep
+// fallback (EvictStaleSpecialists) for threads whose terminal status hook
+// never fires (e.g. the process crashes mid-thread).
+type specialistThreadEntry struct {
+	agentName    string
+	registeredAt time.Time
+}
+
+// SetSpecialistEvictor wires the callback invoked with a specialist's agent
+// name and thread ID when its thread lands terminal or is TTL-swept.
+// Typically wired once at server startup to call
+// AgentRegistry.UnregisterEphemeral and post the finish line. Pass nil to
+// disable (specialists then linger in the overlay until process restart —
+// tests that don't care about eviction may leave this unset).
+func (tm *ThreadManager) SetSpecialistEvictor(fn func(agentName, threadID string)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.specialistEvictFn = fn
+}
+
+// RegisterSpecialistThread records that threadID belongs to the ephemeral
+// specialist agentName, so the terminal-status hook (and the TTL sweep)
+// know to evict it. Call once, right after Create() returns the thread for
+// a spawn_specialist call.
+func (tm *ThreadManager) RegisterSpecialistThread(threadID, agentName string) {
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(agentName) == "" {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.specialistThreads == nil {
+		tm.specialistThreads = make(map[string]specialistThreadEntry)
+	}
+	tm.specialistThreads[threadID] = specialistThreadEntry{
+		agentName:    strings.ToLower(agentName),
+		registeredAt: time.Now(),
+	}
+}
+
+// handleSpecialistThreadStatusChange is registered once (in New()) as an
+// OnStatusChange hook. When a tracked specialist thread lands terminal, it
+// evicts the specialist from the ephemeral overlay (via specialistEvictFn)
+// and clears its fixed-company record — S5's "roster pollution: zero" and
+// S12's fixed-at-spawn company both end together with the thread.
+func (tm *ThreadManager) handleSpecialistThreadStatusChange(id string, status ThreadStatus) {
+	if !isTerminalStatus(status) {
+		return
+	}
+	tm.mu.Lock()
+	entry, ok := tm.specialistThreads[id]
+	if ok {
+		delete(tm.specialistThreads, id)
+		delete(tm.specialistCompany, entry.agentName)
+	}
+	evict := tm.specialistEvictFn
+	tm.mu.Unlock()
+	if ok && evict != nil {
+		evict(entry.agentName, id)
+	}
+}
+
+// isTerminalStatus reports whether status is a terminal thread status
+// (mirrors the switch in activeThreadCountLocked).
+func isTerminalStatus(status ThreadStatus) bool {
+	switch status {
+	case StatusDone, StatusCancelled, StatusError:
+		return true
+	default:
+		return false
+	}
+}
+
+// EvictStaleSpecialists sweeps specialistThreads for entries older than
+// maxAge whose thread never fired the terminal-status hook (crash, stuck
+// watchdog, etc. — precedent: server.go's swarmSnapshotTTL sweep). Evicted
+// agent names are returned for logging; specialistEvictFn is invoked for
+// each. Safe to call on a timer.
+func (tm *ThreadManager) EvictStaleSpecialists(maxAge time.Duration) []string {
+	now := time.Now()
+	tm.mu.Lock()
+	var stale []string
+	type staleEntry struct{ name, threadID string }
+	var staleEntries []staleEntry
+	for id, entry := range tm.specialistThreads {
+		if now.Sub(entry.registeredAt) > maxAge {
+			delete(tm.specialistThreads, id)
+			delete(tm.specialistCompany, entry.agentName)
+			stale = append(stale, entry.agentName)
+			staleEntries = append(staleEntries, staleEntry{entry.agentName, id})
+		}
+	}
+	evict := tm.specialistEvictFn
+	tm.mu.Unlock()
+	if evict != nil {
+		for _, e := range staleEntries {
+			evict(e.name, e.threadID)
+		}
+	}
+	return stale
 }
 
 // widenDeskDMMembers unions DeskPeerNames onto SpaceMembers for a desk DM.
@@ -502,6 +667,7 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 		tm.mu.RLock()
 		checker := tm.memberChecker
 		gate := tm.companyGate
+		specialistCompanyID, isSpecialist := tm.specialistCompanyLocked(p.AgentID)
 		tm.mu.RUnlock()
 
 		// Company isolation is the stricter gate. When the space has a
@@ -516,9 +682,18 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 			}
 			if strings.TrimSpace(companyID) != "" {
 				companyScoped = true
-				in, err := gate.AgentInCompany(p.AgentID, companyID)
-				if err != nil {
-					return nil, fmt.Errorf("threadmgr: company roster: %w", err)
+				var in bool
+				if isSpecialist {
+					// Ephemeral specialists are never seated in a company
+					// roster — AgentInCompany would always reject them.
+					// Their company was fixed at spawn time; honor that
+					// fixed assignment instead of the roster lookup.
+					in = specialistCompanyID == companyID
+				} else {
+					in, err = gate.AgentInCompany(p.AgentID, companyID)
+					if err != nil {
+						return nil, fmt.Errorf("threadmgr: company roster: %w", err)
+					}
 				}
 				if !in {
 					return nil, &notInCompanyError{Agent: p.AgentID}
@@ -526,7 +701,11 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 			}
 		}
 
-		if !companyScoped && checker != nil {
+		if !companyScoped && isSpecialist {
+			// Desk-level space, no company gate: an ephemeral specialist is
+			// never a space member, but its spawn was already authorized by
+			// the CoS grant. Accept it same as the company-fixed path above.
+		} else if !companyScoped && checker != nil {
 			members, err := checker.SpaceMembers(p.SpaceID)
 			if err != nil {
 				return nil, fmt.Errorf("threadmgr: space lookup: %w", err)
@@ -566,6 +745,8 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 		CreatedAt:       now,
 		CreatedByUser:   p.CreatedByUser,
 		CreatedReason:   p.CreatedReason,
+		Specialist:      p.Specialist,
+		SpecialistModel: p.SpecialistModel,
 		TokenBudget:     p.TokenBudget,
 		Timeout:         p.Timeout,
 		InputCh:         make(chan string, 1),

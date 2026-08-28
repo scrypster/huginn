@@ -124,9 +124,10 @@ func TestRunWSChat_HallwayTimeAsk_LiveStreamMatchesPersistedContent(t *testing.T
 
 	liveContent := applyClientTokens(tokens)
 
-	// runWSChat emits "done" before its deferred persistAccumulated() call
-	// finishes writing the assistant row, so poll briefly rather than
-	// assuming persistence is complete the instant "done" arrives.
+	// runWSChat persists the assistant row before emitting "done", but the
+	// row still travels through the store asynchronously in places, so poll
+	// briefly rather than assuming persistence is visible the instant "done"
+	// arrives.
 	var persisted string
 	persistDeadline := time.Now().Add(2 * time.Second)
 	for persisted == "" && time.Now().Before(persistDeadline) {

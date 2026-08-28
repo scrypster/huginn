@@ -548,3 +548,27 @@ describe('ThreadCard — activity heartbeat', () => {
     expect(wrapper.text()).not.toContain('may be stalled')
   })
 })
+
+// ── S4: specialist "temporary" pill + model id ────────────────────────────
+
+describe('ThreadCard — specialist (spawn_specialist) badge', () => {
+  it('renders a "temporary" pill for a specialist thread', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: true, ModelID: 'claude-opus-4-6' }))
+    expect(wrapper.text()).toContain('temporary')
+  })
+
+  it('renders the specialist model id', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: true, ModelID: 'claude-opus-4-6' }))
+    expect(wrapper.text()).toContain('claude-opus-4-6')
+  })
+
+  it('does not render the temporary pill for a regular (roster) thread', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: false }))
+    expect(wrapper.text()).not.toContain('temporary')
+  })
+
+  it('does not render a model id line when not a specialist', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: false, ModelID: 'claude-opus-4-6' }))
+    expect(wrapper.text()).not.toContain('claude-opus-4-6')
+  })
+})

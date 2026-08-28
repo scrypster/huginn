@@ -100,6 +100,16 @@ func (s *Server) persistAgent(incoming agents.AgentDef, pathName string) (create
 				return false, persistErr(409, fmt.Sprintf("agent %q already exists", incoming.Name))
 			}
 		}
+		// A live one-off specialist holds its name in the registry's ephemeral
+		// overlay, which is NOT in existingCfg.Agents. Without this guard a
+		// created/renamed hire could shadow a running specialist (ByName hits
+		// the main map first), silently substituting a different model/prompt
+		// into its in-flight thread (Opus vet 2026-08-29).
+		if s.orch != nil {
+			if reg := s.orch.GetAgentRegistry(); reg != nil && reg.IsEphemeral(incoming.Name) {
+				return false, persistErr(409, fmt.Sprintf("name %q is in use by a one-off specialist that is still running", incoming.Name))
+			}
+		}
 	}
 
 	if err := agents.CheckVaultNameCollision(incoming, pathName, "", existingCfg.Agents); err != nil {

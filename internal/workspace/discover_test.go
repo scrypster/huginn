@@ -188,3 +188,52 @@ func TestLoadConfig_InvalidJSON_ReturnsError(t *testing.T) {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
 }
+
+func TestSaveLastTestCommand_CreatesConfigWhenMissing(t *testing.T) {
+	root := t.TempDir()
+	if err := SaveLastTestCommand(root, "go test ./..."); err != nil {
+		t.Fatalf("SaveLastTestCommand: %v", err)
+	}
+	got := LoadLastTestCommand(root)
+	if got != "go test ./..." {
+		t.Errorf("LoadLastTestCommand = %q, want %q", got, "go test ./...")
+	}
+}
+
+func TestSaveLastTestCommand_PreservesExistingFields(t *testing.T) {
+	root := makeDir(t, map[string]string{
+		".huginn/workspace.json": `{"name":"my-project","exclude":["vendor"]}`,
+	})
+	if err := SaveLastTestCommand(root, "make test"); err != nil {
+		t.Fatalf("SaveLastTestCommand: %v", err)
+	}
+	cfg, err := LoadConfig(root)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Name != "my-project" {
+		t.Errorf("Name = %q, want %q (preserved)", cfg.Name, "my-project")
+	}
+	if len(cfg.Exclude) != 1 || cfg.Exclude[0] != "vendor" {
+		t.Errorf("Exclude = %v, want [vendor] (preserved)", cfg.Exclude)
+	}
+	if cfg.LastTestCommand != "make test" {
+		t.Errorf("LastTestCommand = %q, want %q", cfg.LastTestCommand, "make test")
+	}
+}
+
+func TestLoadLastTestCommand_NoConfig_ReturnsEmpty(t *testing.T) {
+	root := t.TempDir()
+	if got := LoadLastTestCommand(root); got != "" {
+		t.Errorf("LoadLastTestCommand = %q, want empty string", got)
+	}
+}
+
+func TestLoadLastTestCommand_InvalidConfig_ReturnsEmpty(t *testing.T) {
+	root := makeDir(t, map[string]string{
+		".huginn/workspace.json": `{invalid`,
+	})
+	if got := LoadLastTestCommand(root); got != "" {
+		t.Errorf("LoadLastTestCommand = %q, want empty string on parse error", got)
+	}
+}

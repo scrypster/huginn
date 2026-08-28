@@ -2467,12 +2467,18 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if isCancelled {
 			logger.Info("ws chat: run cancelled mid-stream, persisting accumulated content",
 				"session_id", sessionID, "buf_len", assistantBuf.Len(), "tool_calls", len(collectedToolCalls))
+			// Persist BEFORE signaling completion: a client (or test) that acts
+			// on "done" the instant it arrives — e.g. re-fetching history, or a
+			// test tearing down its temp session dir — must never race the
+			// store.Append writes below. persistAccumulated only reads state
+			// already captured in this closure, so computing it first changes
+			// nothing about what gets persisted, only when the wire is told.
+			persistAccumulated("")
 			// Signal completion so any connected client stops its spinner.
 			emit(WSMessage{Type: "done", RunID: runID, Payload: map[string]any{
 				"message_id": assistantMsgID,
 				"cancelled":  true,
 			}})
-			persistAccumulated("")
 		} else {
 			logger.Error("chat completion", "session_id", sessionID, "err", err)
 			agentName := ""
@@ -2485,18 +2491,19 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			} else {
 				errSpeech = "⚠️ " + err.Error()
 			}
-			emit(WSMessage{Type: "error", Content: errSpeech, RunID: runID})
 			persistAccumulated(errSpeech)
+			emit(WSMessage{Type: "error", Content: errSpeech, RunID: runID})
 		}
 	} else {
+		// Persist assistant content BEFORE emitting "done" — see the isCancelled
+		// branch above for why ordering here matters, not just style. The user
+		// row was written at accept so mid-turn announcements keep chronological
+		// seq. Also emits space_activity for unseen badges.
+		persistAccumulated("")
+
 		emit(WSMessage{Type: "done", RunID: runID, Payload: map[string]any{
 			"message_id": assistantMsgID,
 		}})
-
-		// Persist assistant content. The user row was written at accept so
-		// mid-turn announcements keep chronological seq. Also emits
-		// space_activity for unseen badges.
-		persistAccumulated("")
 	}
 
 	logger.Info("ws chat done",

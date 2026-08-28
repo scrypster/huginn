@@ -19,6 +19,11 @@ export interface Thread {
   Summary?: FinishSummary
   TokensUsed: number
   TokenBudget: number
+  // IsSpecialist + ModelID: set only for a one-off spawn_specialist thread —
+  // the agent is an ephemeral overlay entry (agents.AgentRegistry), never on
+  // the roster. ThreadCard renders a "temporary" pill + model id from these.
+  IsSpecialist?: boolean
+  ModelID?: string
 }
 
 export interface Connection {

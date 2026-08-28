@@ -21,6 +21,7 @@ var knownRuleFiles = []string{
 	".claude/CLAUDE.md",
 	".huginn/rules.md",
 	".github/copilot-instructions.md",
+	"AGENTS.md",
 }
 
 type Loader struct {
@@ -103,21 +104,57 @@ func (l *Loader) LoadAll() ([]Skill, []error) {
 	return result, errs
 }
 
-// LoadRuleFiles scans workspaceRoot for known provider rule file patterns.
-// Returns concatenated content with headers. Returns empty string if workspaceRoot is empty or no files found.
+// maxRuleFileWalkDepth bounds how far LoadRuleFiles walks up the directory
+// tree looking for the git root, to prevent runaway traversal on systems
+// without a git repo in the path.
+const maxRuleFileWalkDepth = 32
+
+// LoadRuleFiles scans workspaceRoot, and every ancestor directory up to AND
+// INCLUDING the first directory containing a .git marker, for known provider
+// rule file patterns. This picks up instructions living above the working
+// directory — e.g. rules at a repo root when the agent operates from a
+// subdirectory of that repo.
+//
+// The walk STOPS at the first .git it finds, matching
+// agent.LoadProjectInstructions. So rules living ABOVE a repo (a
+// workspace-level CLAUDE.md in a multi-project checkout, where the
+// subdirectory is itself a separate git repo) are deliberately NOT loaded —
+// the repo boundary is the scope boundary, and crossing it would pull in
+// instructions from unrelated sibling projects. See
+// TestLoadRuleFiles_StopsAtGitBoundary.
+//
+// Returns concatenated content with headers. Returns empty string if
+// workspaceRoot is empty or no files found.
 func (l *Loader) LoadRuleFiles(workspaceRoot string) string {
 	if workspaceRoot == "" {
 		return ""
 	}
+	root := filepath.Clean(workspaceRoot)
+	dir := root
 	var parts []string
-	for _, pattern := range knownRuleFiles {
-		path := filepath.Join(workspaceRoot, pattern)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
+	for i := 0; i < maxRuleFileWalkDepth; i++ {
+		for _, pattern := range knownRuleFiles {
+			path := filepath.Join(dir, pattern)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			label := pattern
+			if rel, relErr := filepath.Rel(root, dir); relErr == nil && rel != "." {
+				label = filepath.Join(rel, pattern)
+			}
+			header := fmt.Sprintf("// Rules from: %s", label)
+			parts = append(parts, header+"\n"+strings.TrimRight(string(data), "\n"))
 		}
-		header := fmt.Sprintf("// Rules from: %s", pattern)
-		parts = append(parts, header+"\n"+strings.TrimRight(string(data), "\n"))
+		// Stop after processing the directory containing the git root marker.
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // reached filesystem root
+		}
+		dir = parent
 	}
 	return strings.Join(parts, "\n\n")
 }

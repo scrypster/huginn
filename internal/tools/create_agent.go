@@ -500,11 +500,18 @@ func hireVaultName(name string) string {
 	return n + "-huginn"
 }
 
+// stripHireGrant strips both hiring tools — create_agent and
+// spawn_specialist — from a granted local_tools list. Used when building a
+// new hire's LocalTools (a hire's local_tools argument could otherwise smuggle
+// either tool in) and, per S11, when building an ephemeral specialist's
+// LocalTools (a specialist can never recurse into hiring or spawning another
+// specialist — enforced here even though spawn_specialist itself always
+// grants specialists a nil/empty LocalTools regardless).
 func stripHireGrant(tools []string) []string {
 	var out []string
 	for _, t := range tools {
 		t = strings.TrimSpace(t)
-		if t == "" || strings.EqualFold(t, CreateAgentName) {
+		if t == "" || strings.EqualFold(t, CreateAgentName) || strings.EqualFold(t, SpawnSpecialistName) {
 			continue
 		}
 		out = append(out, t)

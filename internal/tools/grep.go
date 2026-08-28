@@ -16,8 +16,8 @@ type GrepTool struct {
 	SandboxRoot string
 }
 
-func (t *GrepTool) Name() string        { return "grep" }
-func (t *GrepTool) Description() string { return "Search file contents for a regex pattern." }
+func (t *GrepTool) Name() string                { return "grep" }
+func (t *GrepTool) Description() string         { return "Search file contents for a regex pattern." }
 func (t *GrepTool) Permission() PermissionLevel { return PermRead }
 
 func (t *GrepTool) Schema() backend.Tool {
@@ -75,10 +75,17 @@ func (t *GrepTool) Execute(_ context.Context, args map[string]any) ToolResult {
 	}
 
 	const maxFiles = 100
-	const maxLines = 500
-	var sb strings.Builder
+	const maxLines = 500      // cap on total detail lines rendered (including context lines)
+	const maxDetailLines = 50 // cap on detail lines shown after the summary — a verbose
+	// dump of every match measured worse than no tool at all;
+	// the file:count summary carries the "how much" signal,
+	// the capped detail carries "what it looks like".
+	var detail strings.Builder
+	var fileOrder []string
+	matchCount := map[string]int{} // per-file count of MATCHING lines (excludes context)
 	fileCount := 0
-	lineCount := 0
+	lineCount := 0    // total detail lines rendered (matches + context)
+	totalMatches := 0 // total matching lines found, across all files (uncapped)
 
 	info, statErr := os.Stat(resolved)
 	var paths []string
@@ -106,7 +113,7 @@ func (t *GrepTool) Execute(_ context.Context, args map[string]any) ToolResult {
 	}
 
 	for _, path := range paths {
-		if fileCount >= maxFiles || lineCount >= maxLines {
+		if fileCount >= maxFiles {
 			break
 		}
 		data, readErr := os.ReadFile(path)
@@ -116,11 +123,19 @@ func (t *GrepTool) Execute(_ context.Context, args map[string]any) ToolResult {
 		lines := strings.Split(string(data), "\n")
 		rel, _ := filepath.Rel(t.SandboxRoot, path)
 
-		prevLen := sb.Len()
+		fileMatched := false
 		for i, line := range lines {
 			if !re.MatchString(line) {
 				continue
 			}
+			fileMatched = true
+			matchCount[rel]++
+			totalMatches++
+
+			if lineCount >= maxDetailLines {
+				continue // keep counting for the summary, stop rendering detail
+			}
+
 			// Context before
 			start := i - contextLines
 			if start < 0 {
@@ -130,31 +145,43 @@ func (t *GrepTool) Execute(_ context.Context, args map[string]any) ToolResult {
 			if end > len(lines) {
 				end = len(lines)
 			}
-			for j := start; j < end; j++ {
+			for j := start; j < end && lineCount < maxLines; j++ {
 				sep := ":"
 				if j != i {
 					sep = "-"
 				}
-				fmt.Fprintf(&sb, "%s:%d%s%s\n", rel, j+1, sep, lines[j])
+				fmt.Fprintf(&detail, "%s:%d%s%s\n", rel, j+1, sep, lines[j])
 				lineCount++
-				if lineCount >= maxLines {
-					break
-				}
 			}
 			if contextLines > 0 {
-				sb.WriteString("--\n")
+				detail.WriteString("--\n")
 			}
 		}
-		if sb.Len() > prevLen {
+		if fileMatched {
+			fileOrder = append(fileOrder, rel)
 			fileCount++
 		}
 	}
 
-	if sb.Len() == 0 {
+	if fileCount == 0 {
 		return ToolResult{Output: fmt.Sprintf("no matches for %q", pattern)}
 	}
+
+	// Summary first: file:count so the model knows the shape of the result
+	// before reading any lines, then the (possibly truncated) matching lines.
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d files matched, %d total matching lines\n", fileCount, totalMatches)
+	for _, f := range fileOrder {
+		fmt.Fprintf(&sb, "%s: %d\n", f, matchCount[f])
+	}
+	sb.WriteString("\n")
+	sb.WriteString(detail.String())
+	if totalMatches > lineCount {
+		fmt.Fprintf(&sb, "... [%d more matching lines not shown]\n", totalMatches-lineCount)
+	}
+
 	return ToolResult{
-		Output: sb.String(),
-		Metadata: map[string]any{"files_matched": fileCount, "lines": lineCount},
+		Output:   sb.String(),
+		Metadata: map[string]any{"files_matched": fileCount, "lines": totalMatches},
 	}
 }

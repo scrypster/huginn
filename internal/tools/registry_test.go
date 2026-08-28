@@ -13,9 +13,9 @@ import (
 // mockTool is a minimal Tool implementation for testing.
 type mockTool struct{ name string }
 
-func (m *mockTool) Name() string                                            { return m.name }
-func (m *mockTool) Description() string                                     { return "" }
-func (m *mockTool) Permission() PermissionLevel                             { return PermRead }
+func (m *mockTool) Name() string                { return m.name }
+func (m *mockTool) Description() string         { return "" }
+func (m *mockTool) Permission() PermissionLevel { return PermRead }
 func (m *mockTool) Schema() backend.Tool {
 	return backend.Tool{Type: "function", Function: backend.ToolFunction{Name: m.name}}
 }
@@ -329,7 +329,7 @@ func TestGitHubCLIToolNames_AllRegistered(t *testing.T) {
 		t.Skip("gh CLI not installed, skipping")
 	}
 	reg := NewRegistry()
-	RegisterGitHubTools(reg)
+	RegisterGitHubTools(reg, "/tmp")
 	names := GitHubCLIToolNames()
 	for _, name := range names {
 		if _, ok := reg.Get(name); !ok {

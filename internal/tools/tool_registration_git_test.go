@@ -506,14 +506,55 @@ func TestGitStashTool_Schema(t *testing.T) {
 	}
 }
 
-func TestGitStashTool_Pop_NotImplemented(t *testing.T) {
-	tool := &GitStashTool{SandboxRoot: t.TempDir()}
+// G4: git_stash pop is now implemented via native `git stash pop` instead of
+// returning a hardcoded "not implemented" string.
+
+func TestGitStashTool_Pop_NothingStashed_Errors(t *testing.T) {
+	dir := initGitRepo(t)
+	tool := &GitStashTool{SandboxRoot: dir}
 	result := tool.Execute(context.Background(), map[string]any{"action": "pop"})
-	if result.IsError {
-		t.Errorf("expected pop to return helpful message, not error: %s", result.Error)
+	if !result.IsError {
+		t.Error("expected error popping with no stash entries")
 	}
-	if !strings.Contains(result.Output, "not implemented") {
-		t.Errorf("expected 'not implemented' in output, got %q", result.Output)
+	if strings.Contains(result.Error, "not implemented") {
+		t.Error("git_stash pop should be implemented, not a stub message")
+	}
+}
+
+func TestGitStashTool_PushThenPop_RestoresChanges(t *testing.T) {
+	dir := initGitRepo(t)
+	readmePath := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# modified\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tool := &GitStashTool{SandboxRoot: dir}
+	pushResult := tool.Execute(context.Background(), map[string]any{"action": "push"})
+	if pushResult.IsError {
+		t.Fatalf("stash push failed: %s", pushResult.Error)
+	}
+
+	// The working tree change should be gone after push.
+	data, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("ReadFile after push: %v", err)
+	}
+	if strings.Contains(string(data), "modified") {
+		t.Errorf("expected working tree restored to committed state after push, got: %s", data)
+	}
+
+	popResult := tool.Execute(context.Background(), map[string]any{"action": "pop"})
+	if popResult.IsError {
+		t.Fatalf("stash pop failed: %s", popResult.Error)
+	}
+
+	// The change should be restored after pop.
+	data, err = os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("ReadFile after pop: %v", err)
+	}
+	if !strings.Contains(string(data), "modified") {
+		t.Errorf("expected stashed change restored after pop, got: %s", data)
 	}
 }
 
