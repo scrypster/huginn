@@ -76,18 +76,64 @@ func TestFillTrivialPingPersist_PingOnly(t *testing.T) {
 	for _, ask := range []string{
 		"how many people",
 		"hire Steve",
+		"hire",
 		"thanks",
 		"who is here",
 		"who's on the team",
+		"who is on the team",
+		"ask Steve",
+		"Ask Steve for the hostname",
+		"what company",
+		"what company is this channel in?",
+		"France",
+		"what's the capital of France",
 	} {
-		if got := PersistVisibleAssistantContent(leftoverClockOnly, ask); got != "" {
-			t.Errorf("ask %q filled persist %q, want empty (not Pong.)", ask, got)
+		if got := PersistVisibleAssistantContent(leftoverClockOnly, ask); isLeftoverPongOnly(got) {
+			t.Errorf("ask %q leftover-clock filled persist %q, want not Pong.", ask, got)
 		}
-		if got := PersistVisibleAssistantContent("", ask); got != "" {
-			t.Errorf("empty persist on %q filled %q, want empty", ask, got)
+		if got := PersistVisibleAssistantContent("", ask); isLeftoverPongOnly(got) {
+			t.Errorf("empty persist on %q filled %q, want not Pong.", ask, got)
 		}
 	}
 }
+
+func TestFillTrivialPingPersist_LeftoverPongDoesNotLeak(t *testing.T) {
+	for _, leftover := range []string{"Pong.", "Pong", "pong.", "pong"} {
+		for _, ask := range []string{
+			"ask Steve",
+			"Ask Steve for the hostname",
+			"hire",
+			"hire a teammate",
+			"what company",
+			"what company is this channel in?",
+			"who is on the team",
+			"France",
+			"what's the capital of France",
+		} {
+			if got := PersistVisibleAssistantContent(leftover, ask); got != "" {
+				t.Errorf("leftover %q on %q: %q, want empty (not Pong.)", leftover, ask, got)
+			}
+		}
+	}
+	if got := PersistVisibleAssistantContent("Pong.", "ping"); got != "Pong." {
+		t.Fatalf("ping leftover-pong: %q, want Pong.", got)
+	}
+	if got := PersistVisibleAssistantContent("Pong.", "@Winston ping"); got != "Pong." {
+		t.Fatalf("mention ping leftover-pong: %q, want Pong.", got)
+	}
+	if got := PersistVisibleAssistantContent("Pong.", "pong"); got != "Pong." {
+		t.Fatalf("pong leftover-pong: %q, want Pong.", got)
+	}
+	mixed := "Pong.\n\nSteve isn't in Lab. Sam is."
+	got := PersistVisibleAssistantContent(mixed, "Ask Steve for the hostname")
+	if got != "Steve isn't in Lab. Sam is." {
+		t.Fatalf("mixed leftover-pong+wall: %q", got)
+	}
+	if keep := PersistVisibleAssistantContent("Reggie said PONG.", "what company"); keep != "Reggie said PONG." {
+		t.Fatalf("teammate PONG dropped: %q", keep)
+	}
+}
+
 
 func containsClockLabel(s string) bool {
 	return hasHarnessClockLabel(s)

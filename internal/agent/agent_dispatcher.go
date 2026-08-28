@@ -607,6 +607,16 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	messages = append(messages, backend.Message{Role: "system", Content: systemPrompt})
 	messages = append(messages, opts.history...)
 	messages = append(messages, backend.Message{Role: "user", Content: opts.userMsg})
+	if !isTrivialPing(normalizeTrivialAsk(opts.userMsg)) {
+		kept := messages[:0]
+		for _, m := range messages {
+			if m.Role == "assistant" && backend.IsLeftoverPongSpeech(m.Content) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		messages = kept
+	}
 
 	// Trivial: tools-free completion. Empty ToolSchemas means "all tools
 	// allowed" in RunLoop, so we must not enter the tool loop with a nil belt.
@@ -702,12 +712,22 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 		opts.onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
 	}
 	if len(messages) > 0 && messages[0].Role == "system" {
-		messages[0].Content += "\n\nAnswer the current user message only. If they asked who is here or how many people are in this channel, name the teammates from the roster. Do not repeat the local clock unless they asked the time."
+		messages[0].Content += "\n\nAnswer the current user message only. If they asked who is here or how many people are in this channel, name the teammates from the roster. Do not repeat the local clock unless they asked the time. Do not repeat Pong unless they pinged."
 	}
 	if !backend.IsTimeAsk(opts.userMsg) {
 		kept := messages[:0]
 		for _, m := range messages {
 			if m.Role == "assistant" && backend.IsLeftoverClockSpeech(m.Content) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		messages = kept
+	}
+	if !isTrivialPing(normalizeTrivialAsk(opts.userMsg)) {
+		kept := messages[:0]
+		for _, m := range messages {
+			if m.Role == "assistant" && backend.IsLeftoverPongSpeech(m.Content) {
 				continue
 			}
 			kept = append(kept, m)
