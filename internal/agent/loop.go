@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -473,6 +474,10 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 	// the playbook (recall / delegate again) against a task that is done.
 	var specialistResult bool
 	var workDone bool
+	// unfinishedPlanNudges counts continuation nudges injected for
+	// looksLikeUnfinishedPlan exits (see below). Bounded by
+	// maxUnfinishedPlanContinuations; never reset once incremented.
+	var unfinishedPlanNudges int
 	var lastWorkSpeech string
 	var speechHinted bool
 	var contentBeforeAutoWait string
@@ -711,6 +716,27 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 				// rather than ending with an empty answer.
 				result.FinalContent = contentBeforeAutoWait
 			}
+			// Bounded continuation: a model with tools available, and at
+			// least one tool already run this loop, sometimes narrates the
+			// next step ("I will read X, then fix it") instead of calling
+			// the tool, and the no-tool-calls exit above would otherwise end
+			// the turn half-done. Nudge it to act instead of describing,
+			// up to maxUnfinishedPlanContinuations times; on the last one,
+			// fall through to the normal terminal path below — an honest
+			// partial answer beats a spin loop.
+			if toolsRan && len(cfg.ToolSchemas) > 0 &&
+				unfinishedPlanNudges < maxUnfinishedPlanContinuations &&
+				looksLikeUnfinishedPlan(result.FinalContent) {
+				unfinishedPlanNudges++
+				messages = append(messages, backend.Message{
+					Role:    "user",
+					Content: "[system] Continue: execute the next step now by calling the tool — do not describe it.",
+				})
+				if cfg.OnEvent != nil {
+					cfg.OnEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "continuing"})
+				}
+				continue
+			}
 			if speech := applyTeammateSpeech(messages, cfg.ToolSchemas, result.FinalContent); speech != result.FinalContent {
 				result.FinalContent = speech
 				if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
@@ -808,6 +834,79 @@ func isTerminalWorkTool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// maxUnfinishedPlanContinuations bounds how many times RunLoop nudges a model
+// that ended a tool-less turn with future-tense narration ("I will read X,
+// then fix it") instead of calling a tool. Declared as a var so tests can
+// lower it to exercise the cap quickly.
+var maxUnfinishedPlanContinuations = 3
+
+// unfinishedPlanFutureRE matches a future-tense commitment to do *work*: an
+// intent phrase ("I'll", "I will", "let me", "I'm going to", "I plan to")
+// followed, within a few filler words, by a verb that names actual tool work
+// (read, check, run, edit, ...). The work-verb requirement is load-bearing —
+// the intent phrase alone also appears in ordinary polite closers ("Let me
+// know if you need anything else.", "I'll be here if you need me.", "Next, I
+// will be available for questions.", "I plan to keep the vault updated"),
+// none of which have a next step to execute. Each false nudge costs a full
+// extra model turn (~30s on 14b), so the check errs toward not firing.
+var unfinishedPlanFutureRE = regexp.MustCompile(`(?i)\b(?:i'll|i will|i'm going to|i am going to|i plan to|let me)\s+(?:(?:now|then|go|ahead|and|first|next|also|just|quickly|immediately|start|begin|by|proceed|to|try|attempt)\s+){0,3}(?:read|check|open|run|inspect|look at|examin|verify|test|edit|fix|update|write|creat|add|remov|delet|apply|patch|modif|search|grep|find|list|scan|fetch|quer|call|use|execut|implement|review|analyz|analys|investigat|continu|gather|collect|compil|build|install|configur|deploy|delegat|consult|recall|remember|save|store)`)
+
+// unfinishedPlanCompletedRE matches completed-result markers. Their presence
+// anywhere in the answer means the turn already reported a finished result,
+// even if it also mentions further steps — err toward not nudging rather
+// than double-nudging a genuinely finished answer.
+var unfinishedPlanCompletedRE = regexp.MustCompile("(?i)\\b(done|passes|passing|fixed|changed|complete[d]?|resolved)\\b|```|diff --git")
+
+// looksLikeUnfinishedPlan reports whether text reads as a model narrating
+// future work ("I will read the file, then fix the bug") rather than
+// reporting a completed result. It is deliberately conservative: any
+// completed-result marker anywhere in the text disqualifies a match, and a
+// future-tense commitment must appear in the last sentence(s) — an early
+// aside ("First let me note: ...") that ends with a real result should not
+// match.
+func looksLikeUnfinishedPlan(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if unfinishedPlanCompletedRE.MatchString(t) {
+		return false
+	}
+	// n=3 rather than 2: upstream residual-speech cleanup sometimes inserts a
+	// stray space after a filename's dot (e.g. "mathutil.go" -> "mathutil.
+	// go"), which the crude sentence splitter below reads as an extra
+	// sentence boundary. 3 keeps the check anchored near the end of the
+	// answer without being fooled by that artifact.
+	return unfinishedPlanFutureRE.MatchString(lastSentences(t, 3))
+}
+
+// unfinishedPlanSentenceSplitRE splits text into rough sentences/lines for
+// lastSentences. Not a full sentence tokenizer — good enough to isolate the
+// tail of a short narration turn.
+var unfinishedPlanSentenceSplitRE = regexp.MustCompile(`(?:[.!?]+\s+|\n+)`)
+
+// lastSentences returns the last n non-empty sentences/lines of text, joined
+// back with ". ". Used to look only at how a turn ends, not whether it
+// mentions future work anywhere (an aside earlier in a finished answer
+// should not count).
+func lastSentences(text string, n int) string {
+	parts := unfinishedPlanSentenceSplitRE.Split(text, -1)
+	nonEmpty := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	if n > len(nonEmpty) {
+		n = len(nonEmpty)
+	}
+	return strings.Join(nonEmpty[len(nonEmpty)-n:], ". ")
 }
 
 // waitReturnedSpecialistResult reports whether a wait_for_threads tool result
