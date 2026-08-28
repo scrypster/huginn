@@ -83,14 +83,21 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 		ctx = session.WithEnv(ctx, agentSess.Env)
 		if agentGate != nil {
 			if t, ok := vr.sessionReg.Get(name); ok {
-				if !agentGate.Check(permissions.PermissionRequest{
+				// CheckDetailedCtx, not Check: a cancelled thread (tm.Cancel
+				// closes threadCtx, which reaches us as this ctx) must not
+				// keep sitting on a permission prompt nobody can answer.
+				// Check would bind context.Background() and stall for the
+				// gate's full promptFuncTimeout with a live, unanswerable
+				// banner — the same failure RunLoop.executeSingle fixed by
+				// moving to CheckDetailedCtx.
+				if !agentGate.CheckDetailedCtx(ctx, permissions.PermissionRequest{
 					ToolName:  name,
 					Level:     t.Permission(),
 					Args:      args,
 					Provider:  vr.sessionReg.ProviderFor(name),
 					AgentName: ag.Name,
 					SessionID: GetSessionID(ctx),
-				}) {
+				}).Allowed {
 					return "", fmt.Errorf("permission denied")
 				}
 			}

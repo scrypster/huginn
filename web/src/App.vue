@@ -1096,10 +1096,12 @@ import { useAgents } from './composables/useAgents'
 import { useAgentActivity } from './composables/useAgentActivity'
 import { useDeliveryQueue } from './composables/useDeliveryQueue'
 import { sectionFromPath, showChatSidebar, showContextPanel, NAV_GROUPS } from './utils/navLayout'
+import { isFreshInstall, pickDefaultAgent } from './utils/firstRun'
+import { useFirstRun } from './composables/useFirstRun'
 
 const route = useRoute()
 const router = useRouter()
-const { sessions, fetchSessions, createSession, formatSessionLabel, getMessages, refetchMessages } = useSessions()
+const { sessions, fetchSessions, fetchSessionsError, createSession, formatSessionLabel, getMessages, refetchMessages } = useSessions()
 const { notifications, pendingCount, fetchSummary, fetchNotifications, wireWS } = useNotifications()
 const { wireWS: wireWorkflowsWS } = useWorkflows()
 const { wireActivityWS, isAgentPulsing } = useAgentActivity()
@@ -1335,10 +1337,11 @@ async function initApp() {
     const ws = wsRef.value!
     appLoading.value = false
     await Promise.all([fetchSessions(), fetchSummary()])
-    fetchSpaces()
+    const spacesFetch = fetchSpaces()
     fetchCompanies().catch(() => {})
-    fetchAgents().catch(() => {})
+    const agentsFetch = fetchAgents().catch(() => {})
     fetchCloudStatus().catch(() => {})
+    Promise.all([spacesFetch, agentsFetch]).then(() => { void maybeHandleFirstRun() })
     wireWS(ws)
     wireAgentsWS(ws)
     wireWorkflowsWS(ws)
@@ -1577,6 +1580,29 @@ function selectSpace(id: string) {
   setActiveSpace(id)
   markRead(id)
   router.push(`/space/${id}`)
+}
+
+// ── First run: fresh install (no spaces, no sessions) auto-opens a DM
+// with the default agent so the user never lands on a bare empty state. ──
+const { markWelcomeSpace } = useFirstRun()
+
+async function maybeHandleFirstRun() {
+  // Only steer the user if they're still sitting on the default landing —
+  // never hijack a deep link or a route they've already navigated to.
+  if (route.path !== '/chat') return
+  // "Empty" must mean "the server said empty", not "the fetch failed".
+  // fetchSpaces/fetchSessions swallow their errors into refs and leave the
+  // lists at their previous (initially empty) value, so without this guard a
+  // network blip or 500 on either call makes an ESTABLISHED user look like a
+  // fresh install — and we'd teleport them into a DM they never asked for.
+  if (spacesError.value || fetchSessionsError.value) return
+  if (!isFreshInstall(spaces.value.length, sessions.value.length)) return
+  const target = pickDefaultAgent(agents.value)
+  if (!target) return
+  const sp = await openDM(target.name).catch(() => null)
+  if (!sp) return
+  markWelcomeSpace(sp.id)
+  selectSpace(sp.id)
 }
 
 const seatPicker = ref<null | { agent?: string; companyId?: string; mode: 'companies' | 'people' | 'confirm' }>(null)

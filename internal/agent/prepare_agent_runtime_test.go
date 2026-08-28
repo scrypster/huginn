@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
@@ -192,5 +193,79 @@ func TestPrepareAgentRuntime_EmptyToolbelt_CannotExecuteAWS(t *testing.T) {
 	}
 	if n := callCount(awsTool); n != 0 {
 		t.Fatalf("empty toolbelt executor ran aws_* %d time(s)", n)
+	}
+}
+
+// TestPrepareAgentRuntime_ExecutorHonorsContextCancellation asserts the
+// per-agent executor's permission check unblocks when the caller's context
+// is cancelled — i.e. it goes through Gate.CheckDetailedCtx, not Gate.Check.
+//
+// threadmgr gives every spawned thread a cancellable threadCtx and passes it
+// into runtime.ExecuteTool. With the non-ctx Gate.Check, a cancelled thread
+// sitting on a pending permission prompt would keep waiting for the gate's
+// full 30s promptFuncTimeout with a live, unanswerable banner on screen.
+// This is the same failure RunLoop.executeSingle fixed by moving to
+// CheckDetailedCtx; the delegate/thread executor must behave identically.
+func TestPrepareAgentRuntime_ExecutorHonorsContextCancellation(t *testing.T) {
+	mb := newMockBackend("")
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, stats.NoopCollector{}, nil)
+
+	writeTool := &writeMockTool{
+		name:   "danger_write",
+		result: tools.ToolResult{Output: "wrote"},
+	}
+	reg := tools.NewRegistry()
+	reg.Register(writeTool)
+
+	// A gate whose prompt bridge never answers: the only way out is the
+	// caller's context (or the 30s timeout this test must beat).
+	promptStarted := make(chan struct{})
+	blockForever := make(chan permissions.Decision)
+	gate := permissions.NewGate(false, func(permissions.PermissionRequest) permissions.Decision {
+		close(promptStarted)
+		return <-blockForever
+	})
+	t.Cleanup(gate.Close)
+
+	o.SetTools(reg, gate)
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Threaded", MemoryEnabled: false})
+	o.SetAgentRegistry(agentReg)
+
+	rt, err := o.PrepareAgentRuntime(context.Background(), "Threaded")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("expected a runtime")
+	}
+	defer rt.Cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, execErr := rt.ExecuteTool(ctx, "danger_write", nil)
+		done <- execErr
+	}()
+
+	select {
+	case <-promptStarted:
+	case execErr := <-done:
+		t.Fatalf("executor returned before any prompt was raised: %v", execErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("permission prompt was never raised")
+	}
+	cancel()
+
+	select {
+	case execErr := <-done:
+		if execErr == nil || !strings.Contains(execErr.Error(), "permission denied") {
+			t.Fatalf("expected permission denied after cancellation, got %v", execErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("executor did not unblock promptly after ctx cancellation — still on Gate.Check?")
+	}
+	if n := callCount(writeTool); n != 0 {
+		t.Fatalf("cancelled executor ran the tool %d time(s)", n)
 	}
 }

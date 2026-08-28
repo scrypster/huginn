@@ -87,6 +87,17 @@ type AgentDef struct {
 	// future runs skip prompting for these specific tools.
 	ApprovedTools []string `json:"approved_tools,omitempty"        yaml:"approved_tools,omitempty"`
 
+	// LoadedApprovedTools is a transient API-bridge field, NOT persisted to
+	// disk: the AgentsView editor should echo back the approved_tools it
+	// received when the edit form was loaded, alongside the (possibly
+	// unedited) current ApprovedTools value. This lets persistAgent tell
+	// "user explicitly edited the chips" apart from "form still holds its
+	// as-loaded snapshot" — see persistAgent's approved-tools RMW-race fix.
+	// A client that omits this field (old client, direct API caller) is
+	// treated as "did not edit": ApprovedTools is authoritative only when
+	// it differs from LoadedApprovedTools.
+	LoadedApprovedTools []string `json:"loaded_approved_tools,omitempty" yaml:"-"`
+
 	// Description is a short (max 500 bytes) human-readable summary of what this agent does.
 	// Visible to other agents in channel contexts for intelligent task delegation.
 	Description string `json:"description,omitempty"           yaml:"description,omitempty"`

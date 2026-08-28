@@ -63,6 +63,27 @@ func (s *Server) persistAgent(incoming agents.AgentDef, pathName string) (create
 		incoming.APIKey = existingAgent.APIKey
 	}
 
+	// Approved-tools RMW race (vet E): a grant from the permission banner
+	// (grantApprovedTool) does a read-modify-write of ApprovedTools, while a
+	// PUT from the AgentsView editor sends the whole form as one blob. If a
+	// grant lands while an editor tab is open, and that tab then saves
+	// without touching the approved-tools chips, its stale in-memory copy
+	// (captured at form-load time) would silently clobber the just-landed
+	// grant back off disk.
+	//
+	// Rule: incoming.ApprovedTools is authoritative ONLY when it differs
+	// from incoming.LoadedApprovedTools (the snapshot the client echoes back
+	// from when it loaded the form) — that difference is the signal the user
+	// actually touched the chips. Otherwise (nil — an old client/API caller
+	// that never touched the field at all — or unchanged from the loaded
+	// snapshot) the on-disk value wins, so a grant that landed after load
+	// survives an untouched save. A genuine edit still overwrites a
+	// concurrent grant (last-writer-wins) — documented, not fixed here.
+	if existingAgent != nil && !approvedToolsExplicitlyEdited(incoming.ApprovedTools, incoming.LoadedApprovedTools) {
+		incoming.ApprovedTools = existingAgent.ApprovedTools
+	}
+	incoming.LoadedApprovedTools = nil // bridge-only; never persisted
+
 	if incoming.Version > 0 && existingAgent != nil && incoming.Version != existingAgent.Version {
 		return false, persistErr(409, fmt.Sprintf("agent version conflict: stored=%d, submitted=%d — reload and retry",
 			existingAgent.Version, incoming.Version))
@@ -135,4 +156,48 @@ func (s *Server) persistAgent(incoming agents.AgentDef, pathName string) (create
 		s.logEntityAudit("agent_create", "hired agent "+incoming.Name, map[string]any{"agent": incoming.Name})
 	}
 	return existingAgent == nil, nil
+}
+
+// approvedToolsExplicitlyEdited reports whether current represents a genuine
+// user edit of the approved-tools chips, as opposed to a client echoing back
+// the same snapshot it loaded (or an old client that never sent
+// loaded_approved_tools at all — nil loaded still means "unknown", not
+// "edited", so a nil current is never treated as an edit here regardless).
+// Compared as sets: chip UI reordering is not an edit.
+//
+// Known limitation: (current=[], loaded=nil) — an old client explicitly
+// sending an empty array to clear every chip — compares set-equal to nil and
+// is therefore NOT treated as an edit, so the on-disk value is preserved and
+// the clear does not happen. Accepted deliberately: honoring it would
+// re-open the grant-clobbering RMW race for exactly the clients that cannot
+// echo a loaded snapshot. The chip UI is unaffected (AgentsView always sends
+// loaded_approved_tools); clearing without it means editing the agent YAML.
+// Pinned by TestPersistAgent_EmptyArrayFromOldClientCannotClear.
+func approvedToolsExplicitlyEdited(current, loaded []string) bool {
+	if current == nil {
+		return false
+	}
+	return !stringSetEqual(current, loaded)
+}
+
+// stringSetEqual reports whether a and b contain the same strings,
+// ignoring order and duplicate counts.
+func stringSetEqual(a, b []string) bool {
+	setA := map[string]bool{}
+	for _, s := range a {
+		setA[s] = true
+	}
+	setB := map[string]bool{}
+	for _, s := range b {
+		setB[s] = true
+	}
+	if len(setA) != len(setB) {
+		return false
+	}
+	for k := range setA {
+		if !setB[k] {
+			return false
+		}
+	}
+	return true
 }

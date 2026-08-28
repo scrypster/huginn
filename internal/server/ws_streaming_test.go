@@ -10,6 +10,8 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/modelconfig"
+	"github.com/scrypster/huginn/internal/permissions"
+	"github.com/scrypster/huginn/internal/tools"
 )
 
 // ---------------------------------------------------------------------------
@@ -665,5 +667,119 @@ func TestSanitizeCommandSnippet_StripsControlCharacters(t *testing.T) {
 	}
 	if got := sanitizeCommandSnippet("   \x00\x07  "); got != "" {
 		t.Errorf("all-control command should sanitize to empty, got %q", got)
+	}
+}
+
+// noopPingTool is a trivial real tool used to drive an actual tool dispatch
+// (as opposed to a scripted StreamEvent) so the test below exercises the
+// production wiring end to end: RunLoop's dispatchTools -> agent_dispatcher's
+// chatOnToolCall/chatOnToolDone -> the onToolEvent bridge
+// (newWSToolEventHandler) -> runWSChat's onEvent closure, where the "agent"
+// stamp is added.
+type noopPingTool struct{}
+
+func (noopPingTool) Name() string                      { return "ping_tool" }
+func (noopPingTool) Description() string               { return "ping" }
+func (noopPingTool) Permission() tools.PermissionLevel { return tools.PermRead }
+func (noopPingTool) Schema() backend.Tool {
+	return backend.Tool{Function: backend.ToolFunction{Name: "ping_tool"}}
+}
+func (noopPingTool) Execute(context.Context, map[string]any) tools.ToolResult {
+	return tools.ToolResult{Output: "pong"}
+}
+
+// scriptedToolCallBackend is a Backend whose first ChatCompletion call
+// returns a real tool_calls response (driving an actual RunLoop dispatch,
+// not a scripted onEvent injection) and whose second call returns plain
+// content, ending the turn.
+type scriptedToolCallBackend struct{ n int }
+
+func (b *scriptedToolCallBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	b.n++
+	if b.n == 1 {
+		return &backend.ChatResponse{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID:       "call-ping-1",
+				Function: backend.ToolCallFunction{Name: "ping_tool", Arguments: map[string]any{}},
+			}},
+		}, nil
+	}
+	if req.OnToken != nil {
+		req.OnToken("done")
+	}
+	return &backend.ChatResponse{Content: "done", DoneReason: "stop"}, nil
+}
+func (b *scriptedToolCallBackend) Health(_ context.Context) error   { return nil }
+func (b *scriptedToolCallBackend) Shutdown(_ context.Context) error { return nil }
+func (b *scriptedToolCallBackend) ContextWindow() int               { return 8192 }
+
+// TestWSChat_RealToolDispatch_StampsAgentOnToolCallAndResultPayloads is the
+// wire-level regression test for per-agent ticker attribution (vet wave-6
+// #2/#3): tool_call/tool_result WS payloads must carry the emitting agent's
+// name, not just the top-level WSMessage.Agent field, so the frontend can
+// scope a streaming message's activeToolCalls ticker to its own agent when
+// two agents stream concurrently in one space. This drives a REAL tool
+// dispatch (RunLoop -> agent_dispatcher's onToolEvent bridge ->
+// newWSToolEventHandler -> runWSChat's onEvent, where the stamp is added),
+// covering both paths named in the fix: the onEvent path and the
+// onToolEvent bridge that funnels into it.
+func TestWSChat_RealToolDispatch_StampsAgentOnToolCallAndResultPayloads(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(noopPingTool{})
+
+	b := &scriptedToolCallBackend{}
+	orch, err := agent.NewOrchestrator(b, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+	orch.SetTools(reg, permissions.NewGate(true, nil))
+
+	srv, _ := newTestServer(t)
+	srv.orch = orch
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "Winston", Model: modelconfig.DefaultModels().Reasoner, IsDefault: true, SystemPrompt: "You are Winston.", LocalTools: []string{"ping_tool"}},
+		}}, nil
+	}
+
+	sess := srv.store.New("agent-attribution-session", "/workspace", modelconfig.DefaultModels().Reasoner)
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	client := &wsClient{send: make(chan WSMessage, 256), ctx: context.Background()}
+	srv.handleWSMessage(client, WSMessage{
+		Type:      "chat",
+		SessionID: sess.ID,
+		Content:   "please run the ping tool and report back",
+		RunID:     "attribution-run-1",
+	})
+
+	deadline := time.After(10 * time.Second)
+	sawToolCall, sawToolResult := false, false
+	for {
+		select {
+		case msg := <-client.send:
+			switch msg.Type {
+			case "tool_call":
+				sawToolCall = true
+				if got, _ := msg.Payload["agent"].(string); got != "Winston" {
+					t.Errorf("tool_call payload agent = %q, want %q", got, "Winston")
+				}
+			case "tool_result":
+				sawToolResult = true
+				if got, _ := msg.Payload["agent"].(string); got != "Winston" {
+					t.Errorf("tool_result payload agent = %q, want %q", got, "Winston")
+				}
+			case "done":
+				if !sawToolCall || !sawToolResult {
+					t.Fatalf("expected both tool_call and tool_result on the wire, got tool_call=%v tool_result=%v", sawToolCall, sawToolResult)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for done")
+		}
 	}
 }

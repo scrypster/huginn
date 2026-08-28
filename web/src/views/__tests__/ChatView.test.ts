@@ -458,6 +458,39 @@ describe('ChatView', () => {
     expect(html).toContain('ls')
   })
 
+  it('WS tool_call handler: two agents streaming concurrently each show only their own ticker entry', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'h-winston', role: 'assistant', content: '', agent: 'Winston', streaming: true },
+      { id: 'h-sam', role: 'assistant', content: '', agent: 'Sam', streaming: true },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      payload: { id: 'tc-winston', tool: 'bash', args: { command: 'winston-cmd' }, agent: 'Winston' },
+    })
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      payload: { id: 'tc-sam', tool: 'bash', args: { command: 'sam-cmd' }, agent: 'Sam' },
+    })
+    await nextTick()
+
+    const tickers = wrapper.findAll('[data-testid="tool-ticker"]')
+    expect(tickers.length).toBe(2)
+    // Order is not guaranteed — what matters is each ticker shows ONLY its
+    // own agent's tool call, never the other agent's, i.e. no bleed-over
+    // between two agents streaming concurrently in the same view.
+    const winstonTicker = tickers.find(t => t.text().includes('winston-cmd'))
+    const samTicker = tickers.find(t => t.text().includes('sam-cmd'))
+    expect(winstonTicker).toBeTruthy()
+    expect(samTicker).toBeTruthy()
+    expect(winstonTicker!.text()).not.toContain('sam-cmd')
+    expect(samTicker!.text()).not.toContain('winston-cmd')
+  })
+
   it('WS done handler: sets streaming to false', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []

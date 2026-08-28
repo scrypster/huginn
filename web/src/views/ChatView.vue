@@ -613,7 +613,7 @@
                      floating above it. Spinner on the in-flight call, ✓ on completed
                      ones. Collapses into the "N tool calls · done" chip below once no
                      tool call is still in flight (no duplicate surfaces). -->
-                <div v-if="msg.streaming && visibleToolCalls(activeToolCalls).length" class="mt-2" data-testid="tool-ticker">
+                <div v-if="msg.streaming && visibleToolCalls(activeToolCallsFor(msg)).length" class="mt-2" data-testid="tool-ticker">
                   <div class="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50 text-xs text-huginn-text">
                     <template v-for="(entry, i) in toolTicker(msg)" :key="entry.id">
                       <span v-if="i > 0" class="text-huginn-muted">·</span>
@@ -793,7 +793,7 @@
                 <!-- Tool call chip (completed, attached to this message).
                      Visible as soon as no tool calls are actively running, so the
                      chip persists below the content even while text is still streaming. -->
-                <div v-if="msg.toolCalls?.length && !isBareFailSpeech(visibleAssistantText(msg) || msg.content) && (!msg.streaming || !visibleToolCalls(activeToolCalls).length)" class="mt-2">
+                <div v-if="msg.toolCalls?.length && !isBareFailSpeech(visibleAssistantText(msg) || msg.content) && (!msg.streaming || !visibleToolCalls(activeToolCallsFor(msg)).length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
                     class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100"
@@ -1111,6 +1111,17 @@
         </details>
       </div>
 
+      <!-- ── First-run welcome card (above composer, dismissible) ──── -->
+      <WelcomeCard
+        v-if="showWelcomeCard"
+        :agent-name="displayAgent?.name ?? 'your Chief of Staff'"
+        :agent-icon="displayAgent?.icon"
+        :agent-color="displayAgent?.color"
+        :model-configured="firstRunModelConfigured"
+        @dismiss="dismissWelcome"
+        @use-example="useWelcomeExample"
+      />
+
       <!-- ── Input area ──────────────────────────────────────────── -->
       <div class="px-4 pb-4 flex-shrink-0">
         <p v-if="displayAgentUnreliableTools"
@@ -1287,6 +1298,10 @@ import { isTrivialAsk } from '../utils/trivialAsk'
 import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
 import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, toolTickerEntries, visibleToolCalls } from '../utils/honesty'
+import WelcomeCard from '../components/WelcomeCard.vue'
+import { useFirstRun } from '../composables/useFirstRun'
+import { useConfig } from '../composables/useConfig'
+import { isModelConfigured } from '../utils/firstRun'
 
 interface Agent {
   name: string
@@ -2010,6 +2025,28 @@ const {
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (headerInputEl satisfies unknown)
 
+// ── First-run welcome card ────────────────────────────────────────────
+const { welcomeSpaceId, welcomeDismissed, dismissWelcome } = useFirstRun()
+const { config: firstRunConfig, loadConfig: loadFirstRunConfig } = useConfig()
+
+const showWelcomeCard = computed(() =>
+  !!props.spaceId &&
+  props.spaceId === welcomeSpaceId.value &&
+  !welcomeDismissed.value &&
+  messages.value.length === 0,
+)
+
+const firstRunModelConfigured = computed(() => isModelConfigured(firstRunConfig.value))
+
+watch(showWelcomeCard, (visible) => {
+  if (visible && !firstRunConfig.value) loadFirstRunConfig().catch(() => {})
+}, { immediate: true })
+
+function useWelcomeExample(text: string) {
+  chatEditorRef.value?.setText?.(text)
+  chatEditorRef.value?.focus()
+}
+
 const displayAgentUnreliableTools = computed(() =>
   modelUnreliableForTools({
     name: displayAgent.value?.model,
@@ -2220,10 +2257,20 @@ function changedFilesLineFor(msg: ChatMessage): string {
   return changedFilesLine(visibleAssistantText(msg), diffs)
 }
 
+// activeToolCallsFor scopes the shared activeToolCalls list to one message's
+// agent, so two agents streaming concurrently in the same space (e.g. a
+// channel with a lead + delegate both replying) don't bleed each other's
+// tool calls into the wrong bubble's ticker. A call with no agent (legacy
+// wire payloads, no-agent chat sessions) or a message with no agent still
+// matches — attribution only narrows when both sides know the agent.
+function activeToolCallsFor(msg: { agent?: string }) {
+  return activeToolCalls.value.filter(tc => !tc.agent || !msg.agent || tc.agent === msg.agent)
+}
+
 // toolTicker returns the merged completed+in-flight tool call list for a
 // streaming message's live activity line — see toolTickerEntries (honesty.ts).
-function toolTicker(msg: { toolCalls?: ToolCallRecord[] }) {
-  return toolTickerEntries(msg.toolCalls, activeToolCalls.value)
+function toolTicker(msg: { agent?: string; toolCalls?: ToolCallRecord[] }) {
+  return toolTickerEntries(msg.toolCalls, activeToolCallsFor(msg))
 }
 
 // ── Thread helpers ────────────────────────────────────────────────────
@@ -2751,6 +2798,7 @@ registerWS(ws, 'tool_call', (msg: WSMessage) => {
       id: (p?.id as string) ?? Date.now().toString(),
       name: (p?.tool as string) ?? '',
       args: (p?.args as Record<string, unknown>) ?? {},
+      agent: (p?.agent as string) || undefined,
     })
     scrollToBottom()
   })
@@ -2764,6 +2812,7 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
       id,
       name: (p?.tool as string) ?? '',
       args: (p?.args as Record<string, unknown>) ?? {},
+      agent: (p?.agent as string) || undefined,
     }
     const metadata = p?.metadata as Record<string, unknown> | undefined
     const diff = (metadata?.diff as FileDiff | undefined) ?? undefined
@@ -3236,7 +3285,7 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     // Remove any stale streaming tool calls scoped to the completed thread's
     // agent so they don't linger in the active tool call list.
     if (agentId) {
-      activeToolCalls.value = activeToolCalls.value.filter(tc => (tc as any).agent !== agentId)
+      activeToolCalls.value = activeToolCalls.value.filter(tc => tc.agent !== agentId)
     }
     if (summary) {
       const alreadyPosted = msgs.some(m => m.threadSummaryThreadId === threadId)

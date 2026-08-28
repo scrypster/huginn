@@ -11,12 +11,14 @@ const mockDeleteSession   = vi.fn().mockResolvedValue(undefined)
 const mockRenameSession   = vi.fn().mockResolvedValue(undefined)
 const mockFormatSessionLabel = vi.fn((s: any) => s.title || s.id?.slice(0, 8) || '')
 const mockGetMessages     = vi.fn(() => [])
+const mockSessionsError   = ref<string | null>(null)
 
 vi.mock('../../composables/useSessions', () => ({
   useSessions: () => ({
     sessions: mockSessions,
     loading: ref(false),
     fetchSessions: mockFetchSessions,
+    fetchSessionsError: mockSessionsError,
     createSession: mockCreateSession,
     deleteSession: mockDeleteSession,
     renameSession: mockRenameSession,
@@ -56,6 +58,8 @@ const mockMarkRead    = vi.fn()
 const mockUpdateSpace = vi.fn().mockResolvedValue({ id: 'sp-1', name: 'Updated' })
 const mockDeleteSpace = vi.fn().mockResolvedValue(true)
 const mockClearSpaces = vi.fn()
+const mockOpenDM = vi.fn().mockResolvedValue(null)
+const mockSpacesError = ref<string | null>(null)
 
 vi.mock('../../composables/useSpaces', () => ({
   useSpaces: () => ({
@@ -64,7 +68,7 @@ vi.mock('../../composables/useSpaces', () => ({
     dms: mockDms,
     activeSpaceId: mockActiveSpaceId,
     loading: mockSpacesLoading,
-    error: ref(null),
+    error: mockSpacesError,
     fetchSpaces: mockFetchSpaces,
     setActiveSpace: mockSetActiveSpace,
     fetchSpaceSessions: mockFetchSpaceSessions,
@@ -73,7 +77,7 @@ vi.mock('../../composables/useSpaces', () => ({
     updateSpace: mockUpdateSpace,
     deleteSpace: mockDeleteSpace,
     clearSpaces: mockClearSpaces,
-    openDM: vi.fn().mockResolvedValue(null),
+    openDM: mockOpenDM,
     ensureCompanyDM: vi.fn().mockResolvedValue(null),
   }),
   wireSpaceWS: vi.fn().mockReturnValue(vi.fn()),
@@ -261,6 +265,8 @@ beforeEach(async () => {
   mockDms.value = []
   mockSpaces.value = []
   mockSpacesLoading.value = false
+  mockSpacesError.value = null
+  mockSessionsError.value = null
   mockActiveSpaceId.value = null
   mockPendingCount.value = 0
   mockGetMessages.mockReturnValue([])
@@ -816,6 +822,104 @@ describe('App', () => {
       expect(settingsAt).toBeGreaterThan(-1)
       expect(statsAt).toBeGreaterThan(settingsAt)
       expect(logsAt).toBeGreaterThan(statsAt)
+    })
+  })
+
+  describe('first run (fresh install)', () => {
+    it('auto-opens a DM with the default agent when there are no spaces and no sessions', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockAgents.value = [
+        { name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' },
+        { name: 'fable', color: '#3fb950', icon: 'F', model: 'gpt-4', is_default: true },
+      ]
+      mockOpenDM.mockResolvedValueOnce({ id: 'space-welcome', name: 'fable', kind: 'dm', leadAgent: 'fable', memberAgents: [], icon: 'F', color: '#3fb950', unseenCount: 0, companyId: '' })
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).toHaveBeenCalledWith('fable')
+      expect(mockRouterPush).toHaveBeenCalledWith('/space/space-welcome')
+    })
+
+    it('does nothing when a space already exists', async () => {
+      mockSessions.value = []
+      mockSpaces.value = [{ id: 'sp-1', name: 'general', kind: 'channel', leadAgent: '', memberAgents: [], icon: '', color: '#000', unseenCount: 0, companyId: '' }]
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does nothing when a session already exists', async () => {
+      mockSessions.value = [{ id: 's-1', title: 'old chat' }]
+      mockSpaces.value = []
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does nothing when there are no agents to open a DM with', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockAgents.value = []
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    // Regression: fetchSpaces/fetchSessions swallow their errors into refs and
+    // leave the lists empty. Without an explicit error guard, an established
+    // user whose load failed looks identical to a fresh install and gets
+    // teleported into a DM they never asked for.
+    it('does not misfire for an existing user when the spaces fetch failed', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockSpacesError.value = 'Failed to load spaces'
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does not misfire for an existing user when the sessions fetch failed', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockSessionsError.value = 'Network error'
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does not hijack a route the user already navigated to', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+      mockRoute.path = '/settings'
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
     })
   })
 })

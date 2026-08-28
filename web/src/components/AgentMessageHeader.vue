@@ -11,14 +11,14 @@
       :style="`color:${color}`"
       :title="agentDescription || undefined"
     >{{ agentName }}</span>
-    <!-- Timestamp -->
-    <span class="text-[11px] text-huginn-muted/60">{{ formattedTime }}</span>
+    <!-- Timestamp — title shows absolute clock time on hover -->
+    <span class="text-[11px] text-huginn-muted/60" :title="absoluteTime || undefined">{{ formattedTime }}</span>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { formatRelativeTime } from '../utils/relativeTime'
+import { formatClockTime, formatRelativeTime } from '../utils/relativeTime'
 
 const PALETTE = ['#58A6FF', '#3FB950', '#FF7B72', '#D2A8FF', '#FFA657', '#79C0FF']
 
@@ -39,4 +39,5 @@ const color = computed(() => agentColor(props.agentName))
 const initial = computed(() => (props.agentName?.[0] ?? '?').toUpperCase())
 
 const formattedTime = computed(() => formatRelativeTime(props.createdAt) || 'just now')
+const absoluteTime = computed(() => formatClockTime(props.createdAt))
 </script>

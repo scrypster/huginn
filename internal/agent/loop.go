@@ -194,7 +194,7 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 			AgentName: cfg.AgentName,
 			SessionID: cfg.SessionID,
 		}
-		checkResult := cfg.Gate.CheckDetailed(req)
+		checkResult := cfg.Gate.CheckDetailedCtx(ctx, req)
 		if !checkResult.Allowed {
 			denyOutput := "error: permission denied"
 			if checkResult.Reason != "" {

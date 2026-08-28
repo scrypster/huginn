@@ -132,6 +132,17 @@ describe('AgentMessageHeader', () => {
     expect(chip.text()).toBe('?')
   })
 
+  it('exposes the absolute clock time as a title tooltip on the timestamp', () => {
+    const now = new Date('2024-06-01T12:00:00.000Z')
+    vi.setSystemTime(now)
+    const twoMinsAgo = new Date(now.getTime() - 2 * 60 * 1000).toISOString()
+    const wrapper = mount(AgentMessageHeader, {
+      props: { agentName: 'ares', createdAt: twoMinsAgo },
+    })
+    const stamp = wrapper.findAll('span').find(s => s.text() === '2m')
+    expect(stamp?.attributes('title')).toBeTruthy()
+  })
+
   it('different agent names get different palette colors', () => {
     const color1 = agentColor('atlas')
     const color2 = agentColor('hermes')

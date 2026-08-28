@@ -13,15 +13,15 @@
           </svg>
         </div>
         <div class="text-center space-y-1">
-          <p class="text-huginn-text text-sm font-medium">Select an agent</p>
-          <p class="text-huginn-muted text-xs">Choose from the sidebar or create a new one</p>
+          <p class="text-huginn-text text-sm font-medium">No teammates yet</p>
+          <p class="text-huginn-muted text-xs">Agents are the teammates who do the work — give one a name, a model, and a job.</p>
         </div>
         <button data-testid="new-agent-btn" @click="createNew"
           class="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-huginn-blue border border-huginn-blue/30 hover:bg-huginn-blue/10 transition-all duration-150 active:scale-95">
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          New agent
+          Hire your first teammate
         </button>
       </div>
 

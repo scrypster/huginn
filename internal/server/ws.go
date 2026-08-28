@@ -2123,6 +2123,27 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		if ev.Type == backend.StreamStatus {
 			updateLastStatus(ev.Content)
 		}
+		// Stamp the emitting agent onto tool_call/tool_result payloads (not
+		// just the WSMessage-level Agent field emit() sets) so the client can
+		// scope its live activeToolCalls ticker to the message it belongs to.
+		// Without this, two agents streaming concurrently in one space share
+		// one ticker and each bubble shows the other's tool calls. agentName
+		// is this run's own agent (ag.Name), resolved once above — delegate
+		// threads run their own RunLoop/onEvent closure with their own name,
+		// so this never mixes agents within a single onEvent instance.
+		if (ev.Type == backend.StreamToolCall || ev.Type == backend.StreamToolResult) && agentName != "" {
+			if _, ok := ev.Payload["agent"]; !ok {
+				// Copy rather than mutate ev.Payload in place: it may be the
+				// same map instance the producer (agent_dispatcher, the
+				// onToolEvent bridge) still holds a reference to.
+				withAgent := make(map[string]any, len(ev.Payload)+1)
+				for k, v := range ev.Payload {
+					withAgent[k] = v
+				}
+				withAgent["agent"] = agentName
+				ev.Payload = withAgent
+			}
+		}
 		emit(streamEventToWS(ev, sessionID))
 		// Phase-true status translation layer: a tool_call event already
 		// carries the tool name and (for delegate_to_agent) the target
