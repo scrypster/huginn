@@ -484,3 +484,17 @@ describe('plaintextPreview never Loading model', () => {
     expect(plaintextPreview('Loading model, pleas…')).toBe('')
   })
 })
+
+describe('deduplicateSentencesInLastLine dotted identifiers', () => {
+  // Live falsification 2026-08-28: the flagship screenshot showed
+  // "mathutil. go" — the CLIENT mirror of the sentence dedupe still split on
+  // every dot after the server-side wave-4 fix. The rewrite path (a real
+  // duplicate removed, remaining sentences rejoined with spaces) must not
+  // split dotted identifiers.
+  it('does not split dotted filenames when the dedupe rewrites the last line', () => {
+    const input = 'The tests pass.\nThe bug in mathutil.go has been fixed. The tests pass.'
+    const out = stripResidualSpeech(input, { afterTools: true })
+    expect(out).toContain('mathutil.go')
+    expect(out).not.toContain('mathutil. go')
+  })
+})
