@@ -24,6 +24,13 @@ type Session struct {
 	lastUsed time.Time         // updated on every access; used for idle-TTL eviction
 	running  int               // number of active goroutines using this session
 
+	// compactMu serializes background history compaction for this session so
+	// two async compactions can never race each other (compactHistoryAsync
+	// holds it for the duration of a compaction). snapshotHistory waits on it
+	// so the *next* turn always observes fully-compacted history, while the
+	// turn that triggered the compaction never has to wait on it itself.
+	compactMu sync.Mutex
+
 	// idleCh is created when a run begins; closed when running drops to 0.
 	// WaitForIdle receives on this channel to be notified of idleness.
 	idleCh chan struct{}
@@ -57,7 +64,22 @@ func (s *Session) getState() State {
 }
 
 // snapshotHistory returns a copy of the session's history under the session lock.
+// It first waits for any in-flight background compaction (compactHistoryAsync)
+// to finish, so callers always see compacted history rather than racing ahead
+// of it — the wait lands on the *next* turn, never the turn that scheduled
+// the compaction (which has already returned by the time compaction starts).
 func (s *Session) snapshotHistory() []backend.Message {
+	s.compactMu.Lock()
+	s.compactMu.Unlock() //nolint:staticcheck // deliberate lock/unlock as a wait barrier
+	return s.snapshotHistoryRaw()
+}
+
+// snapshotHistoryRaw returns a copy of the session's history under the
+// session lock WITHOUT waiting on compactMu. Only compactHistory (which runs
+// while already holding compactMu, directly or via compactHistoryAsync) may
+// call this — snapshotHistory would self-deadlock there since sync.Mutex is
+// not reentrant.
+func (s *Session) snapshotHistoryRaw() []backend.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := make([]backend.Message, len(s.history))

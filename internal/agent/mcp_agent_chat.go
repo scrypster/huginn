@@ -165,7 +165,7 @@ func (o *Orchestrator) AgentChat(
 		newMsgs = loopResult.Messages[initialCount:]
 	}
 	appendHistoryHonoringGate(sess, userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 
 	return nil
 }

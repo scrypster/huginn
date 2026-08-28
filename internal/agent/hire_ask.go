@@ -115,6 +115,6 @@ func (o *Orchestrator) tryNamedHireFastPath(ctx context.Context, ag *agents.Agen
 		}
 	}
 	appendHistoryHonoringGate(sess, userMsg, persist, nil, false)
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return true
 }

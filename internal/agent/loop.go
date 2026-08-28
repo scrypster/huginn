@@ -464,6 +464,27 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 		}
 	}
 
+	// tokenGate is recreated each turn (see below) but declared here so it
+	// survives the loop's exit: the max-turns fallthrough returns after the
+	// for-loop body, and still needs the last turn's gate to flush whatever
+	// it held back.
+	var tokenGate *backend.ContentToolCallTokenGate
+	// flushFinal guarantees the authoritative visible content for this run
+	// reaches cfg.OnToken exactly once before RunLoop returns. The gate
+	// tracks what it already forwarded live (g.emitted) and Finish only
+	// emits the un-streamed suffix, so a turn that already streamed never
+	// gets double-painted; a turn the gate held back in full (it looked like
+	// a tool-call candidate that never resolved) finally gets flushed.
+	flushFinal := func(visible string) {
+		if tokenGate != nil {
+			tokenGate.Finish(visible)
+			return
+		}
+		if cfg.OnToken != nil && visible != "" {
+			cfg.OnToken(visible)
+		}
+	}
+
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
 
@@ -472,7 +493,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 		// not Finish again after ChatCompletion — a second suffix flush
 		// after StreamDone forks leftover (`PONG` → `ONG`) into a new
 		// anonymous timeline row.
-		tokenGate := backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
+		tokenGate = backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
 		tokenGate.SetGrantedTools(cfg.ToolSchemas)
 		onToken := cfg.OnToken
 		if tokenGate != nil {
@@ -562,10 +583,12 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 				}
 			}
 			chatResult.Content = applyTeammateSpeech(messages, cfg.ToolSchemas, chatResult.Content)
-			if cfg.OnToken != nil && chatResult.Content != "" && !cutter.Cut() {
-				// Emit the sayable remainder once (the turn was buffered).
-				cfg.OnToken(chatResult.Content)
-			}
+			// Emit the sayable remainder once (the turn was buffered by the
+			// cutter, not the token gate — cutter.OnToken never forwards
+			// downstream, so flushFinal's suffix math starts from "" and
+			// this is a plain one-shot emit regardless of whether decoding
+			// was cut on leading tool JSON).
+			flushFinal(chatResult.Content)
 			messages = append(messages, backend.Message{Role: "assistant", Content: chatResult.Content})
 			result.FinalContent = chatResult.Content
 			result.StopReason = "stop"
@@ -673,6 +696,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 					messages[n-1].Content = speech
 				}
 			}
+			flushFinal(result.FinalContent)
 			result.StopReason = "stop"
 			result.Messages = messages
 			return result, nil
@@ -737,6 +761,7 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 		}
 	}
 
+	flushFinal(result.FinalContent)
 	result.StopReason = "max_turns"
 	result.Messages = messages
 	return result, nil

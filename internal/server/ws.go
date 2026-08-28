@@ -1777,6 +1777,24 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 		return s.orch.Chat(chatCtx, userMsg, onToken, onEvent)
 	}
 
+	// Heartbeat: DEFECT A made hallway turns look dead for tens of seconds
+	// while runChat is in flight but nothing has streamed yet (or a whole
+	// terminal turn was gated and only flushes at the very end). Keep the
+	// "thinking" status alive on the wire so the UI never reads as hung.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				emit(WSMessage{Type: "status", Content: "thinking", SessionID: sessionID})
+			}
+		}
+	}()
+
 	err := runChat()
 	if err != nil && (strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "still busy after queue wait")) {
 		warnContent := "Another response is still finishing — queued your message and retrying."
@@ -1821,6 +1839,7 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			err = runChat()
 		}
 	}
+	close(heartbeatDone)
 	// persistAccumulated saves whatever assistant content/tool-calls have
 	// been accumulated so far. The inbound user row is written at accept;
 	// this is the fallback if that write failed. Called on success (done),

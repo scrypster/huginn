@@ -553,6 +553,55 @@ type agentTurnOpts struct {
 	// injected and before RunLoop is invoked. It allows the caller to perform
 	// additional context mutations (e.g. SetSessionID, delegation context).
 	ctxSetup func(ctx context.Context) context.Context
+	// vaultPrefetch, when non-nil, supplies a precomputed vault connection +
+	// memory prefetch (see startVaultPrefetch). Callers start this goroutine
+	// BEFORE building systemPromptBase so vault connect + prefetch overlaps
+	// with contextBuilder.Build / loadAgentSummaries instead of running after
+	// it. When nil, runAgentTurn falls back to computing it inline (serially).
+	// Never consulted for trivial asks, which skip vault MCP entirely.
+	vaultPrefetch func() vaultPrefetchOutcome
+}
+
+// vaultPrefetchOutcome bundles what runAgentTurn's vault-connect + prefetch
+// step used to compute serially: the vault connection, ctx with the memory
+// gate applied, and the memory-context system-prompt addendum (memory-mode
+// instruction + prefetched muninn_where_left_off / muninn_recall output).
+type vaultPrefetchOutcome struct {
+	vr          vaultResult
+	ctx         context.Context
+	memAddendum string
+}
+
+// startVaultPrefetch runs connectAgentVault followed by
+// prefetchMemoryContextWithEvents in a goroutine and returns a function that
+// blocks for the result. Call it as early as possible — before building the
+// (often slow: repo search, summary loading) system-prompt base — so the two
+// independent phases overlap instead of running serially. This is DEFECT B
+// phase 2: on a local 14b, contextBuilder.Build/loadAgentSummaries and the
+// vault connect (2 retry attempts) + up to 3 sequential 2s-timeout MCP calls
+// were previously back-to-back on every non-trivial turn.
+func (o *Orchestrator) startVaultPrefetch(
+	ctx context.Context,
+	ag *agents.Agent,
+	reg *tools.Registry,
+	sessionID, userMsg string,
+	prefetchCb func(toolName string, args map[string]any, output string, cached bool),
+) func() vaultPrefetchOutcome {
+	resultCh := make(chan vaultPrefetchOutcome, 1)
+	go func() {
+		vr := o.connectAgentVault(ctx, ag, reg)
+		gctx := WithMemoryGate(ctx, ag.MemoryMode, sessionID, ag.Name)
+		addendum := ""
+		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+			slog.Info("vault tools available", "agent", ag.Name, "session_id", sessionID, "vault", ag.VaultName)
+			addendum = memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(gctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, prefetchCb); memCtx != "" {
+			addendum += memCtx
+		}
+		resultCh <- vaultPrefetchOutcome{vr: vr, ctx: gctx, memAddendum: addendum}
+	}()
+	return func() vaultPrefetchOutcome { return <-resultCh }
 }
 
 // runAgentTurn is the shared core of ChatWithAgent (tool-registry path) and
@@ -573,25 +622,27 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	ag := opts.ag
 	trivial := IsTrivialAsk(opts.userMsg)
 
-	// 1. Connect vault — forks the shared registry; safe to call even when vault
-	// is unconfigured (returns a no-op registry fork with cancel=func(){}).
-	// Trivial asks skip vault MCP so 14b never sees muninn / hire tools.
+	// 1+2. Connect vault and prefetch memory context — forks the shared
+	// registry; safe to call even when vault is unconfigured (returns a
+	// no-op registry fork with cancel=func(){}). Trivial asks skip vault MCP
+	// entirely so 14b never sees muninn / hire tools.
+	//
+	// When opts.vaultPrefetch is set, the caller already started this work
+	// concurrently with building systemPromptBase (contextBuilder.Build /
+	// loadAgentSummaries) — we just join it here. Otherwise fall back to
+	// computing it inline (serially), preserving old behavior for any caller
+	// that doesn't opt in.
 	var vr vaultResult
+	systemPrompt := opts.systemPromptBase
 	if trivial {
 		vr = vaultResult{sessionReg: opts.reg, cancel: func() {}}
+	} else if opts.vaultPrefetch != nil {
+		outcome := opts.vaultPrefetch()
+		vr = outcome.vr
+		ctx = outcome.ctx
+		systemPrompt += outcome.memAddendum
 	} else {
 		vr = o.connectAgentVault(ctx, ag, opts.reg)
-	}
-	defer vr.cancel()
-
-	if vr.warning != "" {
-		logVaultUnavailable(ag.Name, opts.sessionID, vr.warning)
-	}
-
-	// 2. Augment system prompt with memory-mode instructions and prefetched context.
-	// Keep persona / roster / space / clock (already in systemPromptBase).
-	systemPrompt := opts.systemPromptBase
-	if !trivial {
 		ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
 		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
 			slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
@@ -600,6 +651,11 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
 			systemPrompt += memCtx
 		}
+	}
+	defer vr.cancel()
+
+	if vr.warning != "" {
+		logVaultUnavailable(ag.Name, opts.sessionID, vr.warning)
 	}
 
 	// 3. Build message list: system + history snapshot + user turn.
@@ -701,7 +757,7 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		newMsgs = loopResult.Messages[initialCount:]
 	}
 	appendHistoryHonoringGate(opts.sess, opts.userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
-	o.compactHistory(ctx, opts.sess)
+	o.compactHistoryAsync(opts.sess)
 	return nil
 }
 
@@ -749,7 +805,7 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 			opts.onToken(pong)
 		}
 		appendHistoryHonoringGate(opts.sess, opts.userMsg, pong, nil, false)
-		o.compactHistory(ctx, opts.sess)
+		o.compactHistoryAsync(opts.sess)
 		return nil
 	}
 	if speech := backend.TrivialAckSpeech(opts.userMsg); speech != "" {
@@ -757,7 +813,7 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 			opts.onToken(speech)
 		}
 		appendHistoryHonoringGate(opts.sess, opts.userMsg, speech, nil, false)
-		o.compactHistory(ctx, opts.sess)
+		o.compactHistoryAsync(opts.sess)
 		return nil
 	}
 	if company, ok := backend.NamedCompanyRosterAsk(opts.userMsg); ok {
@@ -767,7 +823,7 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 				opts.onToken(speech)
 			}
 			appendHistoryHonoringGate(opts.sess, opts.userMsg, speech, nil, false)
-			o.compactHistory(ctx, opts.sess)
+			o.compactHistoryAsync(opts.sess)
 			return nil
 		}
 	}
@@ -793,7 +849,7 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
 	}
 	appendHistoryHonoringGate(opts.sess, opts.userMsg, buf.String(), nil, false)
-	o.compactHistory(ctx, opts.sess)
+	o.compactHistoryAsync(opts.sess)
 	return nil
 }
 
@@ -824,16 +880,6 @@ func (o *Orchestrator) TaskWithAgent(
 		return o.ChatWithAgent(ctx, ag, userMsg, GetSessionID(ctx), onToken, nil, onEvent)
 	}
 
-	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
-	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
-	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
-	if agentReg != nil {
-		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
-		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
-	}
-
-	history := sess.snapshotHistory()
-
 	taskPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
 		if cached {
 			return
@@ -846,6 +892,26 @@ func (o *Orchestrator) TaskWithAgent(
 			onToolDone(callID, toolName, tools.ToolResult{Output: output})
 		}
 	}
+
+	// Start vault connect + memory prefetch concurrently with
+	// contextBuilder.Build / loadAgentSummaries below (DEFECT B phase 2) —
+	// these two phases are independent until runAgentTurn joins them.
+	// sessionID matches what the agentTurnOpts below carries: "" (TaskWithAgent
+	// does not thread a session ID into opts.sessionID).
+	var vaultPrefetch func() vaultPrefetchOutcome
+	if !IsTrivialAsk(userMsg) {
+		vaultPrefetch = o.startVaultPrefetch(ctx, ag, reg, "", userMsg, taskPrefetchCallback)
+	}
+
+	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
+	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
+	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+	if agentReg != nil {
+		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+	}
+
+	history := sess.snapshotHistory()
 
 	return o.runAgentTurn(ctx, agentTurnOpts{
 		ag:               ag,
@@ -864,6 +930,7 @@ func (o *Orchestrator) TaskWithAgent(
 		onToolDone:       onToolDone,
 		onPermDenied:     onPermDenied,
 		onEvent:          onEvent,
+		vaultPrefetch:    vaultPrefetch,
 	})
 }
 
@@ -953,7 +1020,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			onToken(pong)
 		}
 		appendHistoryHonoringGate(sess, userMsg, pong, nil, false)
-		o.compactHistory(ctx, sess)
+		o.compactHistoryAsync(sess)
 		return nil
 	}
 	if speech := backend.TrivialAckSpeech(userMsg); speech != "" {
@@ -961,7 +1028,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			onToken(speech)
 		}
 		appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
-		o.compactHistory(ctx, sess)
+		o.compactHistoryAsync(sess)
 		return nil
 	}
 	if company, ok := backend.NamedCompanyRosterAsk(userMsg); ok {
@@ -971,12 +1038,33 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 				onToken(speech)
 			}
 			appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
-			o.compactHistory(ctx, sess)
+			o.compactHistoryAsync(sess)
 			return nil
 		}
 	}
 	if o.tryNamedHireFastPath(ctx, ag, userMsg, sess, reg, onToken, onEvent) {
 		return nil
+	}
+
+	// chatPrefetchCallback forwards prefetch-phase tool events (e.g. an
+	// automatic muninn_recall) to onToolEvent so the UI shows "agent recalled
+	// memory" even for calls made before the visible tool loop starts.
+	chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
+		if cached || onToolEvent == nil {
+			return
+		}
+		onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
+		onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
+	}
+
+	// Start vault connect + memory prefetch concurrently with
+	// contextBuilder.Build / loadAgentSummaries below (DEFECT B phase 2) —
+	// only worth it on the tool-registry path (reg != nil), which is the only
+	// path that consumes vaultPrefetch; the plain-completion fallback below
+	// never calls runAgentTurn. Trivial asks never touch vault MCP at all.
+	var vaultPrefetch func() vaultPrefetchOutcome
+	if reg != nil && !trivial {
+		vaultPrefetch = o.startVaultPrefetch(ctx, ag, reg, sessionID, userMsg, chatPrefetchCallback)
 	}
 
 	var ctxText string
@@ -1037,14 +1125,6 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		// Entries are deleted in OnToolDone to prevent unbounded growth per turn.
 		// Keying by callID (not tool name) fixes the same-tool-twice collision.
 		toolArgsCapture := make(map[string]map[string]any)
-
-		chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
-			if cached || onToolEvent == nil {
-				return
-			}
-			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
-			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
-		}
 
 		chatOnToolCall := func(callID string, name string, args map[string]any) {
 			slog.Debug("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
@@ -1138,6 +1218,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			onToolCall:       chatOnToolCall,
 			onToolDone:       chatOnToolDone,
 			onEvent:          onEvent,
+			vaultPrefetch:    vaultPrefetch,
 			// ctxSetup wires the session ID into ctx and establishes a delegation
 			// context so downstream code (e.g. threadmgr) can trace the lineage.
 			ctxSetup: func(c context.Context) context.Context {
@@ -1202,7 +1283,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		backend.Message{Role: "user", Content: userMsg},
 		backend.Message{Role: "assistant", Content: buf.String()},
 	)
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return nil
 }
 
