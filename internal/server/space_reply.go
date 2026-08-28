@@ -57,6 +57,10 @@ func (s *Server) RunSpaceThreadAgent(ctx context.Context, spaceID, parentID, age
 		ctx = context.Background()
 	}
 	prompt := s.spaceThreadWakePrompt(spaceID, parentID, task)
+	// Classify trivial asks on the mention line, not the thread transcript.
+	// BuildThreadWakePrompt prepends the parent, which made "@Winston ping"
+	// miss the ping short-circuit and silently drop (SNAP-5a).
+	userTurn := spaceThreadUserTurn(task, prompt)
 	// Tool context gets the real hallway/space session (or a persisted
 	// space-thread session with SpaceID). ChatWithAgent still uses an
 	// ephemeral orch session so leftover speech cannot land as a hallway root.
@@ -72,7 +76,7 @@ func (s *Server) RunSpaceThreadAgent(ctx context.Context, spaceID, parentID, age
 	sessionID := "space-thread-" + strings.TrimSpace(parentID) + "-" + ag.Name
 	var buf strings.Builder
 	var lastVisible string
-	if err := s.orch.ChatWithAgent(ctx, ag, prompt, sessionID, func(tok string) {
+	if err := s.orch.ChatWithAgent(ctx, ag, userTurn, sessionID, func(tok string) {
 		buf.WriteString(tok)
 		vis := spaces.ReplySpeech(buf.String())
 		if vis == "" || strings.HasPrefix(strings.TrimSpace(vis), "{") {
@@ -119,6 +123,20 @@ func (s *Server) ensureDelegateSession(id, spaceID string) {
 	if _, err := session.LoadForDelegate(s.store, id, spaceID); err != nil {
 		slog.Warn("space thread: persist delegate session", "session_id", id, "err", err)
 	}
+}
+
+
+// spaceThreadUserTurn is the ChatWithAgent user message for an in-thread @.
+// Trivial mentions (ping/time/thanks/headcount) use the mention line so the
+// hallway short-circuit still fires. Everything else keeps the thread transcript.
+func spaceThreadUserTurn(task, prompt string) string {
+	if agent.IsTrivialAsk(task) {
+		return strings.TrimSpace(task)
+	}
+	if strings.TrimSpace(prompt) != "" {
+		return prompt
+	}
+	return strings.TrimSpace(task)
 }
 
 // resolveNamedSpaceAgent prefers the live orchestrator registry (production),

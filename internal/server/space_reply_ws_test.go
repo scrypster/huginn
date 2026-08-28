@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/spaces"
 )
@@ -901,5 +902,22 @@ func TestFinishSpaceThreadWake_LiveWinstonInvalidToolPongBecomesTeammate(t *test
 	listed := getHallway(t, srv, ch.ID)
 	if len(listed.Messages) != 1 || listed.Messages[0].ParentID != "" {
 		t.Fatalf("hallway leaked: %+v", listed.Messages)
+	}
+}
+
+func TestSpaceThreadUserTurn_TrivialPingIgnoresTranscript(t *testing.T) {
+	parent := &spaces.SpaceMessage{Role: "user", Content: "drawer-parent-5a (ignore)"}
+	prompt := spaces.BuildThreadWakePrompt(parent, nil, "@Winston ping")
+	if agent.IsTrivialAsk(prompt) {
+		t.Fatalf("transcript+mention must not look trivial: %q", prompt)
+	}
+	if !agent.IsTrivialAsk("@Winston ping") {
+		t.Fatal("mention line must stay trivial")
+	}
+	if got := spaceThreadUserTurn("@Winston ping", prompt); got != "@Winston ping" {
+		t.Fatalf("userTurn=%q, want mention line", got)
+	}
+	if got := spaceThreadUserTurn("@Steve what is 2+2?", prompt); !strings.Contains(got, "drawer-parent-5a") {
+		t.Fatalf("non-trivial should keep transcript, got %q", got)
 	}
 }
