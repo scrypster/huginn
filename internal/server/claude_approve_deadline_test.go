@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,5 +147,85 @@ func TestApproveLateAllowReachesTheHook(t *testing.T) {
 	}
 	if got["decision"] != "allow" {
 		t.Fatalf("decision = %q, want allow", got["decision"])
+	}
+}
+
+// TestStopReleasesPendingApprovals is the Ctrl-C test.
+//
+// Server.Stop calls srv.Shutdown, which WAITS for in-flight handlers, and
+// main.go passes context.Background(). handleClaudeApprove blocks for up to
+// approvalDeadline (285s), so a single pending approval made Ctrl-C look like
+// a hang for nearly five minutes — and because the signal had already fired, a
+// second Ctrl-C was swallowed. Store.Close exists precisely to release every
+// waiter with Deny; Stop has to call it, and call it BEFORE Shutdown.
+func TestStopReleasesPendingApprovals(t *testing.T) {
+	s := &Server{}
+	// A deadline far longer than this test is willing to wait: if Stop does not
+	// release the waiter, this test fails on its own timeout rather than
+	// passing slowly.
+	s.approvals = approvals.New(5 * time.Minute)
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name: "codey", ClaudeSessionID: "sess",
+		}}}, nil
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.srv = &http.Server{
+		Handler: loggingMiddleware(requestIDMiddleware(s.handleClaudeApprove)),
+	}
+	go func() { _ = s.srv.Serve(ln) }()
+
+	decided := make(chan string, 1)
+	go func() {
+		resp, err := http.Post("http://"+ln.Addr().String(), "application/json",
+			strings.NewReader(`{"tool_name":"Bash","session_id":"sess","summary":"ls"}`))
+		if err != nil {
+			decided <- "transport-error"
+			return
+		}
+		defer resp.Body.Close()
+		var got map[string]string
+		_ = json.NewDecoder(resp.Body).Decode(&got)
+		decided <- got["decision"]
+	}()
+
+	// Wait for the approval to actually be parked before shutting down.
+	for i := 0; i < 400 && len(s.approvals.List()) == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(s.approvals.List()) != 1 {
+		t.Fatal("no approval was pending; the test never reached the blocking path")
+	}
+
+	stopped := make(chan error, 1)
+	start := time.Now()
+	go func() { stopped <- s.Stop(context.Background()) }()
+
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop did not return with an approval pending: Ctrl-C hangs for up to " +
+			"approvalDeadline, and the second Ctrl-C is swallowed because the signal " +
+			"already fired. Stop must call approvals.Close() before srv.Shutdown.")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Stop took %v with one approval pending", elapsed)
+	}
+
+	// Fail-closed: the released waiter must DENY, never allow.
+	select {
+	case d := <-decided:
+		if d != "deny" {
+			t.Fatalf("decision on shutdown = %q, want deny — a released waiter must never allow", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hook never received a decision after shutdown")
 	}
 }

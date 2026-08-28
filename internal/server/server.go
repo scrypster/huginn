@@ -60,9 +60,15 @@ type Server struct {
 	// Override in tests to inject a known configuration without touching the filesystem.
 	agentLoader func() (*agents.AgentsConfig, error)
 
-	// agentSaver is nil in production — only tests set it — so callers fall
-	// back to agents.SaveAgents, mirroring agentLoader.
-	agentSaver func(*agents.AgentsConfig) error
+	// agentSaver persists ONE agent. Nil in production — only tests set it —
+	// so callers fall back to agents.SaveAgentDefault, mirroring agentLoader.
+	//
+	// Deliberately single-agent, not func(*agents.AgentsConfig): the whole-
+	// config saver rewrites every <name>.yaml and bumps every agent's Version,
+	// so an unrelated agent open in the config UI took a spurious 409 and a
+	// user on legacy .json agents silently gained .yaml files that then take
+	// precedence over the file they were told to hand-edit.
+	agentSaver func(agents.AgentDef) error
 
 	// onAgentsChanged, if set, is invoked after any agent create/update/rename/
 	// delete/clone is persisted, so the live in-memory agent registry can be
@@ -475,7 +481,8 @@ func (s *Server) Addr() string {
 //  1. statsPersister.Close() — drain in-flight stats/cost records to SQLite
 //  2. auditLog.Close()       — drain audit events to SQLite
 //  3. wsHub.stop()           — close WS connections
-//  4. http.Server.Shutdown() — stop accepting new requests
+//  4. approvals.Close()      — release every parked approval with Deny
+//  5. http.Server.Shutdown() — stop accepting new requests
 //     (caller's cleanup fn closes db after Stop returns)
 func (s *Server) Stop(ctx context.Context) error {
 	// Flush the stats persister before the HTTP server shuts down so that
@@ -493,6 +500,16 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	if s.wsHub != nil {
 		s.wsHub.stop()
+	}
+
+	// Release parked approvals BEFORE Shutdown. Shutdown waits for in-flight
+	// handlers, and handleClaudeApprove blocks for up to approvalDeadline
+	// (285s), so one pending approval made Ctrl-C look like a hang for nearly
+	// five minutes — with the second Ctrl-C swallowed, because the signal had
+	// already fired. Close is exactly what its doc comment promises: every
+	// waiter is released with Deny, which is also the only safe direction.
+	if s.approvals != nil {
+		s.approvals.Close()
 	}
 
 	// Drain in-flight thread goroutines with a 30-second timeout.

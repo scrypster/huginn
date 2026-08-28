@@ -115,7 +115,8 @@ func (s *Server) handleDecideClaudeApproval(w http.ResponseWriter, r *http.Reque
 // The UI must confirm it separately from a one-click Allow. In Phase 1 the
 // only undo is editing the agent config file.
 //
-// It is idempotent: an already-allowed tool writes nothing.
+// It is idempotent: an already-allowed tool writes nothing — and notifies
+// nothing, since nothing changed.
 func (s *Server) promoteClaudeTool(agentName, tool string) error {
 	loader := s.agentLoader
 	if loader == nil {
@@ -133,11 +134,29 @@ func (s *Server) promoteClaudeTool(agentName, tool string) error {
 			return nil
 		}
 		cfg.Agents[i].ClaudeAllowedTools = append(cfg.Agents[i].ClaudeAllowedTools, tool)
+		// Save ONLY this agent, exactly as handleUpdateAgent does. Saving the
+		// whole config would rewrite and re-Version every other agent file for
+		// a change to one of them.
 		saver := s.agentSaver
 		if saver == nil {
-			saver = agents.SaveAgents
+			saver = agents.SaveAgentDefault
 		}
-		return saver(cfg)
+		if err := saver(cfg.Agents[i]); err != nil {
+			return err
+		}
+		// Same follow-through as handleUpdateAgent: refresh the live in-memory
+		// registry, then tell open clients. Without the first, the running
+		// process keeps gating a tool the config now allows; without the
+		// second, an open agent-config UI shows stale allowed-tools.
+		s.notifyAgentsChanged()
+		s.BroadcastWS(WSMessage{
+			Type: "agent_changed",
+			Payload: map[string]any{
+				"name":   cfg.Agents[i].Name,
+				"action": "updated",
+			},
+		})
+		return nil
 	}
 	return nil
 }

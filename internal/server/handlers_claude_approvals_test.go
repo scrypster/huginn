@@ -120,8 +120,8 @@ func TestPromoteClaudeToolAppendsOnce(t *testing.T) {
 			Name: "codey", ClaudeAllowedTools: []string{"Read"},
 		}}}, nil
 	}
-	s.agentSaver = func(cfg *agents.AgentsConfig) error {
-		saved = append(saved, cfg.Agents[0].ClaudeAllowedTools)
+	s.agentSaver = func(a agents.AgentDef) error {
+		saved = append(saved, a.ClaudeAllowedTools)
 		return nil
 	}
 	if err := s.promoteClaudeTool("codey", "Bash"); err != nil {
@@ -140,7 +140,7 @@ func TestPromoteClaudeToolIsIdempotent(t *testing.T) {
 			Name: "codey", ClaudeAllowedTools: []string{"Bash"},
 		}}}, nil
 	}
-	s.agentSaver = func(cfg *agents.AgentsConfig) error { calls++; return nil }
+	s.agentSaver = func(a agents.AgentDef) error { calls++; return nil }
 	if err := s.promoteClaudeTool("codey", "Bash"); err != nil {
 		t.Fatal(err)
 	}
@@ -160,12 +160,13 @@ func TestDecideAllowToolPromotesTheRightAgentAndTool(t *testing.T) {
 			{Name: "codey", ClaudeAllowedTools: []string{"Read"}},
 		}}, nil
 	}
-	s.agentSaver = func(cfg *agents.AgentsConfig) error {
-		for _, a := range cfg.Agents {
-			if len(a.ClaudeAllowedTools) == 2 {
-				savedAgent = a.Name
-				savedTool = a.ClaudeAllowedTools[1]
-			}
+	// The saver now receives exactly the agent being promoted, so this also
+	// asserts the RIGHT one was picked out of the two in the config: "other"
+	// comes first, so an implementation that promotes cfg.Agents[0] fails here.
+	s.agentSaver = func(a agents.AgentDef) error {
+		if len(a.ClaudeAllowedTools) == 2 {
+			savedAgent = a.Name
+			savedTool = a.ClaudeAllowedTools[1]
 		}
 		return nil
 	}
@@ -196,5 +197,115 @@ func TestDecideAllowToolPromotesTheRightAgentAndTool(t *testing.T) {
 	}
 	if savedTool != "Bash" {
 		t.Fatalf("promoted tool = %q, want Bash", savedTool)
+	}
+}
+
+// TestPromoteClaudeToolSavesOnlyThePromotedAgent is the blast-radius test.
+//
+// Promotion used to call agents.SaveAgents(cfg), which loops over EVERY agent
+// calling SaveAgent — bumping every agent's Version and rewriting every
+// <name>.yaml. Two consequences: an unrelated agent open in the config UI got
+// a spurious 409 version conflict on its next save, and a user whose agents
+// live in legacy .json files silently gained .yaml files that then take
+// precedence, so the hand-edit undo the docs promise points at a file that is
+// no longer read. Promotion must touch exactly one agent, like
+// handleUpdateAgent does.
+func TestPromoteClaudeToolSavesOnlyThePromotedAgent(t *testing.T) {
+	s := &Server{}
+	var saved []agents.AgentDef
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "other", ClaudeAllowedTools: []string{"Read"}},
+			{Name: "codey", ClaudeAllowedTools: []string{"Read"}},
+		}}, nil
+	}
+	s.agentSaver = func(a agents.AgentDef) error {
+		saved = append(saved, a)
+		return nil
+	}
+	if err := s.promoteClaudeTool("codey", "Bash"); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("saved %d agents, want exactly 1 — promotion must not rewrite "+
+			"every agent file", len(saved))
+	}
+	if saved[0].Name != "codey" {
+		t.Fatalf("saved agent = %q, want codey", saved[0].Name)
+	}
+	if got := saved[0].ClaudeAllowedTools; len(got) != 2 || got[1] != "Bash" {
+		t.Fatalf("saved ClaudeAllowedTools = %v, want Read+Bash", got)
+	}
+}
+
+// TestPromoteClaudeToolRefreshesTheLiveRegistry pins the other half of the
+// sibling's behaviour. handleUpdateAgent calls notifyAgentsChanged and
+// broadcasts agent_changed after a save; promotion did neither, so the
+// in-memory agent registry and any open agent-config UI went stale — the tool
+// stayed gated in the running process even though the file said otherwise.
+func TestPromoteClaudeToolRefreshesTheLiveRegistry(t *testing.T) {
+	hub := newWSHub()
+	go hub.run()
+	client := &wsClient{send: make(chan WSMessage, 8), ctx: context.Background()}
+	hub.registerWithSession(client, "")
+
+	s := &Server{wsHub: hub}
+	var notified int
+	s.SetOnAgentsChanged(func() { notified++ })
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "codey", ClaudeAllowedTools: []string{"Read"}},
+		}}, nil
+	}
+	s.agentSaver = func(a agents.AgentDef) error { return nil }
+
+	if err := s.promoteClaudeTool("codey", "Bash"); err != nil {
+		t.Fatal(err)
+	}
+	if notified != 1 {
+		t.Fatalf("onAgentsChanged fired %d times, want 1 — the live registry still "+
+			"gates a tool the config now allows", notified)
+	}
+	var sawAgentChanged bool
+	for {
+		select {
+		case m := <-client.send:
+			if m.Type == "agent_changed" {
+				sawAgentChanged = true
+				if name, _ := m.Payload["name"].(string); name != "codey" {
+					t.Fatalf("agent_changed named %q, want codey", name)
+				}
+			}
+			continue
+		case <-time.After(200 * time.Millisecond):
+		}
+		break
+	}
+	if !sawAgentChanged {
+		t.Fatal("no agent_changed broadcast after promotion; an open agent-config UI " +
+			"never learns the tool was permanently allowed")
+	}
+}
+
+// TestPromoteClaudeToolDoesNotNotifyWhenNothingChanged: an already-allowed
+// tool writes nothing, so it must not spuriously reload the registry either.
+func TestPromoteClaudeToolDoesNotNotifyWhenNothingChanged(t *testing.T) {
+	s := &Server{}
+	var notified int
+	s.SetOnAgentsChanged(func() { notified++ })
+	s.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{
+			{Name: "codey", ClaudeAllowedTools: []string{"Bash"}},
+		}}, nil
+	}
+	s.agentSaver = func(a agents.AgentDef) error {
+		t.Fatal("saver called for an already-allowed tool")
+		return nil
+	}
+	if err := s.promoteClaudeTool("codey", "Bash"); err != nil {
+		t.Fatal(err)
+	}
+	if notified != 0 {
+		t.Fatalf("onAgentsChanged fired %d times for a no-op promotion, want 0", notified)
 	}
 }

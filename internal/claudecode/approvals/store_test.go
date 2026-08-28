@@ -245,3 +245,33 @@ func TestRememberableRejectsTruncatedAndEmpty(t *testing.T) {
 		t.Fatal("only Bash carries exact-command memory")
 	}
 }
+
+// TestCloseReleasesPendingWaitersWithDeny pins Close's contract at the store
+// level: Server.Stop relies on it to unblock shutdown, and every released
+// waiter must land on Deny.
+func TestCloseReleasesPendingWaitersWithDeny(t *testing.T) {
+	// A deadline far beyond this test: only Close can end this Wait in time.
+	s := New(5 * time.Minute)
+	p, err := s.Register(req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan Decision, 1)
+	go func() { got <- s.Wait(context.Background(), p) }()
+
+	// Let the waiter park before closing, so this exercises the release path
+	// rather than a Wait that was never blocked.
+	time.Sleep(20 * time.Millisecond)
+	s.Close()
+
+	select {
+	case d := <-got:
+		if d != Deny {
+			t.Fatalf("Wait after Close = %v, want Deny", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not release a parked waiter; Server.Stop then blocks in " +
+			"Shutdown for the whole approval deadline")
+	}
+	s.Close() // idempotent
+}
