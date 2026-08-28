@@ -278,3 +278,62 @@ func TestEditFile_MetadataReplacementCount(t *testing.T) {
 		t.Errorf("expected 3 replacements, got %d", count)
 	}
 }
+
+// TestEditFile_DiffMetadata verifies a successful edit attaches a unified
+// diff of the exact before/after change to result.Metadata["diff"].
+func TestEditFile_DiffMetadata(t *testing.T) {
+	root := t.TempDir()
+	content := "func Add(a, b int) int {\n\treturn a - b\n}\n"
+	filePath := filepath.Join(root, "mathutil.go")
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &EditFileTool{SandboxRoot: root}
+	result := tool.Execute(context.Background(), map[string]any{
+		"file_path":  "mathutil.go",
+		"old_string": "return a - b",
+		"new_string": "return a + b",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	diff, ok := result.Metadata["diff"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected diff metadata, got %#v", result.Metadata)
+	}
+	if diff["path"] != "mathutil.go" {
+		t.Errorf("expected path mathutil.go, got %v", diff["path"])
+	}
+	if diff["added"].(int) != 1 || diff["removed"].(int) != 1 {
+		t.Errorf("expected +1/-1, got +%v/-%v", diff["added"], diff["removed"])
+	}
+	unified, _ := diff["unified"].(string)
+	if !strings.Contains(unified, "-\treturn a - b") || !strings.Contains(unified, "+\treturn a + b") {
+		t.Errorf("expected unified diff with old/new lines, got: %s", unified)
+	}
+}
+
+// TestEditFile_DiffMetadata_NoOpEdit verifies that an edit whose old_string
+// and new_string are identical (a no-op replacement) produces no diff.
+func TestEditFile_DiffMetadata_NoOpEdit(t *testing.T) {
+	root := t.TempDir()
+	content := "same content\n"
+	filePath := filepath.Join(root, "noop.txt")
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &EditFileTool{SandboxRoot: root}
+	result := tool.Execute(context.Background(), map[string]any{
+		"file_path":  "noop.txt",
+		"old_string": "same content",
+		"new_string": "same content",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if _, ok := result.Metadata["diff"]; ok {
+		t.Errorf("expected no diff metadata for no-op edit, got %#v", result.Metadata["diff"])
+	}
+}

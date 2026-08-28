@@ -223,3 +223,72 @@ func TestToolCallsJSON_RoundTrip(t *testing.T) {
 		t.Errorf("Name: want web_search, got %q", got[0].Name)
 	}
 }
+
+// TestTailMessages_ToolCallDiffRoundTrip verifies that a Diff attached to a
+// PersistedToolCall (the write_file/edit_file file-change payload) survives
+// the JSON-in-SQLite round-trip intact — the diff card's data source.
+func TestTailMessages_ToolCallDiffRoundTrip(t *testing.T) {
+	t.Parallel()
+	db := openSessTestDB(t)
+	s := session.NewSQLiteSessionStore(db)
+
+	sess := s.New("diff round trip test", "", "qwen3:30b")
+	if err := s.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	diff := map[string]any{
+		"path":      "mathutil.go",
+		"unified":   "--- mathutil.go\n+++ mathutil.go\n@@ -1,3 +1,3 @@\n-return a - b\n+return a + b\n",
+		"added":     float64(1),
+		"removed":   float64(1),
+		"truncated": false,
+		"is_new":    false,
+		"is_delete": false,
+	}
+	toolCalls := []session.PersistedToolCall{
+		{
+			ID:     "call_edit1",
+			Name:   "edit_file",
+			Args:   map[string]any{"file_path": "mathutil.go"},
+			Result: "edited mathutil.go: replaced 1 occurrence(s)",
+			Diff:   diff,
+		},
+	}
+
+	msg := session.SessionMessage{
+		Role:      "assistant",
+		Content:   "Fixed the bug.",
+		Agent:     "Codey",
+		Ts:        time.Now().UTC(),
+		ToolCalls: toolCalls,
+	}
+	if err := s.Append(sess, msg); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	msgs, err := s.TailMessages(sess.ID, 10)
+	if err != nil {
+		t.Fatalf("TailMessages: %v", err)
+	}
+	if len(msgs) != 1 || len(msgs[0].ToolCalls) != 1 {
+		t.Fatalf("expected 1 message with 1 tool call, got %+v", msgs)
+	}
+	gotDiff := msgs[0].ToolCalls[0].Diff
+	if gotDiff == nil {
+		t.Fatalf("expected Diff to survive round-trip, got nil")
+	}
+	if gotDiff["path"] != "mathutil.go" {
+		t.Errorf("diff path: want mathutil.go, got %v", gotDiff["path"])
+	}
+	unified, _ := gotDiff["unified"].(string)
+	if unified == "" || !json.Valid([]byte(msgs[0].ToolCalls[0].Result)) {
+		// Result isn't JSON here by design; just confirm unified diff text landed.
+	}
+	if unified == "" {
+		t.Errorf("expected non-empty unified diff text, got %v", gotDiff["unified"])
+	}
+	if gotDiff["added"] != float64(1) {
+		t.Errorf("diff added: want 1, got %v (%T)", gotDiff["added"], gotDiff["added"])
+	}
+}

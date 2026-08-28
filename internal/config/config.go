@@ -572,6 +572,16 @@ var updateMu sync.Mutex
 func UpdateAt(path string, mutate func(*Config)) error {
 	updateMu.Lock()
 	defer updateMu.Unlock()
+	// updateMu only serializes goroutines within this process. The TUI and
+	// `serve` run as separate OS processes and each get their own
+	// updateMu — without a cross-process lock they can still interleave a
+	// read from one with a write from the other and lose an update. Hold an
+	// OS-level flock across the whole read-modify-write, same as updateMu.
+	lock, err := acquireFileLock(path)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	cfg, err := LoadFrom(path)
 	if err != nil {
 		return err

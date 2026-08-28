@@ -2025,6 +2025,11 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 			if args, ok := ev.Payload["args"].(map[string]any); ok {
 				tc.Args = args
 			}
+			if md, ok := ev.Payload["metadata"].(map[string]any); ok {
+				if diff, ok := md["diff"].(map[string]any); ok {
+					tc.Diff = diff
+				}
+			}
 			collectedToolCalls = append(collectedToolCalls, tc)
 			logToolPermissionAudit(s.auditLog, ev.Payload)
 		}

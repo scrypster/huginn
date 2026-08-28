@@ -127,6 +127,30 @@ func (l *entityAuditLogger) List(limit int) ([]entityAuditEntry, error) {
 	return out, nil
 }
 
+// countValidTrailingEntries counts JSON-parseable, non-empty lines in buf,
+// skipping the first split element (it may be a truncated partial line —
+// its start is only certain once the chunk read has reached byte 0 of the
+// file). Stops scanning early once the count exceeds limit; the caller only
+// needs to know whether there are "enough", not the exact total.
+func countValidTrailingEntries(buf []byte, limit int) int {
+	lines := bytes.Split(buf, []byte("\n"))
+	n := 0
+	for i := 1; i < len(lines); i++ {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		var e entityAuditEntry
+		if err := json.Unmarshal(line, &e); err == nil {
+			n++
+			if n > limit {
+				return n
+			}
+		}
+	}
+	return n
+}
+
 // readAuditTail reads the last `limit` JSONL entries from path, newest
 // first, without parsing the whole file when limit > 0. limit <= 0 reads
 // and parses the entire file. Returns (nil, nil) if path does not exist.
@@ -168,10 +192,23 @@ func readAuditTail(path string, limit int) ([]entityAuditEntry, error) {
 				return nil, err
 			}
 			buf = append(chunk, buf...)
-			// Need at least limit+1 newlines to guarantee `limit` complete
-			// trailing lines (a line's start is only certain once we've
-			// seen the newline before it, or we've hit the start of file).
-			if bytes.Count(buf, []byte("\n")) > limit || pos == 0 {
+			if pos == 0 {
+				// Reached the start of the file — stop regardless of how
+				// many valid entries were found; there is nothing more to
+				// read from this file.
+				break
+			}
+			// Stop once the window holds more than `limit` VALID trailing
+			// entries, not merely `limit` raw newlines. A corrupt/malformed
+			// line mid-window used to be counted as a newline but silently
+			// dropped during parsing below, so the raw-newline heuristic
+			// could stop the read one or more chunks too early — returning
+			// fewer than `limit` entries even though the rest of the
+			// current file still held plenty. List() then treated that
+			// short read as "current file exhausted" and spliced in rows
+			// from the much older audit.jsonl.1 ahead of still-unread,
+			// still-valid rows in the current file.
+			if countValidTrailingEntries(buf, limit) > limit {
 				break
 			}
 		}

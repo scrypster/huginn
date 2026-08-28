@@ -3,6 +3,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -188,5 +189,77 @@ func TestEntityAuditLogger_List_TailReadCorrectAcrossChunkBoundaries(t *testing.
 	}
 	if len(all) != n {
 		t.Fatalf("expected unlimited List to return all %d entries, got %d", n, len(all))
+	}
+}
+
+// TestEntityAuditLogger_List_CorruptLineDoesNotSpliceStalePredecessor is the
+// Opus-vet finding (2026-08-28): List used to fall back to the retained
+// predecessor (audit.jsonl.1) whenever the current-file read came up short
+// of `limit` valid entries — without checking whether the short read
+// actually reached the start of the current file. A malformed line (or, as
+// here, a wide run of them) inside the tail-read window made the old
+// raw-newline stopping heuristic quit reading the current file early, so
+// List spliced in much older predecessor rows even though the current file,
+// read a bit further back, still had plenty of valid entries of its own.
+func TestEntityAuditLogger_List_CorruptLineDoesNotSpliceStalePredecessor(t *testing.T) {
+	dir := t.TempDir()
+	al := newEntityAuditLogger(dir)
+
+	// Predecessor file: distinctly marked so any splice from it is obvious.
+	predLine := `{"ts":"2020-01-01T00:00:00Z","actor":"user","action":"OLD_PREDECESSOR","what":"stale","detail":{}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "audit.jsonl.1"), []byte(strings.Repeat(predLine, 5)), 0644); err != nil {
+		t.Fatalf("write predecessor: %v", err)
+	}
+
+	// Current file, oldest to newest:
+	//   20 valid entries ("older_valid", idx 0..19)
+	//   2000 corrupted lines (a run far wider than one 64KB read chunk)
+	//   3 valid entries ("newest_valid", idx 0..2)
+	// The 5 most recent VALID entries are: the 3 newest_valid ones, plus the
+	// 2 most recent older_valid ones (idx 19 and 18) — all still inside the
+	// current file, well before any predecessor row should be consulted.
+	var buf strings.Builder
+	for i := 0; i < 20; i++ {
+		buf.WriteString(`{"ts":"2026-01-01T00:00:00Z","actor":"user","action":"older_valid","what":"seated","detail":{"idx":`)
+		buf.WriteString(strconv.Itoa(i))
+		buf.WriteString("}}\n")
+	}
+	for i := 0; i < 2000; i++ {
+		buf.WriteString("not valid json at all, just garbage padding text so this line has some length\n")
+	}
+	for i := 0; i < 3; i++ {
+		buf.WriteString(`{"ts":"2026-01-02T00:00:00Z","actor":"user","action":"newest_valid","what":"seated","detail":{"idx":`)
+		buf.WriteString(strconv.Itoa(i))
+		buf.WriteString("}}\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte(buf.String()), 0644); err != nil {
+		t.Fatalf("write current: %v", err)
+	}
+
+	entries, err := al.List(5)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries, got %d: %+v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if e.Action == "OLD_PREDECESSOR" {
+			t.Fatalf("List spliced in a stale predecessor row while the current file still had valid entries: %+v", entries)
+		}
+	}
+	// Newest-first: the 3 newest_valid entries (idx 2,1,0), then the 2 most
+	// recent older_valid entries (idx 19, 18) — skipping straight past the
+	// 2000-line corrupted run without ever touching audit.jsonl.1.
+	wantAction := []string{"newest_valid", "newest_valid", "newest_valid", "older_valid", "older_valid"}
+	wantIdx := []int{2, 1, 0, 19, 18}
+	for i, e := range entries {
+		if e.Action != wantAction[i] {
+			t.Errorf("entries[%d].Action = %q, want %q", i, e.Action, wantAction[i])
+		}
+		gotIdx, ok := e.Detail["idx"].(float64)
+		if !ok || int(gotIdx) != wantIdx[i] {
+			t.Errorf("entries[%d].Detail[idx] = %v, want %d", i, e.Detail["idx"], wantIdx[i])
+		}
 	}
 }

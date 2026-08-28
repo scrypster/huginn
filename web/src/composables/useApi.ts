@@ -168,7 +168,20 @@ export interface SpaceMessage {
   new_since?: number
   // Populated from WS tool_result events during streaming, or from the server on load.
   // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
-  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean }[]
+  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean; diff?: FileDiff }[]
+}
+
+// FileDiff is the before/after unified diff attached to a write_file/edit_file
+// tool result (see tools.BuildFileDiff on the Go side). Mirrors the "diff" key
+// written into ToolResult.Metadata and persisted on PersistedToolCall.Diff.
+export interface FileDiff {
+  path: string
+  unified: string
+  added: number
+  removed: number
+  truncated: boolean
+  is_new: boolean
+  is_delete: boolean
 }
 
 export interface SystemToolStatus {

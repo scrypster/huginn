@@ -854,6 +854,22 @@
                     </div>
                   </div>
                 </div>
+
+                <!-- Diff card: renders only when this turn's tool calls actually
+                     changed a file (write_file/edit_file attach a diff). Collapsed
+                     by default; independent of the tool-call chip above so it reads
+                     as the work product, not another tool-invocation detail. -->
+                <DiffCard
+                  v-if="msg.toolCalls?.length && !msg.streaming"
+                  :diffs="msg.toolCalls.map(tc => tc.diff)"
+                />
+                <!-- Completion line: only when the model's own speech didn't
+                     already say which files changed — a compact system-styled
+                     fallback derived from the same persisted diff data. -->
+                <p
+                  v-if="!msg.streaming && changedFilesLineFor(msg)"
+                  class="mt-1 text-[11px] text-huginn-muted italic"
+                >{{ changedFilesLineFor(msg) }}</p>
               <MessageActions
                 class="mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
@@ -1233,12 +1249,14 @@ import ReplyThread from '../components/ReplyThread.vue'
 import SpaceReplyChip from '../components/SpaceReplyChip.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
+import DiffCard from '../components/DiffCard.vue'
+import { changedFilesLine } from '../utils/changedFilesLine'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
 import MsgTimeReveal from '../components/MsgTimeReveal.vue'
 import MessageActions from '../components/MessageActions.vue'
 import SystemFailLine from '../components/SystemFailLine.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
-import { api, apiFetch } from '../composables/useApi'
+import { api, apiFetch, type FileDiff } from '../composables/useApi'
 import MemoryVaultChip from '../components/MemoryVaultChip.vue'
 import { isVaultMemoryWarning, resolveMemoryChip, type MuninnPresence } from '../utils/memoryChip'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
@@ -1487,7 +1505,7 @@ watch(() => props.spaceId, (newId, oldId) => {
 const runtimeState      = ref('')
 // pendingToolResults buffers tool results that arrive before the assistant message exists
 // (e.g. prefetch tools like muninn_recall/muninn_where_left_off that fire before streaming starts).
-const pendingToolResults = ref<Array<{ id: string; name: string; args: Record<string, unknown>; result: string }>>([])
+const pendingToolResults = ref<Array<{ id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff }>>([])
 
 // flushPendingToolResults attaches any buffered tool results to the current last assistant message.
 function flushPendingToolResults(sessionId: string) {
@@ -1497,7 +1515,7 @@ function flushPendingToolResults(sessionId: string) {
   if (!last) return
   if (!last.toolCalls) last.toolCalls = []
   for (const tc of pendingToolResults.value) {
-    last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true })
+    last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true, diff: tc.diff })
   }
   pendingToolResults.value = []
 }
@@ -2180,6 +2198,13 @@ function isMemoryOnlyToolCalls(calls?: ToolCallRecord[]): boolean {
   return !!calls?.length && calls.every(tc => isMemoryToolName(tc.name))
 }
 
+// changedFilesLineFor adapts the pure changedFilesLine util to a ChatMessage:
+// derives the visible speech text and this turn's diffs, then delegates.
+function changedFilesLineFor(msg: ChatMessage): string {
+  const diffs = (msg.toolCalls ?? []).map(tc => tc.diff)
+  return changedFilesLine(visibleAssistantText(msg), diffs)
+}
+
 const activeMemoryChipText = computed(() => {
   if (!activeToolCalls.value.length) return ''
   if (!activeToolCalls.value.every(tc => isMemoryToolName(tc.name))) return ''
@@ -2724,16 +2749,18 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
       name: (p?.tool as string) ?? '',
       args: (p?.args as Record<string, unknown>) ?? {},
     }
+    const metadata = p?.metadata as Record<string, unknown> | undefined
+    const diff = (metadata?.diff as FileDiff | undefined) ?? undefined
     if (props.sessionId) {
       const msgs = getMessages(props.sessionId)
       const last = [...msgs].reverse().find(m => m.role === 'assistant')
       if (last) {
         if (!last.toolCalls) last.toolCalls = []
-        last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string, done: true })
+        last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string, done: true, diff })
       } else {
         // No assistant message yet (prefetch tool fired before streaming started).
         // Buffer the result and flush it once the assistant message is created.
-        pendingToolResults.value.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string ?? '' })
+        pendingToolResults.value.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string ?? '', diff })
       }
     }
     activeToolCalls.value = activeToolCalls.value.filter(t => t.id !== id)

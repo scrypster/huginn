@@ -363,3 +363,84 @@ func TestWriteFileTool_Execute_Schema(t *testing.T) {
 		t.Errorf("expected name 'write_file', got %q", schema.Function.Name)
 	}
 }
+
+// TestWriteFileTool_Execute_DiffMetadata_NewFile verifies that writing a
+// brand-new file attaches a diff marked IsNew with only additions.
+func TestWriteFileTool_Execute_DiffMetadata_NewFile(t *testing.T) {
+	root := t.TempDir()
+	tool := &WriteFileTool{SandboxRoot: root}
+
+	result := tool.Execute(nil, map[string]any{
+		"file_path": "fresh.go",
+		"content":   "package main\n\nfunc main() {}\n",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	diff, ok := result.Metadata["diff"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected diff metadata, got %#v", result.Metadata)
+	}
+	if diff["is_new"] != true {
+		t.Errorf("expected is_new=true, got %#v", diff["is_new"])
+	}
+	if diff["added"].(int) != 3 || diff["removed"].(int) != 0 {
+		t.Errorf("expected +3/-0, got +%v/-%v", diff["added"], diff["removed"])
+	}
+	unified, _ := diff["unified"].(string)
+	if !strings.Contains(unified, "+package main") {
+		t.Errorf("expected unified diff to show added lines, got: %s", unified)
+	}
+}
+
+// TestWriteFileTool_Execute_DiffMetadata_Overwrite verifies that overwriting
+// an existing file produces a before/after diff with both additions and
+// removals when content actually changes.
+func TestWriteFileTool_Execute_DiffMetadata_Overwrite(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "existing.txt")
+	if err := os.WriteFile(path, []byte("old content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &WriteFileTool{SandboxRoot: root}
+
+	result := tool.Execute(nil, map[string]any{
+		"file_path": "existing.txt",
+		"content":   "new content\n",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	diff, ok := result.Metadata["diff"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected diff metadata, got %#v", result.Metadata)
+	}
+	if diff["is_new"] != false {
+		t.Errorf("expected is_new=false for overwrite, got %#v", diff["is_new"])
+	}
+	if diff["added"].(int) != 1 || diff["removed"].(int) != 1 {
+		t.Errorf("expected +1/-1, got +%v/-%v", diff["added"], diff["removed"])
+	}
+}
+
+// TestWriteFileTool_Execute_DiffMetadata_NoChange verifies that writing
+// identical content produces no diff metadata at all.
+func TestWriteFileTool_Execute_DiffMetadata_NoChange(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "same.txt")
+	if err := os.WriteFile(path, []byte("unchanged\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &WriteFileTool{SandboxRoot: root}
+
+	result := tool.Execute(nil, map[string]any{
+		"file_path": "same.txt",
+		"content":   "unchanged\n",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if _, ok := result.Metadata["diff"]; ok {
+		t.Errorf("expected no diff metadata for unchanged content, got %#v", result.Metadata["diff"])
+	}
+}

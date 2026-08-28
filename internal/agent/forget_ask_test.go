@@ -132,6 +132,83 @@ func TestChatWithAgent_ForgetFastPath_NoMatch_HonestReply(t *testing.T) {
 
 // Opus-vet BLOCK findings 2026-08-28: bare delete/remove are roster/channel
 // commands, never memory ops; wildcard subjects must not fire.
+// TestChatWithAgent_ForgetFastPath_MentionPrefixed_ExactLiveRepro is the
+// exact live repro (Opus vet, 2026-08-28): "@Winston forget what I told you
+// about the staging database" took a full ~100s LLM turn instead of the
+// zero-LLM tryForgetFastPath (~2s). Asserts zero backend ChatCompletion
+// calls and the fast-path speech, not model prose.
+func TestChatWithAgent_ForgetFastPath_MentionPrefixed_ExactLiveRepro(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should not run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	reg := tools.NewRegistry()
+	recall := &gateRecallStubTool{name: "muninn_recall", output: `{"results":[{"id":"mem_staging","content":"the staging database is on rds-2","score":0.9}]}`}
+	forget := &gateStubTool{name: "muninn_forget"}
+	reg.Register(recall)
+	reg.Register(forget)
+	o.SetTools(reg, permissions.NewGate(true, nil))
+	ag := &agents.Agent{
+		Name:       "Winston",
+		ModelID:    "qwen2.5-coder:14b",
+		VaultName:  "huginn",
+		MemoryMode: "conversational",
+	}
+	var tokens []string
+	if err := o.ChatWithAgent(context.Background(), ag, "@Winston forget what I told you about the staging database", "sess-forget-live-repro", func(tok string) {
+		tokens = append(tokens, tok)
+	}, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	joined := strings.ToLower(strings.Join(tokens, ""))
+	if !strings.Contains(joined, "forgotten") || !strings.Contains(joined, "staging database") {
+		t.Fatalf("speech %q, want fast-path acknowledgement mentioning the staging database", joined)
+	}
+	if forget.callCount() != 1 {
+		t.Fatalf("forget called %d times, want 1", forget.callCount())
+	}
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	if len(mb.lastRequests) != 0 {
+		t.Fatalf("forget fast path must not call the model; got %d requests — fell through to full LLM turn", len(mb.lastRequests))
+	}
+}
+
+// TestChatWithAgent_ForgetFastPath_ConnectsVaultBeforeFastPath is a
+// regression guard for the ordering bug itself: muninn_recall/muninn_forget
+// are only ever registered session-locally by connectAgentVault (into a
+// forked registry), never on the shared o.toolRegistry that ChatWithAgent's
+// local `reg` variable points to. Before the fix, tryForgetFastPath was
+// handed that raw shared registry and always missed the tools — silently
+// falling through to a full model turn on every forget ask in production.
+// This asserts the forget-ask branch actually drives connectAgentVault (a
+// real side effect: the vault negative cache gets populated) instead of
+// skipping straight to the unconnected registry.
+func TestChatWithAgent_ForgetFastPath_ConnectsVaultBeforeFastPath(t *testing.T) {
+	mb := &mockBackend{responses: []*backend.ChatResponse{stopResponse("should not run")}}
+	o := mustNewOrchestrator(t, mb, modelconfig.DefaultModels(), nil, nil, nil, nil)
+	o.SetTools(tools.NewRegistry(), permissions.NewGate(true, nil))
+	// MemoryEnabled + VaultName set, but no muninn config path wired on the
+	// orchestrator — connectAgentVault takes its "config path not set"
+	// early-return branch, which populates the vault negative cache. That
+	// side effect only happens if the forget-ask branch actually calls
+	// connectAgentVault.
+	ag := &agents.Agent{
+		Name:          "Winston",
+		ModelID:       "qwen2.5-coder:14b",
+		MemoryEnabled: true,
+		VaultName:     "huginn",
+		MemoryMode:    "conversational",
+	}
+	if _, cached := o.vaultNegativeCacheGet(ag.Name); cached {
+		t.Fatal("precondition: vault negative cache should be empty before the turn")
+	}
+	if err := o.ChatWithAgent(context.Background(), ag, "forget my dog's name", "sess-forget-vault-order", nil, nil, nil); err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	if _, cached := o.vaultNegativeCacheGet(ag.Name); !cached {
+		t.Fatal("expected connectAgentVault to run on the forget-ask branch (vault negative cache should be populated) — the fast path is still using the unconnected shared registry")
+	}
+}
+
 func TestForgetSubject_NeverHijacksCommands(t *testing.T) {
 	for _, ask := range []string{
 		"delete the channel",
