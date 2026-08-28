@@ -2008,7 +2008,13 @@ function dismissMemoryChip() {
 }
 
 function onMuninnChipStatus(status: MuninnPresence) {
-  muninnStatus.value = { ...muninnStatus.value, ...status }
+  // `status` here reports local-daemon reachability (from muninn.connectLocal),
+  // not whether this agent's vault is attached — that only becomes true once
+  // the user actually confirms a vault (see onMemoryVaultConnected). Merging
+  // its `connected` in would prematurely resolve the memory chip to null and
+  // yank the connect modal out from under the user mid-flow.
+  const { connected: _daemonConnected, ...availability } = status
+  muninnStatus.value = { ...muninnStatus.value, ...availability }
 }
 
 async function onMemoryVaultConnected() {
@@ -2295,7 +2301,7 @@ function applyOwnerRun(state: OwnerRunState) {
   currentRunId.value = state.currentRunId
   queuedRunIds.value = [...state.queuedRunIds]
   if (state.streaming) {
-    startStreamingWatchdog()
+    startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
   } else {
     clearStreamingWatchdog()
@@ -2382,7 +2388,7 @@ function promoteNextQueuedRun() {
   streaming.value = true
   prestreamThinking.value = true
   trivialAskPending.value = false
-  startStreamingWatchdog()
+  startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
   pendingToolResults.value = []
   if (props.sessionId) {
@@ -2438,7 +2444,7 @@ async function handleEditorSend(markdown: string) {
       streaming.value = true
       prestreamThinking.value = true
       armTrivialAskPending(markdown)
-      startStreamingWatchdog()
+      startStreamingWatchdog(runActivityProbe)
       startElapsedTimer()
     } else {
       queueRun(runId)
@@ -2485,7 +2491,7 @@ async function handleEditorSend(markdown: string) {
     streaming.value = true
     prestreamThinking.value = true
     armTrivialAskPending(markdown)
-    startStreamingWatchdog()
+    startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
     pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
     msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true, agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
@@ -2511,7 +2517,7 @@ function handleRetry(content: string) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   currentRunId.value = runId
   streaming.value = true
-  startStreamingWatchdog()
+  startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
   const msgs = getMessages(props.sessionId)
   msgs.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: new Date().toISOString() })
@@ -2581,9 +2587,20 @@ const { notify } = useBrowserNotifications()
 // handlers accumulating across component remounts, e.g. when navigating away and back).
 const wsCleanupFns: (() => void)[] = []
 
+// Any WS traffic while a run is live counts as "the run is still working" for
+// the streaming watchdog ('done'/'error' clear the watchdog themselves).
+let lastRunActivityMs = 0
+function runActivityProbe(): boolean {
+  return Date.now() - lastRunActivityMs < 60_000
+}
+
 function registerWS(ws: HuginnWS, type: string, fn: (msg: WSMessage) => void) {
-  ws.on(type, fn)
-  wsCleanupFns.push(() => ws.off(type, fn))
+  const wrapped = (msg: WSMessage) => {
+    lastRunActivityMs = Date.now()
+    fn(msg)
+  }
+  ws.on(type, wrapped)
+  wsCleanupFns.push(() => ws.off(type, wrapped))
 }
 
 watch(wsRef, (ws) => {
@@ -2605,7 +2622,7 @@ watch(wsRef, (ws) => {
       const lastUser = [...msgs].reverse().find(m => m.role === 'user')
       if (lastUser) setLastSeenMessageId(sid, lastUser.id)
     }
-    startStreamingWatchdog() // reset watchdog on each token to detect true inactivity
+    startStreamingWatchdog(runActivityProbe) // reset watchdog on each token to detect true inactivity
     const apply = () => {
       prestreamThinking.value = false
       // Flush buffered prefetch tool results now that the assistant message exists.

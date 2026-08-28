@@ -1,10 +1,16 @@
 package agents
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/scrypster/huginn/internal/modelconfig"
 )
+
+// modelSizeRe pulls a parameter-count hint like "7b" or "35b" out of a model
+// ID (e.g. "qwen2.5-coder:7b", "qwen3.6:35b").
+var modelSizeRe = regexp.MustCompile(`(\d+)\s*b\b`)
 
 const teamRosterDelegateHint = "Use `delegate_to_agent` to assign sub-tasks to team members, then `wait_for_threads` to collect their full results when you need them before replying. " +
 	"Only delegate when the request clearly requires another agent's specialized expertise. " +
@@ -48,7 +54,24 @@ func AgentSupportsDelegation(ag *Agent) bool {
 	if info == nil {
 		return true
 	}
-	return info.SupportsDelegation
+	if info.SupportsDelegation {
+		return true
+	}
+	// info.SupportsDelegation is false, meaning InferCapabilities fell
+	// through to its TierLow default — it found no high/medium tier name
+	// pattern. That default exists to block genuinely small local models
+	// ("qwen2.5-coder:7b"), not to silently deny delegation to every model
+	// whose name it doesn't recognize (test doubles, new/unlisted model
+	// families, larger local models like "qwen3.6:35b"). Only trust the
+	// TierLow verdict when the name itself signals a small parameter
+	// count; otherwise stay optimistic, per this function's own contract.
+	if m := modelSizeRe.FindStringSubmatch(strings.ToLower(id)); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return n >= 13 // mirrors InferCapabilities' medium-tier "13b"/"14b" patterns
+		}
+		return false
+	}
+	return true
 }
 
 func agentHasImageGeneration(ag *Agent) bool {

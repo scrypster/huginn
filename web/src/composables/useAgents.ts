@@ -49,11 +49,13 @@ export function useAgents() {
   function wireWS(ws: HuginnWS): void {
     if (!ws) return
     const onChanged = (msg: WSMessage) => {
-      const { name: agentName, action } = msg.payload ?? {}
+      const { name: agentName, action, ...rest } = (msg.payload ?? {}) as Record<string, unknown> & { name?: string; action?: string }
       if (action === 'deleted') {
         removeAgent(agentName as string)
       } else if (action === 'created' || action === 'updated') {
-        // Re-fetch the full list to get the latest data including all fields.
+        // Optimistically reflect the change immediately (no page reload needed),
+        // then re-fetch the full list in the background to pick up all fields.
+        if (agentName) updateAgent(agentName, { ...rest, name: agentName } as Partial<AgentSummary>)
         fetchAgents()
       }
     }

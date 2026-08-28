@@ -150,8 +150,10 @@ func TestRunOnce_UnexpectedPanic(t *testing.T) {
 		t.Errorf("expected loopDone after panic recovery, got %v", result.kind)
 	}
 	got, _ := tm.Get(thread.ID)
-	if got == nil || got.Status != StatusDone {
-		t.Errorf("expected StatusDone after panic recovery, got %v", got)
+	// A panic is a failure — the thread must land StatusError (red in the UI),
+	// never a green "done"; the panic text is preserved in the summary.
+	if got == nil || got.Status != StatusError {
+		t.Errorf("expected StatusError after panic recovery, got %v", got)
 	}
 }
 

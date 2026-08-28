@@ -257,7 +257,7 @@ func TestSpawnThread_LLMErrorMarksThreadError(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		got, _ := tm.Get(thread.ID)
-		if got != nil && got.Status == StatusDone {
+		if got != nil && got.Status == StatusError {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -267,8 +267,11 @@ func TestSpawnThread_LLMErrorMarksThreadError(t *testing.T) {
 	if !ok {
 		t.Fatal("thread not found")
 	}
-	if got.Status != StatusDone {
-		t.Errorf("expected StatusDone after LLM error, got %s", got.Status)
+	// A thread stopped by an LLM error is a failure and must land StatusError
+	// so the UI renders it red — never a green "done" (world-class bar: failed
+	// runs are never presented as successes).
+	if got.Status != StatusError {
+		t.Errorf("expected StatusError after LLM error, got %s", got.Status)
 	}
 
 	bmu.Lock()
@@ -319,15 +322,17 @@ func TestSpawnThread_BudgetExceededStopsThread(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		got, _ := tm.Get(thread.ID)
-		if got != nil && got.Status == StatusDone {
+		if got != nil && got.Status == StatusError {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	got, _ := tm.Get(thread.ID)
-	if got == nil || got.Status != StatusDone {
-		t.Errorf("expected StatusDone after budget exceeded, got %v", got)
+	// Budget-exceeded means the task did NOT finish — presenting it as a green
+	// "done" would lie to the user, so it lands StatusError.
+	if got == nil || got.Status != StatusError {
+		t.Errorf("expected StatusError after budget exceeded, got %v", got)
 	}
 
 	bmu.Lock()

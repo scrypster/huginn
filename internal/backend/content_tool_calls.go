@@ -550,7 +550,11 @@ func PersistVisibleAssistantContent(content string, userAsk ...string) string {
 }
 
 // closeIncompletePersist adds a period when persist would otherwise stop
-// mid-clause (SNAP-7b: "from the available"). Already-terminated speech is left alone.
+// mid-clause (SNAP-7b: "from the available"). Already-terminated speech is
+// left alone, and so are short idiomatic acks ("on it", "got it", "sure
+// thing") — a real mid-clause cutoff runs on long enough to have several
+// words; a two- or three-word ack is a complete thought without punctuation,
+// not a truncated one.
 func closeIncompletePersist(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -559,6 +563,9 @@ func closeIncompletePersist(s string) string {
 	r, _ := utf8.DecodeLastRuneInString(s)
 	switch r {
 	case '.', '!', '?', '…', '"', '\'', '”', '’', ')', ']':
+		return s
+	}
+	if len(strings.Fields(s)) <= 3 {
 		return s
 	}
 	return s + "."
