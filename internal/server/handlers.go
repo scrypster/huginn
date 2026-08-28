@@ -1269,8 +1269,38 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, 400, "read body: "+err.Error())
+		return
+	}
+	// Decode onto a copy of the live config, not a zero-value struct.
+	// encoding/json only sets the fields present in the JSON — decoding a
+	// partial body (e.g. {"tools_enabled":true} from a curl one-liner) onto
+	// a pre-populated struct gives merge semantics, so every omitted field
+	// (reasoner_model, web_ui, ...) keeps its current value instead of being
+	// zeroed (Opus vet, 2026-08-28 — BLOCK-level finding).
+	//
+	// The copy goes through a JSON round trip rather than a plain struct
+	// assignment (newCfg := s.cfg) so slice/map fields (MCPServers, ...) get
+	// independent backing storage. encoding/json reuses an existing slice's
+	// backing array when decoding into it, so unmarshaling the request body
+	// straight into a shallow struct copy could mutate s.cfg's live slices
+	// in place — outside the lock and while other requests read s.cfg under
+	// RLock.
+	s.mu.Lock()
+	liveJSON, mErr := json.Marshal(&s.cfg)
+	s.mu.Unlock()
+	if mErr != nil {
+		jsonError(w, 500, "internal: snapshot live config: "+mErr.Error())
+		return
+	}
 	var newCfg config.Config
-	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+	if err := json.Unmarshal(liveJSON, &newCfg); err != nil {
+		jsonError(w, 500, "internal: snapshot live config: "+err.Error())
+		return
+	}
+	if err := json.Unmarshal(body, &newCfg); err != nil {
 		jsonError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}

@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { api, getToken } from './useApi'
+import { api, getToken, type FileDiff } from './useApi'
 
 // hydrationQueueOverflowed is set to true when any session's pre-hydration WS
 // event queue exceeds MAX_HYDRATION_QUEUE_SIZE. Components can watch this ref
@@ -39,6 +39,7 @@ export interface ToolCallRecord {
   args: Record<string, unknown>
   result?: string
   done: boolean
+  diff?: FileDiff
 }
 
 export interface DelegatedThread {
@@ -268,6 +269,7 @@ export function useSessions() {
                 args: (tc.args as Record<string, unknown>) ?? {},
                 result: (tc.result as string | undefined) ?? undefined,
                 done: true,
+                diff: (tc.diff as FileDiff | undefined) ?? undefined,
               }))
             : undefined
           return {

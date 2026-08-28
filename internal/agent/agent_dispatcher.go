@@ -1084,8 +1084,21 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			return nil
 		}
 	}
-	if o.tryForgetFastPath(ctx, ag, userMsg, sess, reg, onToken) {
-		return nil
+	// muninn_recall/muninn_forget are registered session-locally by
+	// connectAgentVault (into a forked registry) — never on the shared
+	// o.toolRegistry that `reg` points to here. Passing `reg` straight to
+	// tryForgetFastPath always missed the tools and silently fell through
+	// to a full ~100s LLM turn (Opus vet, 2026-08-28 — the "forget what I
+	// told you about the staging database" repro). Connect the vault first,
+	// scoped to forget asks only, so every other turn keeps the old
+	// zero-connect trivial-ask fast path untouched.
+	if isForgetAsk(userMsg) {
+		fvr := o.connectAgentVault(ctx, ag, reg)
+		handled := o.tryForgetFastPath(ctx, ag, userMsg, sess, fvr.sessionReg, onToken)
+		fvr.cancel()
+		if handled {
+			return nil
+		}
 	}
 	if o.tryNamedHireFastPath(ctx, ag, userMsg, sess, reg, onToken, onEvent) {
 		return nil

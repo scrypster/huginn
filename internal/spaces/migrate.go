@@ -23,6 +23,7 @@ func Migrations() []sqlitedb.Migration {
 		{Name: "spaces_v9_channel_name_active_only", Up: migrateSpacesV9},
 		{Name: "spaces_v10_company_lead", Up: migrateSpacesV10},
 		{Name: "spaces_v11_space_for_you", Up: migrateSpacesV11},
+		{Name: "spaces_v12_read_position_whole_second_default", Up: migrateSpacesV12},
 	}
 }
 
@@ -250,6 +251,45 @@ func migrateSpacesV7(tx *sql.Tx) error {
 		ON company_members(company_id, LOWER(agent_name))
 	`)
 	return err
+}
+
+// migrateSpacesV12 fixes space_read_positions.last_read_at's column DEFAULT,
+// which still emitted RFC3339Nano-style fractional seconds
+// (strftime(...%f...)). store.go's MarkRead always writes last_read_at
+// explicitly (whole-second RFC3339, matching sessions.updated_at) so the
+// DEFAULT never fires on that path today — but UnseenCount compares the two
+// columns with a plain SQL string (lexicographic) comparison, and any row
+// that ever did land via the DEFAULT would reintroduce the exact
+// same-second unread bug markread_precision_test.go pins: fractional
+// seconds sort BEFORE a bare "Z" at the same wall-clock second, so
+// "...12:00:00.5Z" < "...12:00:00Z" makes an already-read row look older
+// than the message it acknowledged.
+//
+// SQLite has no ALTER TABLE ... ALTER COLUMN, so changing a column's
+// DEFAULT means recreating the table: create a replacement with the fixed
+// DEFAULT, copy every row across unchanged (existing values, whatever their
+// precision, are preserved as-is — only the DEFAULT applied to future bare
+// INSERTs changes), then swap it in for the original. This never touches
+// migrateSpacesV1, which already ran and is recorded in _migrations.
+func migrateSpacesV12(tx *sql.Tx) error {
+	stmts := []string{
+		`DROP TABLE IF EXISTS space_read_positions_new`,
+		`CREATE TABLE space_read_positions_new (
+			space_id     TEXT NOT NULL PRIMARY KEY
+			                 REFERENCES spaces(id) ON DELETE CASCADE,
+			last_read_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+		)`,
+		`INSERT INTO space_read_positions_new (space_id, last_read_at)
+			SELECT space_id, last_read_at FROM space_read_positions`,
+		`DROP TABLE space_read_positions`,
+		`ALTER TABLE space_read_positions_new RENAME TO space_read_positions`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func isColumnExistsError(err error) bool {

@@ -1,5 +1,5 @@
 import { reactive, toRefs } from 'vue'
-import { api, type SpaceMessage } from './useApi'
+import { api, type SpaceMessage, type FileDiff } from './useApi'
 import { plaintextPreview } from '../utils/honesty'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 import { visibleAssistantContent } from '../utils/visibleAssistantContent'
@@ -78,7 +78,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   // pendingToolResults buffers tool call results that arrive before the
   // streaming placeholder exists (the prefetch pattern: tools run before
   // any tokens are emitted). Flushed when onToken creates the placeholder.
-  const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string }[]>()
+  const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff }[]>()
 
   const wireAgent = (msg: WSMessage): string => {
     const raw = msg as unknown as Record<string, unknown>
@@ -295,11 +295,13 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
       if (!st.sessionToSpaceMap.has(sessionId)) continue
       const p = msg.payload as Record<string, unknown> | undefined
       if (!p) break
+      const metadata = p.metadata as Record<string, unknown> | undefined
       const record = {
         id: (p.id as string) ?? '',
         name: (p.tool as string) ?? '',
         args: (p.args as Record<string, unknown>) ?? {},
         result: (p.result as string) ?? '',
+        diff: (metadata?.diff as FileDiff | undefined) ?? undefined,
       }
       // Accept both stream- (result arrived before done) and done- (result
       // arrived after onDone renamed the placeholder — the late-result race).

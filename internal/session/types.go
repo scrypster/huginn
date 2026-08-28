@@ -35,6 +35,13 @@ type PersistedToolCall struct {
 	Name   string         `json:"name"`
 	Args   map[string]any `json:"args,omitempty"`
 	Result string         `json:"result,omitempty"`
+	// Diff carries a before/after unified diff for write-path tools
+	// (write_file, edit_file) that changed a file — see
+	// tools.BuildFileDiff / attachDiffMetadata. Shape matches the
+	// "diff" key written into ToolResult.Metadata:
+	// {path, unified, added, removed, truncated, is_new, is_delete}.
+	// Left nil for tool calls that didn't change a file.
+	Diff map[string]any `json:"diff,omitempty"`
 }
 
 // SessionMessage is one line in messages.jsonl.
