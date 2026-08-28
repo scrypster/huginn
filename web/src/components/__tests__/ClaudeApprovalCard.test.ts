@@ -42,10 +42,14 @@ describe('ClaudeApprovalCard', () => {
     expect(w.emitted('decide')).toEqual([['allow_tool']])
   })
 
-  it('labels command memory as process-scoped', () => {
+  it('labels command memory with its real, process-scoped lifetime', () => {
     const w = mount(ClaudeApprovalCard, { props: { approval: base } })
-    expect(w.get('[data-testid="approval-allow-command"]').text().toLowerCase())
-      .toContain('this session')
+    const label = w.get('[data-testid="approval-allow-command"]').text().toLowerCase()
+    // "this session" is forbidden by approvals/memory.go's invariant: the memory
+    // lasts until the Huginn PROCESS restarts, not the chat or Claude session,
+    // and a user reading only the UI must not be told otherwise.
+    expect(label).toContain('until huginn restarts')
+    expect(label).not.toContain('this session')
   })
 
   it('renders a zero-padded countdown from remaining_ms', () => {

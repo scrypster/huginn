@@ -39,7 +39,7 @@
         class="text-left opacity-70 hover:opacity-100"
         data-testid="approval-allow-command"
         @click="emit('decide', 'allow_command')"
-      >⤷ Always allow this command (this session)</button>
+      >⤷ Always allow this command (until Huginn restarts)</button>
 
       <button
         v-if="!confirmingTool"
