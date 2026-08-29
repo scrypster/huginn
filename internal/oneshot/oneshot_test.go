@@ -22,11 +22,29 @@ import (
 
 // fakeBackend emits scripted ChatCompletion responses. The first response is
 // a bash tool_call; the second is a final assistant answer.
+//
+// scriptModel, when set, restricts responses[] to requests from that one
+// model — every other model always gets the "done" fallback. This matters
+// for delegation tests: delegate_to_agent spawns the specialist's own
+// RunLoop as a real background goroutine (internal/threadmgr.SpawnThread),
+// which calls this same fakeBackend concurrently with the lead agent's own
+// next turn. A single shared response index can't tell those two callers
+// apart, so it is a genuine data race — whichever goroutine's ChatCompletion
+// call reaches f.call first "steals" the response the test scripted for the
+// other agent (this is what made TestRun_ToolsCalled_DoesNotApplyMissingToolSpeech
+// flake under -race: Steve's spawned thread would occasionally consume the
+// response meant for Winston's second turn). A real backend never has this
+// problem — it answers a request based on that request's own model/messages,
+// never on how many prior calls it happened to receive from unrelated
+// conversations. scriptModel makes the mock do the same: each agent's
+// completions are isolated by model name, so the outcome no longer depends
+// on goroutine scheduling.
 type fakeBackend struct {
-	mu        sync.Mutex
-	responses []*backend.ChatResponse
-	requests  []backend.ChatRequest
-	call      int
+	mu          sync.Mutex
+	responses   []*backend.ChatResponse
+	requests    []backend.ChatRequest
+	call        int
+	scriptModel string
 }
 
 func (f *fakeBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
@@ -41,12 +59,15 @@ func (f *fakeBackend) ChatCompletion(_ context.Context, req backend.ChatRequest)
 		}
 		return resp, nil
 	}
-	idx := f.call
-	f.call++
 	var resp *backend.ChatResponse
-	if idx < len(f.responses) {
-		resp = f.responses[idx]
-	} else {
+	if f.scriptModel == "" || req.Model == f.scriptModel {
+		idx := f.call
+		f.call++
+		if idx < len(f.responses) {
+			resp = f.responses[idx]
+		}
+	}
+	if resp == nil {
 		resp = &backend.ChatResponse{Content: "done", DoneReason: "stop"}
 	}
 	if req.OnToken != nil && resp != nil && resp.Content != "" {
@@ -748,7 +769,12 @@ func TestRun_EmptyBelt_SchemasExcludeGitHub(t *testing.T) {
 }
 
 func TestRun_ToolsCalled_DoesNotApplyMissingToolSpeech(t *testing.T) {
-	b := &fakeBackend{responses: []*backend.ChatResponse{
+	// delegate_to_agent spawns Steve's own RunLoop as a real background
+	// goroutine against this same backend (internal/threadmgr.SpawnThread).
+	// scriptModel pins the two scripted responses below to Winston's own
+	// completions ("test-winston") so Steve's concurrent specialist turn
+	// can never race Winston for them — see the fakeBackend doc comment.
+	b := &fakeBackend{scriptModel: "test-winston", responses: []*backend.ChatResponse{
 		{
 			DoneReason: "tool_calls",
 			ToolCalls: []backend.ToolCall{{
