@@ -104,6 +104,7 @@ type Orchestrator struct {
 	huginnHome       string                // set by SetHuginnHome; used to locate agent memory files
 	skillsReg        *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
 	hooks            *HookRegistry         // PreToolUse/PostToolUse chain (G10); nil until SetHooks. Carries G1 syntax validation.
+	userHooks        *UserHookRunner       // user-configurable hooks.json chain; nil until EnableUserHooks.
 
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string

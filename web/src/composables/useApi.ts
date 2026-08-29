@@ -26,6 +26,38 @@ export interface Thread {
   ModelID?: string
 }
 
+// HookEntry mirrors internal/server's hookAPIEntry (agent.UserHookDef +
+// scope). See internal/agent/hooks_config.go for the schema this shadows —
+// "*"/glob tool matching, PreToolUse (can veto) vs PostToolUse
+// (observe-only), scope is "global" (~/.huginn/hooks.json) or "workspace"
+// (.huginn/hooks.json in the open workspace).
+export interface HookEntry {
+  id: string
+  event: 'PreToolUse' | 'PostToolUse'
+  match: { tools: string[] }
+  action: { type: 'command'; command: string; timeout_secs?: number }
+  enabled: boolean
+  scope?: 'global' | 'workspace'
+}
+
+export interface HookTestResult {
+  allowed: boolean
+  exit_code: number
+  output: string
+  error?: string
+}
+
+export interface HookAuditEntry {
+  time: string
+  hook_id: string
+  event: 'PreToolUse' | 'PostToolUse'
+  tool: string
+  vetoed: boolean
+  exit_code: number
+  output: string
+  error?: string
+}
+
 export interface Connection {
   id: string
   provider: string
@@ -384,6 +416,21 @@ export const api = {
 
   runtime: {
     status: () => apiFetch<{ state: string; session_id: string; machine_id: string }>('/api/v1/runtime/status'),
+  },
+
+  hooks: {
+    list: () => apiFetch<{ hooks: HookEntry[] }>('/api/v1/hooks'),
+    create: (hook: HookEntry) =>
+      apiFetch<HookEntry>('/api/v1/hooks', { method: 'POST', body: JSON.stringify(hook) }),
+    update: (id: string, hook: HookEntry) =>
+      apiFetch<HookEntry>(`/api/v1/hooks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(hook) }),
+    delete: (id: string) =>
+      apiFetch<{ deleted: boolean }>(`/api/v1/hooks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    reload: () => apiFetch<{ reloaded: boolean }>('/api/v1/hooks/reload', { method: 'POST' }),
+    test: (req: { id?: string; hook?: HookEntry; tool: string; args?: Record<string, unknown> }) =>
+      apiFetch<HookTestResult>('/api/v1/hooks/test', { method: 'POST', body: JSON.stringify(req) }),
+    audit: (limit?: number) =>
+      apiFetch<{ entries: HookAuditEntry[] }>(`/api/v1/hooks/audit${limit ? `?limit=${limit}` : ''}`),
   },
 
   stats: () => apiFetch<Record<string, number | null>>('/api/v1/stats'),

@@ -65,8 +65,10 @@ func initTools(
 	tools.RegisterBuiltins(toolReg, cwd, bashTimeout)
 	tools.RegisterGitTools(toolReg, cwd)
 	tools.RegisterTestsTool(toolReg, cwd, bashTimeout)
-	tools.RegisterGitHubTools(toolReg)
+	tools.RegisterGitHubTools(toolReg, cwd)
 	toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+	tools.RegisterGitLabTools(toolReg, cwd)
+	toolReg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 	toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 	tools.RegisterWorktreeTools(toolReg, cwd)
 	tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
@@ -164,9 +166,11 @@ func initConnectionTools(cfg config.Config, huginnHome string, sqlDB *sqlitedb.D
 var langExtensions = map[string][]string{
 	"go":         {".go"},
 	"typescript": {".ts", ".tsx"},
-	"javascript": {".js", ".jsx"},
+	"javascript": {".js", ".jsx", ".mjs", ".cjs"},
 	"rust":       {".rs"},
 	"python":     {".py"},
+	"ruby":       {".rb"},
+	"php":        {".php"},
 }
 
 // projectHasLanguage reports whether cwd (or its immediate subdirectories)

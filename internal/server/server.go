@@ -1168,6 +1168,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(50<<10, s.handleSendMessage))))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/chat/stream", api(s.handleChatStream))
 	mux.HandleFunc("GET /api/v1/audit", api(s.handleGetAudit))
+
+	// Hooks API (PreToolUse/PostToolUse user-configurable shell hooks).
+	mux.HandleFunc("GET /api/v1/hooks", api(s.handleListHooks))
+	mux.HandleFunc("POST /api/v1/hooks", api(withMaxBody(64<<10, s.handleCreateHook)))
+	mux.HandleFunc("PUT /api/v1/hooks/{id}", api(withMaxBody(64<<10, s.handleUpdateHook)))
+	mux.HandleFunc("DELETE /api/v1/hooks/{id}", api(s.handleDeleteHook))
+	mux.HandleFunc("POST /api/v1/hooks/reload", api(s.handleReloadHooks))
+	mux.HandleFunc("POST /api/v1/hooks/test", api(withMaxBody(64<<10, s.handleTestHook)))
+	mux.HandleFunc("GET /api/v1/hooks/audit", api(s.handleHooksAudit))
 	mux.HandleFunc("GET /api/v1/agents", api(s.handleListAgents))
 	mux.HandleFunc("GET /api/v1/agents/capability-matrix", api(s.handleGetCapabilityMatrix))
 	mux.HandleFunc("POST /api/v1/agents/capability-matrix/validate", api(withMaxBody(100<<10, s.handleValidateCapabilityMatrix)))

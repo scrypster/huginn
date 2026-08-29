@@ -48,6 +48,19 @@
     <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
   </svg>
   <svg
+    v-else-if="icon === 'hooks'"
+    class="w-4 h-4 flex-shrink-0"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+  >
+    <path d="M18 6L6 18" />
+    <path d="M8 6h10a2 2 0 012 2v8" />
+    <path d="M6 10v8a2 2 0 002 2h4" />
+  </svg>
+  <svg
     v-else-if="icon === 'mcp'"
     class="w-4 h-4 flex-shrink-0"
     viewBox="0 0 24 24"
@@ -90,6 +103,6 @@
 
 <script setup lang="ts">
 defineProps<{
-  icon: 'general' | 'tools' | 'webui' | 'integrations' | 'mcp' | 'notifications' | 'about'
+  icon: 'general' | 'tools' | 'webui' | 'integrations' | 'hooks' | 'mcp' | 'notifications' | 'about'
 }>()
 </script>

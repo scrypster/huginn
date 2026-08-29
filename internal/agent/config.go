@@ -413,6 +413,52 @@ func (o *Orchestrator) toolHooks() *HookRegistry {
 	return o.hooks
 }
 
+// EnableUserHooks loads user-authored hooks.json (global
+// GlobalHooksPath(huginnHome) then workspace WorkspaceHooksPath(workspaceRoot)
+// — workspace entries with the same id win) and registers them into the
+// same HookRegistry EnableToolHooks builds, so user PreToolUse denials and
+// the G1 syntax-validation denial both work identically. Reads huginnHome/
+// workspaceRoot fresh from the orchestrator (set via SetHuginnHome/
+// SetGitRoot) — call those first. Call EnableToolHooks first too (or this
+// creates the registry itself if needed). Idempotent: a second call returns
+// the already-built runner without reloading — use UserHooks().Reload() to
+// re-read the files (also re-resolves paths, e.g. after SetGitRoot changes).
+//
+// No hooks.json anywhere (both paths missing) is not an error — the runner
+// is simply empty and every Pre/Post call is a no-op, matching "off by
+// default until the user has hooks.json". A malformed hooks.json IS an
+// error, returned here so main.go/the reload endpoint can surface it loudly
+// rather than silently running with no user hooks.
+func (o *Orchestrator) EnableUserHooks() (*UserHookRunner, error) {
+	o.mu.Lock()
+	if o.hooks == nil {
+		o.hooks = NewHookRegistry()
+	}
+	if o.userHooks != nil {
+		runner := o.userHooks
+		o.mu.Unlock()
+		return runner, runner.LastError()
+	}
+	globalPath := GlobalHooksPath(o.huginnHome)
+	workspacePath := WorkspaceHooksPath(o.workspaceRoot)
+	runner := NewUserHookRunner(NewHookAuditLog(500))
+	reg := o.hooks
+	o.userHooks = runner
+	o.mu.Unlock()
+
+	err := runner.Load(globalPath, workspacePath)
+	reg.RegisterPreToolUse(runner.Pre)
+	reg.RegisterPostToolUse(runner.Post)
+	return runner, err
+}
+
+// UserHooks returns the user-hooks runner (nil until EnableUserHooks).
+func (o *Orchestrator) UserHooks() *UserHookRunner {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.userHooks
+}
+
 // WorkspaceRoot returns the git repository root set by SetGitRoot.
 func (o *Orchestrator) WorkspaceRoot() string {
 	o.mu.RLock()
@@ -425,6 +471,13 @@ func (o *Orchestrator) SetHuginnHome(home string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.huginnHome = home
+}
+
+// HuginnHome returns the ~/.huginn directory path set by SetHuginnHome.
+func (o *Orchestrator) HuginnHome() string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.huginnHome
 }
 
 // SetSearcher sets the semantic searcher for context retrieval.

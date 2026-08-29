@@ -39,6 +39,20 @@ jobs:
       - name: Enforce OpenAPI route parity
         run: python3 scripts/check_openapi_parity.py
 
+      # web/node_modules/.bin (esbuild) isn't on PATH by default, and
+      # rustfmt isn't preinstalled — both are needed by the language
+      # syntax-validation tests (internal/tools/validation). Without this,
+      # TestValidate_TS_*/TSX/JSX and the Rust validation tests SKIP
+      # silently in CI, turning green on exactly the paths that need
+      # coverage most.
+      - name: Put esbuild and rustfmt on PATH
+        run: |
+          echo "$(pwd)/web/node_modules/.bin" >> "$GITHUB_PATH"
+          rustup component add rustfmt
+
+      - name: Diagnose validation tool availability
+        run: which esbuild rustfmt ruby php node
+
       - name: Run Go tests
         run: go test -race -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
 
