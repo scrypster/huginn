@@ -8,8 +8,10 @@ import (
 )
 
 // IsTrivialAsk reports short hallway asks that need no hire, no delegate,
-// and no tools. Persona, roster, space/company context, and the local clock
-// stay; the tool belt, vault prefetch, and wait_for_threads do not.
+// and no tools. A skeleton persona (identity line + personality addendum)
+// plus space/company context and the local clock stay; the full team
+// roster, capability addendum, cross-session memory, the tool belt, vault
+// prefetch, and wait_for_threads do not.
 //
 // TRUE: time/clock/date, exact ping/pong, thanks/ok/acks, who-is-here /
 // roster, headcount.
@@ -29,7 +31,7 @@ func IsTrivialAsk(s string) bool {
 	if _, ok := TrivialSayEchoWord(s); ok {
 		return true
 	}
-	return isTrivialTimeAsk(s, norm) ||
+	return isTrivialTimeAsk(norm) ||
 		isTrivialPing(norm) ||
 		backend.IsTrivialAckAsk(s) ||
 		isTrivialRoster(norm) ||
@@ -43,7 +45,14 @@ var (
 	meshAskRE = regexp.MustCompile(`(?i)\bmesh\b`)
 	wallAskRE = regexp.MustCompile(`(?i)\b(?:company wall|isn'?t in (?:this )?company|isn'?t in lab)\b`)
 	// Hallway addressee plus a second @name is mesh, not a one-line ping.
-	trivialTimeRE      = regexp.MustCompile(`(?i)\b(?:what time(?: is it)?|current time|time is it|time it is|what day(?: is it)?|current date|what(?:'s| is) the date|date is it)\b`)
+	// trivialTimeRE is anchored to the whole normalized message (see
+	// isTrivialTimeAsk) so a time phrase buried inside a larger, multi-part
+	// ask ("what time is it? also draw me a dog") does not misroute the
+	// whole message to the trivial skeleton path and silently drop the
+	// non-time part (D3). It still matches every pure time/date phrasing
+	// listed below, including trailing punctuation — normalizeTrivialAsk
+	// strips that before this ever runs.
+	trivialTimeRE      = regexp.MustCompile(`(?i)^(?:what time(?: is it)?|current time|time is it|time it is|what day(?: is it)?|current date|what(?:'s| is) the date|date is it)$`)
 	trivialRosterRE    = regexp.MustCompile(`(?i)^(?:who(?:'s| is) here|who(?:'s| is) on the team|who(?:'s| is) on the roster|roster)$`)
 	trivialHeadcountRE = regexp.MustCompile(`(?i)^(?:how many people(?: are(?: in this channel| here)?)?|who(?:'s| is) in this channel)$`)
 )
@@ -70,8 +79,8 @@ func isNonTrivialAsk(s string) bool {
 	return false
 }
 
-func isTrivialTimeAsk(raw, norm string) bool {
-	return trivialTimeRE.MatchString(raw) || trivialTimeRE.MatchString(norm)
+func isTrivialTimeAsk(norm string) bool {
+	return trivialTimeRE.MatchString(norm)
 }
 
 func isTrivialPing(norm string) bool {
@@ -108,6 +117,22 @@ func isTrivialRoster(norm string) bool {
 
 func isTrivialHeadcount(norm string) bool {
 	return trivialHeadcountRE.MatchString(norm)
+}
+
+// trivialNeedsRoster reports whether a trivial ask needs a roster injected
+// in-prompt as an answer source. who-is-here/headcount and named-company
+// roster asks ("who is in acme") do: completeTrivialAsk's channelMembersLine
+// only fires when this channel's membership was attached to ctx (space/
+// channel chat), and namedCompanyMembersLine needs the named-company roster
+// fetched the same way — DMs and other contexts without that attachment
+// still need the roster as a fallback so "how many people are here" / "who
+// is in acme" has something to answer from (D4: this used to miss the
+// named-company case, so "who is in acme" got the skeleton prompt with no
+// roster and the empty-company fallback had nothing to answer from either).
+// Every other trivial kind (ping, ack, time) gets the skeleton prompt.
+func trivialNeedsRoster(userMsg string) bool {
+	norm := normalizeTrivialAsk(userMsg)
+	return isTrivialRoster(norm) || isTrivialHeadcount(norm) || backend.IsNamedCompanyRosterAsk(userMsg)
 }
 
 var (

@@ -26,7 +26,24 @@ func NewFromConfig(provider, endpoint, apiKey, model string) (Backend, error) {
 // This is used internally by BackendCache.For() and NewFromConfig.
 func newFromResolvedConfig(provider, endpoint string, resolver KeyResolver, model string) (Backend, error) {
 	switch provider {
-	case "ollama", "external", "":
+	case "ollama", "":
+		// Genuinely ollama (or the unset-provider default, which config
+		// migration also resolves to "ollama" — see migrateV5toV6): gets
+		// DefaultOllamaKeepAlive so a model that was just loaded stays
+		// resident. See D1: this must NOT live in NewExternalBackend itself,
+		// since that constructor is reused by non-ollama callers.
+		if endpoint == "" {
+			endpoint = "http://localhost:11434"
+		}
+		b := NewExternalBackend(endpoint)
+		b.SetKeepAlive(DefaultOllamaKeepAlive)
+		b.SetModel(model)
+		return b, nil
+
+	case "external":
+		// Generic OpenAI-compatible endpoint — not confirmed to be ollama,
+		// so keep_alive stays omitted unless the caller explicitly opts in
+		// via SetKeepAlive.
 		if endpoint == "" {
 			endpoint = "http://localhost:11434"
 		}

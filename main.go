@@ -66,6 +66,7 @@ import (
 	"github.com/scrypster/huginn/internal/tools"
 	traypkg "github.com/scrypster/huginn/internal/tray"
 	"github.com/scrypster/huginn/internal/tui"
+	"github.com/scrypster/huginn/internal/turnmetrics"
 	"github.com/scrypster/huginn/internal/workspace"
 )
 
@@ -405,6 +406,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "huginn: warning: session schema migrations failed: %v\n", err)
 		}
 	}
+	var tuiTurnMetrics *turnmetrics.Writer
+	if sqlDB != nil {
+		if err := sqlDB.Migrate(turnmetrics.Migrations()); err != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: turn metrics migration failed: %v\n", err)
+		} else {
+			tuiTurnMetrics = turnmetrics.NewWriter(sqlDB)
+			tuiTurnMetrics.Start(context.Background()) // lives for the process — TUI has no graceful-shutdown path to hook
+		}
+	}
 	// sqlDB is used below for connection and memory stores (Phase 1+).
 
 	var memStore agentslib.MemoryStoreIface
@@ -507,7 +517,9 @@ func main() {
 		if endpoint == "" {
 			endpoint = "http://localhost:11434"
 		}
-		b = backend.NewExternalBackend(endpoint)
+		eb := backend.NewExternalBackend(endpoint)
+		eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		b = eb
 		go func(ep string, be backend.Backend) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -570,9 +582,18 @@ func main() {
 		fatalf("failed to create orchestrator: %v", err)
 	}
 	backendCache := backend.NewBackendCache(b)
+	backendCache.SetOllamaKeepAlive(cfg.Backend.KeepAlive)
 	orch.SetBackendCache(backendCache)
+	// Best-effort warm-up (perf wave step 2b): fire one tiny keep-alive
+	// request per distinct ollama model among a small, explicit set — the
+	// default agent and the Chief of Staff — so the first real user turn
+	// doesn't pay a cold model load. Non-blocking, logged, never fatal.
+	warmOllamaModels(context.Background(), *cfg, agentReg)
 	orch.WithMachineID(relay.GetMachineID()) // stable 8-char hex, not cfg.MachineID (hostname-dependent)
 	orch.SetGitRoot(detection.Root)
+	if tuiTurnMetrics != nil {
+		orch.SetTurnMetricsWriter(tuiTurnMetrics)
+	}
 	orch.SetAgentRegistry(agentReg)
 	orch.SetHuginnHome(huginnHome)
 	if memStore != nil {
@@ -2218,7 +2239,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		logger.Info("backend: using cloud provider (serve mode)", "provider", "vertex",
 			"project", cfg.Backend.Project, "location", cfg.Backend.Location)
 	default:
-		b = backend.NewExternalBackend(endpoint)
+		eb := backend.NewExternalBackend(endpoint)
+		eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		b = eb
 		go func(ep string, be backend.Backend) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -2471,6 +2494,24 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	}
 	if symbolStore != nil {
 		cleanupFns = append(cleanupFns, func() { symbolStore.Close() })
+	}
+
+	// Wire turn-latency telemetry (perf wave foundation): a bounded async
+	// writer persists per-turn t_request/t_first_token/t_complete stamps to
+	// turn_metrics, and /api/v1/metrics/turns serves recent rows + a
+	// per-model p50/p95 summary. sqlDB == nil (degraded mode) leaves both
+	// orch and srv without a writer — RunLoop's MetricsWriter check is nil-safe.
+	if sqlDB != nil {
+		if migrErr := sqlDB.Migrate(turnmetrics.Migrations()); migrErr != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: turn metrics migration failed: %v\n", migrErr)
+		} else {
+			tmWriter := turnmetrics.NewWriter(sqlDB)
+			tmCtx, tmCancel := context.WithCancel(context.Background())
+			tmWriter.Start(tmCtx)
+			cleanupFns = append(cleanupFns, tmCancel)
+			orch.SetTurnMetricsWriter(tmWriter)
+			srv.SetTurnMetricsReader(tmWriter)
+		}
 	}
 
 	// Wire cloud vault memory replicator — drains cloud_vault_queue and pushes agent

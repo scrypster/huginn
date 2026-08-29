@@ -208,6 +208,10 @@ type Server struct {
 	symbolStore symbolQuerier
 	symbolCache *symbolIndexCache
 
+	// turnMetrics backs GET /api/v1/metrics/turns. Nil when sqlDB was
+	// unavailable at startup — the handler reports 503 rather than panicking.
+	turnMetrics turnMetricsReader
+
 	// ctx is the server lifecycle context stored at Start(). Used by long-running
 	// goroutines (e.g. SpawnThread) that must outlive individual HTTP requests.
 	ctx context.Context
@@ -1295,6 +1299,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Code Intelligence API (authenticated)
 	mux.HandleFunc("GET /api/v1/symbols/search", api(s.handleSymbolSearch))
 	mux.HandleFunc("GET /api/v1/symbols/impact/{symbol}", api(s.handleSymbolImpact))
+
+	// Turn latency telemetry (authenticated) — perf-wave dashboard/agent feed.
+	mux.HandleFunc("GET /api/v1/metrics/turns", api(s.handleTurnMetrics))
 
 	// OAuth callback (no auth — provider redirects here for local flows)
 	mux.HandleFunc("GET /oauth/callback", s.handleOAuthCallback)

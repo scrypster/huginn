@@ -159,6 +159,33 @@ func TestIsTrivialAsk_FalseFullPath(t *testing.T) {
 	}
 }
 
+// TestIsTrivialAsk_TimeAskMustBeAnchored verifies a mixed ask that merely
+// contains a time phrase as a substring does not misroute to the trivial
+// skeleton path (D3): trivialTimeRE used to be unanchored, so it matched
+// anywhere in the message, dropping real work (image generation, code
+// changes, delegation) buried alongside a time phrase.
+func TestIsTrivialAsk_TimeAskMustBeAnchored(t *testing.T) {
+	for _, ask := range []string{
+		"What time is it? Also draw me a dog.",
+		"quick one - what's the date, and can you refactor the auth module",
+		"current time please, then delegate this bug to Steve",
+	} {
+		if IsTrivialAsk(ask) {
+			t.Errorf("IsTrivialAsk(%q) = true, want false (time phrase is only part of a larger ask)", ask)
+		}
+	}
+}
+
+// TestTrivialNeedsRoster_NamedCompanyRosterAsk verifies "who is in acme"
+// (backend.IsNamedCompanyRosterAsk) needs the roster injected the same way
+// who-is-here/headcount do (D4): without this, it got the skeleton prompt
+// with no roster, and the empty-company fallback had nothing to answer from.
+func TestTrivialNeedsRoster_NamedCompanyRosterAsk(t *testing.T) {
+	if !trivialNeedsRoster("who is in acme") {
+		t.Error(`trivialNeedsRoster("who is in acme") = false, want true`)
+	}
+}
+
 func TestStripTrivialAskDelegationTools(t *testing.T) {
 	in := []backend.Tool{
 		{Function: backend.ToolFunction{Name: "bash"}},

@@ -820,14 +820,23 @@ func couldBeFenceToolPrefix(s string) bool {
 	return isToolPayload(strings.TrimSpace(body[:closeIdx]))
 }
 
-func visibleOrHeldAssistantContent(content string) (visible string, holding bool) {
+// visibleOrHeldAssistantContent reports the currently-visible suffix of a
+// growing content buffer, and whether the gate is holding back a leading
+// tool-call prefix. committed distinguishes WHY it's holding (see D5):
+// stripLeadingContentToolCalls actually recognized and stripped a leading
+// tool call — a genuine commitment, even if the whole buffer was consumed
+// (leftover == "", so nothing to show yet). couldBeContentToolCallPrefix
+// alone is a speculative "might still become one" — true for a lone
+// newline/space, an unresolved code fence, or JSON that hasn't finished
+// streaming, none of which have been confirmed as a tool call yet.
+func visibleOrHeldAssistantContent(content string) (visible string, holding, committed bool) {
 	if leftover, stripped := stripLeadingContentToolCalls(content); stripped {
-		return leftover, leftover == ""
+		return leftover, leftover == "", leftover == ""
 	}
 	if couldBeContentToolCallPrefix(content) {
-		return "", true
+		return "", true, false
 	}
-	return content, false
+	return content, false, false
 }
 
 // ContentToolCallTokenGate holds back streamed tokens that still look like a
@@ -839,6 +848,7 @@ type ContentToolCallTokenGate struct {
 	raw             string
 	emitted         string
 	granted         map[string]bool
+	statusFired     bool // first-signal status (see flush) — fires at most once per turn
 }
 
 // SetGrantedTools enables mid-message stripping of fenced / bare JSON
@@ -893,8 +903,27 @@ func (g *ContentToolCallTokenGate) Finish(visible string) {
 }
 
 func (g *ContentToolCallTokenGate) flush(final bool) {
-	vis, holding := visibleOrHeldAssistantContent(g.raw)
+	vis, holding, committed := visibleOrHeldAssistantContent(g.raw)
 	if holding && !final {
+		// First-signal (perf wave 2c): once the stream COMMITS to a leading
+		// tool-call interpretation (stripLeadingContentToolCalls actually
+		// recognized one — see visibleOrHeldAssistantContent), the user
+		// otherwise sees nothing between "thinking" and the tool_call event
+		// RunLoop emits only after the full response finishes streaming —
+		// which can be many seconds for a large write on a local model.
+		// Reuse the existing (transient, never persisted) StreamStatus type
+		// rather than inventing a new event kind; fires once per turn.
+		//
+		// D5: this must NOT fire on a mere speculative hold (committed ==
+		// false) — a lone leading newline/space, an in-progress code fence,
+		// or JSON that hasn't finished streaming all look like they COULD
+		// become a tool call and are held for that reason, but most resolve
+		// to plain prose. Firing "using tools" on those flashed a false
+		// status ahead of a normal text answer.
+		if committed && !g.statusFired && g.downstreamEvent != nil {
+			g.statusFired = true
+			g.downstreamEvent(StreamEvent{Type: StreamStatus, Content: "using tools"})
+		}
 		return
 	}
 	if final {

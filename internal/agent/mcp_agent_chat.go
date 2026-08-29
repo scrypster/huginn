@@ -145,6 +145,8 @@ func (o *Orchestrator) AgentChat(
 		OnBeforeWrite:      onBeforeWrite,
 		VaultReconnector:   vr.reconnector,
 		SessionID:          GetSessionID(ctx),
+		MetricsWriter:      o.runLoopMetrics(),
+		TurnKind:           "agent-loop",
 	}
 	if defaultAgent != nil {
 		cfg.AgentName = defaultAgent.Name
