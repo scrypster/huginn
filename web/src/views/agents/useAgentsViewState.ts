@@ -12,6 +12,7 @@ import {
   modelUnreliableForTools,
 } from './modelToolCapabilities'
 import { MEMORY_MODES, type MemoryMode } from '../../utils/memoryModes'
+import { DEFAULT_PERSONALITY, normalizePersonality, type Personality } from '../../utils/personalityPresets'
 
 interface OllamaModel {
   name: string
@@ -45,6 +46,14 @@ interface AgentForm {
   approved_tools: string[]
   heartbeat_enabled: boolean
   heartbeat_cron: string
+  personality: Personality
+  // vet_work is tri-state, mirroring AgentDef.VetWork (*bool) on the wire:
+  // null = inherit the personality preset's default (true only for
+  // strict-reviewer); true/false = an explicit user override that always
+  // wins. save() sends this value as-is — Go decodes a JSON `null` (or an
+  // omitted key) into a nil *bool either way, so null round-trips cleanly
+  // as "no override".
+  vet_work: boolean | null
 }
 
 interface VaultItem {
@@ -200,6 +209,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     approved_tools: [],
     heartbeat_enabled: false,
     heartbeat_cron: '',
+    personality: DEFAULT_PERSONALITY,
+    vet_work: null,
   })
   const original = ref('')
   // loadedApprovedTools snapshots form.value.approved_tools as of the last
@@ -884,6 +895,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         approved_tools: (data as any).approved_tools ?? [],
         heartbeat_enabled: (data as any).heartbeat_enabled ?? false,
         heartbeat_cron: (data as any).heartbeat_cron ?? '',
+        personality: normalizePersonality((data as any).personality),
+        vet_work: (data as any).vet_work ?? null,
       }
       const hadWildcards = ((data as any).toolbelt || []).some((e: any) => e.provider === '*')
       wildcardStripped.value = hadWildcards
@@ -1054,6 +1067,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     approved_tools: [],
           heartbeat_enabled: false,
           heartbeat_cron: '',
+          personality: DEFAULT_PERSONALITY,
+          vet_work: null,
         }
         loadedApprovedTools.value = []
         original.value = JSON.stringify(form.value)

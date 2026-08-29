@@ -104,11 +104,25 @@ type AgentDef struct {
 
 	// HeartbeatEnabled controls whether this agent sends periodic check-in DMs to the user.
 	// When true, a workflow YAML is auto-generated at ~/.huginn/workflows/heartbeat-{name}.yaml.
-	HeartbeatEnabled bool   `json:"heartbeat_enabled,omitempty" yaml:"heartbeat_enabled,omitempty"`
+	HeartbeatEnabled bool `json:"heartbeat_enabled,omitempty" yaml:"heartbeat_enabled,omitempty"`
 
 	// HeartbeatCron is the cron schedule for the heartbeat workflow.
 	// Defaults to "0 */4 * * *" (every 4 hours) when empty and HeartbeatEnabled is true.
-	HeartbeatCron    string `json:"heartbeat_cron,omitempty"    yaml:"heartbeat_cron,omitempty"`
+	HeartbeatCron string `json:"heartbeat_cron,omitempty"    yaml:"heartbeat_cron,omitempty"`
+
+	// Personality selects a behavioral preset (see personality.go): "",
+	// "default", "strict-reviewer", "fast-builder", "skeptical-architect", or
+	// "terse-operator". Binds a persona prompt addendum plus (for
+	// strict-reviewer) a harness default — see ResolveVetWork.
+	Personality string `json:"personality,omitempty" yaml:"personality,omitempty"`
+
+	// VetWork is a tri-state override for the productized vet loop: nil
+	// means "inherit the personality preset's default" (true only for
+	// strict-reviewer; see ResolveVetWork), non-nil is an explicit user
+	// choice that always wins over the preset. When effectively true, a
+	// completed delegated coding thread for this agent gets a one-shot
+	// adversarial reviewer pass before its result is presented as final.
+	VetWork *bool `json:"vet_work,omitempty" yaml:"vet_work,omitempty"`
 
 	// Version is an optimistic-lock counter incremented on every save.
 	// On PUT /api/v1/agents/{name}: if the client sends Version > 0 and it does
@@ -209,10 +223,10 @@ func (d *AgentDef) DeriveMemoryType() {
 // validPlasticity contains the recognized plasticity values.
 // Empty string is allowed and defaults to "default" at runtime.
 var validPlasticity = map[string]bool{
-	"":               true,
-	"default":        true,
+	"":                true,
+	"default":         true,
 	"knowledge-graph": true,
-	"reference":      true,
+	"reference":       true,
 }
 
 // validMemoryMode contains the recognized memory_mode values.
@@ -293,6 +307,9 @@ func (d AgentDef) Validate() error {
 	if !validMemoryMode[d.MemoryMode] {
 		return fmt.Errorf("invalid memory_mode %q: must be one of passive, conversational, immersive", d.MemoryMode)
 	}
+	if !ValidPersonality(d.Personality) {
+		return fmt.Errorf("invalid personality %q: must be one of default, strict-reviewer, fast-builder, skeptical-architect, terse-operator", d.Personality)
+	}
 	return nil
 }
 
@@ -313,17 +330,17 @@ func FromDef(def AgentDef) *Agent {
 		memEnabled = *def.MemoryEnabled
 	}
 	return &Agent{
-		Name:          def.Name,
-		ModelID:       def.Model,
-		Provider:      def.Provider,
-		Endpoint:      def.Endpoint,
-		APIKey:        def.APIKey,
-		SystemPrompt:  def.SystemPrompt,
-		Color:         def.Color,
-		Icon:          def.Icon,
-		IsDefault:     def.IsDefault,
-		VaultName:     def.VaultName,
-		Plasticity:    def.Plasticity,
+		Name:                def.Name,
+		ModelID:             def.Model,
+		Provider:            def.Provider,
+		Endpoint:            def.Endpoint,
+		APIKey:              def.APIKey,
+		SystemPrompt:        def.SystemPrompt,
+		Color:               def.Color,
+		Icon:                def.Icon,
+		IsDefault:           def.IsDefault,
+		VaultName:           def.VaultName,
+		Plasticity:          def.Plasticity,
 		MemoryEnabled:       memEnabled,
 		ContextNotesEnabled: def.ContextNotesEnabled,
 		MemoryMode:          def.MemoryMode,
@@ -332,6 +349,8 @@ func FromDef(def AgentDef) *Agent {
 		Skills:              def.Skills,
 		LocalTools:          def.LocalTools,
 		ApprovedTools:       def.ApprovedTools,
+		Personality:         def.Personality,
+		VetWork:             ResolveVetWork(def.Personality, def.VetWork),
 	}
 }
 

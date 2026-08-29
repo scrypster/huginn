@@ -56,6 +56,18 @@ type Agent struct {
 	Skills              []string
 	LocalTools          []string // tool names granted to this agent; ["*"] = all builtins
 	ApprovedTools       []string // tool names pre-approved to skip permission prompts
+
+	// Personality selects a behavioral preset (see personality.go). "" behaves
+	// like "default" (no persona addendum, no harness bindings).
+	Personality string
+
+	// VetWork is the RESOLVED effective setting (personality default merged
+	// with any explicit user override — see ResolveVetWork), not the raw
+	// tri-state persisted on AgentDef. When true, a completed delegated
+	// coding thread for this agent gets a one-shot adversarial reviewer pass
+	// before its result is presented as final (see internal/agent's vet
+	// wiring).
+	VetWork bool
 }
 
 // Rename updates the agent's Name and re-indexes it in the registry under the
@@ -138,6 +150,8 @@ func (a *Agent) cloneUnlocked() Agent {
 		ContextNotesEnabled: a.ContextNotesEnabled,
 		MemoryMode:          a.MemoryMode,
 		VaultDescription:    a.VaultDescription,
+		Personality:         a.Personality,
+		VetWork:             a.VetWork,
 		// Clone slice-backed fields so request-scoped copies never alias shared
 		// registry state under concurrent workflow execution.
 		Toolbelt:      append([]ToolbeltEntry(nil), a.Toolbelt...),
@@ -224,6 +238,9 @@ func BuildPersonaPrompt(ag *Agent, ctxText string) string {
 			"Use markdown formatting — tables, bold, code blocks, lists — when it improves readability."
 	}
 	if add := capabilityAddendum(ag); add != "" {
+		body += "\n\n" + add
+	}
+	if add := PersonalityAddendum(ag.Personality); add != "" {
 		body += "\n\n" + add
 	}
 	return body + "\n\n" + ctxText

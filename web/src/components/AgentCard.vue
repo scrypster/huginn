@@ -30,6 +30,14 @@
 
     <!-- Badges -->
     <div class="flex items-center gap-1.5 flex-wrap">
+      <!-- Personality — subtle, only shown when a non-default preset is set -->
+      <span
+        v-if="personalityBadge"
+        data-testid="agent-personality-badge"
+        class="text-[10px] px-1.5 py-0.5 rounded-full"
+        style="background:rgba(255,255,255,0.06);color:#8b949e"
+      >{{ personalityBadge }}</span>
+
       <!-- Heartbeat -->
       <span
         v-if="agent.heartbeat_enabled"
@@ -62,6 +70,7 @@ import { computed } from 'vue'
 import type { AgentSummary } from '../composables/useAgents'
 import { agentDisplayDescription } from '../utils/agentDescription'
 import { modelUnreliableForTools } from '../views/agents/modelToolCapabilities'
+import { personalityLabel } from '../utils/personalityPresets'
 import ModelToolWarning from './ModelToolWarning.vue'
 
 const props = withDefaults(defineProps<{
@@ -74,6 +83,10 @@ const props = withDefaults(defineProps<{
 defineEmits<{ (e: 'click'): void; (e: 'edit'): void }>()
 
 const displayDescription = computed(() => agentDisplayDescription(props.agent))
+const personalityBadge = computed(() => {
+  const p = props.agent.personality
+  return p && p !== 'default' ? personalityLabel(p) : ''
+})
 const unreliableForTools = computed(() =>
   modelUnreliableForTools({
     name: props.agent.model,

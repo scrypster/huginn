@@ -215,6 +215,26 @@ func TestBuildPersonaContent_AgentFound(t *testing.T) {
 	}
 }
 
+// TestBuildPersonaContent_IncludesPersonalityAddendum fails without the
+// feature: buildPersonaContent's only route to a persona system prompt is
+// agents.BuildPersonaPrompt — before BuildPersonaPrompt consulted
+// ag.Personality, a delegated worker thread for a strict-reviewer agent
+// would carry none of that preset's behavioral instructions.
+func TestBuildPersonaContent_IncludesPersonalityAddendum(t *testing.T) {
+	thread := &Thread{AgentID: "Reviewer", Task: "review the diff"}
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{
+		Name:         "Reviewer",
+		SystemPrompt: "You review code.",
+		ModelID:      "claude-haiku-4",
+		Personality:  agents.PersonalityStrictReviewer,
+	})
+	got := buildPersonaContent(thread, reg)
+	if !strings.Contains(got, "Strict Reviewer") {
+		t.Errorf("delegated worker thread persona missing strict-reviewer addendum:\n%s", got)
+	}
+}
+
 func TestBuildPersonaContent_LocalClockET(t *testing.T) {
 	thread := &Thread{AgentID: "Winston", Task: "what time it is"}
 	got := buildPersonaContent(thread, nil)

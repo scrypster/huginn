@@ -496,6 +496,48 @@
                 Manage skills
               </button>
 
+              <!-- Personality -->
+              <div class="mt-4 border-t border-huginn-border/20 pt-4">
+                <label class="text-[10px] text-huginn-muted/60 font-medium uppercase tracking-wide block mb-1">Personality</label>
+                <select
+                  v-model="form.personality"
+                  @change="markDirty"
+                  data-testid="agent-personality-select"
+                  class="w-full bg-huginn-bg/50 border border-huginn-border/30 rounded px-2 py-1.5 text-[11px] text-huginn-text focus:outline-none focus:border-huginn-blue/50">
+                  <option v-for="p in PERSONALITY_PRESETS" :key="p.value" :value="p.value">{{ p.label }}</option>
+                </select>
+                <p class="mt-1 text-[10px] text-huginn-muted/50 leading-relaxed">
+                  {{ PERSONALITY_PRESETS.find(p => p.value === form.personality)?.description }}
+                </p>
+
+                <div class="flex items-center justify-between mt-3">
+                  <div>
+                    <div class="text-[11px] font-medium text-huginn-text">Vet its own work</div>
+                    <div class="text-[10px] text-huginn-muted/60 mt-0.5">
+                      Runs a one-shot adversarial reviewer pass over file changes before presenting the result
+                      <span v-if="form.vet_work === null" class="text-huginn-muted/40">
+                        (currently {{ form.personality === 'strict-reviewer' ? 'on' : 'off' }} — from Personality)
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="agent-vet-work-toggle"
+                    @click="() => { form.vet_work = !resolvedVetWork; markDirty() }"
+                    :class="resolvedVetWork ? 'bg-huginn-blue' : 'bg-huginn-muted/20'"
+                    class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none">
+                    <span
+                      :class="resolvedVetWork ? 'translate-x-4' : 'translate-x-0'"
+                      class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" />
+                  </button>
+                </div>
+                <button v-if="form.vet_work !== null" type="button"
+                  @click="() => { form.vet_work = null; markDirty() }"
+                  class="mt-1 text-[10px] text-huginn-blue/70 hover:text-huginn-blue transition-colors">
+                  Reset to personality default
+                </button>
+              </div>
+
               <!-- Heartbeat -->
               <div class="mt-4 border-t border-huginn-border/20 pt-4">
                 <div class="flex items-center justify-between mb-2">
@@ -1387,11 +1429,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, toRef } from 'vue'
+import { computed, ref, toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import AgentCard from '../components/AgentCard.vue'
 import ModelToolWarning from '../components/ModelToolWarning.vue'
 import { useAgentsViewState } from './agents/useAgentsViewState'
+import { PERSONALITY_PRESETS } from '../utils/personalityPresets'
 
 const props = defineProps<{ agentName?: string }>()
 const router = useRouter()
@@ -1498,6 +1541,13 @@ const {
 } = useAgentsViewState(toRef(props, 'agentName'), router)
 
 const newApprovedTool = ref('')
+
+// Mirrors internal/agents.ResolveVetWork: an explicit form.vet_work always
+// wins; null (no override) falls back to the personality preset's default
+// (true only for strict-reviewer) purely for the toggle's display state.
+const resolvedVetWork = computed(() =>
+  form.value.vet_work !== null ? form.value.vet_work : form.value.personality === 'strict-reviewer',
+)
 </script>
 
 <style scoped>

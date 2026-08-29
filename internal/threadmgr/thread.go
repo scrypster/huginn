@@ -84,6 +84,18 @@ type FinishSummary struct {
 	Status          string   // "completed" | "blocked" | "needs_review" | "completed-with-timeout" | "error"
 	ParentMessageID string   // ID of the chat message that triggered this thread (for reply threading)
 	ThreadID        string   // stamped by CompletionNotifier.Notify so FollowUpFn can identify the thread
+
+	// VetLabel and VetFindings carry the productized vet loop's verdict
+	// (see the wireThreadManagerVet hook / internal/agent.RunVetPass).
+	// VetLabel is one of "" (not vetted — vet_work off, or no file changes
+	// to review), "no findings", "N findings", or "did not complete" — the
+	// vet pass errored or timed out and the run is honestly labeled
+	// unvetted rather than silently presented as clean. VetFindings holds
+	// the reviewer's structured findings text ("" unless VetLabel is
+	// "N findings"). Both are set via ThreadManager.AttachVetResult, after
+	// Complete has already stored Summary — never invented up front.
+	VetLabel    string
+	VetFindings string
 }
 
 // CreateParams holds arguments for ThreadManager.Create.

@@ -3618,6 +3618,16 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// forking, and session env setup; threadmgr just consumes the
 		// resulting AgentRuntime.
 		tm.SetAgentRuntimePreparer(orch.PrepareAgentRuntime)
+
+		// Productized vet loop: a completed delegated coding thread whose
+		// owning agent has vet_work on (explicit, or via the strict-reviewer
+		// personality default) gets a one-shot adversarial reviewer pass
+		// before its result is presented as final. Wired the same way as
+		// checkpoints — via tm's existing OnStatusChange hook, no threadmgr
+		// changes needed. Non-fatal by construction: initVet never errors.
+		cleanupFns = append(cleanupFns, initVet(srvCWD, agentReg, tm, func(provider, endpoint, apiKey, model string) (backend.Backend, error) {
+			return serveCache.For(provider, endpoint, apiKey, model)
+		}, b))
 	}
 
 	// Wire relay config if HuginnCloud is configured.
