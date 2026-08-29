@@ -502,7 +502,7 @@ func TestNewStore_RefusesHomeInsideSandbox(t *testing.T) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewStore(context.Background(), home, sandbox); err == nil {
+	if _, err := checkpoint.NewStore(context.Background(), home, sandbox); err == nil {
 		t.Fatal("NewStore accepted a huginn home inside the sandbox root; the store would snapshot itself")
 	}
 	// The reverse (sandbox inside home) is fine and must keep working.
@@ -510,7 +510,7 @@ func TestNewStore_RefusesHomeInsideSandbox(t *testing.T) {
 	if err := os.MkdirAll(sandbox2, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewStore(context.Background(), t.TempDir(), sandbox2); err != nil {
+	if _, err := checkpoint.NewStore(context.Background(), t.TempDir(), sandbox2); err != nil {
 		t.Fatalf("NewStore rejected a valid layout: %v", err)
 	}
 }
