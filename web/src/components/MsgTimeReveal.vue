@@ -9,7 +9,7 @@
     @touchmove.passive="onTouchMove"
     @touchend="onTouchEnd"
   >
-    <div class="msg-time-body min-w-0">
+    <div class="msg-time-body min-w-0" data-testid="msg-time-body">
       <slot />
     </div>
     <span
@@ -56,9 +56,16 @@ function onTouchEnd() {
 </script>
 
 <style scoped>
+/* The stamp is taken completely out of normal flow (position: absolute) so it
+   can never change the width available to .msg-time-body. Only `opacity`
+   transitions on hover/reveal — nothing that affects layout (width, margin,
+   transform-driven reflow) — so message text never rewraps when the
+   timestamp appears. The row stays a plain flex container purely for the
+   is-end (right-aligned bubble) alignment that already existed; the stamp
+   overlays the trailing corner of the bubble/text instead of pushing it. */
 .msg-time-row {
+  position: relative;
   display: flex;
-  align-items: center;
   min-width: 0;
   width: 100%;
 }
@@ -67,30 +74,43 @@ function onTouchEnd() {
 }
 .msg-time-body {
   min-width: 0;
-  transition: transform 180ms ease;
+  width: 100%;
 }
-.msg-time-row.is-revealed .msg-time-body {
-  transform: translateX(-6px);
+.msg-time-row.is-end .msg-time-body {
+  width: auto;
+  max-width: 100%;
 }
 .msg-time-stamp {
-  flex: 0 0 auto;
-  max-width: 0;
-  margin-left: 0;
-  overflow: hidden;
-  opacity: 0;
-  transform: translateX(10px);
-  transition: opacity 180ms ease, transform 180ms ease, max-width 180ms ease, margin 180ms ease;
+  position: absolute;
+  right: 8px;
+  bottom: 3px;
+  padding: 1px 6px;
+  border-radius: 6px;
   font-size: 11px;
-  line-height: 1;
-  color: rgba(139, 148, 158, 0.72);
+  line-height: 1.4;
+  color: rgba(139, 148, 158, 0.85);
+  /* Near-opaque (was 0.55): the pill sits over live message text, and a
+     half-transparent backdrop let covered glyphs show through muddied
+     rather than cleanly hidden underneath the stamp. */
+  background: rgba(13, 17, 23, 0.92);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   white-space: nowrap;
+  /* none while hidden: an opacity-0 element still hit-tests, so without
+     this the invisible stamp would silently intercept clicks and text
+     selection over the trailing corner of every message. */
   pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease;
   font-variant-numeric: tabular-nums;
 }
 .msg-time-row.is-revealed .msg-time-stamp {
-  max-width: 8rem;
-  margin-left: 8px;
   opacity: 1;
-  transform: translateX(0);
+  /* auto (not none) only while revealed: the stamp is the only element
+     with a `:title` tooltip (the clock time) — pointer-events: none made
+     it unreachable to the mouse, so hover could never trigger the native
+     tooltip. Scoped to the small revealed stamp itself, not the row, so
+     hover-reveal and text selection elsewhere are unaffected. */
+  pointer-events: auto;
 }
 </style>

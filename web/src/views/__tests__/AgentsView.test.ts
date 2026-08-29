@@ -4,9 +4,10 @@ import { nextTick } from 'vue'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import { MODEL_TOOL_WARNING } from '../agents/modelToolCapabilities'
 
-const { mockModelsAvailable, mockAgentsGet } = vi.hoisted(() => ({
+const { mockModelsAvailable, mockAgentsGet, mockAgentsUpdate } = vi.hoisted(() => ({
   mockModelsAvailable: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
   mockAgentsGet: vi.fn().mockResolvedValue({}),
+  mockAgentsUpdate: vi.fn().mockResolvedValue({}),
 }))
 
 // We need to stub useAgents so we can control the agents list.
@@ -63,6 +64,7 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
       agents: {
         ...orig.api.agents,
         get: (...args: unknown[]) => mockAgentsGet(...args),
+        update: (...args: unknown[]) => mockAgentsUpdate(...args),
         capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
         validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
       },
@@ -96,6 +98,7 @@ describe('AgentsView', () => {
     mockOpenSpaceDM.mockReset()
     mockOpenSpaceDM.mockResolvedValue({ id: 'space-123', kind: 'dm', leadAgent: 'Alpha' })
     mockModelsAvailable.mockReset().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] })
+    mockAgentsUpdate.mockReset().mockResolvedValue({})
     mockAgentsGet.mockReset().mockResolvedValue({
       name: 'Alpha',
       model: 'gpt-4',
@@ -378,4 +381,78 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
   })
+
+  // ── Personality preset ────────────────────────────────────────────────────
+  // Fails without the feature: before the select existed, there was no way
+  // to set personality from the editor and save() would never send it.
+
+  it('personality select defaults to Default for an agent with no preset', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const select = wrapper.get('[data-testid="agent-personality-select"]')
+    expect((select.element as HTMLSelectElement).value).toBe('default')
+  })
+
+  it('changing the personality select marks the form dirty and saves the value', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const select = wrapper.get('[data-testid="agent-personality-select"]')
+    await select.setValue('strict-reviewer')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Unsaved changes')
+
+    await wrapper.get('[data-testid="save-agent-btn-sticky"]').trigger('click')
+    await flushPromises()
+
+    expect(mockAgentsUpdate).toHaveBeenCalled()
+    const [name, payload] = mockAgentsUpdate.mock.calls[mockAgentsUpdate.mock.calls.length - 1]
+    expect(name).toBe('Alpha')
+    expect((payload as any).personality).toBe('strict-reviewer')
+  })
+
+  it('the vet-work toggle reflects the strict-reviewer default until explicitly overridden', async () => {
+    mockAgentsGet.mockResolvedValueOnce({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: [],
+      personality: 'strict-reviewer',
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const toggle = wrapper.get('[data-testid="agent-vet-work-toggle"]')
+    expect(toggle.attributes('class')).toContain('bg-huginn-blue')
+
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Unsaved changes')
+
+    await wrapper.get('[data-testid="save-agent-btn-sticky"]').trigger('click')
+    await flushPromises()
+
+    expect(mockAgentsUpdate).toHaveBeenCalled()
+    const [, payload] = mockAgentsUpdate.mock.calls[mockAgentsUpdate.mock.calls.length - 1]
+    expect((payload as any).vet_work).toBe(false)
+  })
 })
+

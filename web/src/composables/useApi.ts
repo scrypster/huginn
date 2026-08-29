@@ -6,6 +6,12 @@ export interface FinishSummary {
   KeyDecisions?: string[]
   Artifacts?: string[]
   Status: string
+  // VetLabel/VetFindings carry the productized vet loop's verdict (see
+  // internal/threadmgr AttachVetResult). VetLabel is "" (not vetted),
+  // "no findings", "N findings", or "did not complete" — the vet pass
+  // errored or timed out and this run is honestly labeled unvetted.
+  VetLabel?: string
+  VetFindings?: string
 }
 
 export interface Thread {
@@ -56,6 +62,12 @@ export interface HookAuditEntry {
   exit_code: number
   output: string
   error?: string
+  // test_run distinguishes a manual "Test" run (Settings -> Hooks -> Test
+  // button / POST /hooks/test) from a real PreToolUse/PostToolUse
+  // execution during an agent's turn — see internal/agent/hooks_config.go
+  // HookAuditEntry.TestRun. Both are audited (trust story: "every run is
+  // audited"), but the UI must not let a test read as a real veto.
+  test_run?: boolean
 }
 
 export interface Connection {
@@ -127,6 +139,13 @@ export interface Agent {
   approved_tools?: string[] // tool names pre-approved to skip the permission prompt
   skills?: unknown[]
   is_default?: boolean
+  // personality: behavioral preset name — see web/src/utils/personalityPresets.ts.
+  // "" / undefined behaves like "default" (no overlay).
+  personality?: string
+  // vet_work: tri-state on the wire (omitted = inherit the personality
+  // preset's default, e.g. true for strict-reviewer; explicit true/false
+  // always wins). The editor sends whichever it holds in form state.
+  vet_work?: boolean
   [key: string]: unknown
 }
 

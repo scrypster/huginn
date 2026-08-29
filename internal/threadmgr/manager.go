@@ -814,6 +814,10 @@ func (tm *ThreadManager) ListBySession(sessionID string) []*Thread {
 	for _, t := range tm.threads {
 		if t.SessionID == sessionID {
 			cp := *t // copy the struct
+			if t.Summary != nil {
+				s := *t.Summary // deep-copy the FinishSummary value, same as Get
+				cp.Summary = &s
+			}
 			result = append(result, &cp)
 		}
 	}
@@ -960,6 +964,45 @@ func (tm *ThreadManager) Complete(id string, summary FinishSummary) {
 	tm.fireStatusChange(id, status)
 	// Release file leases now that the thread has finished writing.
 	tm.ReleaseLeases(id)
+}
+
+// AttachVetResult records the productized vet loop's verdict onto a thread
+// that has already reached StatusDone, appending a short "Vetted: ..."
+// line to the thread's Summary text (the same field the thread panel and
+// WaitForThreads results already surface — no new event type needed) and
+// setting the structured VetLabel/VetFindings fields.
+//
+// Idempotent: a no-op (returns false) if the thread is missing, has no
+// Summary yet, or already carries a VetLabel — this is the "cap: one vet
+// per thread" enforcement point. Safe to call from any goroutine.
+func (tm *ThreadManager) AttachVetResult(id, label, findings string) bool {
+	tm.mu.Lock()
+	t, ok := tm.threads[id]
+	if !ok || t.Summary == nil || t.Summary.VetLabel != "" {
+		tm.mu.Unlock()
+		return false
+	}
+	t.Summary.VetLabel = label
+	t.Summary.VetFindings = findings
+	t.Summary.Summary = strings.TrimRight(t.Summary.Summary, "\n") +
+		fmt.Sprintf("\n\n---\n**Vetted: %s**", label)
+	if findings != "" {
+		t.Summary.Summary += "\n" + findings
+	}
+	liveCopy := *t
+	summaryCopy := *t.Summary
+	liveCopy.Summary = &summaryCopy
+	store := tm.store
+	tm.mu.Unlock()
+
+	if store != nil {
+		go func(th Thread) {
+			if err := store.SaveThread(context.Background(), &th); err != nil {
+				slog.Warn("threadmgr: SaveThread (vet) failed", "thread_id", th.ID, "err", err)
+			}
+		}(liveCopy)
+	}
+	return true
 }
 
 // ResolveDependencies converts DependsOnHints (agent names) to thread IDs by

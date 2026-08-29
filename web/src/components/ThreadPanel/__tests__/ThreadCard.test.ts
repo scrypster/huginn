@@ -388,6 +388,40 @@ describe('ThreadCard — summary metadata', () => {
     expect(wrapper.html()).toContain('Remove legacy store')
   })
 
+  // Fails without the feature: before VetLabel existed on FinishSummary,
+  // there was no surface at all for the vet loop's verdict in the UI.
+  it('renders a "Vetted: no findings" badge', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done', VetLabel: 'no findings' },
+    }))
+    expect(wrapper.get('[data-testid="thread-vet-badge"]').text()).toContain('Vetted: no findings')
+  })
+
+  it('renders a findings-count badge', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done', VetLabel: '2 findings', VetFindings: '- missing check' },
+    }))
+    expect(wrapper.get('[data-testid="thread-vet-badge"]').text()).toContain('Vetted: 2 findings')
+  })
+
+  it('renders an honest "did not complete" badge rather than hiding the failure', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done', VetLabel: 'did not complete' },
+    }))
+    expect(wrapper.get('[data-testid="thread-vet-badge"]').text()).toContain('Vetted: did not complete')
+  })
+
+  it('does not render a vet badge when the thread was never vetted', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done' },
+    }))
+    expect(wrapper.find('[data-testid="thread-vet-badge"]').exists()).toBe(false)
+  })
+
   it('does not render summary section when thread is running', () => {
     const wrapper = mountCard(makeThread({
       Status: 'thinking',

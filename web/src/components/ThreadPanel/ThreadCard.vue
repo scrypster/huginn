@@ -163,6 +163,17 @@
         <p class="text-[10px] uppercase tracking-wider text-huginn-muted/50 font-medium">Summary</p>
         <p class="text-[11px] text-huginn-muted leading-relaxed">{{ parseSummary(thread.Summary.Summary) }}</p>
 
+        <!-- Vet verdict: honest even when the pass didn't complete -->
+        <span v-if="thread.Summary.VetLabel" data-testid="thread-vet-badge"
+          class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full mt-1"
+          :style="thread.Summary.VetLabel === 'no findings'
+            ? 'background:rgba(63,185,80,0.1);color:#3fb950'
+            : thread.Summary.VetLabel === 'did not complete'
+              ? 'background:rgba(210,153,34,0.1);color:#d29922'
+              : 'background:rgba(248,81,73,0.1);color:#f85149'">
+          Vetted: {{ thread.Summary.VetLabel }}
+        </span>
+
         <!-- Files modified -->
         <div v-if="thread.Summary.FilesModified?.length" class="flex flex-wrap gap-1 mt-1">
           <span v-for="f in thread.Summary.FilesModified" :key="f"

@@ -11,6 +11,7 @@ export interface AgentSummary {
   description?: string          // agent's one-line description
   heartbeat_enabled?: boolean   // whether a heartbeat cron is active
   vault_name?: string           // MuninnDB vault name if memory is configured
+  personality?: string          // behavioral preset name; "" = default (no badge)
   [key: string]: unknown
 }
 

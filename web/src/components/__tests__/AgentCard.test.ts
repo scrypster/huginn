@@ -110,4 +110,25 @@ describe('AgentCard', () => {
     })
     expect(wrapper.find('[data-testid="model-tools-warning"]').exists()).toBe(false)
   })
+
+  // Fails without the feature: before the personality badge existed, a
+  // non-default preset was invisible on the agent card entirely.
+  it('shows a personality badge for a non-default preset', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ personality: 'strict-reviewer' }) },
+    })
+    expect(wrapper.get('[data-testid="agent-personality-badge"]').text()).toBe('Strict Reviewer')
+  })
+
+  it('hides the personality badge for the default preset', () => {
+    const wrapper = mount(AgentCard, {
+      props: { agent: makeAgent({ personality: 'default' }) },
+    })
+    expect(wrapper.find('[data-testid="agent-personality-badge"]').exists()).toBe(false)
+  })
+
+  it('hides the personality badge when no personality is set', () => {
+    const wrapper = mount(AgentCard, { props: { agent: makeAgent() } })
+    expect(wrapper.find('[data-testid="agent-personality-badge"]').exists()).toBe(false)
+  })
 })
