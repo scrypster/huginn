@@ -46,20 +46,19 @@ type Manager struct {
 	runMu sync.Mutex
 }
 
-// NewManager creates a checkpoint Manager rooted at sandboxRoot. locker may
-// be nil, in which case restores are not serialized against other file
-// writers (fine for tests / single-writer use; production wiring should
-// pass the same *tools.FileLockManager used by write_file/edit_file).
-func NewManager(ctx context.Context, sandboxRoot string, locker Locker) (*Manager, error) {
-	store, err := NewStore(ctx, sandboxRoot)
+// NewManager creates a checkpoint Manager for sandboxRoot, with its shadow
+// store and ledger rooted under huginnHome (never inside sandboxRoot — see
+// gitshadow.go's storeSubdir doc, A5). locker may be nil, in which case
+// restores are not serialized against other file writers (fine for tests /
+// single-writer use; production wiring MUST pass the exact same
+// *tools.FileLockManager instance used by write_file/edit_file — see
+// canonicalLockPath below for why the key namespace must also match).
+func NewManager(ctx context.Context, huginnHome, sandboxRoot string, locker Locker) (*Manager, error) {
+	store, err := NewStore(ctx, huginnHome, sandboxRoot)
 	if err != nil {
 		return nil, err
 	}
-	absRoot, err := filepath.Abs(sandboxRoot)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint: resolve sandbox root: %w", err)
-	}
-	ldg, err := newLedger(filepath.Join(absRoot, ledgerDBName))
+	ldg, err := newLedger(store.LedgerPath())
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +76,31 @@ func (m *Manager) Close() error {
 
 func preRef(threadID string) string  { return "refs/huginn/run/" + threadID + "/pre" }
 func postRef(threadID string) string { return "refs/huginn/run/" + threadID + "/post" }
+
+// canonicalLockPath maps a repo-relative slash path (as returned by
+// Store.ChangedPaths / stored in RunRecord.TouchedPaths) to the SAME
+// absolute-path key namespace internal/tools.ResolveSandboxed produces for
+// write_file/edit_file's own FileLock.Lock calls (A1). Without this, even a
+// shared *tools.FileLockManager instance never actually serializes anything
+// against RevertRun: write_file locks the absolute, symlink-resolved path
+// it resolves the request to, while RevertRun previously locked the bare
+// relative path straight from the shadow-git diff ("hello.txt" vs
+// "/abs/sandbox/hello.txt") — two keys that never collide.
+//
+// This mirrors ResolveSandboxed's EvalSymlinks-then-fall-back-to-parent
+// logic (internal/tools/sandbox.go) rather than importing it, to avoid an
+// internal/checkpoint <-> internal/tools import cycle (internal/tools
+// already imports internal/checkpoint to expose the checkpoint_* tools).
+func (m *Manager) canonicalLockPath(relPath string) string {
+	joined := filepath.Join(m.store.WorkTree(), filepath.FromSlash(relPath))
+	if resolved, err := filepath.EvalSymlinks(joined); err == nil {
+		return resolved
+	}
+	if resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(joined)); err == nil {
+		return filepath.Join(resolvedParent, filepath.Base(joined))
+	}
+	return joined
+}
 
 // BeginRun captures a pre-run snapshot of the working tree and records a new
 // active ledger entry for threadID. Called once per run, at the moment a
@@ -106,6 +130,10 @@ func (m *Manager) BeginRun(ctx context.Context, threadID, agentID, taskSummary s
 	}
 	r.Status = RunActive
 	r.PreSnapshot = hash
+	// Best-effort: a failure to list ignored paths must never block
+	// BeginRun (the pre-snapshot itself already succeeded) — it only
+	// degrades the honesty disclosure in RevertResult later.
+	r.IgnoredAtBegin, _ = m.store.IgnoredPaths(ctx)
 	if err := m.ledger.Insert(ctx, r); err != nil {
 		return r, fmt.Errorf("checkpoint: BeginRun(%s): record ledger: %w", threadID, err)
 	}
@@ -168,6 +196,24 @@ func (m *Manager) EndRun(ctx context.Context, threadID string) (RunRecord, error
 	r.PostSnapshot = hash
 	r.TouchedPaths = touched
 	r.CompletedAt = time.Now()
+	// A8: which gitignored-at-begin paths are gone by end-of-run — the
+	// checkpoint system's honest blind spot, since git add -A never
+	// snapshotted them in the first place. Best-effort, same reasoning as
+	// BeginRun's IgnoredAtBegin capture.
+	if len(r.IgnoredAtBegin) > 0 {
+		nowIgnored, ignErr := m.store.IgnoredPaths(ctx)
+		if ignErr == nil {
+			stillIgnored := make(map[string]bool, len(nowIgnored))
+			for _, p := range nowIgnored {
+				stillIgnored[p] = true
+			}
+			for _, p := range r.IgnoredAtBegin {
+				if !stillIgnored[p] {
+					r.IgnoredTouched = append(r.IgnoredTouched, p)
+				}
+			}
+		}
+	}
 	if err := m.ledger.Update(ctx, r); err != nil {
 		return r, fmt.Errorf("checkpoint: EndRun(%s): record ledger: %w", threadID, err)
 	}
@@ -184,6 +230,42 @@ func (m *Manager) MarkPushed(ctx context.Context, threadID, prURL string) error 
 	r.Pushed = true
 	r.PRURL = prURL
 	return m.ledger.Update(ctx, r)
+}
+
+// MarkAllUnsyncedPushed flags every RunCompleted run not already marked
+// Pushed as pushed, with prURL attached to each. This is the production
+// caller MarkPushed was missing entirely (A2): a git_push tool call has no
+// reliable way to know which in-flight runs' file changes ended up in the
+// pushed commit (that would require correlating TouchedPaths against the
+// pushed commit's diff, which the shadow store — a separate git history —
+// can't do without duplicating real-git plumbing). The coarse, honest
+// alternative: on a successful push, treat every completed-but-unsynced run
+// as now "pushed" — conservative in the safe direction, since the
+// pushed-guard's failure mode (blocking an unnecessary revert until
+// allow_after_push is passed) is far less costly than the guard silently
+// never firing at all (the previous behavior, MarkPushed with zero
+// production callers).
+func (m *Manager) MarkAllUnsyncedPushed(ctx context.Context, prURL string) (int, error) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	all, err := m.ledger.List(ctx, 1<<30)
+	if err != nil {
+		return 0, fmt.Errorf("checkpoint: MarkAllUnsyncedPushed: list runs: %w", err)
+	}
+	marked := 0
+	for _, r := range all {
+		if r.Status != RunCompleted || r.Pushed {
+			continue
+		}
+		r.Pushed = true
+		r.PRURL = prURL
+		if err := m.ledger.Update(ctx, r); err != nil {
+			return marked, fmt.Errorf("checkpoint: MarkAllUnsyncedPushed: update %s: %w", r.ThreadID, err)
+		}
+		marked++
+	}
+	return marked, nil
 }
 
 // Get returns the ledger record for threadID.
@@ -268,7 +350,14 @@ func (m *Manager) RevertRun(ctx context.Context, threadID string, opts RevertOpt
 
 	result := RevertResult{}
 	if len(paths) == 0 {
-		result.Warning = "this run has no recorded touched paths to restore (it may not have changed anything, or ended before a post-run snapshot was taken)"
+		// A7: never let this read as a success headline — a run with no
+		// touched paths at all commonly means it ran in a worktree (whose
+		// changes this wave still doesn't capture) or touched only
+		// gitignored files, not that it "changed nothing". Callers (see
+		// checkpoint_tools.go) must lead with this Warning, gated on
+		// NothingCaptured, rather than printing "Reverted run X."
+		result.Warning = "Nothing captured for this run — it may have run in a worktree or touched only ignored files; nothing was restored."
+		result.NothingCaptured = true
 		return result, nil
 	}
 
@@ -293,12 +382,25 @@ func (m *Manager) RevertRun(ctx context.Context, threadID string, opts RevertOpt
 		}
 	}
 
+	// A9: continue collecting results across all paths even when one fails
+	// to restore, rather than aborting the whole run's revert on the first
+	// error. A caller that discards a partial result on error (the old
+	// behavior) has no way to tell a human "12 of 13 files restored, 1
+	// failed: X" — it just reports total failure and leaves the 12 restores
+	// that DID happen undisclosed.
+	var restoreErrs []string
 	for _, p := range paths {
-		m.locker.Lock(p)
+		lockKey := m.canonicalLockPath(p)
+		m.locker.Lock(lockKey)
 		restored, deleted, skip, restoreErr := m.revertOnePath(ctx, r.PreSnapshot, p, changedSinceRun[p])
-		m.locker.Unlock(p)
+		m.locker.Unlock(lockKey)
 		if restoreErr != nil {
-			return result, fmt.Errorf("checkpoint: RevertRun(%s): restore %s: %w", threadID, p, restoreErr)
+			if result.Failed == nil {
+				result.Failed = make(map[string]string, 1)
+			}
+			result.Failed[p] = restoreErr.Error()
+			restoreErrs = append(restoreErrs, fmt.Sprintf("%s: %v", p, restoreErr))
+			continue
 		}
 		switch {
 		case skip:
@@ -323,18 +425,49 @@ func (m *Manager) RevertRun(ctx context.Context, threadID string, opts RevertOpt
 		"any application database or external state the run modified",
 		"network calls, package installs, or other bash side effects with no filesystem trace",
 	}
+	if len(r.IgnoredTouched) > 0 {
+		result.NotRestorable = append(result.NotRestorable,
+			fmt.Sprintf("gitignored file(s) this run may have deleted or changed, never snapshotted or protected: %s", strings.Join(r.IgnoredTouched, ", ")))
+	}
 
 	var warn strings.Builder
 	warn.WriteString("Files only: this reverts the working tree, not databases, network calls, or other side effects.")
 	if len(result.SkippedEdited) > 0 {
 		fmt.Fprintf(&warn, " %d file(s) were hand-edited after this run and were left alone (pass All to override).", len(result.SkippedEdited))
 	}
+	if len(result.Failed) > 0 {
+		fmt.Fprintf(&warn, " %d file(s) FAILED to restore: %s.", len(result.Failed), strings.Join(sortedKeys(result.Failed), ", "))
+	}
 	if r.Pushed {
 		fmt.Fprintf(&warn, " This run was already pushed (%s) — local files were restored, but the pushed commit was NOT rewritten; open a revert PR to undo it remotely.", strings.TrimSpace(r.PRURL))
 	}
 	result.Warning = warn.String()
 
+	// A16: a successful (even if partially failed) revert attempt updates
+	// the run's status so checkpoint_list reflects reality — previously
+	// RunReverted was defined but never set anywhere, so every reverted run
+	// still showed status=completed forever. Best-effort: a failure here
+	// must not turn a real restore into a reported error.
+	if len(result.Restored) > 0 || len(result.Deleted) > 0 {
+		r.Status = RunReverted
+		_ = m.ledger.Update(ctx, r)
+	}
+
+	if len(restoreErrs) > 0 {
+		return result, fmt.Errorf("checkpoint: RevertRun(%s): %d of %d path(s) failed to restore: %s", threadID, len(restoreErrs), len(paths), strings.Join(restoreErrs, "; "))
+	}
 	return result, nil
+}
+
+// sortedKeys returns the sorted keys of a string-keyed map, for stable,
+// deterministic warning text.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // revertOnePath restores a single path, honoring hand-edit preservation:
@@ -351,6 +484,12 @@ func (m *Manager) revertOnePath(ctx context.Context, preHash, path string, handE
 // GC prunes ledger rows and shadow-git refs beyond the retention window,
 // then reclaims the freed shadow-store disk with `git gc` (Sharp edge 4).
 func (m *Manager) GC(ctx context.Context, opts GCOptions) (GCResult, error) {
+	// A12: GC previously took no lock at all, so it could race a concurrent
+	// RevertRun/BeginRun/EndRun's shadow-git add+commit (the shadow index is
+	// shared process-wide, same reasoning as runMu's doc comment above).
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
 	keepRuns := opts.KeepRuns
 	if keepRuns <= 0 {
 		keepRuns = DefaultKeepRuns

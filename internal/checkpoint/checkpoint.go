@@ -71,6 +71,18 @@ type RunRecord struct {
 	// CaptureError is set (and Status == RunCaptureFailed) when a snapshot
 	// attempt failed. Never empty when Status == RunCaptureFailed.
 	CaptureError string
+	// IgnoredAtBegin lists paths the user's own .gitignore excluded from
+	// the pre-run snapshot (git add -A silently skips them — they are
+	// never protected by any checkpoint, tracked or not). Captured at
+	// BeginRun so EndRun can diff against it and tell which of them
+	// disappeared during the run (see IgnoredTouched) — the checkpoint
+	// system's honest blind spot (A8).
+	IgnoredAtBegin []string
+	// IgnoredTouched lists paths from IgnoredAtBegin that no longer exist
+	// (or are no longer ignored, e.g. removed) by EndRun — the run may have
+	// deleted or otherwise touched them, and none of that is recorded in
+	// any snapshot. Surfaced via RevertResult.NotRestorable.
+	IgnoredTouched []string
 }
 
 // RevertOptions controls how RevertRun restores files.
@@ -95,11 +107,17 @@ type RevertOptions struct {
 // honesty requirement from the design doc, modeled on git.go's
 // untrackedFilesNote pattern.
 type RevertResult struct {
-	Restored      []string // paths whose content was rewritten to match the pre-snapshot
-	Deleted       []string // paths that did not exist at the pre-snapshot and were removed
-	SkippedEdited []string // paths touched by this run but also hand-edited afterward — preserved, not restored (unless All)
-	NotRestorable []string // paths the design doc says are out of scope: DB rows, untracked-but-ignored files, side effects
-	Warning       string   // human-readable summary of anything the caller must know (pushed run, bash side effects, etc.)
+	Restored      []string          // paths whose content was rewritten to match the pre-snapshot
+	Deleted       []string          // paths that did not exist at the pre-snapshot and were removed
+	SkippedEdited []string          // paths touched by this run but also hand-edited afterward — preserved, not restored (unless All)
+	NotRestorable []string          // paths/notes the design doc says are out of scope: DB rows, gitignored files, side effects
+	Failed        map[string]string // path -> error message, for touched paths that errored while restoring (A9: partial results are never discarded)
+	Warning       string            // human-readable summary of anything the caller must know (pushed run, bash side effects, etc.)
+	// NothingCaptured is true when this run has no recorded touched paths
+	// at all — e.g. it ran in a worktree (uncaptured today) or touched only
+	// gitignored files. Callers must lead with Warning, not a success
+	// headline, when this is true (A7).
+	NothingCaptured bool
 }
 
 // GCOptions controls checkpoint_gc retention.

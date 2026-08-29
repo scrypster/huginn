@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS runs (
 	pushed         INTEGER NOT NULL DEFAULT 0,
 	pr_url         TEXT NOT NULL DEFAULT '',
 	capture_error  TEXT NOT NULL DEFAULT '',
+	ignored_at_begin TEXT NOT NULL DEFAULT '[]',
+	ignored_touched  TEXT NOT NULL DEFAULT '[]',
 	created_at     TEXT NOT NULL,
 	completed_at   TEXT
 );
@@ -50,6 +52,13 @@ func newLedger(path string) (*ledger, error) {
 		db.Close()
 		return nil, fmt.Errorf("checkpoint: migrate ledger schema: %w", err)
 	}
+	// Additive migration for ledger DBs created before ignored_at_begin/
+	// ignored_touched existed (A8) — CREATE TABLE IF NOT EXISTS above is a
+	// no-op against an already-existing table, so these columns need an
+	// explicit ALTER. Errors are ignored: "duplicate column" on a DB that
+	// already has them is the expected steady-state outcome.
+	_, _ = db.Write().Exec(`ALTER TABLE runs ADD COLUMN ignored_at_begin TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = db.Write().Exec(`ALTER TABLE runs ADD COLUMN ignored_touched TEXT NOT NULL DEFAULT '[]'`)
 	return &ledger{db: db}, nil
 }
 
@@ -62,14 +71,22 @@ func (l *ledger) Insert(ctx context.Context, r RunRecord) error {
 	if err != nil {
 		return fmt.Errorf("checkpoint: marshal touched_paths: %w", err)
 	}
+	ignoredBegin, err := json.Marshal(r.IgnoredAtBegin)
+	if err != nil {
+		return fmt.Errorf("checkpoint: marshal ignored_at_begin: %w", err)
+	}
+	ignoredTouched, err := json.Marshal(r.IgnoredTouched)
+	if err != nil {
+		return fmt.Errorf("checkpoint: marshal ignored_touched: %w", err)
+	}
 	_, err = l.db.Write().ExecContext(ctx, `
-		INSERT INTO runs (thread_id, agent_id, task_summary, status, pre_snapshot, post_snapshot, touched_paths, pushed, pr_url, capture_error, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO runs (thread_id, agent_id, task_summary, status, pre_snapshot, post_snapshot, touched_paths, pushed, pr_url, capture_error, ignored_at_begin, ignored_touched, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(thread_id) DO UPDATE SET
 			agent_id=excluded.agent_id, task_summary=excluded.task_summary, status=excluded.status,
-			pre_snapshot=excluded.pre_snapshot, created_at=excluded.created_at
+			pre_snapshot=excluded.pre_snapshot, ignored_at_begin=excluded.ignored_at_begin, created_at=excluded.created_at
 	`, r.ThreadID, r.AgentID, r.TaskSummary, string(r.Status), r.PreSnapshot, r.PostSnapshot,
-		string(touched), boolToInt(r.Pushed), r.PRURL, r.CaptureError,
+		string(touched), boolToInt(r.Pushed), r.PRURL, r.CaptureError, string(ignoredBegin), string(ignoredTouched),
 		r.CreatedAt.UTC().Format(time.RFC3339Nano), nullableTime(r.CompletedAt))
 	return err
 }
@@ -79,11 +96,15 @@ func (l *ledger) Update(ctx context.Context, r RunRecord) error {
 	if err != nil {
 		return fmt.Errorf("checkpoint: marshal touched_paths: %w", err)
 	}
+	ignoredTouched, err := json.Marshal(r.IgnoredTouched)
+	if err != nil {
+		return fmt.Errorf("checkpoint: marshal ignored_touched: %w", err)
+	}
 	res, err := l.db.Write().ExecContext(ctx, `
-		UPDATE runs SET status=?, post_snapshot=?, touched_paths=?, pushed=?, pr_url=?, capture_error=?, completed_at=?
+		UPDATE runs SET status=?, post_snapshot=?, touched_paths=?, pushed=?, pr_url=?, capture_error=?, ignored_touched=?, completed_at=?
 		WHERE thread_id=?
 	`, string(r.Status), r.PostSnapshot, string(touched), boolToInt(r.Pushed), r.PRURL, r.CaptureError,
-		nullableTime(r.CompletedAt), r.ThreadID)
+		string(ignoredTouched), nullableTime(r.CompletedAt), r.ThreadID)
 	if err != nil {
 		return err
 	}
@@ -99,7 +120,7 @@ func (l *ledger) Update(ctx context.Context, r RunRecord) error {
 
 func (l *ledger) Get(ctx context.Context, threadID string) (RunRecord, error) {
 	row := l.db.Read().QueryRowContext(ctx, `
-		SELECT thread_id, agent_id, task_summary, status, pre_snapshot, post_snapshot, touched_paths, pushed, pr_url, capture_error, created_at, completed_at
+		SELECT thread_id, agent_id, task_summary, status, pre_snapshot, post_snapshot, touched_paths, pushed, pr_url, capture_error, ignored_at_begin, ignored_touched, created_at, completed_at
 		FROM runs WHERE thread_id = ?
 	`, threadID)
 	return scanRun(row)
@@ -110,7 +131,7 @@ func (l *ledger) List(ctx context.Context, limit int) ([]RunRecord, error) {
 		limit = 100
 	}
 	rows, err := l.db.Read().QueryContext(ctx, `
-		SELECT thread_id, agent_id, task_summary, status, pre_snapshot, post_snapshot, touched_paths, pushed, pr_url, capture_error, created_at, completed_at
+		SELECT thread_id, agent_id, task_summary, status, pre_snapshot, post_snapshot, touched_paths, pushed, pr_url, capture_error, ignored_at_begin, ignored_touched, created_at, completed_at
 		FROM runs ORDER BY created_at DESC LIMIT ?
 	`, limit)
 	if err != nil {
@@ -165,11 +186,11 @@ type rowScanner interface {
 
 func scanRun(row rowScanner) (RunRecord, error) {
 	var r RunRecord
-	var status, touchedJSON, createdAt string
+	var status, touchedJSON, ignoredBeginJSON, ignoredTouchedJSON, createdAt string
 	var completedAt sql.NullString
 	var pushed int
 	if err := row.Scan(&r.ThreadID, &r.AgentID, &r.TaskSummary, &status, &r.PreSnapshot, &r.PostSnapshot,
-		&touchedJSON, &pushed, &r.PRURL, &r.CaptureError, &createdAt, &completedAt); err != nil {
+		&touchedJSON, &pushed, &r.PRURL, &r.CaptureError, &ignoredBeginJSON, &ignoredTouchedJSON, &createdAt, &completedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return RunRecord{}, ErrRunNotFound
 		}
@@ -179,6 +200,16 @@ func scanRun(row rowScanner) (RunRecord, error) {
 	r.Pushed = pushed != 0
 	if err := json.Unmarshal([]byte(touchedJSON), &r.TouchedPaths); err != nil {
 		return RunRecord{}, fmt.Errorf("checkpoint: unmarshal touched_paths: %w", err)
+	}
+	if ignoredBeginJSON != "" {
+		if err := json.Unmarshal([]byte(ignoredBeginJSON), &r.IgnoredAtBegin); err != nil {
+			return RunRecord{}, fmt.Errorf("checkpoint: unmarshal ignored_at_begin: %w", err)
+		}
+	}
+	if ignoredTouchedJSON != "" {
+		if err := json.Unmarshal([]byte(ignoredTouchedJSON), &r.IgnoredTouched); err != nil {
+			return RunRecord{}, fmt.Errorf("checkpoint: unmarshal ignored_touched: %w", err)
+		}
 	}
 	if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
 		r.CreatedAt = t

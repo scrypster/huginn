@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/checkpoint"
@@ -35,7 +36,7 @@ func initCheckpointToolsTestRepo(t *testing.T) string {
 
 func TestRegisterCheckpointTools_SchemasValid(t *testing.T) {
 	dir := initCheckpointToolsTestRepo(t)
-	mgr, err := checkpoint.NewManager(context.Background(), dir, tools.NewFileLockManager())
+	mgr, err := checkpoint.NewManager(context.Background(), t.TempDir(), dir, tools.NewFileLockManager())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestRegisterCheckpointTools_SchemasValid(t *testing.T) {
 func TestCheckpointListTool_Execute_EmptyThenPopulated(t *testing.T) {
 	dir := initCheckpointToolsTestRepo(t)
 	ctx := context.Background()
-	mgr, err := checkpoint.NewManager(ctx, dir, tools.NewFileLockManager())
+	mgr, err := checkpoint.NewManager(ctx, t.TempDir(), dir, tools.NewFileLockManager())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestCheckpointListTool_Execute_EmptyThenPopulated(t *testing.T) {
 func TestCheckpointRevertRunTool_MissingThreadID(t *testing.T) {
 	dir := initCheckpointToolsTestRepo(t)
 	ctx := context.Background()
-	mgr, err := checkpoint.NewManager(ctx, dir, tools.NewFileLockManager())
+	mgr, err := checkpoint.NewManager(ctx, t.TempDir(), dir, tools.NewFileLockManager())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -113,5 +114,42 @@ func TestCheckpointRevertRunTool_MissingThreadID(t *testing.T) {
 	result := tool.Execute(ctx, map[string]any{})
 	if !result.IsError {
 		t.Fatal("expected an error when thread_id is missing")
+	}
+}
+
+// TestCheckpointRevertRunTool_NothingCaptured_LeadsWithWarning is A7's
+// regression test: a run with no recorded touched paths (e.g. it ran in a
+// worktree checkpointing doesn't capture, or touched only gitignored
+// files) must have its tool output LEAD with a warning, never print a
+// "Reverted run X." success headline claiming files were restored.
+func TestCheckpointRevertRunTool_NothingCaptured_LeadsWithWarning(t *testing.T) {
+	dir := initCheckpointToolsTestRepo(t)
+	ctx := context.Background()
+	mgr, err := checkpoint.NewManager(ctx, t.TempDir(), dir, tools.NewFileLockManager())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	// BeginRun with no matching EndRun/no file changes at all leaves
+	// TouchedPaths empty — the same shape a worktree-run (uncaptured today)
+	// or an ignored-files-only run produces.
+	if _, err := mgr.BeginRun(ctx, "empty-thread", "coder", "task"); err != nil {
+		t.Fatalf("BeginRun: %v", err)
+	}
+	if _, err := mgr.EndRun(ctx, "empty-thread"); err != nil {
+		t.Fatalf("EndRun: %v", err)
+	}
+
+	tool := &tools.CheckpointRevertRunTool{Manager: mgr}
+	result := tool.Execute(ctx, map[string]any{"thread_id": "empty-thread"})
+	if result.IsError {
+		t.Fatalf("checkpoint_revert_run on an empty-touched-paths run should not itself be an error: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "Reverted run") {
+		t.Fatalf("output claims success (\"Reverted run\") for a run with nothing captured: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "Nothing captured") {
+		t.Fatalf("output does not lead with the nothing-captured warning: %q", result.Output)
 	}
 }

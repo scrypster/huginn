@@ -182,33 +182,58 @@ func (t *CheckpointRevertRunTool) Execute(ctx context.Context, args map[string]a
 	}
 
 	result, err := t.Manager.RevertRun(ctx, threadID, opts)
-	if err != nil {
+	// A9: RevertRun now returns partial results alongside an error rather
+	// than discarding them — only bail with a bare error when there is
+	// truly nothing to show (Manager-level failure before any path was
+	// attempted: capture-failed run, pushed guard, etc.).
+	if err != nil && len(result.Restored) == 0 && len(result.Deleted) == 0 && len(result.Failed) == 0 && !result.NothingCaptured {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("checkpoint_revert_run: %v", err)}
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Reverted run %s.\n", threadID)
-	fmt.Fprintf(&sb, "Restored: %d file(s)", len(result.Restored))
-	if len(result.Restored) > 0 {
-		fmt.Fprintf(&sb, " (%s)", strings.Join(result.Restored, ", "))
+	switch {
+	case result.NothingCaptured:
+		// A7: lead with the warning, never a success headline, when this
+		// run has no recorded touched paths at all (worktree run, or
+		// touched only gitignored files).
+		sb.WriteString(result.Warning)
+		sb.WriteString("\n")
+	case err != nil:
+		fmt.Fprintf(&sb, "Revert run %s completed with errors.\n", threadID)
+	default:
+		fmt.Fprintf(&sb, "Reverted run %s.\n", threadID)
 	}
-	sb.WriteString("\n")
-	if len(result.Deleted) > 0 {
-		fmt.Fprintf(&sb, "Removed (did not exist at checkpoint): %s\n", strings.Join(result.Deleted, ", "))
-	}
-	if len(result.SkippedEdited) > 0 {
-		fmt.Fprintf(&sb, "Skipped (hand-edited since this run finished, preserved): %s\n", strings.Join(result.SkippedEdited, ", "))
-	}
-	if result.Warning != "" {
-		fmt.Fprintf(&sb, "\n%s\n", result.Warning)
+	if !result.NothingCaptured {
+		fmt.Fprintf(&sb, "Restored: %d file(s)", len(result.Restored))
+		if len(result.Restored) > 0 {
+			fmt.Fprintf(&sb, " (%s)", strings.Join(result.Restored, ", "))
+		}
+		sb.WriteString("\n")
+		if len(result.Deleted) > 0 {
+			fmt.Fprintf(&sb, "Removed (did not exist at checkpoint): %s\n", strings.Join(result.Deleted, ", "))
+		}
+		if len(result.SkippedEdited) > 0 {
+			fmt.Fprintf(&sb, "Skipped (hand-edited since this run finished, preserved): %s\n", strings.Join(result.SkippedEdited, ", "))
+		}
+		if len(result.Failed) > 0 {
+			fmt.Fprintf(&sb, "FAILED to restore %d file(s):\n", len(result.Failed))
+			for path, msg := range result.Failed {
+				fmt.Fprintf(&sb, "  %s: %s\n", path, msg)
+			}
+		}
+		if result.Warning != "" {
+			fmt.Fprintf(&sb, "\n%s\n", result.Warning)
+		}
 	}
 	return ToolResult{
-		Output: strings.TrimRight(sb.String(), "\n"),
+		Output:  strings.TrimRight(sb.String(), "\n"),
+		IsError: err != nil,
 		Metadata: map[string]any{
 			"thread_id":      threadID,
 			"restored":       result.Restored,
 			"deleted":        result.Deleted,
 			"skipped_edited": result.SkippedEdited,
+			"failed":         result.Failed,
 			"not_restorable": result.NotRestorable,
 		},
 	}

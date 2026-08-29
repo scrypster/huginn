@@ -613,6 +613,14 @@ func (t *GitStashTool) Execute(ctx context.Context, args map[string]any) ToolRes
 // "no upstream branch" error.
 type GitPushTool struct {
 	SandboxRoot string
+
+	// OnPushed, if set, is called after a successful push with the pushed
+	// branch and remote name. Wired by init_checkpoint.go (A2) to flag
+	// completed-but-unsynced checkpoint runs as Pushed, so
+	// checkpoint_revert_run's pushed-guard (RevertOptions.AllowAfterPush)
+	// actually fires — before this wiring existed, MarkPushed had zero
+	// production callers and the guard was permanently dead.
+	OnPushed func(ctx context.Context, branch, remote string)
 }
 
 func (t *GitPushTool) Name() string { return "git_push" }
@@ -688,6 +696,9 @@ func (t *GitPushTool) Execute(ctx context.Context, args map[string]any) ToolResu
 	}
 	if combined == "" {
 		combined = fmt.Sprintf("pushed %s to %s", branch, remote)
+	}
+	if t.OnPushed != nil {
+		t.OnPushed(ctx, branch, remote)
 	}
 	return ToolResult{Output: combined}
 }

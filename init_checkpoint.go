@@ -20,11 +20,18 @@ import (
 // entry point an orchestrator setup path should call once per sandbox.
 //
 // ONE-LINE INTEGRATION HOOK for the orchestrator: wherever
-// tools.RegisterBuiltins/RegisterGitTools/RegisterWorktreeTools are called
-// for a given (toolReg, sandboxRoot) alongside the *threadmgr.ThreadManager
-// for that session, add:
+// tools.RegisterBuiltinsWithLocker/RegisterGitTools/RegisterWorktreeTools are
+// called for a given (toolReg, sandboxRoot) alongside the
+// *threadmgr.ThreadManager for that session, add:
 //
-//	ckptMgr, unwireCheckpoints, err := initCheckpoints(ctx, sandboxRoot, toolReg, tm)
+//	flm := tools.NewFileLockManager()
+//	tools.RegisterBuiltinsWithLocker(toolReg, sandboxRoot, bashTimeout, flm)
+//	ckptMgr, unwireCheckpoints, err := initCheckpoints(ctx, huginnHome, sandboxRoot, toolReg, tm, flm)
+//
+// Passing the SAME flm to both is required (A1) — RegisterBuiltins (the
+// plain, non-locker variant) creates its own independent FileLockManager,
+// which would leave write_file/edit_file and checkpoint_revert_run
+// serializing against two lock tables that never intersect.
 //
 // and mount its REST surface (optional, only if the HTTP server for that
 // sandbox is available at wiring time):
@@ -33,14 +40,17 @@ import (
 //
 // unwireCheckpoints deregisters the ThreadManager hook and closes the
 // ledger DB — call it on sandbox/session teardown.
-func initCheckpoints(ctx context.Context, sandboxRoot string, toolReg *tools.Registry, tm *threadmgr.ThreadManager) (mgr *checkpoint.Manager, teardown func(), err error) {
-	flm := tools.NewFileLockManager()
-	mgr, err = checkpoint.NewManager(ctx, sandboxRoot, flm)
+func initCheckpoints(ctx context.Context, huginnHome, sandboxRoot string, toolReg *tools.Registry, tm *threadmgr.ThreadManager, flm *tools.FileLockManager) (mgr *checkpoint.Manager, teardown func(), err error) {
+	if flm == nil {
+		flm = tools.NewFileLockManager()
+	}
+	mgr, err = checkpoint.NewManager(ctx, huginnHome, sandboxRoot, flm)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	tools.RegisterCheckpointTools(toolReg, mgr)
+	wireGitPushCheckpoints(toolReg, mgr)
 
 	unwire := wireThreadManagerCheckpoints(tm, mgr)
 
@@ -51,6 +61,28 @@ func initCheckpoints(ctx context.Context, sandboxRoot string, toolReg *tools.Reg
 		}
 	}
 	return mgr, teardown, nil
+}
+
+// wireGitPushCheckpoints hooks git_push's OnPushed callback (added for A2)
+// to flag every completed-but-unsynced checkpoint run as pushed, so
+// checkpoint_revert_run's pushed-guard actually fires. This is a coarse
+// "mark all on any successful push" — see Manager.MarkAllUnsyncedPushed's
+// doc comment for why that's the honest, safe-direction choice rather than
+// trying to correlate TouchedPaths against the pushed commit's diff.
+func wireGitPushCheckpoints(toolReg *tools.Registry, mgr *checkpoint.Manager) {
+	t, ok := toolReg.Get("git_push")
+	if !ok {
+		return
+	}
+	pushTool, ok := t.(*tools.GitPushTool)
+	if !ok {
+		return
+	}
+	pushTool.OnPushed = func(ctx context.Context, branch, remote string) {
+		if _, err := mgr.MarkAllUnsyncedPushed(ctx, ""); err != nil {
+			slog.Error("checkpoint: MarkAllUnsyncedPushed failed", "branch", branch, "remote", remote, "error", err)
+		}
+	}
 }
 
 // wireThreadManagerCheckpoints hooks automatic pre/post-run snapshots into

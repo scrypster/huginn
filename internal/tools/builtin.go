@@ -7,13 +7,27 @@ import (
 
 // RegisterBuiltins creates and registers all built-in tools with the given sandbox root.
 // sandboxRoot is the project directory — tools cannot access paths outside it.
-// A shared FileLockManager is created to serialize concurrent writes to the same file
-// (e.g. when parallel swarm agents target the same path).
+// A fresh FileLockManager is created to serialize concurrent writes to the same file
+// (e.g. when parallel swarm agents target the same path). Callers that also wire up
+// the checkpoint system (init_checkpoint.go) MUST use RegisterBuiltinsWithLocker
+// instead, passing the SAME *FileLockManager instance given to
+// checkpoint.NewManager — otherwise write_file/edit_file and checkpoint_revert_run
+// serialize against two independent lock tables and never actually exclude each
+// other (A1).
 func RegisterBuiltins(reg *Registry, sandboxRoot string, bashTimeout time.Duration) {
+	RegisterBuiltinsWithLocker(reg, sandboxRoot, bashTimeout, NewFileLockManager())
+}
+
+// RegisterBuiltinsWithLocker is RegisterBuiltins with an explicit, caller-owned
+// FileLockManager instead of a fresh one — the shared-lock-manager half of the A1
+// fix. See RegisterBuiltins' doc comment.
+func RegisterBuiltinsWithLocker(reg *Registry, sandboxRoot string, bashTimeout time.Duration, flm *FileLockManager) {
 	if bashTimeout == 0 {
 		bashTimeout = 120 * time.Second
 	}
-	flm := NewFileLockManager()
+	if flm == nil {
+		flm = NewFileLockManager()
+	}
 	reg.Register(&BashTool{SandboxRoot: sandboxRoot, Timeout: bashTimeout})
 	reg.Register(&ReadFileTool{SandboxRoot: sandboxRoot})
 	reg.Register(&WriteFileTool{SandboxRoot: sandboxRoot, FileLock: flm})

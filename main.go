@@ -2869,7 +2869,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// missing this registration, so applyToolbelt returned empty schemas for
 		// any agent with local_tools configured (["*"] or named list).
 		toolReg := tools.NewRegistry()
-		tools.RegisterBuiltins(toolReg, srvCWD, srvBashTimeout)
+		// Shared with initCheckpoints below (A1) — checkpoint_revert_run
+		// must serialize against write_file/edit_file through the SAME
+		// FileLockManager instance, or the two lock tables never intersect.
+		srvFileLock := tools.NewFileLockManager()
+		tools.RegisterBuiltinsWithLocker(toolReg, srvCWD, srvBashTimeout, srvFileLock)
 		tools.RegisterGitTools(toolReg, srvCWD)
 		tools.RegisterTestsTool(toolReg, srvCWD, srvBashTimeout)
 		tools.RegisterGitHubTools(toolReg, srvCWD)
@@ -2915,7 +2919,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// tools + authed REST under /api/v1/checkpoints/. Failure to init is
 		// non-fatal (logged) — the server runs without undo rather than not
 		// at all, and the absence is visible via the missing tools/routes.
-		if ckptMgr, ckptTeardown, ckptErr := initCheckpoints(context.Background(), srvCWD, toolReg, tm); ckptErr != nil {
+		if ckptMgr, ckptTeardown, ckptErr := initCheckpoints(context.Background(), huginnHome, srvCWD, toolReg, tm, srvFileLock); ckptErr != nil {
 			logger.Warn("checkpoints disabled: init failed", "err", ckptErr)
 		} else {
 			srv.SetCheckpointHandler(checkpoint.HTTPHandler(ckptMgr))
