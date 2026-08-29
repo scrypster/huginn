@@ -3323,6 +3323,14 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// (blocks syntactically-broken Go/Python writes; per-repo overridable
 		// via .huginn/workspace.json syntax_validation).
 		orch.EnableToolHooks()
+		// User-configurable hooks (hooks.json): off by default, only active
+		// once the user (or an agent they confirmed) creates one of these
+		// files. Load errors (malformed JSON) are logged loudly, never
+		// swallowed — the reload endpoint (POST /api/v1/hooks/reload)
+		// surfaces the same error after an edit.
+		if _, err := orch.EnableUserHooks(); err != nil {
+			logger.Warn("huginn: user hooks.json failed to load", "err", err)
+		}
 		// Wire agent memory store so cross-session summaries and recall work.
 		// Mirrors lines ~440-451 in TUI mode but scoped to server mode.
 		var srvMemStore agentslib.MemoryStoreIface

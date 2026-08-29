@@ -64,15 +64,13 @@ test.describe('Persistent model tool warning', () => {
     await expect(cards).toHaveCount(2)
     await expect(cards.filter({ hasText: 'Steve' }).locator('[data-testid="model-tools-warning"]')).toHaveText(WARNING)
     await expect(cards.filter({ hasText: 'Chris' }).locator('[data-testid="model-tools-warning"]')).toHaveCount(0)
-    await page.screenshot({ path: '/opt/cursor/artifacts/agent_cards_tool_warning.png', fullPage: true })
   })
 
   test('editor for a saved 7b agent keeps the warning', async ({ page }) => {
     await gotoAgents(page)
-    await page.click('[data-testid="agent-item"]:has-text("Steve")')
+    await page.click('[data-testid="agent-card"]:has-text("Steve") [data-testid="agent-card-edit"]')
     await expect(page.locator('input[placeholder="Agent name"]')).toBeVisible({ timeout: 5000 })
     await expect(page.locator('[data-testid="model-tools-warning"]')).toHaveText(WARNING)
-    await page.screenshot({ path: '/opt/cursor/artifacts/agent_editor_tool_warning.png', fullPage: true })
   })
 })
 
@@ -114,6 +112,5 @@ test.describe('Chat model tool warning', () => {
     await expect(page.getByTestId('system-fail-line')).not.toContainText('TOOL_FAIL')
     await expect(page.getByTestId('system-fail-line')).toHaveAttribute('title', /json/)
     await expect(page.locator('.md-content')).toHaveCount(0)
-    await page.screenshot({ path: '/opt/cursor/artifacts/chat_tool_warning_and_fail_chip.png', fullPage: true })
   })
 })

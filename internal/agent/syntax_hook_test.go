@@ -221,10 +221,12 @@ func TestSyntaxHook_MissingPython3SkipsGracefully(t *testing.T) {
 	}
 }
 
-// TestSyntaxHook_NonGoNonPyExtension_PassesThroughUnchecked verifies an
-// unsupported extension (e.g. .ts) is never blocked, and no warning is
-// attached, per the documented v1 gap.
-func TestSyntaxHook_NonGoNonPyExtension_PassesThroughUnchecked(t *testing.T) {
+// TestSyntaxHook_UnsupportedExtension_PassesThroughUnchecked verifies an
+// extension with no registered validator (e.g. .json) is never blocked, and
+// no warning is attached. TS/JS/Ruby/PHP/Rust are no longer unsupported —
+// see internal/tools/validation for their per-language checks, each
+// LookPath-gated on its external tool.
+func TestSyntaxHook_UnsupportedExtension_PassesThroughUnchecked(t *testing.T) {
 	sandbox := syntaxTestSandbox(t)
 	reg := writeFileRegistry(sandbox)
 
@@ -232,20 +234,20 @@ func TestSyntaxHook_NonGoNonPyExtension_PassesThroughUnchecked(t *testing.T) {
 	RegisterSyntaxValidation(hooks, func() string { return "block" })
 	cfg := &RunLoopConfig{Tools: reg, Hooks: hooks}
 
-	brokenTS := "function broken( {\n"
+	brokenJSON := "{not json"
 	calls := []backend.ToolCall{{
 		ID: "c1",
 		Function: backend.ToolCallFunction{
 			Name: "write_file",
 			Arguments: map[string]any{
-				"file_path": "broken.ts",
-				"content":   brokenTS,
+				"file_path": "broken.json",
+				"content":   brokenJSON,
 			},
 		},
 	}}
 	results := cfg.dispatchTools(context.Background(), calls)
 	if strings.Contains(results[0].content, "blocked") || strings.Contains(results[0].content, "syntax") {
-		t.Errorf("TS/JS is a documented v1 gap and must pass through unchecked, got %q", results[0].content)
+		t.Errorf(".json has no registered validator and must pass through unchecked, got %q", results[0].content)
 	}
 }
 

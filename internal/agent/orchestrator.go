@@ -104,6 +104,7 @@ type Orchestrator struct {
 	huginnHome       string                // set by SetHuginnHome; used to locate agent memory files
 	skillsReg        *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
 	hooks            *HookRegistry         // PreToolUse/PostToolUse chain (G10); nil until SetHooks. Carries G1 syntax validation.
+	userHooks        *UserHookRunner       // user-configurable hooks.json chain; nil until EnableUserHooks.
 
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string
@@ -363,6 +364,11 @@ func (o *Orchestrator) CodeWithAgent(
 	messages = append(messages, backend.Message{Role: "user", Content: userMsg})
 
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+	// agentGate is a per-run fork (own sweep goroutine); close it when this
+	// run ends or the sweeper leaks (same pattern as runAgentTurn).
+	if agentGate != nil {
+		defer agentGate.Close()
+	}
 
 	// Create isolated session environment for this agent run.
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))

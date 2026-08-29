@@ -82,6 +82,10 @@
             @mark-dirty="markDirty"
           />
 
+          <SettingsHooksTab
+            v-if="activeTab === 'hooks'"
+          />
+
           <SettingsMcpTab
             v-if="activeTab === 'mcp'"
             :mcp-servers="mcpServers"
@@ -118,6 +122,7 @@ import SettingsGeneralTab from '../components/settings/SettingsGeneralTab.vue'
 import SettingsToolsTab from '../components/settings/SettingsToolsTab.vue'
 import SettingsWebUITab from '../components/settings/SettingsWebUITab.vue'
 import SettingsIntegrationsTab from '../components/settings/SettingsIntegrationsTab.vue'
+import SettingsHooksTab from '../components/settings/SettingsHooksTab.vue'
 import SettingsMcpTab from '../components/settings/SettingsMcpTab.vue'
 import SettingsNotificationsTab from '../components/settings/SettingsNotificationsTab.vue'
 import SettingsAboutTab from '../components/settings/SettingsAboutTab.vue'
@@ -132,7 +137,7 @@ const notif = useBrowserNotifications()
 const { versionLabel, loadVersion } = useVersion()
 
 // ── State ─────────────────────────────────────────────────────────────
-type SettingsTabID = 'general' | 'tools' | 'webui' | 'integrations' | 'mcp' | 'notifications' | 'about'
+type SettingsTabID = 'general' | 'tools' | 'webui' | 'integrations' | 'hooks' | 'mcp' | 'notifications' | 'about'
 type SettingsTabIconName = SettingsTabID
 type SettingsTab = { id: SettingsTabID; label: string; icon: SettingsTabIconName }
 
@@ -166,6 +171,7 @@ const tabs: SettingsTab[] = [
   { id: 'tools', label: 'Tools', icon: 'tools' },
   { id: 'webui', label: 'Web UI', icon: 'webui' },
   { id: 'integrations', label: 'Integrations', icon: 'integrations' },
+  { id: 'hooks', label: 'Hooks', icon: 'hooks' },
   { id: 'mcp', label: 'MCP Servers', icon: 'mcp' },
   { id: 'notifications', label: 'Notifications', icon: 'notifications' },
   { id: 'about', label: 'About', icon: 'about' },

@@ -125,6 +125,13 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 			vr.cancel()
 		}
 		agentSess.Teardown()
+		// The forked agentGate (captured by executor above) owns a sweep
+		// goroutine; threadmgr invokes Cleanup exactly once when the thread
+		// goroutine exits, after all executor calls are done — the correct
+		// point to stop it. Without this the fork's sweeper leaks per thread.
+		if agentGate != nil {
+			agentGate.Close()
+		}
 	}
 
 	return &threadmgr.AgentRuntime{

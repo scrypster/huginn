@@ -1485,6 +1485,12 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Sessions]
+      summary: Post a message to a space timeline
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
   /api/v1/skills/registry/search:
     get:
       tags: [Skills]
@@ -1503,6 +1509,141 @@ paths:
     post:
       tags: [Skills]
       summary: Execute skill
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/audit:
+    get:
+      tags: [Audit]
+      summary: List audit log entries
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks:
+    get:
+      tags: [Hooks]
+      summary: List user hooks
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Hooks]
+      summary: Create a user hook
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/{id}:
+    put:
+      tags: [Hooks]
+      summary: Update a user hook
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Hooks]
+      summary: Delete a user hook
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/reload:
+    post:
+      tags: [Hooks]
+      summary: Reload user hooks from disk
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/test:
+    post:
+      tags: [Hooks]
+      summary: Dry-run a user hook against a sample tool call
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/audit:
+    get:
+      tags: [Hooks]
+      summary: List hook-execution audit log
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/drop:
+    post:
+      tags: [Workflows]
+      summary: Drop a scheduled workflow
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/muninn/connect-local:
+    post:
+      tags: [Memory]
+      summary: Connect a local MuninnDB instance
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies:
+    get:
+      tags: [Companies]
+      summary: List companies
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Companies]
+      summary: Create a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies/{id}:
+    get:
+      tags: [Companies]
+      summary: Get a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    patch:
+      tags: [Companies]
+      summary: Update a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Companies]
+      summary: Delete a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies/{id}/members:
+    post:
+      tags: [Companies]
+      summary: Add a company member
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies/{id}/members/{agent}:
+    delete:
+      tags: [Companies]
+      summary: Remove a company member
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}/replies:
+    get:
+      tags: [Sessions]
+      summary: List replies to a space message
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}/thread-read:
+    post:
+      tags: [Sessions]
+      summary: Mark a message thread as read
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}/{msgID}:
+    delete:
+      tags: [Sessions]
+      summary: Delete a space message
       responses:
         "200":
           $ref: "#/components/responses/GenericObjectResponse"

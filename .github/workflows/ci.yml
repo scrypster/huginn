@@ -10,7 +10,13 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── Go: build + test ─────────────────────────────────────────────────────
+  # ── Go: build + fast (non-race) test + quality gates ───────────────────────
+  # This is the REQUIRED status check ("Go build & test"). It intentionally
+  # does NOT run `-race` — that's sharded out to the separate "Go race tests"
+  # job below so this one stays fast. Every gate that used to read the full
+  # -race coverage.out (coverage floor, benchmarks, proactivity) is
+  # self-contained and re-runs its own `go test`, so none of them actually
+  # depended on the -race run's coverprofile — see scripts/check_go_coverage.sh.
   go:
     name: Go build & test
     runs-on: ubuntu-latest
@@ -39,8 +45,22 @@ jobs:
       - name: Enforce OpenAPI route parity
         run: python3 scripts/check_openapi_parity.py
 
-      - name: Run Go tests
-        run: go test -race -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
+      # web/node_modules/.bin (esbuild) isn't on PATH by default, and
+      # rustfmt isn't preinstalled — both are needed by the language
+      # syntax-validation tests (internal/tools/validation). Without this,
+      # TestValidate_TS_*/TSX/JSX and the Rust validation tests SKIP
+      # silently in CI, turning green on exactly the paths that need
+      # coverage most.
+      - name: Put esbuild and rustfmt on PATH
+        run: |
+          echo "$(pwd)/web/node_modules/.bin" >> "$GITHUB_PATH"
+          rustup component add rustfmt
+
+      - name: Diagnose validation tool availability
+        run: which esbuild rustfmt ruby php node
+
+      - name: Run Go tests (no -race, fast correctness pass)
+        run: go test -timeout 300s -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Enforce critical package coverage floors
         run: ./scripts/check_go_coverage.sh
@@ -58,7 +78,7 @@ jobs:
           path: docs/plans/benchmark-scorecards/latest-heartbeat-benchmark.md
           retention-days: 7
 
-      - name: Coverage summary
+      - name: Coverage summary (non-race)
         run: go tool cover -func=coverage.out | tail -1
 
       - name: Upload coverage artifact
@@ -66,6 +86,143 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+
+  # ── Go race tests: sharded matrix, -race + coverage per shard ─────────────
+  # `go test -race` on the full ./... is the slow part of CI (internal/server
+  # and internal/spaces alone dominate: ~300s and ~180s respectively on the
+  # 2-core runner). Sharding by package lets the shards run in parallel on
+  # separate runners so wall-clock ≈ slowest shard instead of the sum.
+  #
+  # Shard boundaries were chosen from measured `GOMAXPROCS=2 go test -race`
+  # per-package times (a local proxy for the 2-core CI runner), balanced so
+  # no shard other than "server" dominates. Adjust here if timings drift:
+  #   server:  internal/server (heaviest single package, ~180s local / >300s CI)
+  #   spaces:  internal/spaces (~180s on CI per historical CI runs)
+  #   heavy-a: root pkg + relay + backend + agent + tools/validation (~180s local)
+  #   heavy-b: agents + permissions + scheduler + threadmgr + tools + mcp +
+  #            repo + agent/session + relay/testutil (~170s local)
+  #   rest:    everything else (small/fast packages, computed at runtime)
+  race:
+    name: "Go race tests (${{ matrix.name }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            packages: "./internal/server"
+          - name: spaces
+            packages: "./internal/spaces"
+          - name: heavy-a
+            packages: >-
+              . ./internal/relay ./internal/backend ./internal/agent
+              ./internal/tools/validation
+          - name: heavy-b
+            packages: >-
+              ./internal/agents ./internal/permissions ./internal/scheduler
+              ./internal/threadmgr ./internal/tools ./internal/mcp ./internal/repo
+              ./internal/agent/session ./internal/relay/testutil
+          - name: rest
+            # Computed at runtime below: every package not claimed by the
+            # server/spaces/heavy shards above, so nothing silently falls
+            # off ./... coverage as packages are added.
+            packages: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      # Every shard gets esbuild + rustfmt on PATH; only the "heavy" shard
+      # (internal/tools/validation) actually needs them, but keeping this
+      # uniform avoids a silent skip if the package ever moves shards.
+      - name: Install web dependencies (esbuild)
+        run: cd web && npm ci
+
+      - name: Put esbuild and rustfmt on PATH
+        run: |
+          echo "$(pwd)/web/node_modules/.bin" >> "$GITHUB_PATH"
+          rustup component add rustfmt
+
+      - name: Run Go race tests (shard)
+        env:
+          SHARD_NAME: ${{ matrix.name }}
+          SHARD_PACKAGES: ${{ matrix.packages }}
+        run: |
+          if [ "$SHARD_NAME" = "rest" ]; then
+            claimed='^(github\.com/scrypster/huginn|github\.com/scrypster/huginn/internal/(server|spaces|relay|relay/testutil|agents|permissions|scheduler|threadmgr|tools|tools/validation|backend|mcp|repo|agent|agent/session))$'
+            pkgs="$(go list ./... | grep -v -E "${claimed}")"
+          else
+            pkgs="${SHARD_PACKAGES}"
+          fi
+          echo "Testing packages:"
+          echo "${pkgs}"
+          # shellcheck disable=SC2086 # intentional word-splitting: pkgs is a space-separated package list
+          go test -race -timeout 900s -coverprofile="coverage-${SHARD_NAME}.out" -covermode=atomic ${pkgs}
+
+      - name: Upload shard coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-coverage-${{ matrix.name }}
+          path: coverage-${{ matrix.name }}.out
+          retention-days: 7
+
+  # ── Go race tests aggregator ────────────────────────────────────────────
+  # This is the check to mark as a required status ("Go race tests") in
+  # branch protection — it only goes green if every shard in the matrix
+  # above passed. It also merges the shards' coverage profiles into one
+  # full-repo -race coverage.out for visibility (informational; the
+  # coverage-floor gate in the "go" job does not depend on this).
+  race-summary:
+    name: Go race tests
+    runs-on: ubuntu-latest
+    needs: race
+    if: always()
+
+    steps:
+      - name: Fail if any race shard failed
+        if: needs.race.result != 'success'
+        run: |
+          echo "One or more Go race test shards failed (result: ${{ needs.race.result }})."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: race-coverage-*
+          path: shard-coverage
+          merge-multiple: true
+
+      - name: Merge shard coverage profiles
+        run: |
+          { echo "mode: atomic"; grep -h -v '^mode:' shard-coverage/*.out; } > coverage-race.out
+          wc -l coverage-race.out
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Coverage summary (race, merged)
+        run: go tool cover -func=coverage-race.out | tail -1
+
+      - name: Upload merged race coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-race-merged
+          path: coverage-race.out
+          retention-days: 7
 
   # ── Windows: build + smoke test ──────────────────────────────────────────
   windows:
@@ -180,4 +337,3 @@ jobs:
 
       - name: Run shellcheck
         run: shellcheck install.sh scripts/*.sh
-

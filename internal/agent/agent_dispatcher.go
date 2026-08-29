@@ -725,6 +725,15 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 
 	// 4. Resolve tool schemas and permission gate for this agent run.
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
+	// agentGate is a per-turn fork of opts.gate (see Gate.Fork): it owns its
+	// own sweep goroutine and relayChans, independent of the parent gate and
+	// any sibling forks. It must be closed when this turn ends or its sweeper
+	// leaks forever — one per agent dispatch. Deferred immediately so every
+	// exit path below (success, RunLoop error, errToolsNotSupported) closes
+	// it exactly once; Close is idempotent and safe on a nil-check guard.
+	if agentGate != nil {
+		defer agentGate.Close()
+	}
 	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg, ag)
 	if IsHireAsk(opts.userMsg) {
 		schemas = stripHireDelegationTools(schemas)
