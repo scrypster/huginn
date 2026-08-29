@@ -42,6 +42,11 @@ type PersistedToolCall struct {
 	// {path, unified, added, removed, truncated, is_new, is_delete}.
 	// Left nil for tool calls that didn't change a file.
 	Diff map[string]any `json:"diff,omitempty"`
+	// ChecksStatus is the authoritative CI-checks state from a
+	// gh_pr_checks/glab_mr_checks call ("passed"|"pending"|"failed"),
+	// lifted from ToolResult.Metadata["status"] so the PR card renders the
+	// real state instead of a keyword-guess that defaulted to green.
+	ChecksStatus string `json:"checks_status,omitempty"`
 }
 
 // SessionMessage is one line in messages.jsonl.

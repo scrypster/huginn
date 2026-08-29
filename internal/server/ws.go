@@ -2168,6 +2168,9 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 				if diff, ok := md["diff"].(map[string]any); ok {
 					tc.Diff = diff
 				}
+				if st, ok := md["status"].(string); ok {
+					tc.ChecksStatus = st
+				}
 			}
 			collectedToolCalls = append(collectedToolCalls, tc)
 			logToolPermissionAudit(s.auditLog, ev.Payload)

@@ -40,6 +40,7 @@ export interface ToolCallRecord {
   result?: string
   done: boolean
   diff?: FileDiff
+  checksStatus?: string
 }
 
 export interface DelegatedThread {
@@ -270,6 +271,7 @@ export function useSessions() {
                 result: (tc.result as string | undefined) ?? undefined,
                 done: true,
                 diff: (tc.diff as FileDiff | undefined) ?? undefined,
+                checksStatus: (tc.checks_status as string | undefined) ?? undefined,
               }))
             : undefined
           return {

@@ -61,10 +61,22 @@ func NewGlabMRCreateTool(glabPath string) *GlabMRCreateTool {
 
 // --- glab_mr_create ---
 
-type GlabMRCreateTool struct{ glBase }
+type GlabMRCreateTool struct {
+	glBase
+	// DefaultBranch, when known (resolved once at registration from the
+	// local origin/HEAD ref), is surfaced in the tool description so the
+	// model knows the target branch for the MR without guessing.
+	DefaultBranch string
+}
 
-func (t *GlabMRCreateTool) Name() string                { return "glab_mr_create" }
-func (t *GlabMRCreateTool) Description() string         { return "Create a new merge request using the glab CLI." }
+func (t *GlabMRCreateTool) Name() string { return "glab_mr_create" }
+func (t *GlabMRCreateTool) Description() string {
+	desc := "Create a new merge request using the glab CLI."
+	if t.DefaultBranch != "" {
+		desc += fmt.Sprintf(" 'target_branch' defaults to %q if omitted.", t.DefaultBranch)
+	}
+	return desc
+}
 func (t *GlabMRCreateTool) Permission() PermissionLevel { return PermWrite }
 func (t *GlabMRCreateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -105,7 +117,19 @@ func (t *GlabMRCreateTool) Execute(ctx context.Context, args map[string]any) Too
 	if err != nil {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("glab mr create: %v\n%s", err, stderr)}
 	}
-	return ToolResult{Output: strings.TrimSpace(stdout)}
+	out := strings.TrimSpace(stdout)
+	result := ToolResult{Output: out}
+	// See github.go's gh_pr_create for why: pull the MR URL (and its number)
+	// into Metadata so callers get a structured field, not free text to
+	// re-parse.
+	if url := extractForgeURL(out); url != "" {
+		md := map[string]any{"url": url}
+		if num := prNumberFromURL(url); num != "" {
+			md["number"] = num
+		}
+		result.Metadata = md
+	}
+	return result
 }
 
 // --- glab_mr_checks ---

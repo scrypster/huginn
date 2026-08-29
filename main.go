@@ -2883,6 +2883,26 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		createAgentTool := srv.NewCreateAgentTool()
 		createAgentTool.Deps.Registry = toolReg
 		toolReg.Register(createAgentTool)
+
+		// Register LSP tools (graceful if no LSP configured). Parity with the
+		// TUI toolsEnabled block above — server mode was missing this
+		// registration entirely, so find_definition/list_symbols (tagged
+		// "builtin" and pulled in by God Mode ["*"]) returned "unknown tool".
+		{
+			lspMgrs := make(map[string]tools.LSPManager)
+			for _, lang := range lsp.SupportedLanguages() {
+				if detected := lsp.Detect(lang); detected.Command != "" {
+					mgr := lsp.NewManager(lang, detected)
+					go func(m *lsp.Manager, language string) {
+						if err := m.Start(srvCWD); err != nil {
+							logger.Info("LSP start failed", "lang", language, "err", err)
+						}
+					}(mgr, lang)
+					lspMgrs[lang] = mgr
+				}
+			}
+			tools.RegisterLSPTools(toolReg, srvCWD, lspMgrs)
+		}
 		// Honor AllowedTools/DisallowedTools config filters (parity with TUI mode).
 		if len(cfg.AllowedTools) > 0 {
 			toolReg.SetAllowed(cfg.AllowedTools)
@@ -3057,6 +3077,12 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// stripHireGrant), always goes through the delegation preview gate
 		// with a DENY-on-timeout default (S10), and auto-evicts the moment
 		// its thread lands terminal (S5, via tm.SetSpecialistEvictor below).
+		// S14: promotion counter. Persists {company, capability_label, model,
+		// thread_id, timestamp} for every successful spawn_specialist call, so
+		// the CoS can be told (never auto-hire) when it has brought in the
+		// same capability a 3rd time within a 14-day window.
+		specialistPromo := server.NewSpecialistPromotionTracker(huginnHome)
+
 		spawnSpecialistTool := &tools.SpawnSpecialistTool{Deps: tools.SpawnSpecialistDeps{
 			ValidateName: func(name string) error {
 				return agentslib.AgentDef{Name: name}.Validate()
@@ -3162,6 +3188,12 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					}
 					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
 				}
+				// S14: record this spawn for the promotion counter. Written on
+				// success only, after the preview gate approved and the thread
+				// exists — best-effort, must never fail the spawn itself.
+				if err := specialistPromo.RecordSpawn(companyID, tools.SpecialistDomain(req.Name), canonical, t.ID); err != nil {
+					logger.Info("specialist promotion: record spawn failed", "err", err)
+				}
 				return t.ID, nil
 			},
 		}}
@@ -3189,11 +3221,23 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			if th.Status != threadmgr.StatusDone {
 				return
 			}
+			finishSpeech := tools.SpecialistFinishSpeech(name)
+			// S14: promotion counter. If this specialist was the 3rd of its
+			// capability label spawned within the trailing 14-day window,
+			// append a recommendation — never an auto-hire — to the finish
+			// line the CoS speaks when the specialist's thread lands.
+			label := tools.SpecialistDomain(name)
+			if recommend, err := specialistPromo.ShouldRecommendHire(label); err != nil {
+				logger.Info("specialist promotion: check failed", "err", err)
+			} else if recommend {
+				lowerLabel := strings.ToLower(label)
+				finishSpeech += fmt.Sprintf(" That's the 3rd %s specialist this fortnight — want me to hire a permanent %s teammate? Just say so.", lowerLabel, lowerLabel)
+			}
 			srv.BroadcastToSession(th.SessionID, "thread_result", map[string]any{
 				"session_id": th.SessionID,
 				"thread_id":  threadID,
 				"agent":      name,
-				"summary":    tools.SpecialistFinishSpeech(name),
+				"summary":    finishSpeech,
 				"status":     "archived",
 			})
 		})

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/scrypster/huginn/internal/agent/session"
 	"github.com/scrypster/huginn/internal/backend"
@@ -29,6 +30,29 @@ func runGit(ctx context.Context, workdir string, args ...string) (string, string
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// detectDefaultBranchTimeout bounds the single local git call used to
+// discover the repo's default branch at tool-registration time — cheap and
+// local-only (no network), but capped so a misbehaving repo can't stall
+// startup.
+const detectDefaultBranchTimeout = 2 * time.Second
+
+// detectDefaultBranch returns the repo's default branch (e.g. "main"),
+// resolved from the local `origin/HEAD` ref, or "" if it can't be
+// determined (not a repo, no remote, no cached origin/HEAD). Best-effort
+// only — used to hint forge tool descriptions, never a hard dependency.
+func detectDefaultBranch(sandboxRoot string) string {
+	if sandboxRoot == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), detectDefaultBranchTimeout)
+	defer cancel()
+	stdout, _, err := runGit(ctx, sandboxRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(stdout), "origin/")
 }
 
 // --- git_worktree_create ---
