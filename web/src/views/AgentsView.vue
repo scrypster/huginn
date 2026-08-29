@@ -2,10 +2,10 @@
   <div class="flex flex-col h-full bg-huginn-bg">
 
     <!-- No agent selected -->
-    <div v-if="!agentName" class="flex-1 overflow-y-auto p-6">
+    <div v-if="!agentName" data-testid="agents-home" class="flex-1 overflow-y-auto p-6">
 
       <!-- Empty state: no agents at all -->
-      <div v-if="agents.length === 0 && !loading" class="flex flex-col items-center justify-center h-full gap-5 pb-16">
+      <div v-if="agents.length === 0 && !loading" data-testid="agents-empty-state" class="flex flex-col items-center justify-center h-full gap-5 pb-16">
         <div class="w-16 h-16 rounded-2xl flex items-center justify-center select-none"
           style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2)">
           <svg class="w-8 h-8 text-huginn-blue opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -27,7 +27,7 @@
 
       <!-- Card grid: agents exist -->
       <template v-else>
-        <div class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+        <div data-testid="agents-grid" class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
           <AgentCard
             v-for="agent in agents"
             :key="agent.name"

@@ -69,7 +69,7 @@ test.describe('Persistent model tool warning', () => {
 
   test('editor for a saved 7b agent keeps the warning', async ({ page }) => {
     await gotoAgents(page)
-    await page.click('[data-testid="agent-item"]:has-text("Steve")')
+    await page.click('[data-testid="agent-card"]:has-text("Steve") [data-testid="agent-card-edit"]')
     await expect(page.locator('input[placeholder="Agent name"]')).toBeVisible({ timeout: 5000 })
     await expect(page.locator('[data-testid="model-tools-warning"]')).toHaveText(WARNING)
     await page.screenshot({ path: '/opt/cursor/artifacts/agent_editor_tool_warning.png', fullPage: true })
