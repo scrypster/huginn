@@ -2,7 +2,6 @@ import { test, expect } from '@playwright/test'
 import { setupApiMocks } from './helpers/mock-api'
 import { setupConnectedWS } from './helpers/mock-ws'
 
-const ARTIFACTS = '/opt/cursor/artifacts'
 
 const liveConfig = {
   theme: 'dark',
@@ -68,7 +67,6 @@ test.describe('P0 honesty', () => {
     await expect(page.getByTestId('tool-list-conflict')).toContainText('bash')
     await expect(page.getByTestId('tool-list-conflict')).toContainText('Deny wins')
 
-    await page.screenshot({ path: `${ARTIFACTS}/honesty_settings_tools_conflict.png`, fullPage: true })
   })
 
   test('Chat: fail line is a teammate sentence; preview is human; diagnosis on hover', async ({ page }) => {
@@ -98,7 +96,6 @@ test.describe('P0 honesty', () => {
     await expect(preview).not.toContainText('TOOL_FAIL')
     await expect(preview).not.toContainText('wait_for_threads')
 
-    await page.screenshot({ path: `${ARTIFACTS}/honesty_toolfail_system_line.png`, fullPage: true })
   })
 
   test('Version badge collapses vv prefix; new agent is not unsaved', async ({ page }) => {
@@ -113,17 +110,14 @@ test.describe('P0 honesty', () => {
     const versionRow = page.getByTestId('popover-version-row')
     await expect(versionRow).toContainText('v0.4.0-try-all')
     await expect(versionRow).not.toContainText('vv0.4.0')
-    await page.screenshot({ path: `${ARTIFACTS}/honesty_version_badge.png` })
 
     await page.goto('/#/stats')
     const statsVersion = page.getByTestId('stats-server-version')
     await expect(statsVersion).toHaveText('v0.4.0-try-all')
     await expect(statsVersion).not.toContainText('vv')
-    await page.screenshot({ path: `${ARTIFACTS}/honesty_stats_server_version.png`, fullPage: true })
 
     await page.goto('/#/agents/new')
     await expect(page.getByText('Unsaved changes')).toHaveCount(0)
     await expect(page.getByTestId('delete-agent-btn')).toHaveCount(0)
-    await page.screenshot({ path: `${ARTIFACTS}/honesty_new_agent_clean.png`, fullPage: true })
   })
 })
