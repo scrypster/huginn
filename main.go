@@ -27,6 +27,7 @@ import (
 	agentsession "github.com/scrypster/huginn/internal/agent/session"
 	agentslib "github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/checkpoint"
 	"github.com/scrypster/huginn/internal/compact"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
@@ -2910,6 +2911,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		if len(cfg.DisallowedTools) > 0 {
 			toolReg.SetBlocked(cfg.DisallowedTools)
 		}
+		// Run checkpoints: shadow-git snapshots per thread run, revert/diff
+		// tools + authed REST under /api/v1/checkpoints/. Failure to init is
+		// non-fatal (logged) — the server runs without undo rather than not
+		// at all, and the absence is visible via the missing tools/routes.
+		if ckptMgr, ckptTeardown, ckptErr := initCheckpoints(context.Background(), srvCWD, toolReg, tm); ckptErr != nil {
+			logger.Warn("checkpoints disabled: init failed", "err", ckptErr)
+		} else {
+			srv.SetCheckpointHandler(checkpoint.HTTPHandler(ckptMgr))
+			cleanupFns = append(cleanupFns, ckptTeardown)
+		}
+
 		delegateTool := &threadmgr.DelegateToAgentTool{
 			Fn: func(ctx context.Context, p threadmgr.DelegateParams) threadmgr.DelegateResult {
 				sessionID := agent.GetSessionID(ctx)
