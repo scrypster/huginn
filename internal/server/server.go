@@ -103,9 +103,10 @@ type Server struct {
 	// Tests set this low so failed browser flows drain quickly.
 	cloudRegisterPollInterval time.Duration
 
-	tm          *threadmgr.ThreadManager         // may be nil if multi-agent not configured
-	previewGate *threadmgr.DelegationPreviewGate // may be nil if preview not configured
-	ca          *threadmgr.CostAccumulator       // may be nil if cost tracking not configured
+	tm                *threadmgr.ThreadManager         // may be nil if multi-agent not configured
+	checkpointHandler http.Handler                     // run-checkpoints REST (nil if checkpoints disabled)
+	previewGate       *threadmgr.DelegationPreviewGate // may be nil if preview not configured
+	ca                *threadmgr.CostAccumulator       // may be nil if cost tracking not configured
 
 	// permPrompts tracks in-flight WS permission_request round-trips for
 	// PermissionPromptFunc / handlePermissionResponse. Always non-nil after
@@ -883,6 +884,15 @@ func (s *Server) SetThreadManager(tm *threadmgr.ThreadManager) {
 	s.tm = tm
 }
 
+// SetCheckpointHandler mounts the run-checkpoints REST surface under
+// /api/v1/checkpoints/ (behind the same auth middleware as every other
+// API route). Nil (the default) leaves the routes unregistered.
+func (s *Server) SetCheckpointHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpointHandler = h
+}
+
 // SetPreviewGate wires the DelegationPreviewGate for delegation approval.
 func (s *Server) SetPreviewGate(g *threadmgr.DelegationPreviewGate) {
 	s.mu.Lock()
@@ -1392,6 +1402,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/skills/{name}/enable", api(s.handleSkillsEnable))
 	mux.HandleFunc("PUT /api/v1/skills/{name}/disable", api(s.handleSkillsDisable))
 	mux.HandleFunc("DELETE /api/v1/skills/{name}", api(s.handleSkillsDelete))
+
+	// Run checkpoints (optional; wired by main via SetCheckpointHandler).
+	// Mounted through the same api() middleware chain (logging, request-ID,
+	// auth, body cap) as every other route.
+	if s.checkpointHandler != nil {
+		ckptH := http.StripPrefix("/api/v1/checkpoints", s.checkpointHandler)
+		mux.HandleFunc("/api/v1/checkpoints/", api(func(w http.ResponseWriter, r *http.Request) {
+			ckptH.ServeHTTP(w, r)
+		}))
+	}
 
 	// WebSocket
 	mux.HandleFunc("GET /ws", s.handleWebSocket)

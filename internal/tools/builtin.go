@@ -7,13 +7,27 @@ import (
 
 // RegisterBuiltins creates and registers all built-in tools with the given sandbox root.
 // sandboxRoot is the project directory — tools cannot access paths outside it.
-// A shared FileLockManager is created to serialize concurrent writes to the same file
-// (e.g. when parallel swarm agents target the same path).
+// A fresh FileLockManager is created to serialize concurrent writes to the same file
+// (e.g. when parallel swarm agents target the same path). Callers that also wire up
+// the checkpoint system (init_checkpoint.go) MUST use RegisterBuiltinsWithLocker
+// instead, passing the SAME *FileLockManager instance given to
+// checkpoint.NewManager — otherwise write_file/edit_file and checkpoint_revert_run
+// serialize against two independent lock tables and never actually exclude each
+// other (A1).
 func RegisterBuiltins(reg *Registry, sandboxRoot string, bashTimeout time.Duration) {
+	RegisterBuiltinsWithLocker(reg, sandboxRoot, bashTimeout, NewFileLockManager())
+}
+
+// RegisterBuiltinsWithLocker is RegisterBuiltins with an explicit, caller-owned
+// FileLockManager instead of a fresh one — the shared-lock-manager half of the A1
+// fix. See RegisterBuiltins' doc comment.
+func RegisterBuiltinsWithLocker(reg *Registry, sandboxRoot string, bashTimeout time.Duration, flm *FileLockManager) {
 	if bashTimeout == 0 {
 		bashTimeout = 120 * time.Second
 	}
-	flm := NewFileLockManager()
+	if flm == nil {
+		flm = NewFileLockManager()
+	}
 	reg.Register(&BashTool{SandboxRoot: sandboxRoot, Timeout: bashTimeout})
 	reg.Register(&ReadFileTool{SandboxRoot: sandboxRoot})
 	reg.Register(&WriteFileTool{SandboxRoot: sandboxRoot, FileLock: flm})
@@ -102,14 +116,10 @@ func GitHubCLIToolNames() []string {
 //
 // Deliberately no typed mr-merge tool, matching gh: humans merge.
 //
-// Bitbucket is NOT given a belt here. As of this wave there is no
-// maintained official Bitbucket PR CLI to mirror gh/glab against — Atlassian
-// does not ship one, and the community options are unmaintained or
-// third-party wrappers around the REST API. A future implementer adding
-// Bitbucket support should build directly against the Bitbucket REST API
-// (or Bitbucket Pipelines API for CI) rather than shelling out to a CLI, or
-// re-check whether an official CLI has since shipped before assuming this
-// gap still holds.
+// Bitbucket is a separate belt (see RegisterBitbucketTools in bitbucket.go)
+// — there is no maintained official Bitbucket PR CLI to mirror gh/glab
+// against, so it talks to the Bitbucket Cloud REST API directly instead of
+// shelling out to a CLI.
 func RegisterGitLabTools(reg *Registry, sandboxRoot string) {
 	glabPath, err := exec.LookPath("glab")
 	if err != nil {
@@ -127,6 +137,32 @@ func RegisterGitLabTools(reg *Registry, sandboxRoot string) {
 func GitLabCLIToolNames() []string {
 	return []string{
 		"glab_mr_create", "glab_mr_checks", "glab_ci_view_failed", "glab_mr_comment",
+	}
+}
+
+// RegisterBitbucketTools registers the bitbucket_pr_* REST-API belt (see
+// bitbucket.go). Unlike RegisterGitHubTools/RegisterGitLabTools, this belt
+// is not gated on a CLI binary being present — it talks to the Bitbucket
+// Cloud REST API directly, so it is always registered; a missing/expired
+// Bitbucket connection surfaces as a clear per-call tool error instead of
+// deciding at startup whether the tools exist at all. sandboxRoot is used
+// to resolve the git remote (for workspace/repo_slug) and the current
+// branch, same discipline as gh_*/glab_* (see ghBase/glBase).
+func RegisterBitbucketTools(reg *Registry, sandboxRoot string, clientFunc BitbucketClientFunc) {
+	base := bbBase{SandboxRoot: sandboxRoot, ClientFunc: clientFunc}
+	reg.Register(&BitbucketPRCreateTool{bbBase: base, DefaultBranch: detectDefaultBranch(sandboxRoot)})
+	reg.Register(&BitbucketPRViewTool{bbBase: base})
+	reg.Register(&BitbucketPRChecksTool{bbBase: base})
+	reg.Register(&BitbucketPRCommentTool{bbBase: base})
+	reg.Register(&BitbucketPRMergeTool{bbBase: base})
+}
+
+// BitbucketToolNames returns the registered names of all bitbucket_pr_*
+// tools. Used by main.go to tag them with the "bitbucket" provider.
+func BitbucketToolNames() []string {
+	return []string{
+		"bitbucket_pr_create", "bitbucket_pr_view", "bitbucket_pr_checks",
+		"bitbucket_pr_comment", "bitbucket_pr_merge",
 	}
 }
 

@@ -175,6 +175,7 @@ func TestGHPRListTool_Integration(t *testing.T) {
 		if strings.Contains(result.Error, "authentication") ||
 			strings.Contains(result.Error, "not logged") ||
 			strings.Contains(result.Error, "no git remotes") ||
+			strings.Contains(result.Error, "rate limit") ||
 			strings.Contains(result.Error, "GH_TOKEN") {
 			t.Skip("gh not usable in this repo context")
 		}
@@ -192,6 +193,7 @@ func TestGHIssueListTool_Integration(t *testing.T) {
 		if strings.Contains(result.Error, "authentication") ||
 			strings.Contains(result.Error, "not logged") ||
 			strings.Contains(result.Error, "no git remotes") ||
+			strings.Contains(result.Error, "rate limit") ||
 			strings.Contains(result.Error, "GH_TOKEN") {
 			t.Skip("gh not usable in this repo context")
 		}

@@ -108,6 +108,32 @@ describe('extractPRInfo', () => {
     expect(extractPRInfo(calls)?.checks).toBe('pass')
   })
 
+  it('extracts a bitbucket_pr_create URL shape (pull-requests path)', () => {
+    const calls = [
+      makeTC({
+        name: 'bitbucket_pr_create',
+        args: { title: 'Bitbucket belt' },
+        result: 'Created PR #42: https://bitbucket.org/scrypster/huginn/pull-requests/42',
+      }),
+    ]
+    const pr = extractPRInfo(calls)
+    expect(pr?.tool).toBe('bitbucket_pr_create')
+    expect(pr?.number).toBe('42')
+    expect(pr?.url).toBe('https://bitbucket.org/scrypster/huginn/pull-requests/42')
+    expect(pr?.title).toBe('Bitbucket belt')
+  })
+
+  it('reads checks state from a bitbucket_pr_checks call (authoritative status)', () => {
+    const calls = [
+      makeTC({
+        name: 'bitbucket_pr_create',
+        result: 'https://bitbucket.org/ws/repo/pull-requests/7',
+      }),
+      makeTC({ id: 't2', name: 'bitbucket_pr_checks', result: 'all builds green', checksStatus: 'passed' }),
+    ]
+    expect(extractPRInfo(calls)?.checks).toBe('pass')
+  })
+
   it('leaves checks undefined when no checks call ran', () => {
     const calls = [makeTC({ result: 'https://github.com/scrypster/huginn/pull/1' })]
     expect(extractPRInfo(calls)?.checks).toBeUndefined()

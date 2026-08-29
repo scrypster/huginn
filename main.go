@@ -27,6 +27,7 @@ import (
 	agentsession "github.com/scrypster/huginn/internal/agent/session"
 	agentslib "github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/checkpoint"
 	"github.com/scrypster/huginn/internal/compact"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
@@ -2868,7 +2869,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// missing this registration, so applyToolbelt returned empty schemas for
 		// any agent with local_tools configured (["*"] or named list).
 		toolReg := tools.NewRegistry()
-		tools.RegisterBuiltins(toolReg, srvCWD, srvBashTimeout)
+		// Shared with initCheckpoints below (A1) — checkpoint_revert_run
+		// must serialize against write_file/edit_file through the SAME
+		// FileLockManager instance, or the two lock tables never intersect.
+		srvFileLock := tools.NewFileLockManager()
+		tools.RegisterBuiltinsWithLocker(toolReg, srvCWD, srvBashTimeout, srvFileLock)
 		tools.RegisterGitTools(toolReg, srvCWD)
 		tools.RegisterTestsTool(toolReg, srvCWD, srvBashTimeout)
 		tools.RegisterGitHubTools(toolReg, srvCWD)
@@ -2910,6 +2915,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		if len(cfg.DisallowedTools) > 0 {
 			toolReg.SetBlocked(cfg.DisallowedTools)
 		}
+		// Run checkpoints: shadow-git snapshots per thread run, revert/diff
+		// tools + authed REST under /api/v1/checkpoints/. Failure to init is
+		// non-fatal (logged) — the server runs without undo rather than not
+		// at all, and the absence is visible via the missing tools/routes.
+		if ckptMgr, ckptTeardown, ckptErr := initCheckpoints(context.Background(), huginnHome, srvCWD, toolReg, tm, srvFileLock); ckptErr != nil {
+			logger.Warn("checkpoints disabled: init failed", "err", ckptErr)
+		} else {
+			srv.SetCheckpointHandler(checkpoint.HTTPHandler(ckptMgr))
+			cleanupFns = append(cleanupFns, ckptTeardown)
+		}
+
 		delegateTool := &threadmgr.DelegateToAgentTool{
 			Fn: func(ctx context.Context, p threadmgr.DelegateParams) threadmgr.DelegateResult {
 				sessionID := agent.GetSessionID(ctx)
@@ -3301,7 +3317,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// integration tools, external MCP server tools, and skill PromptTools.
 		// Order matters: connection tools and MCP tools BEFORE orch.SetTools so
 		// applyToolbelt sees them when filtering per-agent schemas.
-		initConnectionTools(*cfg, huginnHome, sqlDB, toolReg)
+		initConnectionTools(*cfg, huginnHome, srvCWD, sqlDB, toolReg)
 		var mcpMgr *mcp.ServerManager
 		if len(cfg.MCPServers) > 0 {
 			mcpMgr = mcp.NewServerManager(cfg.MCPServers)
