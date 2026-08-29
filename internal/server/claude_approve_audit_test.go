@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -127,5 +128,69 @@ func TestApproveAuditsDeadlineAsPromptTimeout(t *testing.T) {
 	if reason != "prompt_timeout" {
 		t.Errorf("reason = %q, want prompt_timeout — an expired prompt is not a human "+
 			"denial, and recording it as one misreports what the operator did", reason)
+	}
+}
+
+// TestStopAuditsShutdownDenials pins spec §12 gap 3.
+//
+// Server.Stop closed the audit log BEFORE releasing parked approvals, so every
+// denial produced by approvals.Close() landed in a channel whose drain
+// goroutine had already exited and was dropped silently. A tool call was
+// refused and the audit trail had no idea — observed live: a real gated Bash
+// call was denied by a shutdown and left no row.
+//
+// It also pins gap 5: a shutdown denial must not be recorded as
+// prompt_timeout. Both mean "no human answered", but only one means the
+// deadline actually elapsed, and an operator reading the log needs to tell a
+// five-minute no-show from a server that went away.
+func TestStopAuditsShutdownDenials(t *testing.T) {
+	// A deadline long enough that nothing can time out during this test, so a
+	// row can only come from the shutdown path.
+	s, read := auditedApprovalServer(t, 10*time.Minute)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/claude/approve",
+			strings.NewReader(`{"tool_name":"Bash","session_id":"sess","summary":"echo hi"}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		s.handleClaudeApprove(rr, req)
+	}()
+
+	// Wait until the handler is genuinely parked, not merely dispatched.
+	var parked bool
+	for i := 0; i < 400; i++ {
+		if len(s.approvals.List()) == 1 {
+			parked = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !parked {
+		t.Fatal("handler never registered a pending approval")
+	}
+
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still parked after Stop returned")
+	}
+
+	action, resource, allowed, reason := read(t)
+	if action != "tool_permission" || resource != "Bash" {
+		t.Fatalf("audit row = (%s,%s), want (tool_permission,Bash)", action, resource)
+	}
+	if allowed {
+		t.Fatal("shutdown denial was audited as ALLOWED")
+	}
+	if reason == "prompt_timeout" {
+		t.Fatal("shutdown denial recorded as prompt_timeout; the deadline had 10 minutes left")
+	}
+	if reason != "claude_approval_server_shutdown" {
+		t.Fatalf("reason = %q, want claude_approval_server_shutdown", reason)
 	}
 }

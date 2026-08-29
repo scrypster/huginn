@@ -218,6 +218,11 @@ type Server struct {
 	// nil if not configured.
 	auditLog *auditLogger
 
+	// approvalWg counts in-flight handleClaudeApprove handlers. Stop releases
+	// their waiters and then waits on this before closing the audit log, so a
+	// denial caused by shutdown still reaches the trail.
+	approvalWg sync.WaitGroup
+
 	// approvals holds Claude Code tool-approval requests waiting on a human.
 	// Nil means the feature is unwired, and a nil store DENIES — never allow
 	// because the store is missing.
@@ -491,6 +496,35 @@ func (s *Server) Stop(ctx context.Context) error {
 	persister := s.statsPersister
 	auditLog := s.auditLog
 	s.mu.Unlock()
+
+	// Release parked approvals FIRST — before the audit log closes, and before
+	// Shutdown. Two separate reasons, both learned the hard way:
+	//
+	// Shutdown waits for in-flight handlers, and handleClaudeApprove blocks for
+	// up to approvalDeadline (285s), so one pending approval made Ctrl-C look
+	// like a hang for nearly five minutes, with the second Ctrl-C swallowed
+	// because the signal had already fired.
+	//
+	// And the audit log used to close here, at the top, while those handlers
+	// were still parked. Every denial Close produced was then enqueued onto a
+	// channel whose drain goroutine had already exited and was dropped: a tool
+	// call was refused and the trail had no record of it. Observed live before
+	// this was fixed. So release the waiters, wait for their handlers to
+	// enqueue their rows, and only then close the log.
+	if s.approvals != nil {
+		s.approvals.Close()
+	}
+	approvalsDrained := make(chan struct{})
+	go func() {
+		s.approvalWg.Wait()
+		close(approvalsDrained)
+	}()
+	select {
+	case <-approvalsDrained:
+	case <-time.After(5 * time.Second):
+		slog.Warn("server: approval handlers did not drain; some denials may be unaudited")
+	}
+
 	if persister != nil {
 		persister.Close()
 	}
@@ -500,16 +534,6 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	if s.wsHub != nil {
 		s.wsHub.stop()
-	}
-
-	// Release parked approvals BEFORE Shutdown. Shutdown waits for in-flight
-	// handlers, and handleClaudeApprove blocks for up to approvalDeadline
-	// (285s), so one pending approval made Ctrl-C look like a hang for nearly
-	// five minutes — with the second Ctrl-C swallowed, because the signal had
-	// already fired. Close is exactly what its doc comment promises: every
-	// waiter is released with Deny, which is also the only safe direction.
-	if s.approvals != nil {
-		s.approvals.Close()
 	}
 
 	// Drain in-flight thread goroutines with a 30-second timeout.

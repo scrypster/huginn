@@ -146,6 +146,21 @@ func newID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// Closed reports whether Close has been called.
+//
+// It exists so a caller can tell the two "no human answered" outcomes apart:
+// a deadline that genuinely elapsed, versus a server shutdown that released
+// every waiter early. Both deny, but only one means the prompt was ignored,
+// and an audit trail that conflates them tells an operator the wrong story.
+//
+// closed is set under the mutex BEFORE any channel is closed, so every waiter
+// released by Close observes true.
+func (s *Store) Closed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
 // Register creates a pending entry. The caller must call Wait on the result.
 func (s *Store) Register(req Request) (*Pending, error) {
 	id, err := newID()

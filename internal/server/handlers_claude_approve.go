@@ -27,6 +27,11 @@ import (
 // Consequence worth knowing: the agent's session semaphore is held for the
 // whole wait. One agent can be frozen for five minutes; others are unaffected.
 func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
+	// Counted so Server.Stop can wait for this handler to write its audit row
+	// after releasing the waiter, instead of closing the log out from under it.
+	s.approvalWg.Add(1)
+	defer s.approvalWg.Done()
+
 	// The server's global WriteTimeout (server.go) is far shorter than
 	// approvalDeadline, and Go sets that deadline before the handler runs and
 	// never resets it. Without extending it here, a decision made after the
@@ -165,7 +170,7 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 	// tool stopped being gated.
 	if s.auditLog != nil {
 		s.auditLog.Log("tool_permission", req.ToolName, decision.Allowed(),
-			auditReasonFor(decision, byHuman))
+			auditReasonFor(decision, byHuman, s.approvals.Closed()))
 	}
 
 	if !decision.Allowed() {
@@ -191,7 +196,7 @@ func (s *Server) handleClaudeApprove(w http.ResponseWriter, r *http.Request) {
 //
 // The default is the denial reason, so a Decision added later without touching
 // this function is reported as a refusal rather than as an approval.
-func auditReasonFor(d approvals.Decision, byHuman bool) string {
+func auditReasonFor(d approvals.Decision, byHuman, shutdown bool) string {
 	switch d {
 	case approvals.Allow:
 		return "claude_approval_allowed"
@@ -201,6 +206,13 @@ func auditReasonFor(d approvals.Decision, byHuman bool) string {
 		return "claude_approval_allowed_tool"
 	}
 	if !byHuman {
+		// A shutdown and an expired deadline both mean "no human answered",
+		// but only the second means the prompt was ignored for its full five
+		// minutes. Reporting a shutdown as prompt_timeout tells an operator
+		// the gate was unattended when in fact the server went away under it.
+		if shutdown {
+			return "claude_approval_server_shutdown"
+		}
 		return "prompt_timeout"
 	}
 	return "claude_approval_denied"

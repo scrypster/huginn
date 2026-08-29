@@ -460,7 +460,8 @@ still pass this test?*
 ## 12. Known gaps after Phase 1
 
 Surfaced by the final whole-branch review and its scoped re-review, adjudicated and
-deliberately NOT fixed in this phase. Recorded here because they are real and because a
+deliberately not fixed in that phase. Gaps 3 and 5 were fixed on 2026-08-28 after gap 3
+was reproduced live during a hands-on test; the rest stand. Recorded here because they are real and because a
 gap nobody wrote down is a gap nobody fixes.
 
 **Ranked by what they could cost.**
@@ -480,11 +481,13 @@ gap nobody wrote down is a gap nobody fixes.
    grant in the whole feature with no human in the loop at any point, which makes it the
    most valuable row the audit log could hold — and it is the one row that does not exist.
 
-3. **Shutdown denials are never audited.** `Server.Stop` closes the audit log (step 2)
-   before releasing pending approvals (step 4), so the denials produced by
-   `approvals.Close()` land in a channel whose drain goroutine has already exited. They
-   are dropped silently rather than crashing — `auditLogger.Log` is a non-blocking send on
-   a never-closed channel. Moving `approvals.Close()` above `auditLog.Close()` fixes it.
+3. ~~**Shutdown denials are never audited.**~~ **FIXED 2026-08-28.** Reproduced live
+   first: a real gated `Bash` call was denied by a server restart and left no audit row.
+   `Server.Stop` now releases parked approvals *before* closing the audit log, and waits
+   on a new `approvalWg` so the released handlers actually enqueue their rows before the
+   drain goroutine exits (a bare reorder was not enough — it only moved the race).
+   Pinned by `TestStopAuditsShutdownDenials`, which was sabotage-verified against the old
+   ordering.
 
 4. **No `SetReadDeadline` beside the write-deadline extension.** `ReadTimeout` is 30s.
    This is harmless *only* because `json.Decoder` does not read the request body to EOF,
@@ -493,9 +496,15 @@ gap nobody wrote down is a gap nobody fixes.
    seconds, for reasons that will look nothing like the cause. Extending the read deadline
    alongside the write deadline is free insurance.
 
-5. **`byHuman == false` conflates three outcomes** — deadline expiry, client hang-up, and
-   shutdown — so all three audit as `prompt_timeout`. Moot while gap 3 stands, since
-   shutdown denials are dropped anyway.
+5. ~~**`byHuman == false` conflates three outcomes.**~~ **PARTLY FIXED 2026-08-28.**
+   Fixing gap 3 made this live rather than moot: shutdown denials now reach the log, so
+   recording them as `prompt_timeout` would have been an actual falsehood — it says the
+   prompt sat unanswered for five minutes when in fact the server went away under it. A
+   shutdown now audits as `claude_approval_server_shutdown`, via `Store.Closed()`, which
+   is set under the mutex before any channel closes so every released waiter observes it.
+   Still conflated: a client hang-up reads as `prompt_timeout`. That one is honest enough
+   — nobody answered — and distinguishing it would mean plumbing the context's cancellation
+   cause through `Wait`.
 
 6. **One card test cannot fail.** `ClaudeApprovalCard`'s "stops ticking after unmount"
    asserts `expect(() => vi.advanceTimersByTime(10000)).not.toThrow()`, which passes with
