@@ -56,6 +56,12 @@ export interface HookAuditEntry {
   exit_code: number
   output: string
   error?: string
+  // test_run distinguishes a manual "Test" run (Settings -> Hooks -> Test
+  // button / POST /hooks/test) from a real PreToolUse/PostToolUse
+  // execution during an agent's turn — see internal/agent/hooks_config.go
+  // HookAuditEntry.TestRun. Both are audited (trust story: "every run is
+  // audited"), but the UI must not let a test read as a real veto.
+  test_run?: boolean
 }
 
 export interface Connection {

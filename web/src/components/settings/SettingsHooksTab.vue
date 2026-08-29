@@ -183,7 +183,13 @@
           :key="i"
           class="px-3 py-1.5 rounded-lg border border-huginn-border bg-huginn-surface/40 text-[11px] font-mono flex items-center gap-2"
         >
-          <span :class="e.vetoed ? 'text-huginn-red' : 'text-huginn-muted'">{{ e.vetoed ? 'VETO' : 'ok' }}</span>
+          <span :class="e.vetoed ? 'text-huginn-red font-bold' : 'text-huginn-green'">{{ e.vetoed ? 'VETO' : 'allowed' }}</span>
+          <span
+            v-if="e.test_run"
+            class="px-1.5 py-0.5 rounded border border-huginn-blue/40 text-huginn-blue text-[9px] uppercase tracking-wide"
+            data-testid="hook-audit-test-tag"
+            title="Manually run via the Test button — not a real tool call"
+          >test</span>
           <span class="text-huginn-text">{{ e.hook_id }}</span>
           <span class="text-huginn-muted">{{ e.event }} / {{ e.tool }}</span>
           <span class="text-huginn-muted ml-auto">exit {{ e.exit_code }}</span>

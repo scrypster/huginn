@@ -86,6 +86,10 @@
             v-if="activeTab === 'hooks'"
           />
 
+          <SettingsCheckpointsTab
+            v-if="activeTab === 'checkpoints'"
+          />
+
           <SettingsMcpTab
             v-if="activeTab === 'mcp'"
             :mcp-servers="mcpServers"
@@ -123,6 +127,7 @@ import SettingsToolsTab from '../components/settings/SettingsToolsTab.vue'
 import SettingsWebUITab from '../components/settings/SettingsWebUITab.vue'
 import SettingsIntegrationsTab from '../components/settings/SettingsIntegrationsTab.vue'
 import SettingsHooksTab from '../components/settings/SettingsHooksTab.vue'
+import SettingsCheckpointsTab from '../components/settings/SettingsCheckpointsTab.vue'
 import SettingsMcpTab from '../components/settings/SettingsMcpTab.vue'
 import SettingsNotificationsTab from '../components/settings/SettingsNotificationsTab.vue'
 import SettingsAboutTab from '../components/settings/SettingsAboutTab.vue'
@@ -137,7 +142,7 @@ const notif = useBrowserNotifications()
 const { versionLabel, loadVersion } = useVersion()
 
 // ── State ─────────────────────────────────────────────────────────────
-type SettingsTabID = 'general' | 'tools' | 'webui' | 'integrations' | 'hooks' | 'mcp' | 'notifications' | 'about'
+type SettingsTabID = 'general' | 'tools' | 'webui' | 'integrations' | 'hooks' | 'checkpoints' | 'mcp' | 'notifications' | 'about'
 type SettingsTabIconName = SettingsTabID
 type SettingsTab = { id: SettingsTabID; label: string; icon: SettingsTabIconName }
 
@@ -172,6 +177,7 @@ const tabs: SettingsTab[] = [
   { id: 'webui', label: 'Web UI', icon: 'webui' },
   { id: 'integrations', label: 'Integrations', icon: 'integrations' },
   { id: 'hooks', label: 'Hooks', icon: 'hooks' },
+  { id: 'checkpoints', label: 'Checkpoints', icon: 'checkpoints' },
   { id: 'mcp', label: 'MCP Servers', icon: 'mcp' },
   { id: 'notifications', label: 'Notifications', icon: 'notifications' },
   { id: 'about', label: 'About', icon: 'about' },

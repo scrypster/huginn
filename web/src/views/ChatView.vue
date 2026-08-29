@@ -511,6 +511,10 @@
                       <polyline points="9 18 15 12 9 6" />
                     </svg>
                   </button>
+                  <!-- Checkpoint affordance: "Snapshotted — Undo available" once this
+                       delegated run has a checkpoint ledger entry; amber "Not snapshotted"
+                       when its capture failed (honesty requirement — never hidden). -->
+                  <CheckpointBadge :thread-id="d.threadId" />
                   <!-- Delegated agent thinking indicator -->
                   <div
                     v-if="isThreadThinking(d.threadId)"
@@ -688,6 +692,8 @@
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </button>
+                    <!-- Checkpoint affordance — see the equivalent comment above. -->
+                    <CheckpointBadge :thread-id="d.threadId" />
                     <!-- Delegated agent thinking indicator -->
                     <div
                       v-if="isThreadThinking(d.threadId)"
@@ -1281,6 +1287,7 @@ import SpaceReplyChip from '../components/SpaceReplyChip.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
 import DiffCard from '../components/DiffCard.vue'
+import CheckpointBadge from '../components/CheckpointBadge.vue'
 import PRCard from '../components/PRCard.vue'
 import { changedFilesLine } from '../utils/changedFilesLine'
 import { prCompletionLine } from '../utils/prCompletionLine'
