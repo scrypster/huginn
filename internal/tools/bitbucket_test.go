@@ -3,10 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"golang.org/x/oauth2"
 )
 
 // --- names / permissions ---
@@ -126,6 +129,15 @@ func TestClassifyBitbucketStatuses(t *testing.T) {
 		{"one stopped", []string{"STOPPED"}, "failed"},
 		{"failed beats pending", []string{"INPROGRESS", "FAILED"}, "failed"},
 		{"lowercase state", []string{"successful"}, "passed"},
+		// B1 (Opus vet 2026-08-29): before the fix, everything below fell
+		// out of the switch and hit a terminal `return "passed"` — a
+		// false green for an unrecognized/missing/empty state. Default-deny
+		// means none of these may ever come back "passed".
+		{"unrecognized state NOTRUN abstains toward pending, not passed", []string{"NOTRUN"}, "pending"},
+		{"empty state string abstains", []string{""}, ""},
+		{"three empty-state statuses (missing state field) abstain", []string{"", "", ""}, ""},
+		{"wholly unrecognized state abstains", []string{"CANCELLED"}, ""},
+		{"failed still wins over an unrecognized state", []string{"CANCELLED", "FAILED"}, "failed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,10 +145,34 @@ func TestClassifyBitbucketStatuses(t *testing.T) {
 			for _, s := range tc.states {
 				statuses = append(statuses, bitbucketStatus{State: s})
 			}
-			if got := classifyBitbucketStatuses(statuses); got != tc.want {
+			got := classifyBitbucketStatuses(statuses)
+			if got != tc.want {
 				t.Errorf("classifyBitbucketStatuses(%v) = %q, want %q", tc.states, got, tc.want)
 			}
+			if got == "passed" && tc.want != "passed" {
+				t.Fatalf("false green: classifyBitbucketStatuses(%v) reported \"passed\"", tc.states)
+			}
 		})
+	}
+}
+
+// TestClassifyBitbucketStatuses_MissingStateField exercises the exact shape
+// B1 called out: a status object decoded from JSON with no "state" key at
+// all (not just an empty string) — e.g. Bitbucket statuses of {"key":"x"}
+// with no "state". Zero-value bitbucketStatus.State is "", same code path
+// as an explicit "", but this constructs it via json.Unmarshal to prove the
+// decode path behaves the same as the hand-built one above.
+func TestClassifyBitbucketStatuses_MissingStateField(t *testing.T) {
+	var statuses []bitbucketStatus
+	for range 3 {
+		var s bitbucketStatus
+		if err := json.Unmarshal([]byte(`{}`), &s); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		statuses = append(statuses, s)
+	}
+	if got := classifyBitbucketStatuses(statuses); got == "passed" {
+		t.Fatalf("false green: classifyBitbucketStatuses([{},{},{}]) = %q, want anything but \"passed\"", got)
 	}
 }
 
@@ -291,6 +327,18 @@ func TestBitbucketPRCreateTool_HappyPath(t *testing.T) {
 	}
 	if num, _ := result.Metadata["number"].(string); num != "42" {
 		t.Errorf("Metadata[number] = %q, want %q", num, "42")
+	}
+	// B3 (Opus vet 2026-08-29): Output used to be the raw JSON response
+	// body, whose links.self API URL (not the html/web link) was the first
+	// https:// URL a naive regex would find. It must instead be a concise
+	// line carrying the real PR web link — the exact shape
+	// web/src/utils/prInfo.ts's PR_URL_RE and prInfo.test.ts expect.
+	wantOutput := "Created PR #42: https://bitbucket.org/myws/myrepo/pull-requests/42"
+	if result.Output != wantOutput {
+		t.Errorf("Output = %q, want %q", result.Output, wantOutput)
+	}
+	if strings.Contains(result.Output, "links") || strings.Contains(result.Output, "\"id\"") {
+		t.Errorf("Output should not be the raw JSON response body, got %q", result.Output)
 	}
 }
 
@@ -492,6 +540,10 @@ func TestBitbucketPRMergeTool_HappyPath(t *testing.T) {
 	if num, _ := result.Metadata["number"].(string); num != "5" {
 		t.Errorf("Metadata[number] = %q, want %q", num, "5")
 	}
+	wantOutput := "Merged PR #5: https://bitbucket.org/myws/myrepo/pull-requests/5"
+	if result.Output != wantOutput {
+		t.Errorf("Output = %q, want %q", result.Output, wantOutput)
+	}
 }
 
 // --- BITBUCKET_ACCESS_TOKEN env fallback ---
@@ -517,5 +569,185 @@ func TestBitbucketPRViewTool_UsesEnvTokenFallback(t *testing.T) {
 	}
 	if gotAuth != "Bearer env-token-123" {
 		t.Errorf("Authorization header = %q, want Bearer env-token-123", gotAuth)
+	}
+}
+
+// --- pagination (B2) ---
+
+// TestBitbucketPRChecksTool_Pagination_FailureOnPage2 proves a FAILED status
+// buried on the statuses list's second page is not invisible: before the
+// fix, only page 1 (all SUCCESSFUL) was ever fetched and the tool reported
+// green.
+func TestBitbucketPRChecksTool_Pagination_FailureOnPage2(t *testing.T) {
+	var page2URL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pullrequests/9"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": 9, "source": map[string]any{"commit": map[string]any{"hash": "abc123"}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/commit/abc123/statuses"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"values": []map[string]any{{"state": "SUCCESSFUL"}},
+				"next":   page2URL,
+			})
+		case strings.HasSuffix(r.URL.Path, "/statuses/page2"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"values": []map[string]any{{"state": "FAILED"}},
+			})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	page2URL = srv.URL + "/statuses/page2"
+
+	tool := &BitbucketPRChecksTool{bbBase: bbBase{
+		apiBase:    srv.URL,
+		ClientFunc: newTestClientFunc(),
+		remoteFunc: testRemoteFunc(),
+	}}
+	result := tool.Execute(context.Background(), map[string]any{"number": 9})
+	if !result.IsError {
+		t.Fatalf("expected IsError for a page-2 FAILED status, got Output=%q Metadata=%v", result.Output, result.Metadata)
+	}
+	if status, _ := result.Metadata["status"].(string); status != "failed" {
+		t.Errorf("Metadata[status] = %q, want %q", status, "failed")
+	}
+}
+
+// TestBitbucketPRChecksTool_Pagination_BoundExceeded proves that when a
+// statuses list has more pages than this belt is willing to follow, the
+// tool abstains from "passed" rather than verdicting off a partial,
+// all-SUCCESSFUL prefix.
+func TestBitbucketPRChecksTool_Pagination_BoundExceeded(t *testing.T) {
+	var statusesURL string
+	pageCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/pullrequests/9") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": 9, "source": map[string]any{"commit": map[string]any{"hash": "abc123"}},
+			})
+			return
+		}
+		// Every page: one SUCCESSFUL status plus a "next" link back to
+		// itself — an unbounded (or very deep) statuses list.
+		pageCount++
+		json.NewEncoder(w).Encode(map[string]any{
+			"values": []map[string]any{{"state": "SUCCESSFUL"}},
+			"next":   statusesURL,
+		})
+	}))
+	defer srv.Close()
+	statusesURL = srv.URL + "/repositories/myws/myrepo/commit/abc123/statuses"
+
+	tool := &BitbucketPRChecksTool{bbBase: bbBase{
+		apiBase:    srv.URL,
+		ClientFunc: newTestClientFunc(),
+		remoteFunc: testRemoteFunc(),
+	}}
+	result := tool.Execute(context.Background(), map[string]any{"number": 9})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if status, _ := result.Metadata["status"].(string); status == "passed" {
+		t.Fatalf("false green: an unbounded-pagination all-SUCCESSFUL response reported \"passed\"")
+	}
+	if pageCount != bitbucketMaxStatusPages {
+		t.Errorf("expected exactly %d statuses-page requests, server saw %d", bitbucketMaxStatusPages, pageCount)
+	}
+}
+
+// --- auth error sanitization (B4) ---
+
+// bbSentinelSecret must never appear in a ToolResult.Error surfaced to the
+// model/transcript.
+const bbSentinelSecret = "sk-super-secret-token-do-not-leak-9f8e7d6c"
+
+func TestBitbucketClient_SanitizesOAuthRetrieveError(t *testing.T) {
+	retrieveErr := &oauth2.RetrieveError{
+		Response: &http.Response{Status: "400 Bad Request"},
+		Body:     []byte(`{"access_token":"` + bbSentinelSecret + `"}`),
+	}
+	tool := &BitbucketPRViewTool{bbBase: bbBase{
+		remoteFunc: func(context.Context) (string, string, error) { return "ws", "repo", nil },
+		ClientFunc: func(context.Context) (*http.Client, error) { return nil, retrieveErr },
+	}}
+	result := tool.Execute(context.Background(), map[string]any{"number": 1})
+	if !result.IsError {
+		t.Fatal("expected an error when the connection's token retrieval fails")
+	}
+	if strings.Contains(result.Error, bbSentinelSecret) {
+		t.Fatalf("ToolResult.Error leaked the token-endpoint response body: %q", result.Error)
+	}
+	if !strings.Contains(result.Error, "authentication failed") {
+		t.Errorf("expected an actionable auth-failure message, got %q", result.Error)
+	}
+}
+
+// --- workspace/repo_slug charset (B5) ---
+
+// TestBitbucketPRCreateTool_RejectsMaliciousSlug proves a workspace/repo_slug
+// pulled from an attacker-controlled .git/config (e.g. "repo?x=y") is
+// rejected before any HTTP request is made — such a value would otherwise
+// turn POST .../pullrequests into a request against a different endpoint.
+func TestBitbucketPRCreateTool_RejectsMaliciousSlug(t *testing.T) {
+	requested := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = true
+		t.Errorf("no HTTP request should have been made, got %s %s", r.Method, r.URL.String())
+	}))
+	defer srv.Close()
+
+	tool := &BitbucketPRCreateTool{bbBase: bbBase{
+		apiBase:    srv.URL,
+		ClientFunc: newTestClientFunc(),
+		remoteFunc: func(context.Context) (string, string, error) { return "ws", "repo?x=y", nil },
+	}}
+	result := tool.Execute(context.Background(), map[string]any{
+		"title":              "x",
+		"destination_branch": "main",
+	})
+	if !result.IsError {
+		t.Fatal("expected an error for a repo_slug outside the Bitbucket slug charset")
+	}
+	if requested {
+		t.Fatal("a request reached the server despite the invalid slug")
+	}
+}
+
+func TestValidateBitbucketSlug(t *testing.T) {
+	valid := []string{"scrypster", "my-repo", "my_repo", "my.repo", "a"}
+	for _, s := range valid {
+		if err := validateBitbucketSlug("workspace", s); err != nil {
+			t.Errorf("validateBitbucketSlug(%q) unexpectedly failed: %v", s, err)
+		}
+	}
+	invalid := []string{"repo?x=y", "repo#frag", "repo%20name", "user@host", "ws:port", ""}
+	for _, s := range invalid {
+		if err := validateBitbucketSlug("workspace", s); err == nil {
+			t.Errorf("validateBitbucketSlug(%q) should have failed", s)
+		}
+	}
+}
+
+// --- timeout hint (B6) ---
+
+func TestBitbucketTimeoutHint_AppendsCheckBitbucketNote(t *testing.T) {
+	msg := bitbucketTimeoutHint(fmt.Errorf("bitbucket: request failed: %w", context.DeadlineExceeded))
+	if !strings.Contains(msg, "may still have been created") {
+		t.Errorf("expected a 'may still have been created' hint, got %q", msg)
+	}
+	if !strings.Contains(msg, "check Bitbucket") {
+		t.Errorf("expected a 'check Bitbucket' hint, got %q", msg)
+	}
+}
+
+func TestBitbucketTimeoutHint_NoHintForOrdinaryError(t *testing.T) {
+	msg := bitbucketTimeoutHint(fmt.Errorf("bitbucket: request failed: connection refused"))
+	if strings.Contains(msg, "may still have been created") {
+		t.Errorf("ordinary errors should not get the timeout hint, got %q", msg)
 	}
 }

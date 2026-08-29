@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	"github.com/scrypster/huginn/internal/agent/session"
 	"github.com/scrypster/huginn/internal/backend"
@@ -72,13 +75,43 @@ func (b *bbBase) base() string {
 // sandbox's "origin" git remote.
 func (b *bbBase) workspaceRepo(ctx context.Context) (workspace, repoSlug string, err error) {
 	if b.remoteFunc != nil {
-		return b.remoteFunc(ctx)
+		workspace, repoSlug, err = b.remoteFunc(ctx)
+	} else {
+		var stdout, stderr string
+		stdout, stderr, err = runGit(ctx, b.SandboxRoot, "remote", "get-url", "origin")
+		if err != nil {
+			return "", "", fmt.Errorf("bitbucket: could not read git remote 'origin': %v\n%s", err, strings.TrimSpace(stderr))
+		}
+		workspace, repoSlug, err = parseBitbucketRemote(stdout)
 	}
-	stdout, stderr, err := runGit(ctx, b.SandboxRoot, "remote", "get-url", "origin")
 	if err != nil {
-		return "", "", fmt.Errorf("bitbucket: could not read git remote 'origin': %v\n%s", err, strings.TrimSpace(stderr))
+		return "", "", err
 	}
-	return parseBitbucketRemote(stdout)
+	// .git/config is attacker-controlled in a cloned repo — a remote like
+	// "ws/repo?x=y" would otherwise pass a query-string-laced workspace/repo
+	// straight into an API path (turning a pull-request POST into a
+	// repository-update POST). Reject anything outside Bitbucket's own slug
+	// charset before it ever reaches a request URL (Opus vet 2026-08-29).
+	if verr := validateBitbucketSlug("workspace", workspace); verr != nil {
+		return "", "", verr
+	}
+	if verr := validateBitbucketSlug("repo_slug", repoSlug); verr != nil {
+		return "", "", verr
+	}
+	return workspace, repoSlug, nil
+}
+
+// bitbucketSlugPattern is Bitbucket's own workspace/repo_slug charset.
+var bitbucketSlugPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validateBitbucketSlug rejects a workspace or repo_slug value that isn't a
+// plain Bitbucket slug — in particular one carrying ?, #, %, @, or : that
+// could redirect a request to a different API endpoint (see workspaceRepo).
+func validateBitbucketSlug(kind, s string) error {
+	if !bitbucketSlugPattern.MatchString(s) {
+		return fmt.Errorf("bitbucket: invalid %s %q (must match %s)", kind, s, bitbucketSlugPattern.String())
+	}
+	return nil
 }
 
 // bitbucketRemotePattern matches both SSH (git@bitbucket.org:ws/repo.git)
@@ -146,10 +179,32 @@ func (b *bbBase) client(ctx context.Context) (*http.Client, error) {
 		return &http.Client{Transport: bitbucketBearerTransport{token: token}}, nil
 	}
 	if connErr != nil {
+		// An *oauth2.RetrieveError's Error() embeds the raw token-endpoint
+		// response body verbatim — that can carry the token, a client
+		// secret, or other server internals. Never let it reach
+		// ToolResult.Error (model context + transcript); sanitize to a
+		// fixed, actionable message instead (Opus vet 2026-08-29).
+		var retrieveErr *oauth2.RetrieveError
+		if errors.As(connErr, &retrieveErr) {
+			return nil, fmt.Errorf("%s (and no BITBUCKET_ACCESS_TOKEN set)", bitbucketAuthFailedMsg)
+		}
 		return nil, fmt.Errorf("bitbucket: %v (and no BITBUCKET_ACCESS_TOKEN set)", connErr)
 	}
 	return nil, fmt.Errorf("bitbucket: no Bitbucket connection configured — connect Bitbucket in Settings → Connections (or set BITBUCKET_ACCESS_TOKEN)")
 }
+
+// bitbucketAuthFailedMsg is the sanitized, actionable message shown when the
+// connections manager's token exchange fails — deliberately fixed text, no
+// interpolation of the underlying oauth2 error (see client, above).
+const bitbucketAuthFailedMsg = "bitbucket: authentication failed — reconnect Bitbucket in Settings → Connections"
+
+// bitbucketMaxResponseBytes bounds a Bitbucket API response body. Larger
+// than the general maxOutputBytes cap (bash.go) — a PR's description/diff
+// stat can legitimately push a create/view/merge response past 100KB, and a
+// silently truncated body there doesn't just clip Output, it corrupts the
+// JSON so json.Unmarshal fails and a successful create is reported as an
+// error (Opus vet 2026-08-29, B6).
+const bitbucketMaxResponseBytes = 2 * 1024 * 1024 // 2MB
 
 // bitbucketRequest issues one Bitbucket API call and returns the raw
 // response body plus status code. body, when non-nil, is JSON-encoded as
@@ -179,11 +234,24 @@ func bitbucketRequest(ctx context.Context, client *http.Client, method, apiURL s
 		return nil, 0, fmt.Errorf("bitbucket: request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxOutputBytes))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, bitbucketMaxResponseBytes))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("bitbucket: read response: %w", err)
 	}
 	return data, resp.StatusCode, nil
+}
+
+// bitbucketTimeoutHint appends an actionable note to a request error when it
+// is (or wraps) a context deadline: the request may have already reached
+// Bitbucket and created/merged the PR server-side before the client gave up
+// waiting, so the caller should check Bitbucket rather than assume nothing
+// happened — and never retry blindly, since a retried create could
+// double-create a PR (see bitbucketHTTPTimeout's doc comment, B6).
+func bitbucketTimeoutHint(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Sprintf("%v (request timed out — the PR may still have been created/merged; check Bitbucket before retrying)", err)
+	}
+	return err.Error()
 }
 
 // bitbucketAPIError formats a non-2xx Bitbucket response body into a tool
@@ -304,7 +372,7 @@ func (t *BitbucketPRCreateTool) Execute(ctx context.Context, args map[string]any
 	apiURL := fmt.Sprintf("%s/repositories/%s/%s/pullrequests", t.base(), workspace, repoSlug)
 	data, status, err := bitbucketRequest(ctx, client, http.MethodPost, apiURL, payload)
 	if err != nil {
-		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_create: %v", err)}
+		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_create: %s", bitbucketTimeoutHint(err))}
 	}
 	if status >= 300 {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_create: %s", bitbucketAPIError(status, data))}
@@ -313,13 +381,29 @@ func (t *BitbucketPRCreateTool) Execute(ctx context.Context, args map[string]any
 	if err := json.Unmarshal(data, &pr); err != nil {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_create: decode response: %v", err)}
 	}
-	result := ToolResult{Output: strings.TrimSpace(string(data))}
+	// Output is a concise human line carrying the PR's web link — mirrors
+	// gh_pr_create/glab_mr_create (extractForgeURL) and is what the web PR
+	// card's prInfo.ts regex actually parses. The raw JSON body used to be
+	// dumped here instead, and its links.self API URL (not the web link)
+	// was the first https:// URL the frontend's regex found (Opus vet
+	// 2026-08-29, B3). Full details stay out of Output; Metadata already
+	// carries the structured {url, number}.
+	result := ToolResult{}
 	if pr.Links.HTML.Href != "" {
+		if pr.ID != 0 {
+			result.Output = fmt.Sprintf("Created PR #%d: %s", pr.ID, pr.Links.HTML.Href)
+		} else {
+			result.Output = fmt.Sprintf("Created PR: %s", pr.Links.HTML.Href)
+		}
 		md := map[string]any{"url": pr.Links.HTML.Href}
 		if pr.ID != 0 {
 			md["number"] = fmt.Sprintf("%d", pr.ID)
 		}
 		result.Metadata = md
+	} else {
+		// Unexpected API shape (no html link) — fall back to the raw body
+		// so there's still something to inspect.
+		result.Output = strings.TrimSpace(string(data))
 	}
 	return result
 }
@@ -411,27 +495,89 @@ type bitbucketStatus struct {
 
 type bitbucketStatusesResponse struct {
 	Values []bitbucketStatus `json:"values"`
+	// Next is the URL of the following page, when the statuses list is
+	// paginated (Bitbucket defaults to ~10 per page). Must be followed —
+	// see fetchBitbucketStatuses (B2).
+	Next string `json:"next"`
+}
+
+// bitbucketMaxStatusPages/bitbucketMaxStatusesCollected bound how much of a
+// paginated statuses list this belt will follow. Chosen generously (5 pages
+// / 500 statuses covers any realistic PR); if a commit's statuses run past
+// this bound, fetchBitbucketStatuses reports truncation rather than silently
+// verdicting off a partial set.
+const (
+	bitbucketMaxStatusPages       = 5
+	bitbucketMaxStatusesCollected = 500
+)
+
+// fetchBitbucketStatuses follows a paginated GET .../statuses response's
+// "next" links, aggregating every page's Values. Bitbucket paginates that
+// endpoint (~10 per page by default); reading only page 1 (as this belt
+// originally did) means a later-page FAILED status is invisible and a
+// passing page 1 alone can report a false green (Opus vet 2026-08-29, B2).
+// truncated is true when more pages remained beyond the bound above — the
+// caller must never report "passed" in that case, since the verdict would
+// be based on incomplete data.
+func fetchBitbucketStatuses(ctx context.Context, client *http.Client, firstURL string) (statuses []bitbucketStatus, truncated bool, err error) {
+	nextURL := firstURL
+	for page := 0; page < bitbucketMaxStatusPages && nextURL != ""; page++ {
+		data, status, ferr := bitbucketRequest(ctx, client, http.MethodGet, nextURL, nil)
+		if ferr != nil {
+			return nil, false, ferr
+		}
+		if status >= 300 {
+			return nil, false, errors.New(bitbucketAPIError(status, data))
+		}
+		var resp bitbucketStatusesResponse
+		if jerr := json.Unmarshal(data, &resp); jerr != nil {
+			return nil, false, fmt.Errorf("decode statuses: %w", jerr)
+		}
+		statuses = append(statuses, resp.Values...)
+		if len(statuses) > bitbucketMaxStatusesCollected {
+			return statuses, true, nil
+		}
+		nextURL = resp.Next
+	}
+	if nextURL != "" {
+		truncated = true
+	}
+	return statuses, truncated, nil
 }
 
 // classifyBitbucketStatuses aggregates a commit's build statuses into a
 // single ChecksStatus-compatible verdict, or "" when there is nothing to
-// go on (no statuses reported). Any FAILED/STOPPED status fails the whole
-// set; otherwise any INPROGRESS status is pending; otherwise (all
-// SUCCESSFUL) it passes. Deliberately never guesses "passed" from an empty
-// set — see gh_pr_checks's doc comment on why a false green is worse than
-// no verdict (Opus vet 2026-08-29).
+// go on (no statuses at all, or one or more statuses in a state this belt
+// doesn't recognize). This is default-deny, not default-pass: "passed" is
+// returned ONLY when every status is the explicit SUCCESSFUL state.
+// FAILED/ERROR/STOPPED fail the whole set outright (checked first, so a
+// failure is never masked by an unrelated unrecognized status).
+// INPROGRESS/NOTRUN/PENDING mark the set pending. Anything else — an empty
+// state, a missing state field, or a value this belt has never seen —
+// abstains: it does NOT count toward "passed", because a status this belt
+// can't classify is exactly the shape of data an attacker (or a new
+// Bitbucket check type) could use to slip a false green past the model
+// (Opus vet 2026-08-29, B1).
 func classifyBitbucketStatuses(statuses []bitbucketStatus) string {
 	if len(statuses) == 0 {
 		return ""
 	}
 	pending := false
+	unknown := false
 	for _, s := range statuses {
 		switch strings.ToUpper(s.State) {
-		case "FAILED", "STOPPED":
+		case "SUCCESSFUL":
+			// contributes toward "passed"
+		case "FAILED", "ERROR", "STOPPED":
 			return "failed"
-		case "INPROGRESS":
+		case "INPROGRESS", "NOTRUN", "PENDING":
 			pending = true
+		default:
+			unknown = true
 		}
+	}
+	if unknown {
+		return ""
 	}
 	if pending {
 		return "pending"
@@ -470,24 +616,32 @@ func (t *BitbucketPRChecksTool) Execute(ctx context.Context, args map[string]any
 	}
 
 	statusesURL := fmt.Sprintf("%s/repositories/%s/%s/commit/%s/statuses", t.base(), workspace, repoSlug, pr.Source.Commit.Hash)
-	statusData, status, err := bitbucketRequest(ctx, client, http.MethodGet, statusesURL, nil)
+	statuses, truncated, err := fetchBitbucketStatuses(ctx, client, statusesURL)
 	if err != nil {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_checks: %v", err)}
 	}
-	if status >= 300 {
-		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_checks: %s", bitbucketAPIError(status, statusData))}
-	}
-	var statuses bitbucketStatusesResponse
-	if err := json.Unmarshal(statusData, &statuses); err != nil {
-		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_checks: decode statuses: %v", err)}
-	}
 
-	verdict := classifyBitbucketStatuses(statuses.Values)
+	verdict := classifyBitbucketStatuses(statuses)
+	if truncated && verdict == "passed" {
+		// Never report passed on a truncated set — more pages of statuses
+		// existed than this belt fetched, so an all-SUCCESSFUL prefix isn't
+		// the whole story (B2). Abstain toward pending rather than a false
+		// green.
+		verdict = "pending"
+	}
+	outBytes, _ := json.Marshal(statuses)
+	output := strings.TrimSpace(string(outBytes))
+	if truncated {
+		output += "\n(truncated: more check-status pages exist than were fetched — this verdict may be incomplete)"
+	}
 	if verdict == "" {
-		return ToolResult{Output: "no checks reported for this pull request"}
+		if len(statuses) == 0 {
+			return ToolResult{Output: "no checks reported for this pull request"}
+		}
+		return ToolResult{Output: output}
 	}
 	result := ToolResult{
-		Output:   strings.TrimSpace(string(statusData)),
+		Output:   output,
 		Metadata: map[string]any{"status": verdict},
 	}
 	// A failed build status is a tool-level error, not just informational —
@@ -605,19 +759,28 @@ func (t *BitbucketPRMergeTool) Execute(ctx context.Context, args map[string]any)
 	apiURL := fmt.Sprintf("%s/repositories/%s/%s/pullrequests/%d/merge", t.base(), workspace, repoSlug, num)
 	data, status, err := bitbucketRequest(ctx, client, http.MethodPost, apiURL, payload)
 	if err != nil {
-		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_merge: %v", err)}
+		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_merge: %s", bitbucketTimeoutHint(err))}
 	}
 	if status >= 300 {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("bitbucket_pr_merge: %s", bitbucketAPIError(status, data))}
 	}
+	// See bitbucket_pr_create's Execute: Output is a concise line carrying
+	// the PR's web link, not the raw JSON body (B3).
 	var pr bitbucketPR
-	result := ToolResult{Output: strings.TrimSpace(string(data))}
+	result := ToolResult{}
 	if json.Unmarshal(data, &pr) == nil && pr.Links.HTML.Href != "" {
+		if pr.ID != 0 {
+			result.Output = fmt.Sprintf("Merged PR #%d: %s", pr.ID, pr.Links.HTML.Href)
+		} else {
+			result.Output = fmt.Sprintf("Merged PR: %s", pr.Links.HTML.Href)
+		}
 		md := map[string]any{"url": pr.Links.HTML.Href}
 		if pr.ID != 0 {
 			md["number"] = fmt.Sprintf("%d", pr.ID)
 		}
 		result.Metadata = md
+	} else {
+		result.Output = strings.TrimSpace(string(data))
 	}
 	return result
 }
