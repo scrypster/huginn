@@ -2,13 +2,13 @@ import type { ToolCallRecord } from '../composables/useSessions'
 
 /**
  * PRInfo is the PR-as-deliverable summary derived from a turn's persisted
- * tool calls: a successful gh_pr_create/glab_mr_create result, plus
+ * tool calls: a successful gh_pr_create/glab_mr_create/bitbucket_pr_create result, plus
  * best-effort branch (from a preceding git_push) and checks state (from a
- * gh_pr_checks/glab_mr_checks call, if one ran). UI-side derivation only —
+ * gh_pr_checks/glab_mr_checks/bitbucket_pr_checks call, if one ran). UI-side derivation only —
  * mirrors changedFilesLine.ts, no engine text injection.
  */
 export interface PRInfo {
-  tool: 'gh_pr_create' | 'glab_mr_create'
+  tool: 'gh_pr_create' | 'glab_mr_create' | 'bitbucket_pr_create'
   title: string
   number: string
   url: string
@@ -16,11 +16,12 @@ export interface PRInfo {
   checks?: 'pending' | 'pass' | 'fail'
 }
 
-// Matches both a GitHub PR URL (.../pull/123) and a GitLab MR URL
-// (.../-/merge_requests/123) — what gh_pr_create / glab_mr_create put in
+// Matches a GitHub PR URL (.../pull/123), a GitLab MR URL
+// (.../-/merge_requests/123), and a Bitbucket PR URL
+// (.../pull-requests/123) — what the create tools put in
 // their tool result on success (see internal/tools/github.go's
 // forgeURLPattern, which this mirrors).
-const PR_URL_RE = /https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)\S*/
+const PR_URL_RE = /https?:\/\/\S+\/(?:pull-requests|pull|merge_requests)\/(\d+)\S*/
 
 /**
  * extractPRInfo scans a turn's tool calls for a successful PR/MR creation
@@ -33,7 +34,7 @@ export function extractPRInfo(toolCalls?: ToolCallRecord[]): PRInfo | null {
   if (!toolCalls?.length) return null
 
   const createCall = toolCalls.find(
-    tc => (tc.name === 'gh_pr_create' || tc.name === 'glab_mr_create') && tc.result && PR_URL_RE.test(tc.result)
+    tc => (tc.name === 'gh_pr_create' || tc.name === 'glab_mr_create' || tc.name === 'bitbucket_pr_create') && tc.result && PR_URL_RE.test(tc.result)
   )
   if (!createCall) return null
 
@@ -44,7 +45,7 @@ export function extractPRInfo(toolCalls?: ToolCallRecord[]): PRInfo | null {
   const title = typeof createCall.args?.title === 'string' ? createCall.args.title : ''
 
   return {
-    tool: createCall.name as 'gh_pr_create' | 'glab_mr_create',
+    tool: createCall.name as 'gh_pr_create' | 'glab_mr_create' | 'bitbucket_pr_create',
     title,
     number,
     url,
@@ -68,7 +69,7 @@ function extractPushedBranch(toolCalls: ToolCallRecord[]): string | undefined {
 function extractChecksState(toolCalls: ToolCallRecord[]): 'pending' | 'pass' | 'fail' | undefined {
   const checksCall = [...toolCalls]
     .reverse()
-    .find(tc => tc.name === 'gh_pr_checks' || tc.name === 'glab_mr_checks')
+    .find(tc => tc.name === 'gh_pr_checks' || tc.name === 'glab_mr_checks' || tc.name === 'bitbucket_pr_checks')
   if (!checksCall) return undefined
   // Prefer the tool's AUTHORITATIVE status (from ToolResult.Metadata.status)
   // over a keyword guess — the old text heuristic defaulted to green on an

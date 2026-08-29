@@ -3301,7 +3301,7 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// integration tools, external MCP server tools, and skill PromptTools.
 		// Order matters: connection tools and MCP tools BEFORE orch.SetTools so
 		// applyToolbelt sees them when filtering per-agent schemas.
-		initConnectionTools(*cfg, huginnHome, sqlDB, toolReg)
+		initConnectionTools(*cfg, huginnHome, srvCWD, sqlDB, toolReg)
 		var mcpMgr *mcp.ServerManager
 		if len(cfg.MCPServers) > 0 {
 			mcpMgr = mcp.NewServerManager(cfg.MCPServers)
