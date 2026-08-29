@@ -161,6 +161,9 @@ type SpaceMessageToolCall struct {
 	// (path, unified, added, removed, truncated, is_new, is_delete) so the
 	// hallway DiffCard survives a reload. Mirrors session.PersistedToolCall.
 	Diff map[string]any `json:"diff,omitempty"`
+	// ChecksStatus mirrors session.PersistedToolCall.ChecksStatus for the
+	// hallway PR card (authoritative CI state, not a keyword guess).
+	ChecksStatus string `json:"checks_status,omitempty"`
 }
 
 // SpaceMessage is a single message returned by ListSpaceMessages.

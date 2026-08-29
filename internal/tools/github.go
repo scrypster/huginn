@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/scrypster/huginn/internal/agent/session"
@@ -182,10 +183,23 @@ func (t *GHPRDiffTool) Execute(ctx context.Context, args map[string]any) ToolRes
 
 // --- gh_pr_create ---
 
-type GHPRCreateTool struct{ ghBase }
+type GHPRCreateTool struct {
+	ghBase
+	// DefaultBranch, when known (resolved once at registration from the
+	// local origin/HEAD ref), is surfaced in the tool description so the
+	// model knows the base branch for the PR without guessing or invoking
+	// an extra tool call to find out.
+	DefaultBranch string
+}
 
-func (t *GHPRCreateTool) Name() string                { return "gh_pr_create" }
-func (t *GHPRCreateTool) Description() string         { return "Create a new pull request using the gh CLI." }
+func (t *GHPRCreateTool) Name() string { return "gh_pr_create" }
+func (t *GHPRCreateTool) Description() string {
+	desc := "Create a new pull request using the gh CLI."
+	if t.DefaultBranch != "" {
+		desc += fmt.Sprintf(" 'base' defaults to %q if omitted.", t.DefaultBranch)
+	}
+	return desc
+}
 func (t *GHPRCreateTool) Permission() PermissionLevel { return PermWrite }
 func (t *GHPRCreateTool) Schema() backend.Tool {
 	return backend.Tool{
@@ -224,7 +238,42 @@ func (t *GHPRCreateTool) Execute(ctx context.Context, args map[string]any) ToolR
 	if err != nil {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("gh pr create: %v\n%s", err, stderr)}
 	}
-	return ToolResult{Output: strings.TrimSpace(stdout)}
+	out := strings.TrimSpace(stdout)
+	result := ToolResult{Output: out}
+	// `gh pr create` prints the new PR's URL as its stdout on success (its
+	// progress chatter goes to stderr). Pull that URL — and the PR number
+	// parsed from it — into Metadata so callers (the model's next turn, the
+	// web UI's PR card) get a structured field instead of having to
+	// re-parse free text.
+	if url := extractForgeURL(out); url != "" {
+		md := map[string]any{"url": url}
+		if num := prNumberFromURL(url); num != "" {
+			md["number"] = num
+		}
+		result.Metadata = md
+	}
+	return result
+}
+
+// forgeURLPattern matches a GitHub (or GitHub Enterprise) pull-request URL or
+// a GitLab merge-request URL — what `gh pr create` / `glab mr create` print
+// to stdout on success.
+var forgeURLPattern = regexp.MustCompile(`https?://\S+/(?:pull|merge_requests)/(\d+)\S*`)
+
+// extractForgeURL pulls the first PR/MR URL out of forge CLI output.
+func extractForgeURL(output string) string {
+	loc := forgeURLPattern.FindString(output)
+	return strings.TrimSpace(loc)
+}
+
+// prNumberFromURL extracts the trailing PR number from a
+// https://.../pull/123 URL, or "" if the URL doesn't match that shape.
+func prNumberFromURL(url string) string {
+	m := forgeURLPattern.FindStringSubmatch(url)
+	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
 }
 
 // --- gh_issue_list ---
@@ -416,7 +465,14 @@ func (t *GHPRChecksTool) Execute(ctx context.Context, args map[string]any) ToolR
 			Metadata: map[string]any{"status": "pending"},
 		}
 	}
-	return ToolResult{IsError: true, Error: fmt.Sprintf("gh pr checks: %v\n%s", err, stderr)}
+	// A non-zero, non-pending exit means checks FAILED — carry the
+	// authoritative status so the UI never has to guess from text (Opus vet
+	// 2026-08-29: the web keyword-heuristic defaulted to green on error).
+	return ToolResult{
+		IsError:  true,
+		Error:    fmt.Sprintf("gh pr checks: %v\n%s", err, stderr),
+		Metadata: map[string]any{"status": "failed"},
+	}
 }
 
 // --- gh_run_view_failed ---

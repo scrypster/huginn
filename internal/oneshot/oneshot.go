@@ -83,7 +83,11 @@ func LoadDefaultRegistry(models *modelconfig.Models) (*agents.AgentRegistry, err
 }
 
 // DefaultToolRegistry registers the same local builtins the web named-agent
-// path sees (minus LSP/MCP, which are process-lifetime services).
+// path sees, minus MCP (a process-lifetime service). find_definition and
+// list_symbols ARE registered (tagged "builtin", so ["*"]/God Mode pulls
+// them in) but wired to the noop LSP manager rather than starting a
+// persistent LSP server per one-shot invocation — they return the honest
+// "no LSP configured" message instead of "unknown tool".
 func DefaultToolRegistry(cwd string, bashTimeout time.Duration) *tools.Registry {
 	if bashTimeout <= 0 {
 		bashTimeout = 120 * time.Second
@@ -96,6 +100,7 @@ func DefaultToolRegistry(cwd string, bashTimeout time.Duration) *tools.Registry 
 	reg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
 	tools.RegisterGitLabTools(reg, cwd)
 	reg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
+	tools.RegisterLSPTools(reg, cwd, nil)
 	reg.TagTools(tools.BuiltinToolNames(), "builtin")
 	return reg
 }

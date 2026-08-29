@@ -184,6 +184,15 @@ func specialistDomain(name string) string {
 	return domain
 }
 
+// SpecialistDomain exports specialistDomain for the S14 promotion counter
+// (server.SpecialistPromotionTracker), which needs the same domain both
+// when recording a spawn and when checking the count at the specialist's
+// finish line — reusing this rather than re-deriving it keeps the two
+// call sites from ever disagreeing on what a specialist's "label" is.
+func SpecialistDomain(name string) string {
+	return specialistDomain(name)
+}
+
 // suggestSpecialistName proposes a "<Domain> Specialist" formatted name from
 // a rejected name, for the validation error message.
 // sanitizeSpecialistName strips characters agent names disallow (colons,

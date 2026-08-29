@@ -74,7 +74,7 @@ func RegisterGitHubTools(reg *Registry, sandboxRoot string) {
 	reg.Register(&GHPRListTool{ghBase: base})
 	reg.Register(&GHPRViewTool{ghBase: base})
 	reg.Register(&GHPRDiffTool{ghBase: base})
-	reg.Register(&GHPRCreateTool{ghBase: base})
+	reg.Register(&GHPRCreateTool{ghBase: base, DefaultBranch: detectDefaultBranch(sandboxRoot)})
 	reg.Register(&GHPRChecksTool{ghBase: base})
 	reg.Register(&GHPRCommentTool{ghBase: base})
 	reg.Register(&GHRunViewFailedTool{ghBase: base})
@@ -116,7 +116,7 @@ func RegisterGitLabTools(reg *Registry, sandboxRoot string) {
 		return
 	}
 	base := glBase{GlabPath: glabPath, SandboxRoot: sandboxRoot}
-	reg.Register(&GlabMRCreateTool{glBase: base})
+	reg.Register(&GlabMRCreateTool{glBase: base, DefaultBranch: detectDefaultBranch(sandboxRoot)})
 	reg.Register(&GlabMRChecksTool{glBase: base})
 	reg.Register(&GlabCIViewFailedTool{glBase: base})
 	reg.Register(&GlabMRCommentTool{glBase: base})

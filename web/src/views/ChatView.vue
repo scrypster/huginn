@@ -865,11 +865,23 @@
                   v-if="msg.toolCalls?.length && !msg.streaming"
                   :diffs="msg.toolCalls.map(tc => tc.diff)"
                 />
-                <!-- Completion line: only when the model's own speech didn't
-                     already say which files changed — a compact system-styled
-                     fallback derived from the same persisted diff data. -->
+                <!-- PR card: renders only when this turn's tool calls include
+                     a successful gh_pr_create/glab_mr_create — the
+                     deliverable itself, alongside the diff that produced it. -->
+                <PRCard
+                  v-if="msg.toolCalls?.length && !msg.streaming"
+                  :tool-calls="msg.toolCalls"
+                />
+                <!-- Completion line: prefers the PR-as-deliverable handoff
+                     line (a run that both changed files and opened a PR)
+                     over the plain changed-files fallback, and both are
+                     suppressed when the model's own speech already said it. -->
                 <p
-                  v-if="!msg.streaming && changedFilesLineFor(msg)"
+                  v-if="!msg.streaming && prCompletionLineFor(msg)"
+                  class="mt-1 text-[11px] text-huginn-muted italic"
+                >{{ prCompletionLineFor(msg) }}</p>
+                <p
+                  v-else-if="!msg.streaming && changedFilesLineFor(msg)"
                   class="mt-1 text-[11px] text-huginn-muted italic"
                 >{{ changedFilesLineFor(msg) }}</p>
               <MessageActions
@@ -1269,7 +1281,9 @@ import SpaceReplyChip from '../components/SpaceReplyChip.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
 import DiffCard from '../components/DiffCard.vue'
+import PRCard from '../components/PRCard.vue'
 import { changedFilesLine } from '../utils/changedFilesLine'
+import { prCompletionLine } from '../utils/prCompletionLine'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
 import MsgTimeReveal from '../components/MsgTimeReveal.vue'
 import MessageActions from '../components/MessageActions.vue'
@@ -2252,9 +2266,21 @@ function isMemoryOnlyToolCalls(calls?: ToolCallRecord[]): boolean {
 
 // changedFilesLineFor adapts the pure changedFilesLine util to a ChatMessage:
 // derives the visible speech text and this turn's diffs, then delegates.
+// Suppressed when prCompletionLineFor already has a deliverable-handoff line
+// to show for this turn (PR + diffs) — that line supersedes the plain
+// changed-files fallback rather than stacking under it.
 function changedFilesLineFor(msg: ChatMessage): string {
+  if (prCompletionLineFor(msg)) return ''
   const diffs = (msg.toolCalls ?? []).map(tc => tc.diff)
   return changedFilesLine(visibleAssistantText(msg), diffs)
+}
+
+// prCompletionLineFor adapts the pure prCompletionLine util to a
+// ChatMessage: derives this turn's diffs, then delegates. See
+// prCompletionLine.ts — PR-as-deliverable completion summary, UI-side only.
+function prCompletionLineFor(msg: ChatMessage): string {
+  const diffs = (msg.toolCalls ?? []).map(tc => tc.diff)
+  return prCompletionLine(msg.toolCalls, diffs)
 }
 
 // activeToolCallsFor scopes the shared activeToolCalls list to one message's
