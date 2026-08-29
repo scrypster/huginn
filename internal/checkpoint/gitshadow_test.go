@@ -492,3 +492,25 @@ func TestStore_Snapshot_StripsInheritedGitIndexEnv(t *testing.T) {
 		t.Fatalf("ChangedPaths(hash, hash) = %v, want empty (no self-diff)", changed)
 	}
 }
+
+// Vet A5 residual: a huginn home located INSIDE the sandbox root would make
+// the shadow store snapshot itself (self-ingestion). NewStore must refuse so
+// initCheckpoints disables checkpoints honestly instead.
+func TestNewStore_RefusesHomeInsideSandbox(t *testing.T) {
+	sandbox := t.TempDir()
+	home := filepath.Join(sandbox, ".huginn-home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(context.Background(), home, sandbox); err == nil {
+		t.Fatal("NewStore accepted a huginn home inside the sandbox root; the store would snapshot itself")
+	}
+	// The reverse (sandbox inside home) is fine and must keep working.
+	sandbox2 := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(sandbox2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(context.Background(), t.TempDir(), sandbox2); err != nil {
+		t.Fatalf("NewStore rejected a valid layout: %v", err)
+	}
+}

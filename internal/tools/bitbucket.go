@@ -231,6 +231,14 @@ func bitbucketRequest(ctx context.Context, client *http.Client, method, apiURL s
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		// An oauth2 token refresh can fail mid-request; its error embeds the
+		// token-endpoint response body verbatim. Sanitize it the same way the
+		// connect path does so token-endpoint bodies never reach
+		// ToolResult.Error or the model transcript (vet B4b).
+		var retrieveErr *oauth2.RetrieveError
+		if errors.As(err, &retrieveErr) {
+			return nil, 0, errors.New(bitbucketAuthFailedMsg)
+		}
 		return nil, 0, fmt.Errorf("bitbucket: request failed: %w", err)
 	}
 	defer resp.Body.Close()

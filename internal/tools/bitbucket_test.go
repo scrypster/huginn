@@ -751,3 +751,33 @@ func TestBitbucketTimeoutHint_NoHintForOrdinaryError(t *testing.T) {
 		t.Errorf("ordinary errors should not get the timeout hint, got %q", msg)
 	}
 }
+
+// bbLeakTransport simulates an oauth2 token refresh failing mid-request:
+// http.Client wraps the RoundTripper error in *url.Error, which embeds the
+// RetrieveError whose Error() echoes the token-endpoint response body.
+type bbLeakTransport struct{ body string }
+
+func (tr bbLeakTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, &oauth2.RetrieveError{
+		Response: &http.Response{Status: "400 Bad Request", StatusCode: 400},
+		Body:     []byte(tr.body),
+	}
+}
+
+// Vet B4b: the REQUEST path (not just the connect path) must sanitize
+// oauth2.RetrieveError — token-endpoint bodies must never reach
+// ToolResult.Error or the transcript.
+func TestBitbucketRequest_SanitizesOAuthRetrieveError(t *testing.T) {
+	const sentinel = "sk-VET-LEAK-1234567890"
+	client := &http.Client{Transport: bbLeakTransport{body: `{"error":"invalid_grant","access_token":"` + sentinel + `"}`}}
+	_, _, err := bitbucketRequest(context.Background(), client, http.MethodGet, "https://api.bitbucket.org/2.0/x", nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("token-endpoint body leaked into request error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("expected sanitized auth-failure message, got: %v", err)
+	}
+}

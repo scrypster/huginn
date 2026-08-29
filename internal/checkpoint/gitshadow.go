@@ -71,6 +71,17 @@ func NewStore(ctx context.Context, huginnHome, sandboxRoot string) (*Store, erro
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint: resolve huginn home: %w", err)
 	}
+	if resolved, err := filepath.EvalSymlinks(absHome); err == nil {
+		absHome = resolved
+	}
+	// Refuse a home inside the sandbox: the store would snapshot itself
+	// (self-ingestion — every run's touched paths dominated by store files,
+	// and the user's `git add -A` would stage the store). initCheckpoints
+	// treats this error as non-fatal: checkpoints disable with a warning
+	// rather than silently corrupting every snapshot (vet A5 residual).
+	if rel, relErr := filepath.Rel(absRoot, absHome); relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("checkpoint: huginn home %s is inside sandbox root %s; refusing to snapshot the store into itself", absHome, absRoot)
+	}
 	checkpointDir := checkpointDirFor(absHome, absRoot)
 	gitDir := filepath.Join(checkpointDir, storeSubdir)
 	s := &Store{gitDir: gitDir, workTree: absRoot}
