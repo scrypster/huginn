@@ -24,14 +24,28 @@ type VetResult struct {
 	// "Vetted" when the reviewer didn't actually finish.
 	Label string
 	// Findings is the reviewer's structured findings text. Empty when Label
-	// is "no findings" or "did not complete".
+	// is "no findings", "did not complete", or "not vetted — no diff
+	// captured".
 	Findings string
 }
+
+// LabelNotVetted is the HONESTY BACKSTOP label: it means capture (diff +
+// untracked-file content) came back completely empty, so no reviewer pass
+// was even attempted. This is a DISTINCT outcome from "did not complete"
+// (which means a pass WAS attempted and failed/timed out) — callers must
+// never render either one as "Vetted: ...", and must never let a model
+// reply of "PASS" override this label, because there was nothing for the
+// model to have actually reviewed.
+const LabelNotVetted = "not vetted — no diff captured"
 
 // DidNotComplete reports whether the vet pass failed to produce a verdict
 // (timeout, backend error, or an empty/unparseable reply) — the caller must
 // present this to the user honestly rather than as an implicit pass.
 func (r VetResult) DidNotComplete() bool { return r.Label == "did not complete" }
+
+// NotVetted reports whether the pass was skipped because diff capture came
+// back empty — see LabelNotVetted.
+func (r VetResult) NotVetted() bool { return r.Label == LabelNotVetted }
 
 // reviewerPersona is written for a 14b model: short, imperative, concrete —
 // not a character sheet. Adversarial and evidence-first per the vet-loop
@@ -74,7 +88,12 @@ func RunVetPass(ctx context.Context, b backend.Backend, ag *agents.Agent, task, 
 
 	diffText := strings.TrimSpace(diff)
 	if diffText == "" {
-		diffText = "(diff unavailable for this run — review the task description below as best you can and say so if that's not enough to judge.)"
+		// HONESTY BACKSTOP: nothing was captured to review (no diff, no
+		// untracked-file content) — never let a "PASS: no findings" verdict
+		// get printed for a review the model never actually ran. Skip the
+		// backend call entirely rather than asking a model to grade a review
+		// input it was never given.
+		return VetResult{Label: LabelNotVetted}
 	}
 	userMsg := fmt.Sprintf("## Task\n%s\n\n## Diff\n%s", strings.TrimSpace(task), diffText)
 

@@ -89,10 +89,16 @@ function onTouchEnd() {
   font-size: 11px;
   line-height: 1.4;
   color: rgba(139, 148, 158, 0.85);
-  background: rgba(13, 17, 23, 0.55);
+  /* Near-opaque (was 0.55): the pill sits over live message text, and a
+     half-transparent backdrop let covered glyphs show through muddied
+     rather than cleanly hidden underneath the stamp. */
+  background: rgba(13, 17, 23, 0.92);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
   white-space: nowrap;
+  /* none while hidden: an opacity-0 element still hit-tests, so without
+     this the invisible stamp would silently intercept clicks and text
+     selection over the trailing corner of every message. */
   pointer-events: none;
   opacity: 0;
   transition: opacity 150ms ease;
@@ -100,5 +106,11 @@ function onTouchEnd() {
 }
 .msg-time-row.is-revealed .msg-time-stamp {
   opacity: 1;
+  /* auto (not none) only while revealed: the stamp is the only element
+     with a `:title` tooltip (the clock time) — pointer-events: none made
+     it unreachable to the mouse, so hover could never trigger the native
+     tooltip. Scoped to the small revealed stamp itself, not the row, so
+     hover-reveal and text selection elsewhere are unaffected. */
+  pointer-events: auto;
 }
 </style>

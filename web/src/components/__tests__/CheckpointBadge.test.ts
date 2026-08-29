@@ -4,9 +4,10 @@ import type { RunRecord } from '../../composables/useCheckpoints'
 
 const ensureLoaded = vi.fn().mockResolvedValue(undefined)
 const getRunForThread = vi.fn<(id: string) => RunRecord | undefined>()
+const fetchRuns = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('../../composables/useCheckpoints', () => ({
-  useCheckpoints: () => ({ ensureLoaded, getRunForThread }),
+  useCheckpoints: () => ({ ensureLoaded, getRunForThread, fetchRuns }),
 }))
 
 import CheckpointBadge from '../CheckpointBadge.vue'
@@ -35,6 +36,7 @@ describe('CheckpointBadge', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     ensureLoaded.mockResolvedValue(undefined)
+    fetchRuns.mockResolvedValue(undefined)
   })
 
   it('renders nothing when no checkpoint run exists for the thread', async () => {
@@ -86,5 +88,40 @@ describe('CheckpointBadge', () => {
     await flushPromises()
     expect(w.text()).toContain('pushed')
     expect(w.find('[data-testid="checkpoint-badge-undo"]').exists()).toBe(true)
+  })
+
+  // F4: a run that finishes AFTER the checkpoints list's first fetch must
+  // still get a badge without a page reload. useCheckpoints.fetchRuns is a
+  // module-singleton fetch-once composable — CheckpointBadge must re-fetch
+  // when ITS OWN thread's `done` flag (mirrors DelegatedThread.done,
+  // ChatView's existing WS-driven completion source) transitions to true.
+  it('refetches checkpoints when this thread transitions to done after mount', async () => {
+    getRunForThread.mockReturnValue(undefined)
+    const w = mount(CheckpointBadge, { props: { threadId: 'thread-1', done: false } })
+    await flushPromises()
+    expect(fetchRuns).not.toHaveBeenCalled()
+
+    await w.setProps({ done: true })
+    await flushPromises()
+    expect(fetchRuns).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refetch on mount when the thread is already done', async () => {
+    getRunForThread.mockReturnValue(makeRun())
+    mount(CheckpointBadge, { props: { threadId: 'thread-1', done: true } })
+    await flushPromises()
+    expect(fetchRuns).not.toHaveBeenCalled()
+  })
+
+  it('does not refetch again on further no-op done updates', async () => {
+    getRunForThread.mockReturnValue(undefined)
+    const w = mount(CheckpointBadge, { props: { threadId: 'thread-1', done: false } })
+    await w.setProps({ done: true })
+    await flushPromises()
+    expect(fetchRuns).toHaveBeenCalledTimes(1)
+
+    await w.setProps({ done: true })
+    await flushPromises()
+    expect(fetchRuns).toHaveBeenCalledTimes(1)
   })
 })

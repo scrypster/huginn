@@ -76,4 +76,43 @@ test.describe('Chat message hover timestamp — zero-reflow overlay', () => {
       await page.mouse.move(0, 0)
     }
   })
+
+  // F5: the stamp carries the only :title tooltip (the full clock time).
+  // pointer-events: none on the whole overlay row used to make that
+  // tooltip permanently unreachable — the element sitting under the
+  // stamp's own bounding box was always something else. Assert
+  // elementFromPoint at the stamp's centre resolves to the stamp itself
+  // while it's revealed.
+  test('the revealed timestamp stamp is the hit-tested element at its own centre (tooltip reachable)', async ({ page }) => {
+    const userText = 'A short message with a timestamp tooltip to check.'
+    await mockSessionEndpoints(page, [
+      { id: 'msg-1', role: 'user', content: userText, ts: '2026-03-15T10:00:00Z' },
+    ])
+    await page.routeWebSocket('**/ws**', _ws => { /* swallow */ })
+
+    await page.goto(`/#/chat/${SESSION}`)
+    await expect(page.locator('[data-testid="ws-status-dot"]')).toHaveClass(/bg-huginn-green/, { timeout: 5000 })
+
+    const userBubble = page.locator('[data-testid="space-root-bubble"]').filter({ hasText: userText })
+    await expect(userBubble).toBeVisible({ timeout: 5000 })
+
+    const row = userBubble.locator('xpath=ancestor::*[@data-testid="msg-time-row"][1]')
+    const stamp = row.locator('[data-testid="msg-rel-time"]')
+
+    await expect(stamp).toHaveAttribute('title', /.+/)
+
+    await row.hover()
+    await expect(stamp).toHaveCSS('opacity', '1')
+
+    const box = await stamp.boundingBox()
+    expect(box).not.toBeNull()
+    const cx = box!.x + box!.width / 2
+    const cy = box!.y + box!.height / 2
+
+    const hitTestId = await page.evaluate(
+      ({ x, y }) => (document.elementFromPoint(x, y) as HTMLElement | null)?.dataset.testid ?? null,
+      { x: cx, y: cy },
+    )
+    expect(hitTestId).toBe('msg-rel-time')
+  })
 })

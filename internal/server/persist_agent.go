@@ -84,6 +84,30 @@ func (s *Server) persistAgent(incoming agents.AgentDef, pathName string) (create
 	}
 	incoming.LoadedApprovedTools = nil // bridge-only; never persisted
 
+	// Same full-blob-PUT clobber risk as ApprovedTools above, for two more
+	// fields that a caller can easily omit from the JSON body: an API
+	// caller (or any client not yet updated to know about these fields)
+	// that PUTs a partial payload without personality/vet_work would
+	// otherwise silently reset them to their Go zero values ("" / nil) and
+	// wipe out a value set through the UI. VetWork is already a *bool, so
+	// "omitted" and "explicitly nil" are indistinguishable from "unset"
+	// either way — nil here always means "inherit the stored value" when
+	// one exists. Personality carries the same known limitation the
+	// ApprovedTools comment above documents: "" is both the legitimate
+	// "Default" preset AND what an omitted field decodes to, so a
+	// deliberate reset-to-Default from a client that already had a
+	// non-default value stored requires re-sending the same non-empty
+	// personality through the UI's own always-set-this-field save path
+	// rather than an empty PUT.
+	if existingAgent != nil {
+		if incoming.Personality == "" {
+			incoming.Personality = existingAgent.Personality
+		}
+		if incoming.VetWork == nil {
+			incoming.VetWork = existingAgent.VetWork
+		}
+	}
+
 	if incoming.Version > 0 && existingAgent != nil && incoming.Version != existingAgent.Version {
 		return false, persistErr(409, fmt.Sprintf("agent version conflict: stored=%d, submitted=%d — reload and retry",
 			existingAgent.Version, incoming.Version))

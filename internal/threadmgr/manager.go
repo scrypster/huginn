@@ -814,6 +814,10 @@ func (tm *ThreadManager) ListBySession(sessionID string) []*Thread {
 	for _, t := range tm.threads {
 		if t.SessionID == sessionID {
 			cp := *t // copy the struct
+			if t.Summary != nil {
+				s := *t.Summary // deep-copy the FinishSummary value, same as Get
+				cp.Summary = &s
+			}
 			result = append(result, &cp)
 		}
 	}

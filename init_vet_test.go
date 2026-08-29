@@ -207,6 +207,144 @@ func TestAttachVetResult_Idempotent(t *testing.T) {
 	}
 }
 
+// TestCaptureDiff_UntrackedFileIncludesContent fails without the fix: the
+// old captureDiff ran a plain `git diff -- <files>` which is structurally
+// blind to untracked (newly-created) files — a run that only CREATES a
+// file got an empty diff and the reviewer never saw the file at all.
+func TestCaptureDiff_UntrackedFileIncludesContent(t *testing.T) {
+	dir := vetTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "brand_new.go"), []byte("package app\n\nfunc DoTheThing() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := captureDiff(dir, []string{"brand_new.go"})
+	if got == "" {
+		t.Fatal("captureDiff returned empty for a newly-created (untracked) file")
+	}
+	if !contains(got, "DoTheThing") {
+		t.Errorf("captureDiff did not include the untracked file's content: %q", got)
+	}
+}
+
+// TestCaptureDiff_CommittedWorkIsCaptured fails without the fix: plain
+// `git diff` is empty once the working tree matches HEAD (i.e. the agent
+// committed its change), so the old captureDiff returned "" for work the
+// agent already committed.
+func TestCaptureDiff_CommittedWorkIsCaptured(t *testing.T) {
+	dir := vetTestRepo(t)
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte("package app\n\nfunc CommittedChange() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "--quiet", "-m", "add CommittedChange")
+
+	got := captureDiff(dir, []string{"app.go"})
+	if got == "" {
+		t.Fatal("captureDiff returned empty for work the agent already committed")
+	}
+	if !contains(got, "CommittedChange") {
+		t.Errorf("captureDiff did not include the committed change: %q", got)
+	}
+}
+
+// TestInitVet_HonestyBackstop_NoDiffCaptured is the HONESTY BACKSTOP: when
+// capture yields nothing at all (file never existed, never touched), the
+// thread must NEVER end up labelled as if it passed review — even though
+// the reviewer backend below would happily reply "PASS: no findings" if it
+// were ever called. Before the fix, RunVetPass substituted a placeholder
+// string for the empty diff, the model was asked to grade that placeholder,
+// and a "PASS" reply became "Vetted: no findings" — a green from a check
+// that never looked at any code.
+func TestInitVet_HonestyBackstop_NoDiffCaptured(t *testing.T) {
+	dir := vetTestRepo(t)
+	tm := threadmgr.New()
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "coder", ModelID: "qwen2.5-coder:14b", VetWork: true})
+
+	b := &countingBackend{content: "PASS: no findings"}
+	teardown := initVet(dir, reg, tm, nil, b)
+	defer teardown()
+
+	th, err := tm.Create(threadmgr.CreateParams{SessionID: "s1", AgentID: "coder", Task: "bump version"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	tm.Start(th.ID, nil, func() {})
+	tm.Complete(th.ID, threadmgr.FinishSummary{
+		Summary:       "bumped the version",
+		FilesModified: []string{"ghost-file-that-never-existed.go"},
+		Status:        "completed",
+	})
+
+	got := waitForVetLabel(t, tm, th.ID)
+	if got.Summary.VetLabel != "not vetted — no diff captured" {
+		t.Errorf("VetLabel = %q, want the honesty-backstop label", got.Summary.VetLabel)
+	}
+	if b.callCount() != 0 {
+		t.Errorf("reviewer backend should never be called when nothing was captured, got %d calls", b.callCount())
+	}
+}
+
+// panickingBackend panics on every call — used to prove the vet goroutine
+// recovers instead of crashing the process.
+type panickingBackend struct{}
+
+func (p *panickingBackend) ChatCompletion(_ context.Context, _ backend.ChatRequest) (*backend.ChatResponse, error) {
+	panic("simulated backend panic")
+}
+func (p *panickingBackend) Health(_ context.Context) error   { return nil }
+func (p *panickingBackend) Shutdown(_ context.Context) error { return nil }
+func (p *panickingBackend) ContextWindow() int               { return 128_000 }
+
+// TestInitVet_ReviewerPanicIsRecovered fails without the fix: before the
+// goroutine had a recover(), a panic inside the reviewer pass (e.g. a
+// backend that panics instead of returning an error) would crash the whole
+// process — a single misbehaving backend taking down a server with many
+// other threads in flight. With the fix, the panic is caught and logged;
+// the thread simply never gets a VetLabel, and the test process survives.
+func TestInitVet_ReviewerPanicIsRecovered(t *testing.T) {
+	dir := vetTestRepo(t)
+	tm := threadmgr.New()
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{Name: "coder", ModelID: "qwen2.5-coder:14b", VetWork: true})
+
+	teardown := initVet(dir, reg, tm, nil, &panickingBackend{})
+	defer teardown()
+
+	th, err := tm.Create(threadmgr.CreateParams{SessionID: "s1", AgentID: "coder", Task: "bump version"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	tm.Start(th.ID, nil, func() {})
+	tm.Complete(th.ID, threadmgr.FinishSummary{
+		Summary:       "bumped the version",
+		FilesModified: []string{"app.go"},
+		Status:        "completed",
+	})
+
+	// If the panic wasn't recovered, this test process would already be
+	// dead by now. Just give the goroutine a moment and confirm we're
+	// still alive with no VetLabel ever landing.
+	time.Sleep(150 * time.Millisecond)
+	got, ok := tm.Get(th.ID)
+	if !ok {
+		t.Fatal("thread not found")
+	}
+	if got.Summary.VetLabel != "" {
+		t.Errorf("expected no VetLabel after a panicking reviewer pass, got %q", got.Summary.VetLabel)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (func() bool {
 		for i := 0; i+len(sub) <= len(s); i++ {

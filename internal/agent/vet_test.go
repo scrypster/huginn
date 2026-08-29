@@ -114,6 +114,32 @@ func TestRunVetPass_UsesSameModelAsOwningAgent(t *testing.T) {
 	}
 }
 
+// TestRunVetPass_HonestyBackstop_EmptyDiffNeverCallsModel fails without the
+// fix: RunVetPass used to substitute a placeholder string for an empty diff
+// and still ask the model to grade it — a "PASS" reply became a "Vetted: no
+// findings" label for a review that never saw any code. The fix must short-
+// circuit to LabelNotVetted BEFORE the backend is ever called, so a
+// backend that would happily reply PASS never gets the chance to.
+func TestRunVetPass_HonestyBackstop_EmptyDiffNeverCallsModel(t *testing.T) {
+	b := &mockBackend{responses: []*backend.ChatResponse{{Content: "PASS: no findings", DoneReason: "stop"}}}
+	ag := &agents.Agent{Name: "coder", ModelID: "qwen2.5-coder:14b"}
+
+	res := RunVetPass(context.Background(), b, ag, "bump version", "")
+
+	if res.Label != LabelNotVetted {
+		t.Errorf("Label = %q, want %q", res.Label, LabelNotVetted)
+	}
+	if res.DidNotComplete() {
+		t.Errorf("NotVetted must be distinct from DidNotComplete, got DidNotComplete()=true")
+	}
+	if !res.NotVetted() {
+		t.Errorf("NotVetted() = false, want true")
+	}
+	if len(b.lastRequests) != 0 {
+		t.Errorf("backend should never be called on empty diff, got %d requests", len(b.lastRequests))
+	}
+}
+
 func TestRunVetPass_NilInputsFailHonestly(t *testing.T) {
 	if r := RunVetPass(context.Background(), nil, &agents.Agent{}, "t", "d"); !r.DidNotComplete() {
 		t.Errorf("nil backend should fail honestly, got %q", r.Label)

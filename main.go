@@ -3621,10 +3621,18 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 
 		// Productized vet loop: a completed delegated coding thread whose
 		// owning agent has vet_work on (explicit, or via the strict-reviewer
-		// personality default) gets a one-shot adversarial reviewer pass
-		// before its result is presented as final. Wired the same way as
-		// checkpoints — via tm's existing OnStatusChange hook, no threadmgr
-		// changes needed. Non-fatal by construction: initVet never errors.
+		// personality default) gets a one-shot adversarial reviewer pass.
+		// This runs ASYNCHRONOUSLY, after the thread is already StatusDone —
+		// by design, nobody blocks on it (a vet pass can take up to
+		// agent.VetTimeout). The verdict attaches to the thread later via
+		// AttachVetResult and surfaces wherever that thread's Summary is
+		// read: the thread panel, and the persisted summary record. A lead
+		// agent's WaitForThreads call returns on the thread's terminal
+		// status and will usually complete before the verdict lands — this
+		// is expected, not a bug, and the result is never gated on the vet
+		// pass. Wired the same way as checkpoints — via tm's existing
+		// OnStatusChange hook, no threadmgr changes needed. Non-fatal by
+		// construction: initVet never errors.
 		cleanupFns = append(cleanupFns, initVet(srvCWD, agentReg, tm, func(provider, endpoint, apiKey, model string) (backend.Backend, error) {
 			return serveCache.For(provider, endpoint, apiKey, model)
 		}, b))

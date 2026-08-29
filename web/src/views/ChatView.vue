@@ -514,7 +514,7 @@
                   <!-- Checkpoint affordance: "Snapshotted — Undo available" once this
                        delegated run has a checkpoint ledger entry; amber "Not snapshotted"
                        when its capture failed (honesty requirement — never hidden). -->
-                  <CheckpointBadge :thread-id="d.threadId" />
+                  <CheckpointBadge :thread-id="d.threadId" :done="d.done" />
                   <!-- Delegated agent thinking indicator -->
                   <div
                     v-if="isThreadThinking(d.threadId)"
@@ -693,7 +693,7 @@
                       </svg>
                     </button>
                     <!-- Checkpoint affordance — see the equivalent comment above. -->
-                    <CheckpointBadge :thread-id="d.threadId" />
+                    <CheckpointBadge :thread-id="d.threadId" :done="d.done" />
                     <!-- Delegated agent thinking indicator -->
                     <div
                       v-if="isThreadThinking(d.threadId)"

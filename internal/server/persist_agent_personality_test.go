@@ -85,6 +85,58 @@ func TestPersistAgent_PersonalityAndVetWorkRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPersistAgent_MissingPersonalityAndVetWorkFieldsPreserveDisk fails
+// without the fix: persistAgent did the full-blob-clobber-protection dance
+// for ApprovedTools only. A PUT that omits personality/vet_work entirely
+// (e.g. an older API caller, or a form that doesn't round-trip every field)
+// decodes those to their Go zero values ("" / nil) and, since persistAgent
+// writes incoming as a whole AgentDef, silently reset a previously-saved
+// personality preset and vet_work override back to default.
+func TestPersistAgent_MissingPersonalityAndVetWorkFieldsPreserveDisk(t *testing.T) {
+	setupAgentsDir(t, map[string]string{
+		"codey.yaml": "name: Codey\nmodel: qwen2.5-coder:14b\npersonality: strict-reviewer\nvet_work: false\n",
+	})
+	_, ts := newTestServer(t)
+
+	// Same shape as TestPersistAgent_MissingApprovedToolsFieldPreservesDisk:
+	// a PUT that only touches an unrelated field, omitting personality and
+	// vet_work entirely.
+	body := `{"name":"Codey","model":"qwen2.5-coder:14b","color":"#123456"}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/agents/Codey", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+
+	cfg, err := agents.LoadAgents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved agents.AgentDef
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Name == "Codey" {
+			saved = a
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("agent not persisted")
+	}
+	if saved.Personality != "strict-reviewer" {
+		t.Errorf("personality after field-omitted PUT = %q, want %q preserved", saved.Personality, "strict-reviewer")
+	}
+	if saved.VetWork == nil || *saved.VetWork != false {
+		t.Errorf("vet_work after field-omitted PUT = %v, want false preserved", saved.VetWork)
+	}
+}
+
 func TestPersistAgent_RejectsInvalidPersonality(t *testing.T) {
 	setupAgentsDir(t, map[string]string{})
 	_, ts := newTestServer(t)

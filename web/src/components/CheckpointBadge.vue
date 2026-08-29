@@ -51,18 +51,34 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useCheckpoints } from '../composables/useCheckpoints'
 import CheckpointRevertDialog from './CheckpointRevertDialog.vue'
 
 const props = defineProps<{
   threadId: string
+  // Mirrors DelegatedThread.done (useSessions.ts) — the same WS-driven
+  // completion flag ChatView already uses for delegatedThreadStatusLabel.
+  // The checkpoints list is fetched once (module-singleton, see
+  // useCheckpoints.ts); a run that finishes AFTER that first fetch would
+  // otherwise never get a badge until a page reload. Refetching on this
+  // thread's own done transition is the cheapest correct trigger — no
+  // polling loop, and it fires only for a thread whose badge is actually
+  // mounted right now.
+  done?: boolean
 }>()
 
-const { ensureLoaded, getRunForThread } = useCheckpoints()
+const { ensureLoaded, getRunForThread, fetchRuns } = useCheckpoints()
 const showDialog = ref(false)
 
 onMounted(ensureLoaded)
+
+watch(
+  () => props.done,
+  (isDone, wasDone) => {
+    if (isDone && !wasDone) fetchRuns()
+  },
+)
 
 const run = computed(() => getRunForThread(props.threadId))
 </script>

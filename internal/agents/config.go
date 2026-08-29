@@ -329,6 +329,17 @@ func FromDef(def AgentDef) *Agent {
 	if def.MemoryEnabled != nil {
 		memEnabled = *def.MemoryEnabled
 	}
+	// Personality is normalized here rather than trusted from disk: LoadAgentsFromBase
+	// unmarshals AgentDef files directly without calling Validate, so a hand-edited or
+	// corrupted file can carry any string. An unrecognized value isn't a security issue
+	// (unknown maps to "" everywhere it's consulted), but it WOULD otherwise render
+	// verbatim in the web UI's personality badge — normalize to "" (default) here so
+	// the UI never shows arbitrary text.
+	personality := def.Personality
+	if !ValidPersonality(personality) {
+		slog.Warn("agents: unrecognized personality, normalizing to default", "agent", def.Name, "personality", personality)
+		personality = ""
+	}
 	return &Agent{
 		Name:                def.Name,
 		ModelID:             def.Model,
@@ -349,8 +360,8 @@ func FromDef(def AgentDef) *Agent {
 		Skills:              def.Skills,
 		LocalTools:          def.LocalTools,
 		ApprovedTools:       def.ApprovedTools,
-		Personality:         def.Personality,
-		VetWork:             ResolveVetWork(def.Personality, def.VetWork),
+		Personality:         personality,
+		VetWork:             ResolveVetWork(personality, def.VetWork),
 	}
 }
 
