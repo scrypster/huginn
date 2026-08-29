@@ -2322,7 +2322,7 @@ function formatThreadStatus(status: string): string {
 async function loadAgents() {
   try {
     const data = await api.agents.list()
-    agentsList.value = data as unknown as Agent[]
+    agentsList.value = Array.isArray(data) ? (data as unknown as Agent[]) : []
   } catch { /* ignore */ }
 }
 

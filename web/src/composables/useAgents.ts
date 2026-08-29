@@ -23,7 +23,7 @@ export function useAgents() {
     loading.value = true
     try {
       const data = await api.agents.list()
-      agents.value = data as unknown as AgentSummary[]
+      agents.value = Array.isArray(data) ? (data as unknown as AgentSummary[]) : []
     } catch { /* ignore */ } finally {
       loading.value = false
     }

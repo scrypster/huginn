@@ -65,7 +65,10 @@ const cursor = ref(0)
 const agents = ref<Array<Record<string, unknown>>>([])
 
 onMounted(async () => {
-  try { agents.value = await api.agents.list() } catch {}
+  try {
+    const data = await api.agents.list()
+    agents.value = Array.isArray(data) ? data : []
+  } catch {}
   document.addEventListener('mousedown', onOutside)
 })
 onBeforeUnmount(() => document.removeEventListener('mousedown', onOutside))

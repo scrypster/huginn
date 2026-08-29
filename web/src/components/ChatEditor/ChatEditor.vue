@@ -58,7 +58,8 @@ const agentsReady = new Promise<void>(resolve => { resolveAgentsReady = resolve 
 onMounted(async () => {
   for (let attempt = 1; attempt <= AGENTS_FETCH_MAX_ATTEMPTS; attempt++) {
     try {
-      agents.value = await api.agents.list()
+      const data = await api.agents.list()
+      agents.value = Array.isArray(data) ? data : []
       break
     } catch {
       // Transient failure (e.g. a 503 while the backend is warming up) would
