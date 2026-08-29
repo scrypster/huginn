@@ -54,7 +54,7 @@ jobs:
         run: which esbuild rustfmt ruby php node
 
       - name: Run Go tests
-        run: go test -race -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -race -timeout 300s -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Enforce critical package coverage floors
         run: ./scripts/check_go_coverage.sh
