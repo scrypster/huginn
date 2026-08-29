@@ -787,6 +787,8 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		MemoryHome:         o.huginnHome,
 		AgentName:          ag.Name,
 		SessionID:          opts.sessionID,
+		MetricsWriter:      o.runLoopMetrics(),
+		TurnKind:           opts.latencySlot,
 	}
 
 	start := time.Now().UnixNano()

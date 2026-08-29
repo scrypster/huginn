@@ -1247,6 +1247,13 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/metrics/turns:
+    get:
+      tags: [System]
+      summary: Get recent turn latency metrics and per-model summary
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
   /api/v1/connections/{id}/default:
     put:
       tags: [Connections]

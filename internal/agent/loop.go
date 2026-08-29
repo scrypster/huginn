@@ -15,6 +15,7 @@ import (
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/turnmetrics"
 )
 
 // defaultToolConcurrency is the maximum number of independent tool calls that
@@ -94,6 +95,18 @@ type RunLoopConfig struct {
 	// user-configurable — the harness populates it. Nil = no hooks, behavior
 	// identical to before hooks existed.
 	Hooks *HookRegistry
+
+	// MetricsWriter, when set, records turn-latency telemetry (t_request,
+	// t_first_token, t_first_signal, t_complete, tool call count, prompt
+	// size) for this run to the turn_metrics table. Nil (the default for
+	// existing callers and tests) disables telemetry entirely — RunLoop does
+	// not wrap any callback and costs nothing extra.
+	MetricsWriter *turnmetrics.Writer
+	// TurnKind labels this run for telemetry grouping. Callers reuse the same
+	// string passed to recordLLMLatency's "slot" (e.g. "agent-loop",
+	// "agent-chat") so the two latency views line up. Optional; empty is
+	// recorded as-is.
+	TurnKind string
 }
 
 // LoopResult is the final state after the loop ends.
@@ -489,6 +502,16 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err er
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = 50
 	}
+	// t_request is stamped here, before anything else runs — see the
+	// MetricsWriter doc comment on RunLoopConfig for why RunLoop entry is
+	// the chosen "turn started processing" point. newTurnMetricsHook wraps
+	// cfg.OnToken/OnEvent/OnToolCall in place, so every return path below
+	// (including the very next early return) is covered by the single defer.
+	metricsHook := newTurnMetricsHook(&cfg)
+	defer func() {
+		metricsHook.finish(err != nil)
+	}()
+
 	messages := make([]backend.Message, len(cfg.Messages))
 	copy(messages, cfg.Messages)
 

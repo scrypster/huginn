@@ -21,6 +21,7 @@ import (
 	"github.com/scrypster/huginn/internal/skills"
 	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/turnmetrics"
 )
 
 // sessionIDCtxKey is an unexported context key type to avoid collisions.
@@ -159,6 +160,28 @@ type Orchestrator struct {
 
 	lastUsagePrompt     atomic.Int64
 	lastUsageCompletion atomic.Int64
+
+	// turnMetrics is the async writer for per-turn latency telemetry (nil =
+	// disabled, set by SetTurnMetricsWriter from main.go). RunLoop call
+	// sites read it via runLoopMetrics() and pass it through
+	// RunLoopConfig.MetricsWriter.
+	turnMetrics *turnmetrics.Writer
+}
+
+// SetTurnMetricsWriter wires the turn-latency telemetry writer. Called once
+// from main.go after the writer is constructed and its migration applied.
+// Nil disables telemetry (default; safe for tests).
+func (o *Orchestrator) SetTurnMetricsWriter(w *turnmetrics.Writer) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.turnMetrics = w
+}
+
+// runLoopMetrics returns the turn metrics writer for RunLoopConfig.MetricsWriter.
+func (o *Orchestrator) runLoopMetrics() *turnmetrics.Writer {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.turnMetrics
 }
 
 // NewOrchestrator creates an Orchestrator ready for use.
@@ -401,6 +424,8 @@ func (o *Orchestrator) CodeWithAgent(
 		VaultReconnector:   vr.reconnector,
 		AgentName:          ag.Name,
 		SessionID:          GetSessionID(ctx),
+		MetricsWriter:      o.runLoopMetrics(),
+		TurnKind:           "agent-loop",
 	}
 
 	agentLoopStart := time.Now().UnixNano()

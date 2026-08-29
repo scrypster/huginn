@@ -228,6 +228,8 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			MemoryHome:       o.huginnHome,
 			AgentName:        ag.Name,
 			SessionID:        sessionID,
+			MetricsWriter:    o.runLoopMetrics(),
+			TurnKind:         "agent-chat",
 			OnToolCall: func(callID string, name string, args map[string]any) {
 				if onToolEvent != nil {
 					onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
