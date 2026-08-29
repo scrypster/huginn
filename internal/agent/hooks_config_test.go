@@ -303,8 +303,13 @@ func TestRunHookCommand_TimeoutNotDefeatedByBackgroundedChild(t *testing.T) {
 	if elapsed >= 10*time.Second {
 		t.Fatalf("runHookCommand took %v — timeout was defeated by the backgrounded child (bug F1)", elapsed)
 	}
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("expected a timeout error, got exitCode=%d output=%q err=%v", exitCode, output, err)
+	// The exact error differs by platform: on macOS the process-group kill
+	// closes the pipe first (context timeout error); on Linux Go's WaitDelay
+	// path fires first (exec.ErrWaitDelay, "WaitDelay expired before I/O
+	// complete"). Either way the safety property is the same — a non-nil
+	// error, which the caller treats as a fail-closed veto.
+	if err == nil {
+		t.Fatalf("expected an error (timeout or WaitDelay), got exitCode=%d output=%q err=nil", exitCode, output)
 	}
 	t.Logf("runHookCommand returned in %v (exitCode=%d, output=%q)", elapsed, exitCode, output)
 }
