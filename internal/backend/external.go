@@ -89,6 +89,14 @@ func externalStreamingTransport() *http.Transport {
 	}
 }
 
+// DefaultOllamaKeepAlive is the keep_alive duration sent on every chat
+// request to a freshly-constructed ollama-family ExternalBackend (see
+// NewExternalBackend), so a model that was just loaded stays resident for
+// this long after the request instead of being evicted the instant the
+// response finishes — the next turn doesn't pay a multi-second reload.
+// Config can override this per SetKeepAlive; "" omits the field entirely.
+const DefaultOllamaKeepAlive = "10m"
+
 // ExternalBackend calls any OpenAI-compatible /v1/chat/completions endpoint.
 // It is safe for concurrent use.
 type ExternalBackend struct {
@@ -96,21 +104,43 @@ type ExternalBackend struct {
 	client      *http.Client
 	model       string      // configured model name
 	keyResolver KeyResolver // optional; resolves API key sent as Bearer token
+
+	// keepAlive is sent as the ollama "keep_alive" field on every chat
+	// request (e.g. "10m", "1h", "-1" to keep loaded indefinitely, "0" to
+	// unload right after the response). Empty omits the field entirely.
+	// Only ollama-family backends (constructed via NewExternalBackend) get a
+	// non-empty default; NewExternalBackendWithAPIKey clears it back to ""
+	// since remote OpenAI-compatible providers (openai/deepseek/zai/custom)
+	// are not ollama and don't accept the field.
+	keepAlive string
 }
 
-// NewExternalBackend creates an ExternalBackend pointing at endpoint.
+// NewExternalBackend creates an ExternalBackend pointing at endpoint, with
+// DefaultOllamaKeepAlive pre-set (see SetKeepAlive to override or disable).
 func NewExternalBackend(endpoint string) *ExternalBackend {
 	return &ExternalBackend{
-		endpoint: strings.TrimRight(endpoint, "/"),
-		client:   &http.Client{Timeout: 0, Transport: externalStreamingTransport()},
+		endpoint:  strings.TrimRight(endpoint, "/"),
+		client:    &http.Client{Timeout: 0, Transport: externalStreamingTransport()},
+		keepAlive: DefaultOllamaKeepAlive,
 	}
 }
 
-// NewExternalBackendWithAPIKey creates an ExternalBackend that sends a Bearer token.
+// NewExternalBackendWithAPIKey creates an ExternalBackend that sends a Bearer
+// token — used for remote OpenAI-compatible providers (openai, deepseek,
+// zai, custom), never for ollama. keep_alive is an ollama-only extension, so
+// it's cleared here rather than inherited from NewExternalBackend's default.
 func NewExternalBackendWithAPIKey(endpoint string, resolver KeyResolver) *ExternalBackend {
 	b := NewExternalBackend(endpoint)
 	b.keyResolver = resolver
+	b.keepAlive = ""
 	return b
+}
+
+// SetKeepAlive overrides the ollama keep_alive duration sent on every chat
+// request. Pass "" to omit the field. Must be called before any concurrent
+// use of this backend begins (same convention as SetModel).
+func (b *ExternalBackend) SetKeepAlive(d string) {
+	b.keepAlive = d
 }
 
 // SetModel sets the model identifier used by ContextWindow.
@@ -218,6 +248,10 @@ type openAIRequest struct {
 	Messages []openAIMessage `json:"messages"`
 	Tools    []Tool          `json:"tools,omitempty"`
 	Stream   bool            `json:"stream"`
+	// KeepAlive is an ollama extension (empty on every other provider — see
+	// ExternalBackend.keepAlive) telling ollama how long to keep the model
+	// resident after this request.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 type openAIContentPart struct {
@@ -283,10 +317,11 @@ func (b *ExternalBackend) buildRequest(req ChatRequest) ([]byte, error) {
 		msgs = append(msgs, om)
 	}
 	r := openAIRequest{
-		Model:    req.Model,
-		Messages: msgs,
-		Tools:    req.Tools,
-		Stream:   true,
+		Model:     req.Model,
+		Messages:  msgs,
+		Tools:     req.Tools,
+		Stream:    true,
+		KeepAlive: b.keepAlive,
 	}
 	return json.Marshal(r)
 }
@@ -356,6 +391,9 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 	}()
 
 	result := &ChatResponse{}
+	// nativeToolCallStatusFired guards the first-signal StreamStatus emitted
+	// below the moment native delta.tool_calls fragments first appear.
+	nativeToolCallStatusFired := false
 	// accumulate tool call fragments indexed by wire index field
 	tcFragments := map[int]*ToolCall{}
 	// accumulate raw argument JSON fragments per tool call index
@@ -418,6 +456,21 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 				if req.OnToken != nil {
 					req.OnToken(choice.Delta.Content)
 				}
+			}
+		}
+
+		// First-signal (perf wave 2c): native delta.tool_calls fragments never
+		// pass through the content token gate (that only holds JSON embedded
+		// in .content), so a straight-to-tool-call turn with no prose would
+		// otherwise show nothing between "thinking" and the tool_call event
+		// RunLoop emits only once the whole response has finished streaming.
+		// Reuse the existing StreamStatus type (transient, never persisted);
+		// fires once per turn, only when the content gate hasn't already
+		// fired its own version of this signal.
+		if len(choice.Delta.ToolCalls) > 0 && len(tcFragments) == 0 && !nativeToolCallStatusFired {
+			nativeToolCallStatusFired = true
+			if req.OnEvent != nil && (tokenGate == nil || !tokenGate.statusFired) {
+				req.OnEvent(StreamEvent{Type: StreamStatus, Content: "using tools"})
 			}
 		}
 

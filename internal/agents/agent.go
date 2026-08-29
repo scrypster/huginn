@@ -246,6 +246,28 @@ func BuildPersonaPrompt(ag *Agent, ctxText string) string {
 	return body + "\n\n" + ctxText
 }
 
+// BuildSkeletonPersonaPrompt returns a minimal system prompt for a turn the
+// caller has already classified as trivial (see agent.IsTrivialAsk): an
+// identity line plus the short personality addendum, nothing else. It
+// deliberately omits capabilityAddendum, codebase context, cross-session
+// memory, the team roster, and the available-models block — none of that
+// changes the answer to "ping" or "thanks", and skipping it cuts prefill
+// cost on local models where prompt size dominates latency (perf wave step
+// 2a). Callers MUST gate this on the existing trivial-ask classifier rather
+// than inventing a second one, and MUST use the full BuildPersonaPrompt*
+// family for every non-trivial turn, delegated worker thread, and coding run.
+func BuildSkeletonPersonaPrompt(ag *Agent) string {
+	name := ag.Name
+	if name == "" {
+		name = "assistant"
+	}
+	body := "You are " + name + "."
+	if add := PersonalityAddendum(ag.Personality); add != "" {
+		body += "\n\n" + add
+	}
+	return body
+}
+
 // BuildPersonaPromptWithRoster builds the system prompt for a primary agent,
 // appending the agent roster when one is provided. Returns the base prompt
 // unchanged if roster is empty. Delegation instructions are omitted when

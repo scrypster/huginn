@@ -580,7 +580,13 @@ func main() {
 		fatalf("failed to create orchestrator: %v", err)
 	}
 	backendCache := backend.NewBackendCache(b)
+	backendCache.SetOllamaKeepAlive(cfg.Backend.KeepAlive)
 	orch.SetBackendCache(backendCache)
+	// Best-effort warm-up (perf wave step 2b): fire one tiny keep-alive
+	// request per distinct ollama model among a small, explicit set — the
+	// default agent and the Chief of Staff — so the first real user turn
+	// doesn't pay a cold model load. Non-blocking, logged, never fatal.
+	warmOllamaModels(context.Background(), *cfg, agentReg)
 	orch.WithMachineID(relay.GetMachineID()) // stable 8-char hex, not cfg.MachineID (hostname-dependent)
 	orch.SetGitRoot(detection.Root)
 	if tuiTurnMetrics != nil {
@@ -2231,7 +2237,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		logger.Info("backend: using cloud provider (serve mode)", "provider", "vertex",
 			"project", cfg.Backend.Project, "location", cfg.Backend.Location)
 	default:
-		b = backend.NewExternalBackend(endpoint)
+		eb := backend.NewExternalBackend(endpoint)
+		eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		b = eb
 		go func(ep string, be backend.Backend) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()

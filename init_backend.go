@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -99,6 +101,7 @@ func initBackend(
 				endpoint = "http://localhost:11434"
 			}
 			b := backend.NewExternalBackend(endpoint)
+			b.SetKeepAlive(cfg.Backend.KeepAlive)
 			go func(ep string, be backend.Backend) {
 				probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 				defer cancel()
@@ -153,6 +156,7 @@ func initBackend(
 	}
 	backendCache := backend.NewBackendCache(res.Backend)
 	backendCache.WithFallbackAPIKey(cfg.Backend.APIKey)
+	backendCache.SetOllamaKeepAlive(cfg.Backend.KeepAlive)
 	// Pre-register a VertexBackend whenever credentials are configured so that
 	// agents with provider="vertex" reuse it instead of going through the
 	// env-only factory case — see main.go startServer for the same wiring.
@@ -384,6 +388,9 @@ func selectBackend(ctx context.Context, cfg *config.Config, endpointOverride, mo
 			endpoint = "http://localhost:11434"
 		}
 		b = backend.NewExternalBackend(endpoint)
+		if eb, ok := b.(*backend.ExternalBackend); ok {
+			eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		}
 		// Blocking probe: fail fast so the user gets a clear error instead of a hang.
 		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
@@ -452,6 +459,108 @@ func startModelCapabilityProbe(baseURL string, reg *modelconfig.ModelRegistry) {
 		reg.ReplaceAvailable(infos)
 		slog.Info("backend: probed model capabilities", "count", len(infos))
 	}(baseURL)
+}
+
+// warmOllamaModelSet resolves the small, explicit set of models to warm up
+// at serve start (perf wave step 2b): the default agent's model and the
+// Chief of Staff's model (agentslib.AgentIsCoS), deduplicated. Deliberately
+// bounded to at most 2 models — this is a "don't pay a cold load on the
+// first turn" optimization, not "keep every installed model resident",
+// which would thrash a small machine's VRAM. Agents whose provider is not
+// ollama-family, or whose endpoint points elsewhere, are skipped: this is
+// ollama-only warm-up, never a probe of a remote/cloud provider.
+func warmOllamaModelSet(agentReg *agentslib.AgentRegistry, localEndpoint string) []string {
+	if agentReg == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(ag *agentslib.Agent) {
+		if ag == nil {
+			return
+		}
+		switch ag.Provider {
+		case "", "ollama", "external":
+			// ollama-family; fall through.
+		default:
+			return
+		}
+		if ag.Endpoint != "" && ag.Endpoint != localEndpoint {
+			return
+		}
+		id := ag.GetModelID()
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	add(agentReg.DefaultAgent())
+	for _, ag := range agentReg.All() {
+		if agentslib.AgentIsCoS(ag) {
+			add(ag)
+			break
+		}
+	}
+	return out
+}
+
+// warmOllamaModels fires one best-effort, non-blocking keep-alive request
+// per model in warmOllamaModelSet so the first real user turn doesn't pay a
+// cold model load. Every request runs in its own goroutine with a bounded
+// timeout; failures are logged, never fatal — this is pure latency-hiding,
+// not a readiness gate.
+func warmOllamaModels(ctx context.Context, cfg config.Config, agentReg *agentslib.AgentRegistry) {
+	endpoint := cfg.Backend.Endpoint
+	if endpoint == "" {
+		endpoint = "http://localhost:11434"
+	}
+	keepAlive := cfg.Backend.KeepAlive
+	if keepAlive == "" {
+		keepAlive = backend.DefaultOllamaKeepAlive
+	}
+	for _, model := range warmOllamaModelSet(agentReg, endpoint) {
+		go func(model string) {
+			warmCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			if err := warmOneOllamaModel(warmCtx, endpoint, model, keepAlive); err != nil {
+				slog.Warn("backend: ollama warm-up failed", "model", model, "endpoint", endpoint, "err", err)
+				return
+			}
+			slog.Info("backend: ollama warm-up requested", "model", model, "keep_alive", keepAlive)
+		}(model)
+	}
+}
+
+// warmOneOllamaModel POSTs to ollama's native /api/generate with an empty
+// prompt — per ollama's documented behavior this loads (or refreshes the
+// keep_alive TTL of) the model without running inference, the smallest
+// request that accomplishes a warm-up.
+func warmOneOllamaModel(ctx context.Context, endpoint, model, keepAlive string) error {
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"prompt":     "",
+		"keep_alive": keepAlive,
+	})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(endpoint, "/") + "/api/generate"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // joinStrings joins a slice of strings with a separator.

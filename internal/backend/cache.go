@@ -16,6 +16,18 @@ type BackendCache struct {
 	fallback          Backend            // global backend from config.json
 	providerKeys      map[string]string  // provider → raw API key ref (e.g. "keyring:huginn:anthropic")
 	preResolvedByName map[string]Backend // provider → pre-built backend (used when factory can't see full config)
+	ollamaKeepAlive   string             // applied to every ollama-family backend For() builds; see SetOllamaKeepAlive
+}
+
+// SetOllamaKeepAlive sets the keep_alive duration applied to every
+// ollama-family backend (provider "ollama"/"external"/"") built by For()
+// from this point on. Does not affect backends already cached; call before
+// the first For() of a session for it to take effect everywhere. Pass "" to
+// omit the field (disable keep-alive).
+func (c *BackendCache) SetOllamaKeepAlive(d string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ollamaKeepAlive = d
 }
 
 // SetProviderBackend registers a pre-built backend for a provider. When
@@ -42,9 +54,10 @@ func (c *BackendCache) SetProviderBackend(provider string, b Backend) {
 // The fallback is returned when For() is called with an empty provider.
 func NewBackendCache(fallback Backend) *BackendCache {
 	return &BackendCache{
-		backends:     make(map[string]Backend),
-		fallback:     fallback,
-		providerKeys: make(map[string]string),
+		backends:        make(map[string]Backend),
+		fallback:        fallback,
+		providerKeys:    make(map[string]string),
+		ollamaKeepAlive: DefaultOllamaKeepAlive,
 	}
 }
 
@@ -157,6 +170,12 @@ func (c *BackendCache) For(provider, endpoint, apiKey, model string) (Backend, e
 	b, err := newFromResolvedConfig(provider, endpoint, resolver, model)
 	if err != nil {
 		return nil, fmt.Errorf("backend cache: %w", err)
+	}
+	// eb.keepAlive is non-empty only for ollama-family backends (see
+	// NewExternalBackend vs NewExternalBackendWithAPIKey) — this discriminates
+	// "is this actually ollama" without re-deriving the provider switch here.
+	if eb, ok := b.(*ExternalBackend); ok && eb.keepAlive != "" {
+		eb.SetKeepAlive(c.ollamaKeepAlive)
 	}
 
 	c.backends[key] = b

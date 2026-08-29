@@ -74,3 +74,50 @@ func TestBuildPersonaPromptWithRoster_TierLow_OmitsDelegateHint(t *testing.T) {
 		t.Fatalf("expected cannot-delegate addendum, got:\n%s", got)
 	}
 }
+
+// TestBuildSkeletonPersonaPrompt_OmitsCapabilityAddendum verifies the
+// skeleton prompt (perf wave step 2a) never includes the capabilities
+// block that BuildPersonaPrompt always adds — that block only matters for
+// tool-calling turns, never for a trivial ack/ping.
+func TestBuildSkeletonPersonaPrompt_OmitsCapabilityAddendum(t *testing.T) {
+	ag := &agents.Agent{Name: "Steve", LocalTools: []string{"bash", "read_file"}}
+	got := agents.BuildSkeletonPersonaPrompt(ag)
+	if strings.Contains(got, "## Your capabilities") {
+		t.Fatalf("skeleton prompt must omit capability addendum, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Steve") {
+		t.Fatalf("skeleton prompt must keep the agent identity line, got:\n%s", got)
+	}
+}
+
+// TestBuildSkeletonPersonaPrompt_KeepsPersonalityAddendum verifies the
+// short personality addendum (task 2a explicitly calls it out as cheap
+// enough to keep) still reaches the skeleton prompt.
+func TestBuildSkeletonPersonaPrompt_KeepsPersonalityAddendum(t *testing.T) {
+	ag := &agents.Agent{Name: "Reggie", Personality: agents.PersonalityTerseOperator}
+	got := agents.BuildSkeletonPersonaPrompt(ag)
+	if !strings.Contains(got, "Terse Operator") {
+		t.Fatalf("skeleton prompt must keep the personality addendum, got:\n%s", got)
+	}
+}
+
+// TestBuildSkeletonPersonaPrompt_MaterialSmallerThanFull demonstrates the
+// prompt-budget win: a skeleton prompt for an agent with a real persona,
+// local-tool grants, and a long SystemPrompt is materially smaller than the
+// full BuildPersonaPrompt output for the same agent.
+func TestBuildSkeletonPersonaPrompt_MaterialSmallerThanFull(t *testing.T) {
+	ag := &agents.Agent{
+		Name:         "Winston",
+		SystemPrompt: "You are Winston, the Chief of Staff. You coordinate the team, triage incoming requests, and delegate work to specialists based on their strengths.",
+		LocalTools:   []string{"*"},
+	}
+	full := agents.BuildPersonaPrompt(ag, "")
+	skeleton := agents.BuildSkeletonPersonaPrompt(ag)
+	if len(skeleton) >= len(full) {
+		t.Fatalf("skeleton (%d bytes) must be smaller than full prompt (%d bytes)", len(skeleton), len(full))
+	}
+	// Not just smaller — meaningfully smaller, not a rounding error.
+	if len(skeleton) > len(full)/2 {
+		t.Fatalf("skeleton (%d bytes) not materially smaller than full prompt (%d bytes)", len(skeleton), len(full))
+	}
+}

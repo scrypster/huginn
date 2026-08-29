@@ -839,6 +839,7 @@ type ContentToolCallTokenGate struct {
 	raw             string
 	emitted         string
 	granted         map[string]bool
+	statusFired     bool // first-signal status (see flush) — fires at most once per turn
 }
 
 // SetGrantedTools enables mid-message stripping of fenced / bare JSON
@@ -895,6 +896,17 @@ func (g *ContentToolCallTokenGate) Finish(visible string) {
 func (g *ContentToolCallTokenGate) flush(final bool) {
 	vis, holding := visibleOrHeldAssistantContent(g.raw)
 	if holding && !final {
+		// First-signal (perf wave 2c): once the stream commits to a leading
+		// tool-call prefix that must never paint in the bubble, the user
+		// otherwise sees nothing between "thinking" and the tool_call event
+		// RunLoop emits only after the full response finishes streaming —
+		// which can be many seconds for a large write on a local model.
+		// Reuse the existing (transient, never persisted) StreamStatus type
+		// rather than inventing a new event kind; fires once per turn.
+		if !g.statusFired && g.downstreamEvent != nil {
+			g.statusFired = true
+			g.downstreamEvent(StreamEvent{Type: StreamStatus, Content: "using tools"})
+		}
 		return
 	}
 	if final {

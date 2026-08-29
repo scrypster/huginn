@@ -814,8 +814,9 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	return nil
 }
 
-// completeTrivialAsk is the tools-free hallway path: persona/roster/space/clock
-// stay, but 14b never sees wait_for_threads / delegate_to_agent / consult_agent.
+// completeTrivialAsk is the tools-free hallway path: skeleton persona plus
+// space/clock stay, but 14b never sees wait_for_threads / delegate_to_agent /
+// consult_agent, and the full team roster never gets built for this turn.
 func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpts, messages []backend.Message) error {
 	if opts.onEvent != nil {
 		opts.onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
@@ -1066,8 +1067,11 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	}
 
 	// Trivial asks (time/clock/date, ping, thanks, who-is-here) skip repo
-	// search, memory summaries, and skills so the 14b sees the message in
-	// seconds — not after 60s of orchestration. Clock + roster stay.
+	// search, memory summaries, skills, the team roster, and the capability
+	// addendum — a skeleton system prompt only — so the 14b sees the message
+	// in seconds, not after paying prefill on a multi-KB prompt. Space/
+	// channel context and the local clock still stay (who-is-here answers
+	// from the cheap per-turn channelMembersLine, not the full roster).
 	trivial := IsTrivialAsk(userMsg)
 	if onEvent != nil {
 		onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
@@ -1159,17 +1163,31 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		vaultPrefetch = o.startVaultPrefetch(ctx, ag, reg, sessionID, userMsg, chatPrefetchCallback)
 	}
 
-	var ctxText string
-	var recentSummaries []agents.SessionSummary
-	if !trivial {
-		ctxText = o.contextBuilder.Build(userMsg, ag.GetModelID())
-		recentSummaries = o.loadAgentSummaries(ctx, ag.Name)
-	}
-	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
-	if agentReg != nil {
-		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
-		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
-		systemPromptBase = agents.AppendAvailableModels(systemPromptBase, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
+	// Prompt budget (perf wave step 2a): a trivial turn that doesn't need the
+	// roster as an answer source gets a skeleton system prompt — identity
+	// line + personality addendum only. Repo context, cross-session memory,
+	// the team roster, and the available-models block cost real prefill time
+	// on local models and change nothing about the answer to "ping" or
+	// "thanks". Who-is-here/headcount trivial asks keep the full roster
+	// (trivialNeedsRoster) since they may need it as a fallback answer
+	// source. Non-trivial turns are byte-for-byte unchanged from before this
+	// optimization.
+	var systemPromptBase string
+	if trivial && !trivialNeedsRoster(userMsg) {
+		systemPromptBase = agents.BuildSkeletonPersonaPrompt(ag)
+	} else {
+		var ctxText string
+		var recentSummaries []agents.SessionSummary
+		if !trivial {
+			ctxText = o.contextBuilder.Build(userMsg, ag.GetModelID())
+			recentSummaries = o.loadAgentSummaries(ctx, ag.Name)
+		}
+		systemPromptBase = agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+		if agentReg != nil {
+			roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+			systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+			systemPromptBase = agents.AppendAvailableModels(systemPromptBase, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
+		}
 	}
 
 	// Per-agent skills fragment. Non-default agents (workflow steps, delegated

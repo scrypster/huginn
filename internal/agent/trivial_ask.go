@@ -8,8 +8,10 @@ import (
 )
 
 // IsTrivialAsk reports short hallway asks that need no hire, no delegate,
-// and no tools. Persona, roster, space/company context, and the local clock
-// stay; the tool belt, vault prefetch, and wait_for_threads do not.
+// and no tools. A skeleton persona (identity line + personality addendum)
+// plus space/company context and the local clock stay; the full team
+// roster, capability addendum, cross-session memory, the tool belt, vault
+// prefetch, and wait_for_threads do not.
 //
 // TRUE: time/clock/date, exact ping/pong, thanks/ok/acks, who-is-here /
 // roster, headcount.
@@ -108,6 +110,18 @@ func isTrivialRoster(norm string) bool {
 
 func isTrivialHeadcount(norm string) bool {
 	return trivialHeadcountRE.MatchString(norm)
+}
+
+// trivialNeedsRoster reports whether a trivial ask needs the full team
+// roster injected in-prompt as an answer source. Only who-is-here/headcount
+// trivial asks do: completeTrivialAsk's channelMembersLine only fires when
+// this channel's membership was attached to ctx (space/channel chat); DMs
+// and other contexts without that attachment still need the roster as a
+// fallback so "how many people are here" has something to answer from.
+// Every other trivial kind (ping, ack, time) gets the skeleton prompt.
+func trivialNeedsRoster(userMsg string) bool {
+	norm := normalizeTrivialAsk(userMsg)
+	return isTrivialRoster(norm) || isTrivialHeadcount(norm)
 }
 
 var (

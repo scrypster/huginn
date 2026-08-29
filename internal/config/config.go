@@ -64,6 +64,12 @@ type BackendConfig struct {
 	Project         string `json:"project,omitempty"`          // GCP project (vertex provider); fallback: GOOGLE_CLOUD_PROJECT
 	Location        string `json:"location,omitempty"`         // GCP region (vertex provider); fallback: GOOGLE_CLOUD_LOCATION, default us-central1
 	CredentialsPath string `json:"credentials_path,omitempty"` // path to service-account JSON; fallback: GOOGLE_APPLICATION_CREDENTIALS
+	// KeepAlive is the ollama "keep_alive" duration (e.g. "10m", "1h", "-1"
+	// to keep loaded indefinitely) sent on every ollama chat request so the
+	// model isn't unloaded between turns and the next turn doesn't pay a
+	// cold reload. Ollama-only — ignored for every other provider. Empty
+	// disables the field entirely; default is "10m" (see Default()).
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 // ResolvedAPIKey returns the API key, resolving environment variables if needed.
@@ -127,9 +133,10 @@ func Default() *Config {
 		ReasonerModel: "deepseek-r1:14b",
 		OllamaBaseURL: "http://localhost:11434",
 		Backend: BackendConfig{
-			Type:     "external",
-			Endpoint: "http://localhost:11434",
-			Provider: "ollama",
+			Type:      "external",
+			Endpoint:  "http://localhost:11434",
+			Provider:  "ollama",
+			KeepAlive: "10m", // mirrors backend.DefaultOllamaKeepAlive
 		},
 		Theme:             "dark",
 		ContextLimitKB:    128,
