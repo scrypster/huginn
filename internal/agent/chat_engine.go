@@ -191,6 +191,13 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 		}
 
 		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+		// agentGate is a per-turn fork (own sweep goroutine); close it when
+		// this turn ends or the sweeper leaks — one per chat turn. Safe:
+		// RunLoop joins all tool goroutines before returning (see the same
+		// pattern in runAgentTurn).
+		if agentGate != nil {
+			defer agentGate.Close()
+		}
 
 		agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
 		if sessErr != nil {

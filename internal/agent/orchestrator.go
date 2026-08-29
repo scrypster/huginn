@@ -364,6 +364,11 @@ func (o *Orchestrator) CodeWithAgent(
 	messages = append(messages, backend.Message{Role: "user", Content: userMsg})
 
 	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+	// agentGate is a per-run fork (own sweep goroutine); close it when this
+	// run ends or the sweeper leaks (same pattern as runAgentTurn).
+	if agentGate != nil {
+		defer agentGate.Close()
+	}
 
 	// Create isolated session environment for this agent run.
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
