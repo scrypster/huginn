@@ -802,20 +802,6 @@
           </button>
         </div>
 
-        <!-- ── Skills navigation items ── -->
-        <div v-else-if="activeSection === 'skills'" class="flex-1 py-3 space-y-0.5 px-2">
-          <button v-for="item in skillsNavItems" :key="item.tab"
-            @click="router.push('/skills/' + item.tab)"
-            class="relative w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-left transition-colors duration-100"
-            :class="(route.params.tab as string) === item.tab || (!route.params.tab && item.tab === 'installed')
-              ? 'bg-huginn-bg/80 text-huginn-text'
-              : 'text-huginn-muted hover:bg-huginn-bg/40 hover:text-huginn-text'"
-          >
-            <div class="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-huginn-blue rounded-r"
-              v-if="(route.params.tab as string) === item.tab || (!route.params.tab && item.tab === 'installed')" />
-            <span class="text-xs">{{ item.label }}</span>
-          </button>
-        </div>
       </aside>
     </transition>
 
@@ -1129,13 +1115,6 @@ const panelTitle       = computed(() => {
   if (activeSection.value === 'skills') return 'Skills'
   return 'Agents'
 })
-
-// ── Skills navigation items ─────────────────────────────────────────
-const skillsNavItems = [
-  { tab: 'installed', label: 'Installed' },
-  { tab: 'browse',    label: 'Browse' },
-  { tab: 'create',    label: 'Create' },
-]
 
 // ── Agents list (for sidebar panel) ─────────────────────────────────
 const { agents, loading: agentsLoading, fetchAgents, wireWS: wireAgentsWS } = useAgents()

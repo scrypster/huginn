@@ -1,6 +1,19 @@
 <template>
   <div class="flex flex-col h-full overflow-y-auto bg-huginn-bg">
 
+    <!-- ── Tab switcher ───────────────────────────────────────────── -->
+    <div class="flex items-center px-6 py-3 flex-shrink-0" data-testid="skills-tabs">
+      <div class="flex items-center gap-0.5 p-0.5 rounded-lg border border-huginn-border/60" style="background:rgba(22,27,34,0.7)">
+        <button v-for="t in tabDefs" :key="t.id"
+          :data-testid="`skills-tab-${t.id}`"
+          @click="setTab(t.id)"
+          class="px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150"
+          :class="tab === t.id ? 'bg-huginn-blue text-white shadow-sm' : 'text-huginn-muted hover:text-huginn-text'">
+          {{ t.label }}
+        </button>
+      </div>
+    </div>
+
     <!-- ── Installed tab ──────────────────────────────────────────── -->
     <template v-if="tab === 'installed'">
       <div class="flex items-center justify-between px-6 py-4 border-b border-huginn-border flex-shrink-0">
@@ -834,6 +847,18 @@ const props = defineProps<{ tab?: string }>()
 const router = useRouter()
 
 const tab = computed(() => props.tab || 'installed')
+
+// ── Tab switcher ───────────────────────────────────────────────────────────
+const tabDefs = [
+  { id: 'browse', label: 'Browse' },
+  { id: 'installed', label: 'Installed' },
+  { id: 'create', label: 'Create' },
+] as const
+
+function setTab(id: string) {
+  if (tab.value === id) return
+  router.push('/skills/' + id)
+}
 
 const installed = useInstalledSkills()
 const registry = useRegistrySkills()
