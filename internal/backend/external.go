@@ -89,12 +89,17 @@ func externalStreamingTransport() *http.Transport {
 	}
 }
 
-// DefaultOllamaKeepAlive is the keep_alive duration sent on every chat
-// request to a freshly-constructed ollama-family ExternalBackend (see
-// NewExternalBackend), so a model that was just loaded stays resident for
-// this long after the request instead of being evicted the instant the
-// response finishes — the next turn doesn't pay a multi-second reload.
-// Config can override this per SetKeepAlive; "" omits the field entirely.
+// DefaultOllamaKeepAlive is the keep_alive duration applied by callers that
+// know they're constructing a genuinely-ollama backend (newFromResolvedConfig's
+// "ollama" case, and the local-ollama construction sites in init_backend.go /
+// main.go), so a model that was just loaded stays resident for this long
+// after the request instead of being evicted the instant the response
+// finishes — the next turn doesn't pay a multi-second reload. It is NOT
+// applied automatically by NewExternalBackend: keep_alive is an ollama-only
+// extension, and ExternalBackend is also embedded by OpenRouterBackend and
+// ManagedBackend and constructed for the generic "external" provider, none
+// of which are ollama. Config can override this per SetKeepAlive; "" omits
+// the field entirely.
 const DefaultOllamaKeepAlive = "10m"
 
 // ExternalBackend calls any OpenAI-compatible /v1/chat/completions endpoint.
@@ -107,32 +112,33 @@ type ExternalBackend struct {
 
 	// keepAlive is sent as the ollama "keep_alive" field on every chat
 	// request (e.g. "10m", "1h", "-1" to keep loaded indefinitely, "0" to
-	// unload right after the response). Empty omits the field entirely.
-	// Only ollama-family backends (constructed via NewExternalBackend) get a
-	// non-empty default; NewExternalBackendWithAPIKey clears it back to ""
-	// since remote OpenAI-compatible providers (openai/deepseek/zai/custom)
-	// are not ollama and don't accept the field.
+	// unload right after the response). Empty (the zero value, and what
+	// every constructor here leaves it as) omits the field entirely — it is
+	// an ollama-only extension, so only a caller that knows it's building a
+	// genuinely-ollama backend should ever call SetKeepAlive with a non-empty
+	// value (see DefaultOllamaKeepAlive).
 	keepAlive string
 }
 
-// NewExternalBackend creates an ExternalBackend pointing at endpoint, with
-// DefaultOllamaKeepAlive pre-set (see SetKeepAlive to override or disable).
+// NewExternalBackend creates an ExternalBackend pointing at endpoint.
+// keep_alive is omitted by default — call SetKeepAlive(DefaultOllamaKeepAlive)
+// from a construction site that knows it's building a genuinely-ollama
+// backend (never here: this constructor is also used for the generic
+// "external" provider and is embedded by OpenRouterBackend and
+// ManagedBackend, none of which are ollama).
 func NewExternalBackend(endpoint string) *ExternalBackend {
 	return &ExternalBackend{
-		endpoint:  strings.TrimRight(endpoint, "/"),
-		client:    &http.Client{Timeout: 0, Transport: externalStreamingTransport()},
-		keepAlive: DefaultOllamaKeepAlive,
+		endpoint: strings.TrimRight(endpoint, "/"),
+		client:   &http.Client{Timeout: 0, Transport: externalStreamingTransport()},
 	}
 }
 
 // NewExternalBackendWithAPIKey creates an ExternalBackend that sends a Bearer
 // token — used for remote OpenAI-compatible providers (openai, deepseek,
-// zai, custom), never for ollama. keep_alive is an ollama-only extension, so
-// it's cleared here rather than inherited from NewExternalBackend's default.
+// zai, custom), never for ollama.
 func NewExternalBackendWithAPIKey(endpoint string, resolver KeyResolver) *ExternalBackend {
 	b := NewExternalBackend(endpoint)
 	b.keyResolver = resolver
-	b.keepAlive = ""
 	return b
 }
 

@@ -150,7 +150,7 @@ func TestWarmOllamaModelSet_DefaultPlusCoS(t *testing.T) {
 	reg.Register(&agentslib.Agent{Name: "Claude", ModelID: "claude-sonnet-4", Provider: "anthropic"})                 // cloud — never warmed
 	reg.Register(&agentslib.Agent{Name: "Remote", ModelID: "qwen2.5-coder:32b", Provider: "ollama", Endpoint: "http://other-box:11434"})
 
-	got := warmOllamaModelSet(reg, "http://localhost:11434")
+	got := warmOllamaModelSet(reg, "http://localhost:11434", "ollama")
 	if len(got) != 1 || got[0] != "qwen2.5-coder:14b" {
 		t.Fatalf("expected only the shared default+CoS model, got %v", got)
 	}
@@ -165,7 +165,7 @@ func TestWarmOllamaModelSet_DistinctDefaultAndCoS(t *testing.T) {
 	reg.Register(&agentslib.Agent{Name: "Steve", ModelID: "deepseek-r1:14b", LocalTools: []string{"create_agent"}})
 	reg.Register(&agentslib.Agent{Name: "Reggie", ModelID: "llama3:8b"})
 
-	got := warmOllamaModelSet(reg, "http://localhost:11434")
+	got := warmOllamaModelSet(reg, "http://localhost:11434", "ollama")
 	if len(got) != 2 {
 		t.Fatalf("expected exactly 2 models (default + CoS), got %v", got)
 	}
@@ -179,8 +179,36 @@ func TestWarmOllamaModelSet_DistinctDefaultAndCoS(t *testing.T) {
 
 // TestWarmOllamaModelSet_NilRegistry verifies a nil registry never panics.
 func TestWarmOllamaModelSet_NilRegistry(t *testing.T) {
-	if got := warmOllamaModelSet(nil, "http://localhost:11434"); got != nil {
+	if got := warmOllamaModelSet(nil, "http://localhost:11434", "ollama"); got != nil {
 		t.Fatalf("expected nil for nil registry, got %v", got)
+	}
+}
+
+// TestWarmOllamaModelSet_NonOllamaGlobalProviderWarmsNothing verifies D8:
+// a global provider of "custom" (a remote, non-ollama endpoint) warms
+// nothing, even though the registered agent's own Provider/Endpoint fields
+// look ollama-shaped — the global provider decides whether huginn is
+// managing a local ollama instance to warm at all.
+func TestWarmOllamaModelSet_NonOllamaGlobalProviderWarmsNothing(t *testing.T) {
+	reg := agentslib.NewRegistry()
+	reg.Register(&agentslib.Agent{Name: "Winston", ModelID: "qwen2.5-coder:14b", IsDefault: true})
+
+	got := warmOllamaModelSet(reg, "http://localhost:11434", "custom")
+	if len(got) != 0 {
+		t.Fatalf("expected nothing warmed for a non-ollama global provider, got %v", got)
+	}
+}
+
+// TestWarmOllamaModelSet_EmptyGlobalProviderStillWarms verifies the
+// unset-provider default (which config migration normalizes to "ollama")
+// still warms — only a genuinely different global provider opts out.
+func TestWarmOllamaModelSet_EmptyGlobalProviderStillWarms(t *testing.T) {
+	reg := agentslib.NewRegistry()
+	reg.Register(&agentslib.Agent{Name: "Winston", ModelID: "qwen2.5-coder:14b", IsDefault: true})
+
+	got := warmOllamaModelSet(reg, "http://localhost:11434", "")
+	if len(got) != 1 || got[0] != "qwen2.5-coder:14b" {
+		t.Fatalf("expected the default agent's model warmed for empty global provider, got %v", got)
 	}
 }
 

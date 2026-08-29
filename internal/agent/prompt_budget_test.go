@@ -9,17 +9,23 @@ import (
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/modelconfig"
+	"github.com/scrypster/huginn/internal/models"
 )
 
 // promptBudgetRegistry builds a roster large enough that AppendTeamRoster's
 // output is unmistakably present or absent in the assembled system prompt.
+// Winston is given create_agent (agents.AgentIsCoS) so AppendAvailableModels
+// actually emits content for it below — without that, the models-block
+// argument to AppendAvailableModels is a no-op for every non-CoS agent and
+// TestChatWithAgent_NonTrivial_PromptUnchangedByPromptBudget's guard on that
+// block is untested regardless of what it's given (see D9).
 func promptBudgetRegistry() *agents.AgentRegistry {
 	reg := agents.NewRegistry()
 	reg.Register(&agents.Agent{
 		Name:         "Winston",
 		ModelID:      "claude-sonnet-4",
 		SystemPrompt: "You are Winston, the Chief of Staff.",
-		LocalTools:   []string{"*"},
+		LocalTools:   []string{"*", "create_agent"},
 		IsDefault:    true,
 	})
 	reg.Register(&agents.Agent{Name: "Steve", ModelID: "qwen2.5-coder:14b", SystemPrompt: "You are Steve, the coder."})
@@ -59,13 +65,17 @@ func TestChatWithAgent_TrivialAck_GetsSkeletonPrompt(t *testing.T) {
 			t.Errorf("skeleton prompt for a trivial time ask must not contain the team roster, found %q:\n%s", roster, sys)
 		}
 	}
-	if strings.Contains(sys, "## Your capabilities") {
-		t.Errorf("skeleton prompt must not contain the capability addendum:\n%s", sys)
+	// The capability addendum stays (D3): it's a handful of lines, and it's
+	// the deterministic backstop for a trivial-ask misroute that still needs
+	// to know what the agent can't do (e.g. image generation) — only the
+	// ~2KB team roster and available-models block are cut.
+	if !strings.Contains(sys, "## Your capabilities") {
+		t.Errorf("skeleton prompt must keep the capability addendum:\n%s", sys)
 	}
 	if !strings.Contains(sys, "Local time now:") {
 		t.Errorf("skeleton prompt must still carry the local clock:\n%s", sys)
 	}
-	if len(sys) > 400 {
+	if len(sys) > 600 {
 		t.Errorf("skeleton prompt for a trivial ask should be small, got %d bytes:\n%s", len(sys), sys)
 	}
 }
@@ -102,10 +112,23 @@ func TestChatWithAgent_NonTrivial_PromptUnchangedByPromptBudget(t *testing.T) {
 	// excluded from the comparison (and checked separately) since it stamps
 	// a fresh time.Now() on each call — the point of this test is that the
 	// non-clock content is untouched by the prompt-budget change.
+	//
+	// D9: the models-block argument uses the real production input
+	// (models.GlobalProviderCatalog().AvailableModelsBlock()) rather than a
+	// literal "" — the previous version of this test passed "" here, which
+	// happened to match production's output for a non-CoS agent regardless
+	// of whether AppendAvailableModels was even wired correctly, so a
+	// regression that dropped the real catalog block from the dispatcher
+	// would NOT have failed this test. Winston is CoS (see
+	// promptBudgetRegistry) specifically so this path is actually exercised.
+	// What this test still CANNOT catch: ctxText and recentSummaries are
+	// faked as "" / nil rather than o.contextBuilder.Build(...) /
+	// o.loadAgentSummaries(...)'s real output — a regression isolated to
+	// those two inputs would need its own test.
 	roster := agents.BuildRoster(reg, o.ModelInfoFn(), ag.Name)
 	want := agents.BuildPersonaPromptWithMemory(ag, "", nil)
 	want = agents.AppendTeamRoster(want, roster, agents.AgentSupportsDelegation(ag))
-	want = agents.AppendAvailableModels(want, ag, "")
+	want = agents.AppendAvailableModels(want, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
 
 	gotNoClock := stripLocalClockLine(sys)
 	wantNoClock := stripLocalClockLine(backend.AppendLocalClock(want, time.Now()))

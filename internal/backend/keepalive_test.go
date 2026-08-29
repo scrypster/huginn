@@ -31,11 +31,15 @@ func keepAliveCaptureServer(t *testing.T, captured *string, present *bool) *http
 	}))
 }
 
-// TestExternalBackend_KeepAlive_DefaultSentOnOllamaBackend verifies a
-// freshly-constructed ExternalBackend (the ollama-family constructor) sends
-// DefaultOllamaKeepAlive ("10m") on every chat request without any explicit
-// SetKeepAlive call.
-func TestExternalBackend_KeepAlive_DefaultSentOnOllamaBackend(t *testing.T) {
+// TestExternalBackend_KeepAlive_OmittedByDefault verifies a freshly-constructed
+// ExternalBackend (the bare constructor, used directly for provider "external"
+// and embedded by OpenRouterBackend / ManagedBackend) sends no keep_alive field
+// at all without an explicit SetKeepAlive call — the ollama default lives in
+// the "ollama"-specific construction arms (see
+// TestNewFromResolvedConfig_OllamaProvider_KeepAlive_Sent), not here. D1: this
+// used to default to DefaultOllamaKeepAlive, leaking keep_alive to every
+// non-ollama caller with no way to disable it.
+func TestExternalBackend_KeepAlive_OmittedByDefault(t *testing.T) {
 	var captured string
 	var present bool
 	srv := keepAliveCaptureServer(t, &captured, &present)
@@ -48,11 +52,8 @@ func TestExternalBackend_KeepAlive_DefaultSentOnOllamaBackend(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ChatCompletion: %v", err)
 	}
-	if !present {
-		t.Fatal("expected keep_alive field in request body, got none")
-	}
-	if captured != DefaultOllamaKeepAlive {
-		t.Fatalf("expected keep_alive=%q, got %q", DefaultOllamaKeepAlive, captured)
+	if present {
+		t.Fatalf("expected no keep_alive field from the bare constructor, got %q", captured)
 	}
 }
 
@@ -142,6 +143,127 @@ func TestBackendCache_SetOllamaKeepAlive_AppliesToOllamaBackends(t *testing.T) {
 	}
 	if captured != "30m" {
 		t.Fatalf("expected keep_alive=%q from BackendCache override, got %q", "30m", captured)
+	}
+}
+
+// TestOpenRouterBackend_KeepAlive_NeverSent verifies OpenRouterBackend (an
+// ExternalBackend wired at NewOpenRouterBackendWithEndpoint) never sends the
+// ollama-only keep_alive field, since it embeds ExternalBackend and reuses
+// buildRequest for its wire body. Regression test for D1: NewExternalBackend
+// used to pre-seed DefaultOllamaKeepAlive on every construction, leaking
+// keep_alive to OpenRouter (and any other embedder) with no way to disable it.
+func TestOpenRouterBackend_KeepAlive_NeverSent(t *testing.T) {
+	var captured string
+	var present bool
+	srv := keepAliveCaptureServer(t, &captured, &present)
+	defer srv.Close()
+
+	b := NewOpenRouterBackendWithEndpoint(func() (string, error) { return "sk-or-test", nil }, "anthropic/claude-sonnet-4-6", srv.URL)
+	if _, err := b.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "anthropic/claude-sonnet-4-6",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if present {
+		t.Fatalf("OpenRouter backend must never send keep_alive, got %q", captured)
+	}
+}
+
+// TestManagedBackend_KeepAlive_NeverSent verifies the embedded-llama-server
+// ManagedBackend never sends keep_alive — it's an ollama-only extension and
+// llama-server doesn't manage a model pool the way ollama does.
+func TestManagedBackend_KeepAlive_NeverSent(t *testing.T) {
+	var captured string
+	var present bool
+	srv := keepAliveCaptureServer(t, &captured, &present)
+	defer srv.Close()
+
+	b := NewManagedBackend(srv.URL, nil)
+	if _, err := b.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "local-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if present {
+		t.Fatalf("managed llama-server backend must never send keep_alive, got %q", captured)
+	}
+}
+
+// TestNewFromResolvedConfig_ExternalProvider_KeepAlive_NeverSent verifies
+// provider "external" (factory.go) — a generic OpenAI-compatible endpoint,
+// not confirmed to be ollama — never sends keep_alive unless a caller
+// explicitly opts in via SetKeepAlive.
+func TestNewFromResolvedConfig_ExternalProvider_KeepAlive_NeverSent(t *testing.T) {
+	var captured string
+	var present bool
+	srv := keepAliveCaptureServer(t, &captured, &present)
+	defer srv.Close()
+
+	b, err := newFromResolvedConfig("external", srv.URL, NewKeyResolver(""), "some-model")
+	if err != nil {
+		t.Fatalf("newFromResolvedConfig: %v", err)
+	}
+	if _, err := b.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "some-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if present {
+		t.Fatalf("provider \"external\" must never send keep_alive by default, got %q", captured)
+	}
+}
+
+// TestNewFromResolvedConfig_OllamaProvider_KeepAlive_Sent verifies provider
+// "ollama" still gets DefaultOllamaKeepAlive — the default moved from
+// NewExternalBackend's constructor into this construction arm, it didn't
+// disappear.
+func TestNewFromResolvedConfig_OllamaProvider_KeepAlive_Sent(t *testing.T) {
+	var captured string
+	var present bool
+	srv := keepAliveCaptureServer(t, &captured, &present)
+	defer srv.Close()
+
+	b, err := newFromResolvedConfig("ollama", srv.URL, NewKeyResolver(""), "qwen2.5-coder:14b")
+	if err != nil {
+		t.Fatalf("newFromResolvedConfig: %v", err)
+	}
+	if _, err := b.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "qwen2.5-coder:14b",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if !present || captured != DefaultOllamaKeepAlive {
+		t.Fatalf("expected keep_alive=%q from provider \"ollama\", got present=%v captured=%q", DefaultOllamaKeepAlive, present, captured)
+	}
+}
+
+// TestBackendCache_SetOllamaKeepAlive_EmptyDisablesForOllama verifies
+// config.Backend.KeepAlive == "" (routed through SetOllamaKeepAlive("")) omits
+// the field entirely for an ollama-family backend built through For().
+func TestBackendCache_SetOllamaKeepAlive_EmptyDisablesForOllama(t *testing.T) {
+	var captured string
+	var present bool
+	srv := keepAliveCaptureServer(t, &captured, &present)
+	defer srv.Close()
+
+	c := NewBackendCache(nil)
+	c.SetOllamaKeepAlive("")
+	b, err := c.For("ollama", srv.URL, "", "qwen2.5-coder:14b")
+	if err != nil {
+		t.Fatalf("For: %v", err)
+	}
+	if _, err := b.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "qwen2.5-coder:14b",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if present {
+		t.Fatalf("config keep_alive=\"\" must disable keep_alive for ollama, got %q", captured)
 	}
 }
 

@@ -1,6 +1,7 @@
 package turnmetrics
 
 import (
+	"math"
 	"sort"
 	"time"
 )
@@ -133,15 +134,22 @@ func summarizeModel(model string, rows []TurnRow) ModelSummary {
 	return s
 }
 
-// percentile returns the p-th percentile (0..1) of vals using nearest-rank,
-// or 0 for an empty slice. vals is sorted in place — callers pass a slice
-// built fresh per summary so this is safe.
+// percentile returns the p-th percentile (0..1) of vals using nearest-rank
+// (idx = ceil(p*n) - 1), or 0 for an empty slice. vals is sorted in place —
+// callers pass a slice built fresh per summary so this is safe.
+//
+// D6: the previous formula (idx = int(p*(n-1))) is a linear-interpolation
+// index that rounds DOWN toward the body of the distribution — for
+// [1..19, 9999] (n=20) it computed idx=18 and returned 19, the second-to-
+// largest value, silently hiding a 9999ms outlier sitting in the true top
+// 5%. Nearest-rank is the standard definition for this exact "don't hide
+// the tail" requirement.
 func percentile(vals []int64, p float64) int64 {
 	if len(vals) == 0 {
 		return 0
 	}
 	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
-	idx := int(p * float64(len(vals)-1))
+	idx := int(math.Ceil(p*float64(len(vals)))) - 1
 	if idx < 0 {
 		idx = 0
 	}

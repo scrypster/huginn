@@ -75,18 +75,33 @@ func TestBuildPersonaPromptWithRoster_TierLow_OmitsDelegateHint(t *testing.T) {
 	}
 }
 
-// TestBuildSkeletonPersonaPrompt_OmitsCapabilityAddendum verifies the
-// skeleton prompt (perf wave step 2a) never includes the capabilities
-// block that BuildPersonaPrompt always adds — that block only matters for
-// tool-calling turns, never for a trivial ack/ping.
-func TestBuildSkeletonPersonaPrompt_OmitsCapabilityAddendum(t *testing.T) {
+// TestBuildSkeletonPersonaPrompt_KeepsCapabilityAddendum verifies the
+// skeleton prompt (perf wave step 2a) keeps the capabilities block —
+// D3: without it, a trivial-ask misroute (a time phrase buried inside a
+// larger multi-part message) can reach the skeleton path with no
+// deterministic backstop saying what the agent can't do, e.g. a no-image
+// agent silently agreeing to "draw me a dog". It's a handful of lines, not
+// the ~2KB team roster this prompt still omits.
+func TestBuildSkeletonPersonaPrompt_KeepsCapabilityAddendum(t *testing.T) {
 	ag := &agents.Agent{Name: "Steve", LocalTools: []string{"bash", "read_file"}}
 	got := agents.BuildSkeletonPersonaPrompt(ag)
-	if strings.Contains(got, "## Your capabilities") {
-		t.Fatalf("skeleton prompt must omit capability addendum, got:\n%s", got)
+	if !strings.Contains(got, "## Your capabilities") {
+		t.Fatalf("skeleton prompt must keep capability addendum, got:\n%s", got)
 	}
 	if !strings.Contains(got, "Steve") {
 		t.Fatalf("skeleton prompt must keep the agent identity line, got:\n%s", got)
+	}
+}
+
+// TestBuildSkeletonPersonaPrompt_ImageDenyLineForNoImageAgent verifies the
+// specific line D3 calls out: a no-image agent's skeleton prompt still says
+// "You do not have image generation." even though the full team roster and
+// codebase context are skipped.
+func TestBuildSkeletonPersonaPrompt_ImageDenyLineForNoImageAgent(t *testing.T) {
+	ag := &agents.Agent{Name: "Reggie"}
+	got := agents.BuildSkeletonPersonaPrompt(ag)
+	if !strings.Contains(got, "You do not have image generation.") {
+		t.Fatalf("expected no-image line in skeleton prompt, got:\n%s", got)
 	}
 }
 

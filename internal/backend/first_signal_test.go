@@ -66,6 +66,80 @@ func TestContentToolCallTokenGate_Prose_NeverEmitsToolStatus(t *testing.T) {
 	}
 }
 
+// countUsingToolsStatus pushes chunks through a fresh gate one at a time
+// (so the gate actually passes through a holding state between chunks,
+// the way real SSE deltas arrive) and returns how many "using tools"
+// StreamStatus events fired.
+func countUsingToolsStatus(t *testing.T, finalVisible string, chunks ...string) int {
+	t.Helper()
+	var events []StreamEvent
+	gate := NewContentToolCallTokenGate(nil, func(ev StreamEvent) { events = append(events, ev) })
+	for _, c := range chunks {
+		gate.Push(c)
+	}
+	gate.Finish(finalVisible)
+	var n int
+	for _, ev := range events {
+		if ev.Type == StreamStatus && ev.Content == "using tools" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestContentToolCallTokenGate_MereHold_NeverFiresStatus replaces the old
+// mental-model test (D5): the gate must fire "using tools" only when it
+// COMMITS to a tool-call interpretation (stripLeadingContentToolCalls
+// actually recognizes and strips a leading tool call), never merely because
+// couldBeContentToolCallPrefix is holding content that MIGHT still become
+// one. Pre-fix, the status fired the instant the gate held anything,
+// including these four shapes that never turn out to be a tool call.
+func TestContentToolCallTokenGate_MereHold_NeverFiresStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		final  string
+		chunks []string
+	}{
+		{
+			name:   "leading newline prose",
+			final:  "\nHello there, how are you?",
+			chunks: []string{"\n", "Hello there,", " how are you?"},
+		},
+		{
+			name:   "leading space prose",
+			final:  " Hello there, how are you?",
+			chunks: []string{" ", "Hello there,", " how are you?"},
+		},
+		{
+			name:   "code-fence answer",
+			final:  "```python\nprint('hi')\n```",
+			chunks: []string{"```", "python\n", "print('hi')\n", "```"},
+		},
+		{
+			name:   "prose-starting-with-JSON",
+			final:  `{"greeting": "hello", "detail": "not a tool call"}`,
+			chunks: []string{`{"greeting"`, `: "hello", `, `"detail": "not a tool call"}`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if n := countUsingToolsStatus(t, tc.final, tc.chunks...); n != 0 {
+				t.Fatalf("%s: expected 0 'using tools' status events, got %d", tc.name, n)
+			}
+		})
+	}
+}
+
+// TestContentToolCallTokenGate_RealCommit_FiresStatusExactlyOnce covers the
+// positive side of D5's replacement test: content-embedded tool JSON that
+// really does resolve to a tool call still fires the status exactly once
+// (unchanged behavior — this is the genuine "commit" case).
+func TestContentToolCallTokenGate_RealCommit_FiresStatusExactlyOnce(t *testing.T) {
+	if n := countUsingToolsStatus(t, "", `{"name": "bash",`, ` "arguments": {"command": "hostname"}}`); n != 1 {
+		t.Fatalf("expected exactly 1 'using tools' status event for real tool-call JSON, got %d", n)
+	}
+}
+
 // TestParseSSE_NativeToolCalls_EmitsUsingToolsStatusBeforeDone verifies a
 // straight-to-tool-call response (native delta.tool_calls, no prose) still
 // gives the user a signal before RunLoop's tool_call event fires at the

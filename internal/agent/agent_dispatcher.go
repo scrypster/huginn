@@ -886,10 +886,20 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, backendErr)
 	}
 	var buf strings.Builder
-	start := time.Now().UnixNano()
-	_, err := b.ChatCompletion(ctx, backend.ChatRequest{
-		Model:    ag.GetModelID(),
-		Messages: messages,
+	// Reuse RunLoop's turnMetricsHook (t_request/t_first_token/t_complete,
+	// turn_kind "trivial") so this hallway path shows up in turn_metrics too
+	// — otherwise the prompt-budget win it exists for is invisible in
+	// telemetry (see D2). completeTrivialAsk never calls RunLoop, so nothing
+	// stamps these on its own; building a throwaway RunLoopConfig just to
+	// get the hook's OnToken/OnEvent wrapping is the smallest way to reuse
+	// the exact same stamping logic instead of duplicating it here.
+	metricsCfg := &RunLoopConfig{
+		MetricsWriter: o.runLoopMetrics(),
+		SessionID:     opts.sessionID,
+		AgentName:     ag.Name,
+		ModelName:     ag.GetModelID(),
+		TurnKind:      "trivial",
+		Messages:      messages,
 		OnToken: func(token string) {
 			buf.WriteString(token)
 			if opts.onToken != nil {
@@ -897,8 +907,17 @@ func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpt
 			}
 		},
 		OnEvent: opts.onEvent,
+	}
+	hook := newTurnMetricsHook(metricsCfg)
+	start := time.Now().UnixNano()
+	_, err := b.ChatCompletion(ctx, backend.ChatRequest{
+		Model:    ag.GetModelID(),
+		Messages: messages,
+		OnToken:  metricsCfg.OnToken,
+		OnEvent:  metricsCfg.OnEvent,
 	})
 	o.recordLLMLatency(start, opts.latencySlot)
+	hook.finish(err != nil)
 	if err != nil {
 		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
 	}

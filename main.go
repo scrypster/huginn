@@ -517,7 +517,9 @@ func main() {
 		if endpoint == "" {
 			endpoint = "http://localhost:11434"
 		}
-		b = backend.NewExternalBackend(endpoint)
+		eb := backend.NewExternalBackend(endpoint)
+		eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		b = eb
 		go func(ep string, be backend.Backend) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()

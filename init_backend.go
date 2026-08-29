@@ -469,8 +469,20 @@ func startModelCapabilityProbe(baseURL string, reg *modelconfig.ModelRegistry) {
 // which would thrash a small machine's VRAM. Agents whose provider is not
 // ollama-family, or whose endpoint points elsewhere, are skipped: this is
 // ollama-only warm-up, never a probe of a remote/cloud provider.
-func warmOllamaModelSet(agentReg *agentslib.AgentRegistry, localEndpoint string) []string {
+//
+// globalProvider is cfg.Backend.Provider (D8): when the globally-configured
+// provider isn't ollama-family ("" or "ollama"), nothing is warmed even if
+// individual per-agent Provider/Endpoint fields happen to look ollama-shaped
+// — a global cloud/custom provider means huginn isn't managing a local
+// ollama instance to warm in the first place.
+func warmOllamaModelSet(agentReg *agentslib.AgentRegistry, localEndpoint, globalProvider string) []string {
 	if agentReg == nil {
+		return nil
+	}
+	switch globalProvider {
+	case "", "ollama":
+		// ollama-family global provider; proceed.
+	default:
 		return nil
 	}
 	seen := map[string]bool{}
@@ -519,7 +531,7 @@ func warmOllamaModels(ctx context.Context, cfg config.Config, agentReg *agentsli
 	if keepAlive == "" {
 		keepAlive = backend.DefaultOllamaKeepAlive
 	}
-	for _, model := range warmOllamaModelSet(agentReg, endpoint) {
+	for _, model := range warmOllamaModelSet(agentReg, endpoint, cfg.Backend.Provider) {
 		go func(model string) {
 			warmCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()

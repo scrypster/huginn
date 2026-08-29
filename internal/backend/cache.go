@@ -16,14 +16,15 @@ type BackendCache struct {
 	fallback          Backend            // global backend from config.json
 	providerKeys      map[string]string  // provider → raw API key ref (e.g. "keyring:huginn:anthropic")
 	preResolvedByName map[string]Backend // provider → pre-built backend (used when factory can't see full config)
-	ollamaKeepAlive   string             // applied to every ollama-family backend For() builds; see SetOllamaKeepAlive
+	ollamaKeepAlive   string             // applied to genuinely-ollama backends For() builds; see SetOllamaKeepAlive
 }
 
 // SetOllamaKeepAlive sets the keep_alive duration applied to every
-// ollama-family backend (provider "ollama"/"external"/"") built by For()
-// from this point on. Does not affect backends already cached; call before
-// the first For() of a session for it to take effect everywhere. Pass "" to
-// omit the field (disable keep-alive).
+// genuinely-ollama backend (provider "ollama"/"") built by For() from this
+// point on — never "external", which is a generic OpenAI-compatible endpoint
+// not confirmed to be ollama (see D1). Does not affect backends already
+// cached; call before the first For() of a session for it to take effect
+// everywhere. Pass "" to omit the field (disable keep-alive).
 func (c *BackendCache) SetOllamaKeepAlive(d string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -171,9 +172,12 @@ func (c *BackendCache) For(provider, endpoint, apiKey, model string) (Backend, e
 	if err != nil {
 		return nil, fmt.Errorf("backend cache: %w", err)
 	}
-	// eb.keepAlive is non-empty only for ollama-family backends (see
-	// NewExternalBackend vs NewExternalBackendWithAPIKey) — this discriminates
-	// "is this actually ollama" without re-deriving the provider switch here.
+	// eb.keepAlive is non-empty only for genuinely-ollama backends (only
+	// newFromResolvedConfig's "ollama" case ever calls SetKeepAlive with a
+	// non-empty value — see D1) — this discriminates "is this actually
+	// ollama" without re-deriving the provider switch here. The type
+	// assertion also naturally excludes wrapper types like OpenRouterBackend
+	// that embed *ExternalBackend rather than being one.
 	if eb, ok := b.(*ExternalBackend); ok && eb.keepAlive != "" {
 		eb.SetKeepAlive(c.ollamaKeepAlive)
 	}
