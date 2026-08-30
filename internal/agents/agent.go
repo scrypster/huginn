@@ -496,6 +496,13 @@ func (r *AgentRegistry) All() []*Agent {
 	for _, a := range r.agents {
 		result = append(result, a)
 	}
+	// Deterministic order: map iteration is randomized per call, which made
+	// every roster-bearing persona prompt nondeterministic (flaky
+	// byte-for-byte prompt tests, and needless prompt-cache misses on
+	// backends that prefix-cache). Sort by name, case-insensitive.
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
 	return result
 }
 
