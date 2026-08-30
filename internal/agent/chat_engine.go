@@ -190,7 +190,7 @@ func (o *Orchestrator) ChatForSessionWithAgent(ctx context.Context, sessionID, u
 			msgs[0].Content += memCtx
 		}
 
-		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+		schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate, o.getConfiguredMCPProviders())
 		// agentGate is a per-turn fork (own sweep goroutine); close it when
 		// this turn ends or the sweeper leaks — one per chat turn. Safe:
 		// RunLoop joins all tool goroutines before returning (see the same

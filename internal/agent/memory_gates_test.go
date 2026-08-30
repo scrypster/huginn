@@ -138,7 +138,7 @@ func TestApplyToolbelt_PassiveStripsWriteTools(t *testing.T) {
 	}
 	reg := muninnSchemaReg(names...)
 	ag := &agents.Agent{Name: "passive-bot", MemoryMode: "passive"}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	got := map[string]bool{}
 	for _, s := range schemas {
 		got[s.Function.Name] = true
@@ -163,7 +163,7 @@ func TestApplyToolbelt_CreateWorkflowVaultHiddenEveryMode(t *testing.T) {
 	reg := muninnSchemaReg(names...)
 	for _, mode := range []string{"", "passive", "conversational", "immersive"} {
 		ag := &agents.Agent{Name: "bot", MemoryMode: mode}
-		schemas, _ := applyToolbelt(ag, reg, nil)
+		schemas, _ := applyToolbelt(ag, reg, nil, nil)
 		for _, s := range schemas {
 			if s.Function.Name == muninnCreateWorkflowVault {
 				t.Fatalf("mode %q leaked muninn_create_workflow_vault", mode)
@@ -176,7 +176,7 @@ func TestApplyToolbelt_ConversationalKeepsWrites(t *testing.T) {
 	names := []string{"muninn_recall", "muninn_remember", "muninn_evolve", "muninn_decide"}
 	reg := muninnSchemaReg(names...)
 	ag := &agents.Agent{Name: "bot", MemoryMode: "conversational"}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	got := map[string]bool{}
 	for _, s := range schemas {
 		got[s.Function.Name] = true

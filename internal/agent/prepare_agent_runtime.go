@@ -63,7 +63,7 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 	// tools (always included regardless of toolbelt filtering). The forked
 	// gate isolates per-agent allowed/watched provider sets. Do not discard
 	// the forked gate — skipAll on the parent is auto-approve, not allow-all.
-	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, permGate)
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, permGate, o.getConfiguredMCPProviders())
 
 	// Build a session env so external MCP tools (GitHub, AWS, etc.) see the
 	// right per-profile credentials. Falls back to an empty session on error

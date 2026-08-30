@@ -70,7 +70,7 @@ func TestCarryover_WildcardLocalTools_PlusToolbelt(t *testing.T) {
 		Toolbelt:   []agents.ToolbeltEntry{{Provider: "slack"}},
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	names := schemaNames(schemas)
 
 	// All builtins (including delegation tools tagged as builtin)
@@ -119,7 +119,7 @@ func TestCarryover_NamedLocalTools_MultipleProviders(t *testing.T) {
 		},
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	names := schemaNames(schemas)
 
 	// Only named builtins
@@ -158,7 +158,7 @@ func TestCarryover_DefaultDeny_VaultAndDelegationTools(t *testing.T) {
 	reg := buildCarryoverTestRegistry()
 	ag := &agents.Agent{Name: "Bare"} // no LocalTools, no Toolbelt
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	names := schemaNames(schemas)
 
 	// Vault tools + delegation tools should be present
@@ -186,7 +186,7 @@ func TestCarryover_NamedLocalTools_AlwaysIncludesDelegationTools(t *testing.T) {
 		LocalTools: []string{"read_file", "bash"},
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	names := schemaNames(schemas)
 
 	// Named tools present
@@ -216,7 +216,7 @@ func TestCarryover_VaultToolsBypassToolbeltFiltering(t *testing.T) {
 		// No LocalTools — only toolbelt
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	names := schemaNames(schemas)
 
 	// AWS tools present via toolbelt
@@ -261,7 +261,7 @@ func TestCarryover_NoDuplicateTools(t *testing.T) {
 		Toolbelt:   []agents.ToolbeltEntry{{Provider: "shared_provider"}}, // also includes shared_tool
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	// Count occurrences of shared_tool
 	count := 0

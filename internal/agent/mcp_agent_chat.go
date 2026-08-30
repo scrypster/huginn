@@ -109,7 +109,7 @@ func (o *Orchestrator) AgentChat(
 	var schemas []backend.Tool
 	runGate := gate // fallback: shared gate with no provider restrictions
 	if defaultAgent != nil {
-		schemas, runGate = applyToolbelt(defaultAgent, vr.sessionReg, gate)
+		schemas, runGate = applyToolbelt(defaultAgent, vr.sessionReg, gate, o.getConfiguredMCPProviders())
 		// runGate is now a per-run fork (own sweep goroutine) — close it when
 		// this run ends or the sweeper leaks. Guarded so the shared fallback
 		// gate above is never closed.

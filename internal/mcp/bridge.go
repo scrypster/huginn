@@ -81,6 +81,14 @@ func (a *MCPToolAdapter) Schema() backend.Tool {
 	}
 }
 
+// pluralS returns "s" for any n != 1, "" for n == 1.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func (a *MCPToolAdapter) Execute(ctx context.Context, args map[string]any) tools.ToolResult {
 	var (
 		result *MCPToolCallResult
@@ -99,6 +107,7 @@ func (a *MCPToolAdapter) Execute(ctx context.Context, args map[string]any) tools
 	}
 	var parts []string
 	var imageDataURI string // first image within the size cap, if any
+	imagesDropped := 0 // additional images beyond the first attached one (not size-related)
 	for _, c := range result.Content {
 		switch c.Type {
 		case "text":
@@ -116,20 +125,45 @@ func (a *MCPToolAdapter) Execute(ctx context.Context, args map[string]any) tools
 			if c.Data == "" {
 				continue
 			}
-			decodedLen := base64.StdEncoding.DecodedLen(len(c.Data))
 			mimeType := c.MimeType
 			if mimeType == "" {
 				mimeType = "image/png"
 			}
-			if decodedLen > maxInlineImageBytes {
-				parts = append(parts, fmt.Sprintf("[image captured (%s, ~%d bytes) — exceeds %d byte inline display cap, not attached]", mimeType, decodedLen, maxInlineImageBytes))
+			// V8: only build/attach a data URI for actual image content —
+			// a non-image MIME type (or one MCP servers mislabel) is noted
+			// as text, never rendered as an <img>.
+			if !strings.HasPrefix(mimeType, "image/") {
+				parts = append(parts, fmt.Sprintf("[non-image content: %s, not attached]", mimeType))
 				continue
 			}
-			parts = append(parts, fmt.Sprintf("[image captured: %s, ~%d bytes]", mimeType, decodedLen))
+			// V7: cap on ACTUAL decoded bytes, not the base64 length
+			// estimate — DecodedLen() rounds up to the padded block size
+			// and can overestimate, wrongly rejecting an image that's
+			// actually within the cap.
+			decoded, decodeErr := base64.StdEncoding.DecodeString(c.Data)
+			if decodeErr != nil {
+				parts = append(parts, fmt.Sprintf("[image captured: %s — could not be decoded, not attached]", mimeType))
+				continue
+			}
+			decodedLen := len(decoded)
+			if decodedLen > maxInlineImageBytes {
+				parts = append(parts, fmt.Sprintf("[image captured (%s, %d bytes) — exceeds %d byte inline display cap, not attached]", mimeType, decodedLen, maxInlineImageBytes))
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("[image captured: %s, %d bytes]", mimeType, decodedLen))
 			if imageDataURI == "" {
 				imageDataURI = "data:" + mimeType + ";base64," + c.Data
+			} else {
+				// Only the first in-cap image is attached (Image is a
+				// single field, not a list, across PersistedToolCall /
+				// SpaceMessageToolCall / the UI) — say so honestly instead
+				// of silently dropping the rest.
+				imagesDropped++
 			}
 		}
+	}
+	if imagesDropped > 0 {
+		parts = append(parts, fmt.Sprintf("%d more screenshot%s not shown", imagesDropped, pluralS(imagesDropped)))
 	}
 	combined := strings.Join(parts, "\n")
 	if result.IsError {

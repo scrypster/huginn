@@ -234,7 +234,7 @@ export interface SpaceMessage {
   new_since?: number
   // Populated from WS tool_result events during streaming, or from the server on load.
   // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
-  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean; diff?: FileDiff }[]
+  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean; diff?: FileDiff; image?: string }[]
 }
 
 // FileDiff is the before/after unified diff attached to a write_file/edit_file

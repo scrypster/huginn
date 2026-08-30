@@ -22,6 +22,7 @@ type StdioTransport struct {
 }
 
 func NewStdioTransport(ctx context.Context, command string, args []string, env []string) (*StdioTransport, error) {
+	command = expandTilde(command)
 	cmd := exec.CommandContext(ctx, command, args...)
 	if len(env) > 0 {
 		cmd.Env = append(cmd.Environ(), env...)

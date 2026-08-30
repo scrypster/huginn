@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -673,7 +674,49 @@ func FormatRequest(req PermissionRequest) string {
 			return fmt.Sprintf("edit_file: %s", path)
 		}
 	}
+	// browser_* / MCP tools: render the most identifying arg (url first,
+	// falling back to selector/text) readably instead of a Go map dump
+	// (map[url:https://... timeout:30] reads worse than the tool name did
+	// on its own).
+	if strings.HasPrefix(req.ToolName, "browser_") || req.Provider != "" {
+		if url, ok := req.Args["url"].(string); ok && url != "" {
+			return fmt.Sprintf("%s: %s", req.ToolName, truncateLine(url, 80))
+		}
+		if s, ok := formatFirstStringArg(req.Args, "selector", "text", "query"); ok {
+			return fmt.Sprintf("%s: %s", req.ToolName, truncateLine(s, 80))
+		}
+		if len(req.Args) == 0 {
+			return req.ToolName
+		}
+		return fmt.Sprintf("%s: %s", req.ToolName, formatArgsReadable(req.Args))
+	}
 	return fmt.Sprintf("%s: %v", req.ToolName, req.Args)
+}
+
+// formatFirstStringArg returns the first non-empty string value found among
+// the given arg keys, in order.
+func formatFirstStringArg(args map[string]any, keys ...string) (string, bool) {
+	for _, k := range keys {
+		if s, ok := args[k].(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// formatArgsReadable renders args as "key=value, key2=value2" (keys sorted
+// for stable output) instead of Go's default map[...] dump.
+func formatArgsReadable(args map[string]any) string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, args[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // FormatPromptOptions returns the key hint shown in the TUI permission prompt.

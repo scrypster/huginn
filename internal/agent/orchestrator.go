@@ -107,6 +107,13 @@ type Orchestrator struct {
 	hooks            *HookRegistry         // PreToolUse/PostToolUse chain (G10); nil until SetHooks. Carries G1 syntax validation.
 	userHooks        *UserHookRunner       // user-configurable hooks.json chain; nil until EnableUserHooks.
 
+	// configuredMCPProviders is the set of configured MCP server names (same
+	// set main.go base-watches via serverGate.SetBaseWatchedProviders). Set
+	// by SetConfiguredMCPProviders. applyToolbelt adds these to a narrow
+	// toolbelt agent's allowedProviders so a configured MCP tool call reaches
+	// the base-watch prompt instead of being silently denied (V3 policy).
+	configuredMCPProviders map[string]bool
+
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string
 
@@ -386,7 +393,7 @@ func (o *Orchestrator) CodeWithAgent(
 	messages = append(messages, history...)
 	messages = append(messages, backend.Message{Role: "user", Content: userMsg})
 
-	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate, o.getConfiguredMCPProviders())
 	// agentGate is a per-run fork (own sweep goroutine); close it when this
 	// run ends or the sweeper leaks (same pattern as runAgentTurn).
 	if agentGate != nil {

@@ -35,7 +35,7 @@ func runHallucinatedCall(t *testing.T, ag *agents.Agent, reg *tools.Registry, to
 	t.Helper()
 	// Server oneshot/WS uses NewGate(true, nil): auto-approve, not allow-all.
 	gate := permissions.NewGate(true, nil)
-	schemas, agentGate := applyToolbelt(ag, reg, gate)
+	schemas, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	mb := &mockBackend{
 		responses: []*backend.ChatResponse{
@@ -116,7 +116,7 @@ func TestApplyToolbelt_EmptyGateDeniesAWSEvenWithSkipAll(t *testing.T) {
 	reg, _, _ := newAWSSlackReg()
 	ag := &agents.Agent{Name: "locked"}
 	gate := permissions.NewGate(true, nil)
-	_, agentGate := applyToolbelt(ag, reg, gate)
+	_, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	if agentGate.Check(permissions.PermissionRequest{
 		ToolName: "aws_ec2_terminate_instance",
@@ -134,7 +134,7 @@ func TestApplyToolbelt_WildcardGateAllowsAWS(t *testing.T) {
 		Toolbelt: []agents.ToolbeltEntry{{ConnectionID: "*", Provider: "*"}},
 	}
 	gate := permissions.NewGate(true, nil)
-	_, agentGate := applyToolbelt(ag, reg, gate)
+	_, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	if !agentGate.Check(permissions.PermissionRequest{
 		ToolName: "aws_ec2_terminate_instance",

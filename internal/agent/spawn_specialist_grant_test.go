@@ -18,7 +18,7 @@ func TestApplyToolbelt_SpawnSpecialistNeverImpliedByWildcard(t *testing.T) {
 
 	ag := &agents.Agent{Name: "Winston", LocalTools: []string{"*"}}
 	gate := permissions.NewGate(true, nil)
-	schemas, _ := applyToolbelt(ag, reg, gate)
+	schemas, _ := applyToolbelt(ag, reg, gate, nil)
 
 	for _, s := range schemas {
 		if s.Function.Name == tools.SpawnSpecialistName {
@@ -38,7 +38,7 @@ func TestApplyToolbelt_SpawnSpecialistGrantedByName(t *testing.T) {
 
 	ag := &agents.Agent{Name: "Reggie", LocalTools: []string{"spawn_specialist"}}
 	gate := permissions.NewGate(true, nil)
-	schemas, _ := applyToolbelt(ag, reg, gate)
+	schemas, _ := applyToolbelt(ag, reg, gate, nil)
 
 	found := false
 	for _, s := range schemas {
@@ -60,7 +60,7 @@ func TestApplyToolbelt_BothHiringToolsExcludedIndependently(t *testing.T) {
 
 	ag := &agents.Agent{Name: "Reggie", LocalTools: []string{"create_agent"}}
 	gate := permissions.NewGate(true, nil)
-	schemas, _ := applyToolbelt(ag, reg, gate)
+	schemas, _ := applyToolbelt(ag, reg, gate, nil)
 
 	hasCreate, hasSpawn := false, false
 	for _, s := range schemas {

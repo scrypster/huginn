@@ -78,7 +78,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
   // pendingToolResults buffers tool call results that arrive before the
   // streaming placeholder exists (the prefetch pattern: tools run before
   // any tokens are emitted). Flushed when onToken creates the placeholder.
-  const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff }[]>()
+  const pendingToolResults = new Map<string, { id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff; image?: string }[]>()
 
   const wireAgent = (msg: WSMessage): string => {
     const raw = msg as unknown as Record<string, unknown>
@@ -302,6 +302,7 @@ export function wireSpaceTimelineWS(ws: HuginnWS): () => void {
         args: (p.args as Record<string, unknown>) ?? {},
         result: (p.result as string) ?? '',
         diff: (metadata?.diff as FileDiff | undefined) ?? undefined,
+        image: (metadata?.image_data_uri as string | undefined) ?? undefined,
       }
       // Accept both stream- (result arrived before done) and done- (result
       // arrived after onDone renamed the placeholder — the late-result race).

@@ -1,8 +1,10 @@
 package permissions
 
 import (
+	"context"
 	"testing"
 
+	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/tools"
 )
 
@@ -14,17 +16,45 @@ import (
 // server names as always-watched, independent of any per-agent toolbelt
 // ApprovalGate flag — closing the "Auto-approve all tools in server mode" gap
 // for outward-facing tools without touching bash's own PermExec handling.
+//
+// V10: these tests drive the PRODUCTION shape instead of hand-built
+// gate/fork args — NewGate(true, nil) + SetPromptFuncCtx (matching real
+// server-mode wiring, not the legacy SetPromptFunc), and a fork built
+// exactly the way applyToolbelt (internal/agent/agent_dispatcher.go) builds
+// it. internal/permissions cannot import internal/agent directly (agent
+// imports permissions — that would cycle), so buildApplyToolbeltFork below
+// mirrors applyToolbelt's step 5 construction verbatim. Each test's
+// "configuredMCPProviders" argument is the pre-V3 shape when nil (the MCP
+// server name is absent from allowedProviders) and the post-V3-fix shape
+// when it names the provider.
+
+// buildApplyToolbeltFork mirrors applyToolbelt's step 5 (agent_dispatcher.go)
+// exactly: allowed providers = agents.AllowedProviders(toolbelt) plus
+// muninndb/builtin plus (V3 policy) any configured MCP server names, forked
+// with agents.WatchedProviders(toolbelt) as the per-agent watched set.
+func buildApplyToolbeltFork(g *Gate, toolbelt []agents.ToolbeltEntry, configuredMCPProviders map[string]bool) *Gate {
+	allowed := agents.AllowedProviders(toolbelt)
+	if allowed != nil && !allowed["*"] {
+		allowed["muninndb"] = true
+		allowed["builtin"] = true
+		for name := range configuredMCPProviders {
+			allowed[name] = true
+		}
+	}
+	return g.Fork(agents.WatchedProviders(toolbelt), allowed)
+}
 
 func TestBaseWatchedProviders_PromptsUnderSkipAll(t *testing.T) {
 	called := false
-	g := NewGate(true, func(req PermissionRequest) Decision {
+	g := NewGate(true, nil)
+	t.Cleanup(g.Close)
+	g.SetPromptFuncCtx(func(_ context.Context, req PermissionRequest) Decision {
 		called = true
 		if req.ToolName != "browser_navigate" {
 			t.Errorf("expected browser_navigate, got %s", req.ToolName)
 		}
 		return Deny
 	})
-	t.Cleanup(g.Close)
 	g.SetBaseWatchedProviders(map[string]bool{"playwright": true})
 
 	req := PermissionRequest{ToolName: "browser_navigate", Level: tools.PermWrite, Provider: "playwright"}
@@ -38,11 +68,12 @@ func TestBaseWatchedProviders_PromptsUnderSkipAll(t *testing.T) {
 
 func TestBaseWatchedProviders_UnwatchedProviderStillAutoApproved(t *testing.T) {
 	called := false
-	g := NewGate(true, func(req PermissionRequest) Decision {
+	g := NewGate(true, nil)
+	t.Cleanup(g.Close)
+	g.SetPromptFuncCtx(func(_ context.Context, _ PermissionRequest) Decision {
 		called = true
 		return Deny
 	})
-	t.Cleanup(g.Close)
 	g.SetBaseWatchedProviders(map[string]bool{"playwright": true})
 
 	req := PermissionRequest{ToolName: "github_list_repos", Level: tools.PermWrite, Provider: "github"}
@@ -54,39 +85,77 @@ func TestBaseWatchedProviders_UnwatchedProviderStillAutoApproved(t *testing.T) {
 	}
 }
 
-// TestBaseWatchedProviders_SurvivesFork verifies that base-watched providers
-// are copied forward by Fork even though Fork replaces the per-agent
-// watchedProviders wholesale with agents.WatchedProviders(ag.Toolbelt).
-// Without this, an agent whose toolbelt entry never set approval_gate: true
-// for "playwright" would silently auto-run browser tools once
-// applyToolbelt forks the gate.
-func TestBaseWatchedProviders_SurvivesFork(t *testing.T) {
+// TestBaseWatchedProviders_SurvivesFork_ProductionShape verifies that
+// base-watched providers are copied forward by the exact fork
+// applyToolbelt builds, using the V3 policy shape: the agent's toolbelt
+// does NOT grant "playwright" and does NOT set ApprovalGate — only the
+// configured-MCP-server set (V3) puts "playwright" in allowedProviders.
+// Without V3, this fork would deny with provider_not_allowed before ever
+// reaching the base-watch prompt below.
+func TestBaseWatchedProviders_SurvivesFork_ProductionShape(t *testing.T) {
 	called := false
-	g := NewGate(true, func(req PermissionRequest) Decision {
+	g := NewGate(true, nil)
+	t.Cleanup(g.Close)
+	g.SetPromptFuncCtx(func(_ context.Context, req PermissionRequest) Decision {
 		called = true
 		return Deny
 	})
-	t.Cleanup(g.Close)
 	g.SetBaseWatchedProviders(map[string]bool{"playwright": true})
 
-	// Simulate applyToolbelt: the agent's toolbelt grants "playwright" but
-	// does NOT set ApprovalGate, so the per-agent watchedProviders passed to
-	// Fork is empty.
-	child := g.Fork(map[string]bool{}, map[string]bool{"playwright": true})
+	toolbelt := []agents.ToolbeltEntry{{Provider: "slack"}} // narrow — no playwright
+	child := buildApplyToolbeltFork(g, toolbelt, map[string]bool{"playwright": true})
 	t.Cleanup(child.Close)
 
-	req := PermissionRequest{ToolName: "browser_navigate", Level: tools.PermWrite, Provider: "playwright"}
-	if child.Check(req) {
-		t.Error("expected forked gate to still prompt for a base-watched provider")
+	result := child.CheckDetailedCtx(context.Background(), PermissionRequest{
+		ToolName: "browser_navigate", Level: tools.PermWrite, Provider: "playwright",
+	})
+	if result.ReasonCode == ReasonProviderNotAllowed {
+		t.Fatal("expected the V3 policy to let a configured MCP provider past the provider gate")
+	}
+	if result.Allowed {
+		t.Error("expected forked gate to still prompt (not auto-allow) for a base-watched provider")
 	}
 	if !called {
 		t.Error("expected forked gate's promptFunc to be invoked for a base-watched provider")
 	}
 }
 
-func TestBaseWatchedProviders_ChildMutationDoesNotAffectParent(t *testing.T) {
-	g := NewGate(true, func(PermissionRequest) Decision { return Deny })
+// TestBaseWatchedProviders_WithoutV3Policy_DeniedBeforePrompt documents the
+// pre-V3 shape: when the configured-MCP-server set is NOT plumbed into the
+// fork (nil), a narrow toolbelt without "playwright" is denied at the
+// provider gate and the base-watch prompt never fires — the bug V3 fixes.
+func TestBaseWatchedProviders_WithoutV3Policy_DeniedBeforePrompt(t *testing.T) {
+	called := false
+	g := NewGate(true, nil)
 	t.Cleanup(g.Close)
+	g.SetPromptFuncCtx(func(_ context.Context, _ PermissionRequest) Decision {
+		called = true
+		return Deny
+	})
+	g.SetBaseWatchedProviders(map[string]bool{"playwright": true})
+
+	toolbelt := []agents.ToolbeltEntry{{Provider: "slack"}}
+	child := buildApplyToolbeltFork(g, toolbelt, nil) // pre-V3 shape: no configured MCP providers plumbed
+	t.Cleanup(child.Close)
+
+	result := child.CheckDetailedCtx(context.Background(), PermissionRequest{
+		ToolName: "browser_navigate", Level: tools.PermWrite, Provider: "playwright",
+	})
+	if result.Allowed {
+		t.Error("expected pre-V3 shape to deny")
+	}
+	if result.ReasonCode != ReasonProviderNotAllowed {
+		t.Errorf("expected ReasonProviderNotAllowed (the bug V3 fixes), got %q", result.ReasonCode)
+	}
+	if called {
+		t.Error("promptFunc must not fire when the provider gate already denied")
+	}
+}
+
+func TestBaseWatchedProviders_ChildMutationDoesNotAffectParent(t *testing.T) {
+	g := NewGate(true, nil)
+	t.Cleanup(g.Close)
+	g.SetPromptFuncCtx(func(context.Context, PermissionRequest) Decision { return Deny })
 	g.SetBaseWatchedProviders(map[string]bool{"playwright": true})
 
 	child := g.Fork(nil, nil)
@@ -102,13 +171,14 @@ func TestBaseWatchedProviders_ChildMutationDoesNotAffectParent(t *testing.T) {
 }
 
 func TestBaseWatchedProviders_NilClears(t *testing.T) {
-	g := NewGate(true, func(PermissionRequest) Decision { return Deny })
+	g := NewGate(true, nil)
 	t.Cleanup(g.Close)
+	g.SetPromptFuncCtx(func(context.Context, PermissionRequest) Decision { return Deny })
 	g.SetBaseWatchedProviders(map[string]bool{"playwright": true})
 	g.SetBaseWatchedProviders(nil)
 
 	called := false
-	g.SetPromptFunc(func(PermissionRequest) Decision {
+	g.SetPromptFuncCtx(func(_ context.Context, _ PermissionRequest) Decision {
 		called = true
 		return Deny
 	})

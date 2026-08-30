@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -240,10 +241,43 @@ var knownInstallHints = map[string]string{
 	"playwright": "Not installed. Run: mkdir -p ~/.huginn/mcp-bin && cd ~/.huginn/mcp-bin && npm install @playwright/mcp@latest && npx playwright install chromium. Then set this server's command to ~/.huginn/mcp-bin/node_modules/.bin/playwright-mcp.",
 }
 
+// expandTilde expands a leading "~/" in path to the user's home directory,
+// the canonical place both commandResolvable and the stdio spawn path
+// (NewStdioTransport) resolve a tilde-prefixed command. Any other path
+// (absolute, relative, bare $PATH name, or a lone "~" with no trailing
+// slash) is returned unchanged. If the home directory can't be determined,
+// the path is returned unchanged and the downstream stat/exec call fails
+// naturally rather than swallowing the error here.
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[2:])
+}
+
+// reservedProviderTags are provider tags used elsewhere in the system for
+// builtin/connection tool grouping (see applyToolbelt, internal/agents
+// toolbelt handling). A configured MCP server whose Name collides with one
+// of these would have its tools silently folded into that tag's
+// allowedProviders/toolbelt grant instead of getting its own gated identity
+// — StartAll skips (and warns on) any such server (V6).
+var reservedProviderTags = map[string]bool{
+	"builtin":    true,
+	"muninndb":   true,
+	"github_cli": true,
+	"gitlab_cli": true,
+	"bitbucket":  true,
+}
+
 // commandResolvable reports whether an stdio transport's command can be
 // found — either as an absolute/relative path that exists, or as a name on
-// $PATH. Non-stdio transports (sse/http) have no local binary and always
-// resolve.
+// $PATH. A leading "~/" is expanded to the home directory first (see
+// expandTilde). Non-stdio transports (sse/http) have no local binary and
+// always resolve.
 func commandResolvable(cfg MCPServerConfig) bool {
 	transport := cfg.Transport
 	if transport == "" {
@@ -255,11 +289,12 @@ func commandResolvable(cfg MCPServerConfig) bool {
 	if cfg.Command == "" {
 		return false
 	}
-	if strings.ContainsRune(cfg.Command, '/') {
-		_, err := os.Stat(cfg.Command)
+	command := expandTilde(cfg.Command)
+	if strings.ContainsRune(command, '/') {
+		_, err := os.Stat(command)
 		return err == nil
 	}
-	_, err := exec.LookPath(cfg.Command)
+	_, err := exec.LookPath(command)
 	return err == nil
 }
 
@@ -316,6 +351,26 @@ func (m *ServerManager) StartAll(ctx context.Context, reg *tools.Registry) {
 	defer m.mu.Unlock()
 	for _, cfg := range m.configs {
 		cfg := cfg
+		// V5: an unnamed server has no provider tag, so its tools would
+		// register ungated — TagTools(names, "") tags them with the empty
+		// provider, which the permission gate's allowedProviders/
+		// baseWatchedProviders maps can never key on. config.Validate
+		// already rejects Name=="" at PUT /api/v1/config; this is the
+		// defense-in-depth skip for any other config source (env, TUI-mode
+		// JSON on disk edited by hand, etc).
+		if strings.TrimSpace(cfg.Name) == "" {
+			logger.Warn("mcp: skipping server with empty name — cannot be gated by provider")
+			continue
+		}
+		// V6: a server whose Name collides with a reserved provider tag would
+		// have its tools folded into that tag's allowedProviders/toolbelt
+		// grant (e.g. an MCP server named "builtin" would grant every
+		// LocalTools:["*"] agent access to its tools without an explicit
+		// toolbelt entry). Skip rather than silently merge.
+		if reservedProviderTags[cfg.Name] {
+			logger.Warn("mcp: skipping server — name collides with a reserved provider tag", "server", cfg.Name)
+			continue
+		}
 		client, mcpTools, err := m.factory(ctx, cfg)
 		if err != nil {
 			logger.Warn("mcp: server unavailable", "server", cfg.Name, "err", err)
@@ -325,7 +380,14 @@ func (m *ServerManager) StartAll(ctx context.Context, reg *tools.Registry) {
 		ms := &managedServer{cfg: cfg, client: client, cancel: cancel}
 		var names []string
 		for _, t := range mcpTools {
-			reg.Register(NewMCPToolAdapterGated(client, t, m, ms))
+			// V6: never shadow an existing registered tool (e.g. builtin
+			// "bash") with an MCP tool of the same name — RegisterStrict
+			// rejects the collision instead of silently overwriting it.
+			adapter := NewMCPToolAdapterGated(client, t, m, ms)
+			if err := reg.RegisterStrict(adapter); err != nil {
+				logger.Warn("mcp: skipping tool — name collides with an existing registration", "server", cfg.Name, "tool", t.Name, "err", err)
+				continue
+			}
 			names = append(names, t.Name)
 		}
 		ms.registeredToolNames = names
@@ -401,7 +463,13 @@ func (m *ServerManager) watchServer(ctx context.Context, ms *managedServer, reg 
 		ms.client = newClient
 		var names []string
 		for _, t := range mcpTools {
-			reg.Register(NewMCPToolAdapterGated(newClient, t, m, ms))
+			// V6: same collision guard as StartAll — never shadow an
+			// existing registration on reconnect either.
+			adapter := NewMCPToolAdapterGated(newClient, t, m, ms)
+			if err := reg.RegisterStrict(adapter); err != nil {
+				logger.Warn("mcp: skipping tool on reconnect — name collides with an existing registration", "server", ms.cfg.Name, "tool", t.Name, "err", err)
+				continue
+			}
 			names = append(names, t.Name)
 		}
 		reg.TagTools(names, ms.cfg.Name)

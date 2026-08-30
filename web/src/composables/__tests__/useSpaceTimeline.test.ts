@@ -452,6 +452,38 @@ describe('wireSpaceTimelineWS', () => {
     })
   })
 
+  it('tool_result: lifts metadata.image_data_uri onto the tool call (space/hallway screenshot parity)', async () => {
+    const { state } = setupSpace()
+    state.sessionToSpaceMap.set(SESSION_ID, SPACE_ID)
+
+    const ws = createMockWs()
+    wireSpaceTimelineWS(ws as any)
+
+    ws.emit('token', { type: 'token', session_id: SESSION_ID, content: 'Taking a screenshot...' })
+    await nextTick()
+
+    ws.emit('tool_result', {
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: {
+        id: 'tc-shot',
+        tool: 'browser_take_screenshot',
+        args: {},
+        result: 'screenshot captured',
+        metadata: { image_data_uri: 'data:image/png;base64,AAAA' },
+      },
+    })
+    await nextTick()
+
+    const streaming = state.messages.find(m => m.id.startsWith('stream-'))
+    expect(streaming).toBeDefined()
+    expect(streaming!.toolCalls).toHaveLength(1)
+    expect(streaming!.toolCalls![0]).toMatchObject({
+      id: 'tc-shot',
+      image: 'data:image/png;base64,AAAA',
+    })
+  })
+
   it('tool_result: ignored when session is NOT in sessionToSpaceMap', async () => {
     const { state } = setupSpace()
     // Deliberately do NOT add session to map

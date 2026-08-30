@@ -43,7 +43,7 @@ func TestApplyToolbelt_SeedsApprovedToolsIntoForkedGate(t *testing.T) {
 		ApprovedTools: []string{"bash"},
 	}
 
-	_, agentGate := applyToolbelt(ag, reg, parentGate)
+	_, agentGate := applyToolbelt(ag, reg, parentGate, nil)
 	if agentGate == nil {
 		t.Fatal("expected forked gate")
 	}
@@ -76,7 +76,7 @@ func TestApplyToolbelt_NoApprovedToolsStillPrompts(t *testing.T) {
 
 	ag := &agents.Agent{Name: "codey", LocalTools: []string{"bash"}}
 
-	_, agentGate := applyToolbelt(ag, reg, parentGate)
+	_, agentGate := applyToolbelt(ag, reg, parentGate, nil)
 	if agentGate.Check(permissions.PermissionRequest{
 		ToolName: "bash",
 		Level:    tools.PermExec,
@@ -121,7 +121,7 @@ func TestApplyToolbelt_AlwaysAllowDoesNotLeakToOtherAgents(t *testing.T) {
 	}
 
 	agentA := &agents.Agent{Name: "alice", LocalTools: []string{"bash"}}
-	_, gateA := applyToolbelt(agentA, reg, parentGate)
+	_, gateA := applyToolbelt(agentA, reg, parentGate, nil)
 	if gateA == nil {
 		t.Fatal("expected forked gate for alice")
 	}
@@ -141,7 +141,7 @@ func TestApplyToolbelt_AlwaysAllowDoesNotLeakToOtherAgents(t *testing.T) {
 	// Agent B forks from the same parent gate in the same session. It has no
 	// persisted grant, so it must be prompted on its own.
 	agentB := &agents.Agent{Name: "bob", LocalTools: []string{"bash"}}
-	_, gateB := applyToolbelt(agentB, reg, parentGate)
+	_, gateB := applyToolbelt(agentB, reg, parentGate, nil)
 	if gateB == nil {
 		t.Fatal("expected forked gate for bob")
 	}
@@ -184,11 +184,11 @@ func TestApplyToolbelt_ApprovedToolsAreAgentScoped(t *testing.T) {
 	parentGate.SetExecRequiresPrompt(true)
 
 	granted := &agents.Agent{Name: "alice", LocalTools: []string{"bash"}, ApprovedTools: []string{"bash"}}
-	_, gateGranted := applyToolbelt(granted, reg, parentGate)
+	_, gateGranted := applyToolbelt(granted, reg, parentGate, nil)
 	defer gateGranted.Close()
 
 	ungranted := &agents.Agent{Name: "bob", LocalTools: []string{"bash"}}
-	_, gateUngranted := applyToolbelt(ungranted, reg, parentGate)
+	_, gateUngranted := applyToolbelt(ungranted, reg, parentGate, nil)
 	defer gateUngranted.Close()
 
 	req := permissions.PermissionRequest{ToolName: "bash", Level: tools.PermExec, Provider: reg.ProviderFor("bash")}

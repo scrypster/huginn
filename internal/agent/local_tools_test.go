@@ -40,7 +40,7 @@ func TestApplyToolbelt_EmptyConfigNoToolsWhenNoneRegistered(t *testing.T) {
 	reg := buildLocalTestRegistry()
 	ag := &agents.Agent{Name: "test"} // empty LocalTools + empty Toolbelt — registry has no delegation tools so step 4 is a no-op
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 0 {
 		t.Errorf("expected 0 schemas with default-deny, got %d", len(schemas))
 	}
@@ -50,7 +50,7 @@ func TestApplyToolbelt_LocalToolsWildcardReturnsAllBuiltins(t *testing.T) {
 	reg := buildLocalTestRegistry()
 	ag := &agents.Agent{Name: "test", LocalTools: []string{"*"}}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 3 {
 		t.Errorf("expected 3 builtin schemas, got %d", len(schemas))
 	}
@@ -66,7 +66,7 @@ func TestApplyToolbelt_LocalToolsNamedListReturnsOnlyNamed(t *testing.T) {
 	reg := buildLocalTestRegistry()
 	ag := &agents.Agent{Name: "test", LocalTools: []string{"read_file", "git_status"}}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 2 {
 		t.Fatalf("expected 2 schemas, got %d", len(schemas))
 	}
@@ -89,7 +89,7 @@ func TestApplyToolbelt_ExternalToolbeltOnlyReturnsExternal(t *testing.T) {
 		Toolbelt: []agents.ToolbeltEntry{{Provider: "slack"}},
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 1 {
 		t.Fatalf("expected 1 schema (slack_post), got %d", len(schemas))
 	}
@@ -111,7 +111,7 @@ func TestApplyToolbelt_WildcardIncludesDelegationToolsWhenTaggedBuiltin(t *testi
 	reg.TagTools([]string{"delegate_to_agent", "list_team_status", "recall_thread_result"}, "builtin")
 
 	ag := &agents.Agent{Name: "Tom", LocalTools: []string{"*"}}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	names := map[string]bool{}
 	for _, s := range schemas {
@@ -136,7 +136,7 @@ func TestApplyToolbelt_DelegationToolsInjectedEvenWhenUntagged(t *testing.T) {
 	}
 
 	ag := &agents.Agent{Name: "Tom", LocalTools: []string{"read_file"}}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	names := map[string]bool{}
 	for _, s := range schemas {
@@ -162,7 +162,7 @@ func TestApplyToolbelt_BothLocalAndExternal(t *testing.T) {
 		Toolbelt:   []agents.ToolbeltEntry{{Provider: "slack"}},
 	}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 2 {
 		t.Fatalf("expected 2 schemas, got %d", len(schemas))
 	}
@@ -193,7 +193,7 @@ func TestApplyToolbelt_NamedLocalToolsAlwaysIncludesDelegationTools(t *testing.T
 	reg := buildDelegationTestRegistry()
 	ag := &agents.Agent{Name: "Max", LocalTools: []string{"read_file", "bash"}}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	names := map[string]bool{}
 	for _, s := range schemas {
@@ -216,7 +216,7 @@ func TestApplyToolbelt_EmptyLocalToolsAlwaysIncludesDelegationTools(t *testing.T
 	reg := buildDelegationTestRegistry()
 	ag := &agents.Agent{Name: "Max"} // empty LocalTools
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	names := map[string]bool{}
 	for _, s := range schemas {
@@ -236,7 +236,7 @@ func TestApplyToolbelt_DelegationToolsNotInjectedWhenNotRegistered(t *testing.T)
 	reg := buildLocalTestRegistry() // no delegation tools registered
 	ag := &agents.Agent{Name: "Max", LocalTools: []string{"read_file"}}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	names := map[string]bool{}
 	for _, s := range schemas {
@@ -256,7 +256,7 @@ func TestApplyToolbelt_WildcardDeduplicatesDelegationTools(t *testing.T) {
 	reg := buildDelegationTestRegistry()
 	ag := &agents.Agent{Name: "Max", LocalTools: []string{"*"}}
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	seen := map[string]int{}
 	for _, s := range schemas {
@@ -284,7 +284,7 @@ func TestApplyToolbelt_WildcardIncludesGitHubCLI(t *testing.T) {
 		Name:     "Astra",
 		Toolbelt: []agents.ToolbeltEntry{{Provider: "*", ConnectionID: "*"}},
 	}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	names := map[string]bool{}
 	for _, s := range schemas {
 		names[s.Function.Name] = true
@@ -310,7 +310,7 @@ func TestApplyToolbelt_EmptyBeltExcludesGitHubCLI(t *testing.T) {
 	reg.TagTools([]string{"delegate_to_agent", "wait_for_threads", "list_team_status", "recall_thread_result"}, "builtin")
 
 	ag := &agents.Agent{Name: "Reggie", LocalTools: nil, Toolbelt: nil}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	var names []string
 	for _, s := range schemas {
 		n := s.Function.Name
@@ -351,7 +351,7 @@ func TestApplyToolbelt_EmptyBelt_ProductionTaggingNoGitHub(t *testing.T) {
 	}
 
 	ag := &agents.Agent{Name: "Reggie", LocalTools: nil, Toolbelt: nil}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	for _, s := range schemas {
 		n := strings.ToLower(s.Function.Name)
 		if n == "gh_issue_create" || strings.HasPrefix(n, "gh_") || n == "github" || strings.Contains(n, "github") {
@@ -365,22 +365,22 @@ func TestApplyToolbelt_CreateAgentGrantWall(t *testing.T) {
 	reg.Register(&localTestTool{name: "create_agent"})
 	// Intentionally not tagged builtin — God Mode must not receive hire.
 
-	star, _ := applyToolbelt(&agents.Agent{Name: "Astra", LocalTools: []string{"*"}}, reg, nil)
+	star, _ := applyToolbelt(&agents.Agent{Name: "Astra", LocalTools: []string{"*"}}, reg, nil, nil)
 	if hasSchema(star, "create_agent") {
 		t.Fatal("local_tools ['*'] must NOT include create_agent")
 	}
 
-	none, _ := applyToolbelt(&agents.Agent{Name: "Sam"}, reg, nil)
+	none, _ := applyToolbelt(&agents.Agent{Name: "Sam"}, reg, nil, nil)
 	if hasSchema(none, "create_agent") {
 		t.Fatal("specialist without grant: schema must be absent")
 	}
 
-	named, _ := applyToolbelt(&agents.Agent{Name: "Sam", LocalTools: []string{"read_file"}}, reg, nil)
+	named, _ := applyToolbelt(&agents.Agent{Name: "Sam", LocalTools: []string{"read_file"}}, reg, nil, nil)
 	if hasSchema(named, "create_agent") {
 		t.Fatal("named specialist list without grant: schema must be absent")
 	}
 
-	winston, _ := applyToolbelt(&agents.Agent{Name: "Winston", LocalTools: []string{"create_agent"}}, reg, nil)
+	winston, _ := applyToolbelt(&agents.Agent{Name: "Winston", LocalTools: []string{"create_agent"}}, reg, nil, nil)
 	if !hasSchema(winston, "create_agent") {
 		t.Fatal("Winston with named grant must see create_agent")
 	}
@@ -393,11 +393,11 @@ func TestApplyToolbelt_ToolbeltWildcardDoesNotGrantCreateAgent(t *testing.T) {
 		Name:       "Steve",
 		LocalTools: []string{"bash"},
 		Toolbelt:   []agents.ToolbeltEntry{{Provider: "*", ConnectionID: "*"}},
-	}, reg, nil)
+	}, reg, nil, nil)
 	if hasSchema(steve, "create_agent") {
 		t.Fatal("toolbelt ['*'] must NOT include create_agent")
 	}
-	god, _ := applyToolbelt(&agents.Agent{Name: "hiregod", LocalTools: []string{"*"}}, reg, nil)
+	god, _ := applyToolbelt(&agents.Agent{Name: "hiregod", LocalTools: []string{"*"}}, reg, nil, nil)
 	if hasSchema(god, "create_agent") {
 		t.Fatal("local_tools ['*'] must NOT include create_agent")
 	}
@@ -405,7 +405,7 @@ func TestApplyToolbelt_ToolbeltWildcardDoesNotGrantCreateAgent(t *testing.T) {
 		Name:       "Winston",
 		LocalTools: []string{"create_agent"},
 		Toolbelt:   []agents.ToolbeltEntry{{Provider: "*", ConnectionID: "*"}},
-	}, reg, nil)
+	}, reg, nil, nil)
 	if !hasSchema(winston, "create_agent") {
 		t.Fatal("named create_agent grant must survive toolbelt wildcard")
 	}
@@ -431,7 +431,7 @@ func hasSchema(schemas []backend.Tool, name string) bool {
 func TestApplyToolbelt_TierLowOmitsDelegate(t *testing.T) {
 	reg := buildDelegationTestRegistry()
 	ag := &agents.Agent{Name: "Tiny", ModelID: "qwen2.5-coder:7b", LocalTools: []string{"read_file"}}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if hasSchema(schemas, "delegate_to_agent") {
 		t.Fatal("TierLow must not receive delegate_to_agent")
 	}
@@ -446,7 +446,7 @@ func TestApplyToolbelt_TierLowOmitsDelegate(t *testing.T) {
 func TestApplyToolbelt_TierLowStarOmitsDelegate(t *testing.T) {
 	reg := buildDelegationTestRegistry()
 	ag := &agents.Agent{Name: "Tiny", ModelID: "qwen2.5-coder:7b", LocalTools: []string{"*"}}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if hasSchema(schemas, "delegate_to_agent") {
 		t.Fatal("TierLow LocalTools [*] must not keep delegate_to_agent from step 1")
 	}
@@ -463,7 +463,7 @@ func TestApplyToolbelt_HighTierWinstonKeepsCreateAgentAndDelegate(t *testing.T) 
 		ModelID:    "claude-sonnet-4",
 		LocalTools: []string{"create_agent"},
 	}
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if !hasSchema(schemas, "create_agent") {
 		t.Fatal("Winston named create_agent grant must remain")
 	}
