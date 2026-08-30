@@ -21,12 +21,23 @@
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-1.5">
           <span class="text-xs font-medium text-huginn-text truncate">{{ thread.AgentID || 'Agent' }}</span>
+          <!-- Temporary pill (one-off spawn_specialist thread — never on the roster) -->
+          <span
+            v-if="thread.IsSpecialist"
+            class="text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0"
+            style="background:rgba(163,113,247,0.12);color:rgba(163,113,247,0.9)"
+            title="One-off specialist — not a hire, archived when this thread finishes"
+          >temporary</span>
           <!-- Status badge -->
           <span
             class="text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0"
             :class="statusBadgeClass"
           >{{ statusLabel }}</span>
         </div>
+        <!-- Specialist model id -->
+        <p v-if="thread.IsSpecialist && thread.ModelID"
+          class="text-[10px] font-mono text-huginn-muted/50 truncate mt-0.5 leading-snug"
+        >{{ thread.ModelID }}</p>
         <p class="text-[11px] text-huginn-muted truncate mt-0.5 leading-snug">{{ thread.Task || 'Running task…' }}</p>
         <!-- Live activity heartbeat (only while running) -->
         <p v-if="isRunning && activityLabel"
@@ -111,16 +122,19 @@
         <div v-if="toolsExpanded" class="space-y-1 pl-4 border-l-2" style="border-color:rgba(255,255,255,0.06)">
           <div v-for="(tc, i) in thread.toolCalls" :key="i"
             class="flex items-center gap-2 text-[11px] px-2 py-1 rounded-lg"
-            :style="tc.done
+            :style="isFailedToolResult(tc.resultSummary)
+              ? 'background:rgba(248,81,73,0.06);border:1px solid rgba(248,81,73,0.15)'
+              : tc.done
               ? 'background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.12)'
               : 'background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.15)'"
           >
             <svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-              :style="tc.done ? 'color:rgba(63,185,80,0.7)' : 'color:rgba(210,153,34,0.7)'">
+              :style="isFailedToolResult(tc.resultSummary) ? 'color:rgba(248,81,73,0.8)' : tc.done ? 'color:rgba(63,185,80,0.7)' : 'color:rgba(210,153,34,0.7)'">
               <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
             </svg>
-            <span class="font-mono font-medium flex-1 truncate" :style="tc.done ? 'color:#3fb950' : 'color:#d29922'">{{ tc.tool }}</span>
-            <span v-if="tc.done" class="text-huginn-muted/50 text-[10px]">done</span>
+            <span class="font-mono font-medium flex-1 truncate" :style="isFailedToolResult(tc.resultSummary) ? 'color:#f85149' : tc.done ? 'color:#3fb950' : 'color:#d29922'">{{ tc.tool }}</span>
+            <span v-if="isFailedToolResult(tc.resultSummary)" class="text-huginn-red text-[10px]">failed</span>
+            <span v-else-if="tc.done" class="text-huginn-muted/50 text-[10px]">done</span>
             <span v-else class="text-[10px]" style="color:rgba(210,153,34,0.7)">running</span>
           </div>
         </div>
@@ -148,6 +162,17 @@
       <div v-if="thread.Summary?.Summary && !isRunning" class="space-y-1.5">
         <p class="text-[10px] uppercase tracking-wider text-huginn-muted/50 font-medium">Summary</p>
         <p class="text-[11px] text-huginn-muted leading-relaxed">{{ parseSummary(thread.Summary.Summary) }}</p>
+
+        <!-- Vet verdict: honest even when the pass didn't complete -->
+        <span v-if="thread.Summary.VetLabel" data-testid="thread-vet-badge"
+          class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full mt-1"
+          :style="thread.Summary.VetLabel === 'no findings'
+            ? 'background:rgba(63,185,80,0.1);color:#3fb950'
+            : thread.Summary.VetLabel === 'did not complete'
+              ? 'background:rgba(210,153,34,0.1);color:#d29922'
+              : 'background:rgba(248,81,73,0.1);color:#f85149'">
+          Vetted: {{ thread.Summary.VetLabel }}
+        </span>
 
         <!-- Files modified -->
         <div v-if="thread.Summary.FilesModified?.length" class="flex flex-wrap gap-1 mt-1">
@@ -208,6 +233,7 @@
 import { ref, computed } from 'vue'
 import type { LiveThread } from '../../composables/useThreads'
 import { TERMINAL_STATUSES } from '../../composables/useThreads'
+import { isFailedToolResult } from '../../utils/honesty'
 
 const props = defineProps<{
   thread: LiveThread

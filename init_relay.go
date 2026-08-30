@@ -189,7 +189,16 @@ func initRelayDispatcher(ctx context.Context, dcfg relayDispatcherConfig) func()
 				cfg.Backend.APIKey = apiKey
 			}
 			backendMu.Unlock()
-			return cfg.Save()
+			// Read-modify-write against the CURRENT on-disk config — cfg.Save()
+			// here would clobber every field the config API saved since this
+			// process started (the third copy of the bug fixed in main.go).
+			return config.UpdateDefault(func(disk *config.Config) {
+				disk.Backend.Provider = provider
+				disk.Backend.Endpoint = endpoint
+				if apiKey != "" {
+					disk.Backend.APIKey = apiKey
+				}
+			})
 		},
 		PullModel: func(name string) error {
 			baseURL := cfg.OllamaBaseURL

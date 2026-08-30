@@ -40,10 +40,12 @@ const mockEditorInstance = {
 }
 
 let capturedOnSend: (() => void) | null = null
+let capturedOptions: { onSend: () => void; memberNames?: { value: string[] | undefined } } | null = null
 
 vi.mock('../useEditor', () => ({
-  useEditor: (options: { onSend: () => void }) => {
+  useEditor: (options: { onSend: () => void; memberNames?: { value: string[] | undefined } }) => {
     capturedOnSend = options.onSend
+    capturedOptions = options
     const editor = ref(mockEditorInstance)
     return {
       editor,
@@ -82,6 +84,7 @@ describe('ChatEditor', () => {
     mockEditorState.editable = true
     mockEditorInstance.isEmpty = true
     capturedOnSend = null
+    capturedOptions = null
   })
 
   afterEach(() => {
@@ -258,5 +261,81 @@ describe('ChatEditor', () => {
     expect(wrapper.emitted('send')!.length).toBe(2)
     expect(wrapper.emitted('send')![0]).toEqual(['First message'])
     expect(wrapper.emitted('send')![1]).toEqual(['Second message'])
+  })
+
+  // ── Space roster @ picker ─────────────────────────────────────────────
+
+  it('passes memberNames through to useEditor', async () => {
+    mount(ChatEditor, {
+      props: { memberNames: ['Steve', 'Chris'] },
+    })
+    await flushPromises()
+    expect(capturedOptions?.memberNames?.value).toEqual(['Steve', 'Chris'])
+  })
+
+  it('drops leftover @Name of a non-member, warns, and sends the rest', async () => {
+    mockEditorInstance.isEmpty = false
+    mockEditorState.isEmpty = false
+    mockEditorState.markdown = '@Tess say hello'
+
+    const wrapper = mount(ChatEditor, {
+      props: { memberNames: ['Steve'] },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+
+    expect(wrapper.emitted('unknown-mention')).toEqual([['Tess']])
+    expect(wrapper.find('[data-testid="unknown-mention-hint"]').text()).toContain('not in this channel')
+    expect(wrapper.emitted('send')).toEqual([['say hello']])
+  })
+
+  it('does not send when leftover @Name is the whole message and not a member', async () => {
+    mockEditorInstance.isEmpty = false
+    mockEditorState.isEmpty = false
+    mockEditorState.markdown = '@Tess'
+
+    const wrapper = mount(ChatEditor, {
+      props: { memberNames: ['Steve'] },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+
+    expect(wrapper.emitted('unknown-mention')).toEqual([['Tess']])
+    expect(wrapper.emitted('send')).toBeFalsy()
+  })
+
+  it('drops mid-text @Name of a non-member, warns, and sends the rest', async () => {
+    mockEditorInstance.isEmpty = false
+    mockEditorState.isEmpty = false
+    mockEditorState.markdown = 'please ask @Steve about hostname'
+
+    const wrapper = mount(ChatEditor, {
+      props: { memberNames: ['Tess'] },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+
+    expect(wrapper.emitted('unknown-mention')).toEqual([['Steve']])
+    expect(wrapper.find('[data-testid="unknown-mention-hint"]').text()).toContain('not in this channel')
+    expect(wrapper.emitted('send')).toEqual([['please ask about hostname']])
+  })
+
+  it('keeps a member leading mention on send', async () => {
+    mockEditorInstance.isEmpty = false
+    mockEditorState.isEmpty = false
+    mockEditorState.markdown = '@Steve say hello'
+
+    const wrapper = mount(ChatEditor, {
+      props: { memberNames: ['Steve'] },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+
+    expect(wrapper.emitted('unknown-mention')).toBeFalsy()
+    expect(wrapper.emitted('send')).toEqual([['@Steve say hello']])
   })
 })

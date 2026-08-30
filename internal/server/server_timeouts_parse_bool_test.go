@@ -397,6 +397,27 @@ func TestHandleStats_Iter3(t *testing.T) {
 	}
 }
 
+func TestHandleStats_UnknownUsageReturnsNull(t *testing.T) {
+	_, ts := newTestServer(t)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["last_prompt_tokens"] != nil {
+		t.Errorf("last_prompt_tokens = %#v, want null when unused", body["last_prompt_tokens"])
+	}
+	if body["last_completion_tokens"] != nil {
+		t.Errorf("last_completion_tokens = %#v, want null when unused", body["last_completion_tokens"])
+	}
+}
+
 // --- handleLogs ---
 
 func TestHandleLogs_Iter3(t *testing.T) {

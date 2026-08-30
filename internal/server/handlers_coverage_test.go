@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/connections"
 )
 
@@ -109,6 +110,73 @@ func TestHandleSendMessage_NilOrchestrator(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 503 {
 		t.Fatalf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleSendMessage_StoreSessionNotInOrch is the hallway REST twin:
+// a space session exists in the persisted store but was never registered in
+// the orchestrator's ephemeral o.sessions map (Vue-created DM, post-restart).
+// ChatForSession 500s "session not found"; REST must use ChatWithAgent like WS.
+func TestHandleSendMessage_StoreSessionNotInOrch(t *testing.T) {
+	srv, ts := newTestServer(t)
+
+	sess := srv.store.New("hallway-rest", "/workspace", "test-model")
+	if err := srv.store.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	if _, ok := srv.orch.GetSession(sess.ID); ok {
+		t.Fatal("precondition failed: session must not be in orchestrator map")
+	}
+
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{
+			Name:      "Steve",
+			Model:     "test-model",
+			IsDefault: true,
+		}}}, nil
+	}
+
+	body := `{"content":"ping via rest"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/sessions/"+sess.ID+"/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for store-backed session not in orch, got %d", resp.StatusCode)
+	}
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["content"] == "" {
+		t.Error("expected non-empty assistant content")
+	}
+	if _, ok := srv.orch.GetSession(sess.ID); !ok {
+		t.Error("ChatWithAgent should hydrate the store session into the orch map")
+	}
+}
+
+// TestHandleSendMessage_UnknownSession_404 verifies a missing id is 404, not
+// the old ChatForSession 500 "session … not found".
+func TestHandleSendMessage_UnknownSession_404(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	missing := "01AAAAAAAAAAAAAAAAAAAAAAAA"
+	body := `{"content":"hello"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/sessions/"+missing+"/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 for unknown session, got %d", resp.StatusCode)
 	}
 }
 

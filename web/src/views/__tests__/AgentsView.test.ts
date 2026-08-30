@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { createRouter, createMemoryHistory } from 'vue-router'
+import { MODEL_TOOL_WARNING } from '../agents/modelToolCapabilities'
+
+const { mockModelsAvailable, mockAgentsGet, mockAgentsUpdate } = vi.hoisted(() => ({
+  mockModelsAvailable: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
+  mockAgentsGet: vi.fn().mockResolvedValue({}),
+  mockAgentsUpdate: vi.fn().mockResolvedValue({}),
+}))
 
 // We need to stub useAgents so we can control the agents list.
 vi.mock('../../composables/useAgents', () => {
@@ -22,13 +30,19 @@ vi.mock('../../composables/useAgents', () => {
   }
 })
 
-// Stub apiFetch used by openDM
+const mockOpenSpaceDM = vi.hoisted(() => vi.fn())
+
+vi.mock('../../composables/useSpaces', () => ({
+  useSpaces: () => ({
+    openDM: mockOpenSpaceDM,
+  }),
+  wireSpaceWS: vi.fn(),
+}))
+
+// Stub remaining API used by the agent editor
 vi.mock('../../composables/useApi', async (importOriginal) => {
   const orig = await importOriginal<any>()
-  const mockedApiFetch = vi.fn().mockImplementation(async (path: string) => {
-    if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
-    return {}
-  })
+  const mockedApiFetch = vi.fn().mockResolvedValue({})
   return {
     ...orig,
     apiFetch: mockedApiFetch,
@@ -49,12 +63,14 @@ vi.mock('../../composables/useApi', async (importOriginal) => {
       },
       agents: {
         ...orig.api.agents,
+        get: (...args: unknown[]) => mockAgentsGet(...args),
+        update: (...args: unknown[]) => mockAgentsUpdate(...args),
         capabilityMatrix: vi.fn().mockResolvedValue({ connections: [], providers: [] }),
         validateCapabilityMatrix: vi.fn().mockResolvedValue({ valid: true, decisions: [] }),
       },
       models: {
         ...orig.api.models,
-        available: vi.fn().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] }),
+        available: (...args: unknown[]) => mockModelsAvailable(...args),
       },
     },
   }
@@ -79,6 +95,18 @@ describe('AgentsView', () => {
       if (path.startsWith('/api/v1/spaces/dm/')) return { id: 'space-123' }
       return {}
     })
+    mockOpenSpaceDM.mockReset()
+    mockOpenSpaceDM.mockResolvedValue({ id: 'space-123', kind: 'dm', leadAgent: 'Alpha' })
+    mockModelsAvailable.mockReset().mockResolvedValue({ models: [], builtin_models: [], provider_models: [] })
+    mockAgentsUpdate.mockReset().mockResolvedValue({})
+    mockAgentsGet.mockReset().mockResolvedValue({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: [],
+    })
   })
 
   it('shows empty state when agents list is empty and not loading', async () => {
@@ -87,7 +115,7 @@ describe('AgentsView', () => {
       props: { agentName: undefined },
     })
     await flushPromises()
-    expect(wrapper.text()).toContain('Select an agent')
+    expect(wrapper.text()).toContain('No teammates yet')
     expect(wrapper.find('[data-testid="agent-card"]').exists()).toBe(false)
   })
 
@@ -102,7 +130,8 @@ describe('AgentsView', () => {
     })
     await flushPromises()
     expect(wrapper.findAll('[data-testid="agent-card"]')).toHaveLength(2)
-    expect(wrapper.text()).not.toContain('Select an agent')
+    expect(wrapper.text()).not.toContain('No teammates yet')
+    expect(wrapper.text()).not.toContain('No description')
   })
 
   it('openDM navigates to /space/:id on success', async () => {
@@ -119,12 +148,22 @@ describe('AgentsView', () => {
     expect(router.currentRoute.value.path).toBe('/space/space-123')
   })
 
-  it('openDM falls back to /agents/:name if DM fetch fails', async () => {
-    // Override the mock so DM fetch fails while other calls (e.g. skills load) succeed.
-    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/v1/spaces/dm/')) throw new Error('fail')
-      return {}
+  it('/agents/new has no delete button and no unsaved bar on mount', async () => {
+    await router.push('/agents/new')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'new' },
     })
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('[data-testid="delete-agent-btn"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Unsaved changes')
+  })
+
+  it('openDM falls back to /agents/:name if DM fetch fails', async () => {
+    mockOpenSpaceDM.mockResolvedValueOnce(null)
     ;((_useAgents() as any).agents as any).value = [
       { name: 'Alpha', color: '#ff0', icon: 'A', model: 'gpt-4' },
     ]
@@ -137,4 +176,283 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/agents/Alpha')
   })
+
+  it('renders approved-tools chips from a persisted always-allow grant', async () => {
+    mockAgentsGet.mockResolvedValueOnce({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: ['bash'],
+      approved_tools: ['bash'],
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const section = wrapper.find('[data-testid="approved-tools-section"]')
+    expect(section.exists()).toBe(true)
+    const chips = wrapper.findAll('[data-testid="approved-tool-chip"]')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].text()).toContain('bash')
+  })
+
+  // Section is now ALWAYS rendered: it carries the add-grant input needed for
+  // unattended runs (scheduled workflows have no human to click Allow).
+  it('renders the approved-tools section with the add affordance even with no grants', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="approved-tools-section"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="approved-tool-chip"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="approved-tool-add-input"]').exists()).toBe(true)
+  })
+
+  it('removing an approved-tool chip clears it from the form and marks dirty', async () => {
+    mockAgentsGet.mockResolvedValueOnce({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: ['bash'],
+      approved_tools: ['bash'],
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="approved-tool-remove-btn"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="approved-tool-chip"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Unsaved changes')
+  })
+
+  it('local access Allow all warning click must confirm first', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const allowAll = wrapper.find('[data-testid="local-access-allow-all-btn"]')
+    expect(allowAll.exists()).toBe(true)
+    expect(allowAll.text()).toBe('Allow all')
+
+    await allowAll.trigger('click')
+    await flushPromises()
+
+    const confirmBanner = wrapper.find('[data-testid="local-access-allow-all-confirm"]')
+    expect(confirmBanner.exists()).toBe(true)
+    expect(confirmBanner.text()).toMatch(/God Mode/i)
+    expect(confirmBanner.text()).toMatch(/shell/i)
+    expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('Allow all')
+
+    await wrapper.find('[data-testid="local-access-allow-all-confirm-btn"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="local-access-allow-all-confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="local-access-allow-all-btn"]').text()).toBe('✓ Allow all')
+  })
+
+  const editorMount = (props: { agentName?: string } = { agentName: 'new' }) => mount(AgentsView, {
+    global: {
+      plugins: [router],
+      stubs: { Teleport: true, Transition: false },
+    },
+    props,
+  })
+
+  it('shows the tools warning when picking qwen2.5-coder:7b but not 14b', async () => {
+    mockModelsAvailable.mockResolvedValue({
+      models: [
+        { name: 'qwen2.5-coder:7b', supportsTools: true, supportsDelegation: false, tier: 'low', details: { parameter_size: '7.6B' } },
+        { name: 'qwen2.5-coder:14b', supportsTools: true, supportsDelegation: true, tier: 'medium', details: { parameter_size: '14.8B' } },
+      ],
+      builtin_models: [],
+      provider_models: [],
+    })
+    const wrapper = editorMount()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="pick-model-qwen2.5-coder:7b"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+    expect(wrapper.find('[data-testid="local-access-model-tools-warning"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="local-access-allow-all-btn"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="local-access-allow-all-confirm-btn"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="local-access-model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="pick-model-qwen2.5-coder:14b"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="model-tools-warning"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="local-access-model-tools-warning"]').exists()).toBe(false)
+  })
+
+  it('shows the picker warning copy when supportsTools is false', async () => {
+    mockModelsAvailable.mockResolvedValue({
+      models: [
+        { name: 'custom-coder', supportsTools: false, supportsDelegation: false, tier: 'low' },
+      ],
+      builtin_models: [],
+      provider_models: [],
+    })
+    const wrapper = editorMount()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="model-picker-tools-warning"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="pick-model-custom-coder"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+
+    await wrapper.get('[data-testid="open-model-picker"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-picker-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  it('shows the tools warning on a 7b agent card but not a 14b card', async () => {
+    ;((_useAgents() as any).agents as any).value = [
+      { name: 'Steve', color: '#ff0', icon: 'S', model: 'qwen2.5-coder:7b' },
+      { name: 'Chris', color: '#0ff', icon: 'C', model: 'qwen2.5-coder:14b' },
+    ]
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: undefined },
+    })
+    await flushPromises()
+    const cards = wrapper.findAll('[data-testid="agent-card"]')
+    expect(cards).toHaveLength(2)
+    expect(cards[0]!.text()).toContain(MODEL_TOOL_WARNING)
+    expect(cards[1]!.text()).not.toContain(MODEL_TOOL_WARNING)
+  })
+
+  it('keeps the tools warning in the editor for a saved 7b agent', async () => {
+    mockAgentsGet.mockResolvedValue({
+      name: 'Steve',
+      model: 'qwen2.5-coder:7b',
+      color: '#58a6ff',
+      icon: 'S',
+      system_prompt: '',
+      local_tools: ['*'],
+    })
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router], stubs: { Teleport: true, Transition: false } },
+      props: { agentName: 'Steve' },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  it('shows the tools warning on a card when supportsTools is false', async () => {
+    ;((_useAgents() as any).agents as any).value = [
+      { name: 'Custom', color: '#ff0', icon: 'C', model: 'custom-coder', supportsTools: false },
+    ]
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: undefined },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="model-tools-warning"]').text()).toBe(MODEL_TOOL_WARNING)
+  })
+
+  // ── Personality preset ────────────────────────────────────────────────────
+  // Fails without the feature: before the select existed, there was no way
+  // to set personality from the editor and save() would never send it.
+
+  it('personality select defaults to Default for an agent with no preset', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const select = wrapper.get('[data-testid="agent-personality-select"]')
+    expect((select.element as HTMLSelectElement).value).toBe('default')
+  })
+
+  it('changing the personality select marks the form dirty and saves the value', async () => {
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const select = wrapper.get('[data-testid="agent-personality-select"]')
+    await select.setValue('strict-reviewer')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Unsaved changes')
+
+    await wrapper.get('[data-testid="save-agent-btn-sticky"]').trigger('click')
+    await flushPromises()
+
+    expect(mockAgentsUpdate).toHaveBeenCalled()
+    const [name, payload] = mockAgentsUpdate.mock.calls[mockAgentsUpdate.mock.calls.length - 1]
+    expect(name).toBe('Alpha')
+    expect((payload as any).personality).toBe('strict-reviewer')
+  })
+
+  it('the vet-work toggle reflects the strict-reviewer default until explicitly overridden', async () => {
+    mockAgentsGet.mockResolvedValueOnce({
+      name: 'Alpha',
+      model: 'gpt-4',
+      system_prompt: '',
+      toolbelt: [],
+      skills: [],
+      local_tools: [],
+      personality: 'strict-reviewer',
+    })
+    await router.push('/agents/Alpha')
+    await router.isReady()
+    const wrapper = mount(AgentsView, {
+      global: { plugins: [router] },
+      props: { agentName: 'Alpha' },
+    })
+    await flushPromises()
+
+    const toggle = wrapper.get('[data-testid="agent-vet-work-toggle"]')
+    expect(toggle.attributes('class')).toContain('bg-huginn-blue')
+
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Unsaved changes')
+
+    await wrapper.get('[data-testid="save-agent-btn-sticky"]').trigger('click')
+    await flushPromises()
+
+    expect(mockAgentsUpdate).toHaveBeenCalled()
+    const [, payload] = mockAgentsUpdate.mock.calls[mockAgentsUpdate.mock.calls.length - 1]
+    expect((payload as any).vet_work).toBe(false)
+  })
 })
+

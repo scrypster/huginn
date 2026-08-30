@@ -215,15 +215,23 @@ automation.
 
 ## Empty Toolbelt
 
-When `AgentDef.Toolbelt` is nil or empty, no filtering is applied. The agent
-can see and use all registered provider schemas and all configured connections.
+When `AgentDef.Toolbelt` is nil or empty, **no external providers are
+granted**. Schema filtering sends no connection tools to the model, and
+`AllowedProviders` returns an empty map so the permission gate fails closed
+even if the model hallucinates a tool name that exists in the global registry
+(for example `aws_ec2_terminate_instance`).
 
-This is the backward-compatible default. Agents defined before the toolbelt
-feature existed continue to work without modification.
+Built-in tools from `local_tools` and always-injected delegation / vault tools
+(`builtin`, `muninndb`) stay available exactly as they do for a named toolbelt.
 
-**Operators should treat an empty toolbelt as a conscious decision**, not an
-oversight. Review agents with empty toolbelts regularly, especially agents that
-have access to sensitive session state or run on schedules.
+`Gate.skipAll` (server oneshot/WebSocket auto-approve, or
+`--dangerously-skip-permissions`) does **not** override an empty toolbelt.
+Auto-approve skips the human prompt; it is not allow-all-providers.
+
+**Explicit allow-all** is a wildcard entry: `provider: "*"` and/or
+`connection_id: "*"`. Agents created before default-deny were migrated to that
+wildcard so existing full-access assistants (for example Astra on MJ Mac) keep
+working. Review wildcard toolbelts regularly.
 
 ---
 
@@ -232,7 +240,7 @@ have access to sensitive session state or run on schedules.
 | Location | What it does |
 |---|---|
 | `internal/agents/types.go` | `ToolbeltEntry` and `AgentDef` definitions |
-| `internal/agents/toolbelt.go` | `ToolbeltProviders()` — extracts provider set from a toolbelt |
+| `internal/agents/toolbelt.go` | `ToolbeltProviders()` / `AllowedProviders()` — empty = deny; `*` = allow-all |
 | `internal/tools/registry.go` | `AllSchemasForProviders()`, `ProviderFor()`, provider tag at registration |
 | `internal/permissions/permissions.go` | `Gate` type, approval gate integration |
 | `internal/server/handlers_agents.go` | Agent config loading and toolbelt hydration |

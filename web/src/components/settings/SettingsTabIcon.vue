@@ -48,6 +48,19 @@
     <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
   </svg>
   <svg
+    v-else-if="icon === 'hooks'"
+    class="w-4 h-4 flex-shrink-0"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+  >
+    <path d="M18 6L6 18" />
+    <path d="M8 6h10a2 2 0 012 2v8" />
+    <path d="M6 10v8a2 2 0 002 2h4" />
+  </svg>
+  <svg
     v-else-if="icon === 'mcp'"
     class="w-4 h-4 flex-shrink-0"
     viewBox="0 0 24 24"
@@ -59,6 +72,18 @@
     <rect x="2" y="3" width="20" height="14" rx="2" />
     <path d="M8 21h8M12 17v4" />
     <path d="M7 8h3m4 0h3" />
+  </svg>
+  <svg
+    v-else-if="icon === 'checkpoints'"
+    class="w-4 h-4 flex-shrink-0"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+  >
+    <polyline points="1 4 1 10 7 10" />
+    <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
   </svg>
   <svg
     v-else-if="icon === 'notifications'"
@@ -90,6 +115,6 @@
 
 <script setup lang="ts">
 defineProps<{
-  icon: 'general' | 'tools' | 'webui' | 'integrations' | 'mcp' | 'notifications' | 'about'
+  icon: 'general' | 'tools' | 'webui' | 'integrations' | 'hooks' | 'checkpoints' | 'mcp' | 'notifications' | 'about'
 }>()
 </script>

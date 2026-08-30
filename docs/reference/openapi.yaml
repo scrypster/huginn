@@ -138,6 +138,17 @@ paths:
                 $ref: "#/components/schemas/ConfigUpdateResponse"
         "400":
           $ref: "#/components/responses/ErrorResponse"
+  /api/v1/mcp/status:
+    get:
+      tags: [System]
+      summary: Live connection status for configured MCP servers (e.g. the browser/Playwright server)
+      responses:
+        "200":
+          description: Per-server status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MCPStatusResponse"
   /api/v1/models:
     get:
       tags: [System]
@@ -1247,6 +1258,13 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/metrics/turns:
+    get:
+      tags: [System]
+      summary: Get recent turn latency metrics and per-model summary
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
   /api/v1/connections/{id}/default:
     put:
       tags: [Connections]
@@ -1485,6 +1503,12 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Sessions]
+      summary: Post a message to a space timeline
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
   /api/v1/skills/registry/search:
     get:
       tags: [Skills]
@@ -1503,6 +1527,141 @@ paths:
     post:
       tags: [Skills]
       summary: Execute skill
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/audit:
+    get:
+      tags: [Audit]
+      summary: List audit log entries
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks:
+    get:
+      tags: [Hooks]
+      summary: List user hooks
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Hooks]
+      summary: Create a user hook
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/{id}:
+    put:
+      tags: [Hooks]
+      summary: Update a user hook
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Hooks]
+      summary: Delete a user hook
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/reload:
+    post:
+      tags: [Hooks]
+      summary: Reload user hooks from disk
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/test:
+    post:
+      tags: [Hooks]
+      summary: Dry-run a user hook against a sample tool call
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/hooks/audit:
+    get:
+      tags: [Hooks]
+      summary: List hook-execution audit log
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/workflows/drop:
+    post:
+      tags: [Workflows]
+      summary: Drop a scheduled workflow
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/muninn/connect-local:
+    post:
+      tags: [Memory]
+      summary: Connect a local MuninnDB instance
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies:
+    get:
+      tags: [Companies]
+      summary: List companies
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    post:
+      tags: [Companies]
+      summary: Create a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies/{id}:
+    get:
+      tags: [Companies]
+      summary: Get a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    patch:
+      tags: [Companies]
+      summary: Update a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+    delete:
+      tags: [Companies]
+      summary: Delete a company
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies/{id}/members:
+    post:
+      tags: [Companies]
+      summary: Add a company member
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/companies/{id}/members/{agent}:
+    delete:
+      tags: [Companies]
+      summary: Remove a company member
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}/replies:
+    get:
+      tags: [Sessions]
+      summary: List replies to a space message
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}/thread-read:
+    post:
+      tags: [Sessions]
+      summary: Mark a message thread as read
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+  /api/v1/space-messages/{id}/{msgID}:
+    delete:
+      tags: [Sessions]
+      summary: Delete a space message
       responses:
         "200":
           $ref: "#/components/responses/GenericObjectResponse"
@@ -1783,8 +1942,10 @@ components:
       properties:
         last_prompt_tokens:
           type: integer
+          nullable: true
         last_completion_tokens:
           type: integer
+          nullable: true
       additionalProperties: true
     CostResponse:
       type: object
@@ -1814,6 +1975,33 @@ components:
         requires_restart:
           type: boolean
       required: [saved, requires_restart]
+    MCPServerStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        connected:
+          type: boolean
+        circuit_state:
+          type: string
+          description: "closed / open / half-open; empty when never connected"
+        tool_count:
+          type: integer
+        binary_found:
+          type: boolean
+          description: Whether the configured command resolves to an executable on this machine
+        install_hint:
+          type: string
+          description: Actionable install instructions, present only when binary_found is false and the server name is recognized
+      required: [name, connected, tool_count, binary_found]
+    MCPStatusResponse:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MCPServerStatus"
+      required: [servers]
     SessionArtifactSummary:
       type: object
       properties:

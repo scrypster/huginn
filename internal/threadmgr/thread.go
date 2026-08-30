@@ -24,11 +24,11 @@ type Thread struct {
 	SessionID       string
 	AgentID         string
 	Task            string
-	Rationale       string         // why this agent was chosen (optional, from lead agent)
-	ParentMessageID string         // ID of the chat message that triggered this thread (for frontend linkage)
+	Rationale       string // why this agent was chosen (optional, from lead agent)
+	ParentMessageID string // ID of the chat message that triggered this thread (for frontend linkage)
 	Status          ThreadStatus
-	DependsOn       []string       // resolved thread IDs that must complete first
-	DependsOnHints  []string       // LLM-provided agent name hints, resolved by ResolveDependencies
+	DependsOn       []string // resolved thread IDs that must complete first
+	DependsOnHints  []string // LLM-provided agent name hints, resolved by ResolveDependencies
 	StartedAt       time.Time
 	CompletedAt     time.Time
 	CreatedAt       time.Time      // when the thread was registered (monotonic)
@@ -37,16 +37,24 @@ type Thread struct {
 	ArchivedAt      *time.Time     // non-nil when the thread has been archived
 	Summary         *FinishSummary // set on completion
 	TokensUsed      int
-	TokenBudget     int            // 0 = unlimited
-	Timeout         time.Duration  // 0 = no timeout; when > 0, the goroutine is killed after this duration
-	cancel          func()         // non-nil after Start()
-	InputCh         chan string     // receives human input when status == blocked
+	TokenBudget     int           // 0 = unlimited
+	Timeout         time.Duration // 0 = no timeout; when > 0, the goroutine is killed after this duration
+	cancel          func()        // non-nil after Start()
+	InputCh         chan string   // receives human input when status == blocked
 
 	// Heartbeat fields — let the lead agent and UI distinguish "still working"
 	// from "stalled" without waiting for a terminal status.
 	LastActivityAt  time.Time // updated on every turn, tool call, and (throttled) token
 	CurrentActivity string    // human-readable, e.g. `thinking (turn 3/50)`, `running tool "bash"`
 	Turn            int       // current loop turn (1-based; 0 = not yet running)
+
+	// Specialist / SpecialistModel: a one-off spawn_specialist thread. Stamped
+	// DURABLY at spawn time (not derived from the ephemeral registry overlay),
+	// so the "temporary" attribution + model survive the overlay eviction that
+	// fires the instant the thread lands terminal — a cost-review reader needs
+	// this precisely after completion (Opus vet 2026-08-29).
+	Specialist      bool
+	SpecialistModel string
 
 	// CollectedAt is stamped when WaitForThreads delivers this thread's result
 	// to a waiting lead agent. The completion notifier skips its automatic
@@ -76,6 +84,18 @@ type FinishSummary struct {
 	Status          string   // "completed" | "blocked" | "needs_review" | "completed-with-timeout" | "error"
 	ParentMessageID string   // ID of the chat message that triggered this thread (for reply threading)
 	ThreadID        string   // stamped by CompletionNotifier.Notify so FollowUpFn can identify the thread
+
+	// VetLabel and VetFindings carry the productized vet loop's verdict
+	// (see the wireThreadManagerVet hook / internal/agent.RunVetPass).
+	// VetLabel is one of "" (not vetted — vet_work off, or no file changes
+	// to review), "no findings", "N findings", or "did not complete" — the
+	// vet pass errored or timed out and the run is honestly labeled
+	// unvetted rather than silently presented as clean. VetFindings holds
+	// the reviewer's structured findings text ("" unless VetLabel is
+	// "N findings"). Both are set via ThreadManager.AttachVetResult, after
+	// Complete has already stored Summary — never invented up front.
+	VetLabel    string
+	VetFindings string
 }
 
 // CreateParams holds arguments for ThreadManager.Create.
@@ -92,6 +112,8 @@ type CreateParams struct {
 	SpaceID         string        // if set, AgentID must be a member of this space
 	CreatedByUser   string        // actor that requested this thread (e.g. "primary-agent", user ID)
 	CreatedReason   string        // free-text rationale for why this thread was created
+	Specialist      bool          // one-off spawn_specialist thread (durable marker; see Thread.Specialist)
+	SpecialistModel string        // model the specialist runs on (for post-eviction attribution)
 }
 
 // checkTokenBudget returns an error if the thread identified by threadID has

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -147,6 +148,33 @@ func continuityModeFromContext(ctx context.Context) proactivity.ContinuityMode {
 	return proactivity.ContinuityModeConversational
 }
 
+// pinMuninnVault returns the vault name Huginn must send on every Muninn call.
+// Omitting vault makes Muninn write/read the `default` vault — a leak.
+// Empty or explicit "default" is rewritten to huginn (this work's vault).
+func pinMuninnVault(vaultName string) string {
+	v := strings.TrimSpace(vaultName)
+	if v == "" || strings.EqualFold(v, "default") {
+		return "huginn"
+	}
+	if !muninnVaultNameOK(v) {
+		return "huginn"
+	}
+	return v
+}
+
+func muninnVaultNameOK(v string) bool {
+	if len(v) < 1 || len(v) > 64 {
+		return false
+	}
+	for _, r := range v {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // prefetchMemoryContext silently calls muninn_where_left_off (if registered)
 // and returns a formatted block ready to append to the system prompt.
 // Returns "" if the tool is unavailable, times out, or errors.
@@ -188,41 +216,64 @@ func (o *Orchestrator) prefetchMemoryContextWithEvents(
 		return ""
 	}
 
+	gate := memoryGateFromContext(ctx)
+	pinned := pinMuninnVault(vaultName)
+	mode := normalizeMemoryMode(gate.Mode)
+	sessionKey := gate.SessionID
+	if sessionKey == "" {
+		sessionKey = agentName
+	}
+	doWhere, doRecall, reuseRecall := o.pullCadence(sessionKey, mode, userMsg)
+	slog.Info("memory.inject", "kind", "start", "vault", pinned, "mode", mode, "agent", agentName)
+
 	wloKey := agentName + ":" + vaultName
 	whereOutput := ""
 	if hasWhere {
 		whereOutput = o.getCachedMemoryPrefetch(wloKey)
 		switch {
 		case whereOutput != "":
+			slog.Info("memory.inject", "kind", "where_left_off", "vault", pinned, "cached", true)
 			if onPrefetch != nil {
-				onPrefetch("muninn_where_left_off", map[string]any{}, whereOutput, true)
+				onPrefetch("muninn_where_left_off", map[string]any{"vault": pinned}, whereOutput, true)
 			}
-		default:
+		case doWhere:
 			prefetchCtx, cancel := context.WithTimeout(ctx, prefetchTimeout)
-			result := whereTool.Execute(prefetchCtx, map[string]any{})
+			result := whereTool.Execute(prefetchCtx, map[string]any{"vault": pinned})
 			cancel()
 			if !result.IsError && result.Output != "" {
 				whereOutput = trimToLines(result.Output, prefetchMaxItems)
 				o.setCachedMemoryPrefetch(wloKey, whereOutput)
+				slog.Info("memory.inject", "kind", "where_left_off", "vault", pinned, "cached", false)
 				if onPrefetch != nil {
-					onPrefetch("muninn_where_left_off", map[string]any{}, whereOutput, false)
+					onPrefetch("muninn_where_left_off", map[string]any{"vault": pinned}, whereOutput, false)
 				}
 			}
 		}
 	}
 
+	recallQuery := sanitizeRecallQuery(userMsg)
 	recallOutput := ""
-	if userMsg != "" {
-		if hasRecall {
-			recallKey := agentName + ":" + vaultName + ":recall:" + hashMessage(userMsg)
-			recallArgs := map[string]any{
-				"context":   []string{userMsg},
-				"mode":      "balanced",
-				"limit":     5,
-				"threshold": 0.6,
+	if recallQuery != "" && hasRecall {
+		recallArgs := map[string]any{
+			"vault":     pinned,
+			"context":   []string{recallQuery},
+			"mode":      "balanced",
+			"limit":     5,
+			"threshold": 0.6,
+		}
+		if !doRecall {
+			recallOutput = reuseRecall
+			if recallOutput != "" {
+				slog.Info("memory.inject", "kind", "recall", "vault", pinned, "cached", true)
+				if onPrefetch != nil {
+					onPrefetch("muninn_recall", recallArgs, recallOutput, true)
+				}
 			}
+		} else {
+			recallKey := agentName + ":" + vaultName + ":recall:" + hashMessage(recallQuery)
 			if cachedRecall := o.getCachedSemanticPrefetch(recallKey); cachedRecall != "" {
 				recallOutput = cachedRecall
+				slog.Info("memory.inject", "kind", "recall", "vault", pinned, "cached", true)
 				if onPrefetch != nil {
 					onPrefetch("muninn_recall", recallArgs, recallOutput, true)
 				}
@@ -233,6 +284,7 @@ func (o *Orchestrator) prefetchMemoryContextWithEvents(
 				if !recallResult.IsError && recallResult.Output != "" {
 					recallOutput = trimToLines(recallResult.Output, 10)
 					o.setCachedSemanticPrefetch(recallKey, recallOutput)
+					slog.Info("memory.inject", "kind", "recall", "vault", pinned, "cached", false)
 					if onPrefetch != nil {
 						onPrefetch("muninn_recall", recallArgs, recallOutput, false)
 					}
@@ -240,14 +292,119 @@ func (o *Orchestrator) prefetchMemoryContextWithEvents(
 			}
 		}
 	}
+	o.rememberPull(sessionKey, userMsg, recallOutput)
 
-	mode := continuityModeFromContext(ctx)
+	// Immersive session-start also guide, once per session.
+	if normalizeMemoryMode(gate.Mode) == MemoryModeImmersive {
+		sessionKey := gate.SessionID
+		if sessionKey == "" {
+			sessionKey = agentName
+		}
+		if sessionKey != "" && o.shouldGuideSession(sessionKey) {
+			if guideTool, hasGuide := sessionReg.Get("muninn_guide"); hasGuide {
+				gCtx, gCancel := context.WithTimeout(ctx, prefetchTimeout)
+				gRes := guideTool.Execute(gCtx, map[string]any{"vault": pinned})
+				gCancel()
+				if !gRes.IsError && gRes.Output != "" {
+					slog.Info("memory.inject", "kind", "guide", "vault", pinned, "cached", false)
+					if onPrefetch != nil {
+						onPrefetch("muninn_guide", map[string]any{"vault": pinned}, gRes.Output, false)
+					}
+				}
+			}
+		}
+	}
+
+	cmode := continuityModeFromContext(ctx)
 	return proactivity.AssembleContinuityPack(proactivity.ContinuityPackInput{
-		Mode:               mode,
+		Mode:               cmode,
 		UserMessage:        userMsg,
 		WhereLeftOffOutput: whereOutput,
 		RecallOutput:       recallOutput,
 	})
+}
+
+// shouldGuideSession returns true the first time sessionKey is seen.
+func (o *Orchestrator) shouldGuideSession(sessionKey string) bool {
+	if o == nil || sessionKey == "" {
+		return false
+	}
+	_, loaded := o.memoryGuided.LoadOrStore(sessionKey, true)
+	return !loaded
+}
+
+type sessionPullState struct {
+	lastUser string
+	recall   string
+}
+
+// pullCadence decides whether this turn may fire a Muninn MCP pull.
+// immersive: every turn. conversational: session start + topic-shift.
+// passive: session-start only. Cached inject is still allowed.
+func (o *Orchestrator) pullCadence(sessionKey, mode, userMsg string) (doWhere, doRecall bool, reuseRecall string) {
+	if o == nil {
+		return true, true, ""
+	}
+	mode = normalizeMemoryMode(mode)
+	if sessionKey == "" {
+		sessionKey = "default"
+	}
+	if mode == MemoryModeImmersive {
+		return true, true, ""
+	}
+	raw, ok := o.memoryPulled.Load(sessionKey)
+	var st sessionPullState
+	if ok {
+		st, _ = raw.(sessionPullState)
+	}
+	if !ok {
+		return true, true, ""
+	}
+	if mode == MemoryModePassive {
+		return false, false, st.recall
+	}
+	if topicShifted(st.lastUser, userMsg) {
+		return true, true, ""
+	}
+	return false, false, st.recall
+}
+
+func (o *Orchestrator) rememberPull(sessionKey, userMsg, recall string) {
+	if o == nil || sessionKey == "" {
+		return
+	}
+	prev, _ := o.memoryPulled.Load(sessionKey)
+	st, _ := prev.(sessionPullState)
+	if recall == "" {
+		recall = st.recall
+	}
+	if userMsg == "" {
+		userMsg = st.lastUser
+	}
+	o.memoryPulled.Store(sessionKey, sessionPullState{lastUser: userMsg, recall: recall})
+}
+
+// maxRecallQueryChars caps how much of the raw user message is sent to
+// muninn_recall as the semantic query. A rambling turn shouldn't blow the
+// query past what the vault's embedder expects.
+const maxRecallQueryChars = 500
+
+// sanitizeRecallQuery strips DM/channel @mention prefixes and truncates the
+// user's ask before it becomes the muninn_recall "context" query. Leading
+// mentions ("@Winston what's our production database called?") are pure
+// routing noise — leaving them in the semantic query dilutes it against the
+// actual question. Live repro: 2026-08-27 Winston DM, recall query polluted
+// by the mention prefix returned no hits for a fact that was in the vault.
+func sanitizeRecallQuery(userMsg string) string {
+	s := stripLeadingMentions(userMsg)
+	s = strings.TrimSpace(s)
+	if len(s) > maxRecallQueryChars {
+		r := []rune(s)
+		if len(r) > maxRecallQueryChars {
+			s = strings.TrimSpace(string(r[:maxRecallQueryChars]))
+		}
+	}
+	return s
 }
 
 // trimToLines returns at most n lines from s, appending "…" if truncated.

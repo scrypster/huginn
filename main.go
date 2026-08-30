@@ -27,6 +27,7 @@ import (
 	agentsession "github.com/scrypster/huginn/internal/agent/session"
 	agentslib "github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/checkpoint"
 	"github.com/scrypster/huginn/internal/compact"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
@@ -41,6 +42,7 @@ import (
 	modelslib "github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notepad"
 	"github.com/scrypster/huginn/internal/notification"
+	"github.com/scrypster/huginn/internal/oneshot"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/pricing"
 	"github.com/scrypster/huginn/internal/proactivity"
@@ -64,6 +66,7 @@ import (
 	"github.com/scrypster/huginn/internal/tools"
 	traypkg "github.com/scrypster/huginn/internal/tray"
 	"github.com/scrypster/huginn/internal/tui"
+	"github.com/scrypster/huginn/internal/turnmetrics"
 	"github.com/scrypster/huginn/internal/workspace"
 )
 
@@ -77,7 +80,7 @@ func main() {
 	headlessFlag := flag.Bool("headless", false, "run in headless mode (no TUI)")
 	cwdFlag := flag.String("cwd", "", "working directory (headless mode)")
 	commandFlag := flag.String("command", "", "slash command to run (headless mode)")
-	jsonFlag := flag.Bool("json", false, "output JSON (headless mode)")
+	jsonFlag := flag.Bool("json", false, "output JSON (one-shot --print / headless)")
 	workspaceFlag := flag.String("workspace", "", "path to huginn.workspace.json")
 	dangerouslySkipPermissions := flag.Bool("dangerously-skip-permissions", false, "skip all permission prompts (allows all tool use without approval)")
 	noToolsFlag := flag.Bool("no-tools", false, "disable tool use (plain chat mode)")
@@ -253,9 +256,9 @@ func main() {
 	if migrateErr := agentslib.MigrateAgents(huginnHome); migrateErr != nil {
 		appLog.Info("agents migration skipped", "err", migrateErr)
 	}
-	if err := agentslib.MigrateEmptyToolbeltToWildcard(huginnHome); err != nil {
-		appLog.Info("migrate toolbelt: non-fatal", "err", err)
-	}
+	// Empty toolbelt is default-deny for external providers (github_cli, aws, …).
+	// Do not backfill provider:"*" — that leaked gh_* schemas into oneshot/serve
+	// for agents whose yaml was toolbelt [] (Reggie). Explicit toolbelt * remains.
 
 	// 2. Determine working directory
 	cwd, err := os.Getwd()
@@ -273,37 +276,32 @@ func main() {
 			Command: *commandFlag,
 			JSON:    *jsonFlag,
 		}
-		// When --print is also set, wire the agent runner so the headless pipeline
-		// runs the prompt and includes the output in the result (fixes mutual exclusion bug).
+		// When --print is also set, run the same agentic tool loop as --print
+		// (ChatWithAgent / RunLoop), not a bare ChatCompletion.
 		if *printFlag != "" {
 			hcfg.Prompt = *printFlag
 			hcfg.Agent = *agentFlag
-			endpoint := cfg.Backend.Endpoint
-			if *endpointFlag != "" {
-				endpoint = *endpointFlag
+			hlBackend, hlModels, hlErr := selectBackend(context.Background(), cfg, *endpointFlag, *modelFlag)
+			if hlErr != nil {
+				fatalf("backend: %v", hlErr)
 			}
-			if endpoint == "" {
-				endpoint = "http://localhost:11434"
-			}
-			hlBackend := backend.NewExternalBackend(endpoint)
-			hlModels := modelconfig.DefaultModels()
-			hlOrch, orchErr := agent.NewOrchestrator(hlBackend, hlModels, nil, nil, nil, nil)
-			if orchErr != nil {
-				fatalf("headless: orchestrator init: %v", orchErr)
-			}
-			hcfg.AgentRun = func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
-				var buf strings.Builder
-				var toolsCalled []string
-				chatErr := hlOrch.Chat(ctx, prompt, func(token string) {
-					buf.WriteString(token)
-				}, func(ev backend.StreamEvent) {
-					if ev.Type == backend.StreamToolCall {
-						if name, ok := ev.Payload["tool"].(string); ok && name != "" {
-							toolsCalled = append(toolsCalled, name)
-						}
-					}
-				})
-				return buf.String(), toolsCalled, 0, chatErr
+			hcfg.AgentRun = func(ctx context.Context, agentName, prompt, sessionID string) (string, []oneshot.ToolCall, int, error) {
+				res, runErr := oneshot.Run(ctx, newOneShotConfig(oneshotRunOpts{
+					prompt:          prompt,
+					agentName:       agentName,
+					model:           *modelFlag,
+					noTools:         *noToolsFlag,
+					skipPermissions: *dangerouslySkipPermissions,
+					maxTurns:        *maxTurnsFlag,
+					cwd:             cwd,
+					bashTimeoutSecs: cfg.BashTimeoutSecs,
+					backend:         hlBackend,
+					models:          hlModels,
+				}))
+				if runErr != nil {
+					return "", nil, 0, runErr
+				}
+				return res.AgentOutput, res.ToolsCalled, 0, nil
 			}
 		}
 		result, err := headless.Run(hcfg)
@@ -326,70 +324,38 @@ func main() {
 		return
 	}
 
-	// 2c. --print / -p: non-interactive single-turn mode
-	if *printFlag != "" {
+	// 2c. --print / --agent MSG: one-shot agentic loop (no Bubble Tea).
+	// --print and --agent work together; --headless is not required.
+	printMsg := *printFlag
+	if printMsg == "" && *agentFlag != "" && len(flag.Args()) > 0 {
+		printMsg = strings.Join(flag.Args(), " ")
+	}
+	if printMsg != "" {
 		printBackend, printModels, err := selectBackend(context.Background(), cfg, *endpointFlag, *modelFlag)
 		if err != nil {
 			fatalf("backend: %v", err)
 		}
-		printOrch, err := agent.NewOrchestrator(printBackend, printModels, nil, nil, nil, nil)
-		if err != nil {
-			fatalf("failed to create orchestrator: %v", err)
+		oscfg := newOneShotConfig(oneshotRunOpts{
+			prompt:          printMsg,
+			agentName:       *agentFlag,
+			model:           *modelFlag,
+			noTools:         *noToolsFlag,
+			skipPermissions: *dangerouslySkipPermissions,
+			maxTurns:        *maxTurnsFlag,
+			cwd:             cwd,
+			bashTimeoutSecs: cfg.BashTimeoutSecs,
+			backend:         printBackend,
+			models:          printModels,
+		})
+		if !*jsonFlag {
+			oscfg.OnToken = func(token string) { fmt.Print(token) }
 		}
-		err = printOrch.Chat(context.Background(), *printFlag, func(token string) {
-			fmt.Print(token)
-		}, nil)
-		fmt.Println()
+		res, err := oneshot.Run(context.Background(), oscfg)
 		if err != nil {
 			fatalf("print: %v", err)
 		}
-		return
-	}
-
-	// 2d. --agent non-interactive: huginn --agent Chris "do this task"
-	if *agentFlag != "" && len(flag.Args()) > 0 {
-		agentsCfg, agentsErr := agentslib.LoadAgents()
-		if agentsErr != nil {
-			agentsCfg = agentslib.DefaultAgentsConfig()
-		}
-		agentModels := modelconfig.DefaultModels()
-		agentUsername := memory.ResolveUsername("")
-		agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, agentModels, agentUsername)
-
-		ag, ok := agentReg.ByName(*agentFlag)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown agent %q; available: %s\n",
-				*agentFlag, strings.Join(agentReg.Names(), ", "))
-			os.Exit(1)
-		}
-		if *modelFlag != "" {
-			ag.SwapModel(*modelFlag)
-		}
-		msg := strings.Join(flag.Args(), " ")
-		endpoint := cfg.Backend.Endpoint
-		if *endpointFlag != "" {
-			endpoint = *endpointFlag
-		}
-		if endpoint == "" {
-			endpoint = "http://localhost:11434"
-		}
-		b := backend.NewExternalBackend(endpoint)
-		systemPrompt := ag.SystemPrompt
-		if systemPrompt == "" {
-			systemPrompt = fmt.Sprintf("You are %s, an expert assistant.", ag.Name)
-		}
-		_, err = b.ChatCompletion(context.Background(), backend.ChatRequest{
-			Model: ag.GetModelID(),
-			Messages: []backend.Message{
-				{Role: "system", Content: systemPrompt},
-				{Role: "user", Content: msg},
-			},
-			OnToken: func(token string) { fmt.Print(token) },
-		})
-		fmt.Println()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent error: %v\n", err)
-			os.Exit(1)
+		if err := oneshot.WriteResult(os.Stdout, os.Stderr, res, *jsonFlag, !*jsonFlag); err != nil {
+			fatalf("print: %v", err)
 		}
 		return
 	}
@@ -438,6 +404,15 @@ func main() {
 	if sqlDB != nil {
 		if err := sqlDB.Migrate(session.Migrations()); err != nil {
 			fmt.Fprintf(os.Stderr, "huginn: warning: session schema migrations failed: %v\n", err)
+		}
+	}
+	var tuiTurnMetrics *turnmetrics.Writer
+	if sqlDB != nil {
+		if err := sqlDB.Migrate(turnmetrics.Migrations()); err != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: turn metrics migration failed: %v\n", err)
+		} else {
+			tuiTurnMetrics = turnmetrics.NewWriter(sqlDB)
+			tuiTurnMetrics.Start(context.Background()) // lives for the process — TUI has no graceful-shutdown path to hook
 		}
 	}
 	// sqlDB is used below for connection and memory stores (Phase 1+).
@@ -542,7 +517,9 @@ func main() {
 		if endpoint == "" {
 			endpoint = "http://localhost:11434"
 		}
-		b = backend.NewExternalBackend(endpoint)
+		eb := backend.NewExternalBackend(endpoint)
+		eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		b = eb
 		go func(ep string, be backend.Backend) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -558,6 +535,7 @@ func main() {
 	}
 
 	registry := modelconfig.NewRegistry(models)
+	startModelCapabilityProbe(cfg.OllamaBaseURL, registry)
 
 	// 7b. Load agent registry (non-fatal: falls back to defaults)
 	agentsCfg, agentsErr := agentslib.LoadAgents()
@@ -567,6 +545,10 @@ func main() {
 	// Resolve username up-front so vault names include the user segment
 	// (e.g. "huginn:agent:mj:steve" rather than "huginn:agent::steve").
 	tuiUsername := memory.ResolveUsername(cwd)
+	// One-time migration: rewrite any AgentDef.VaultName left over from the old
+	// hire-flow's "<slug-of-name>-huginn" auto-naming scheme to the canonical
+	// "huginn:agent:<user>:<name>" form, persisting the change to disk.
+	agentslib.MigrateLegacyVaultNamesDefault(agentsCfg, tuiUsername)
 	agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, models, tuiUsername)
 
 	// 7b-warn. Warn if any agent uses a literal API key instead of $ENV or keyring:
@@ -600,9 +582,18 @@ func main() {
 		fatalf("failed to create orchestrator: %v", err)
 	}
 	backendCache := backend.NewBackendCache(b)
+	backendCache.SetOllamaKeepAlive(cfg.Backend.KeepAlive)
 	orch.SetBackendCache(backendCache)
+	// Best-effort warm-up (perf wave step 2b): fire one tiny keep-alive
+	// request per distinct ollama model among a small, explicit set — the
+	// default agent and the Chief of Staff — so the first real user turn
+	// doesn't pay a cold model load. Non-blocking, logged, never fatal.
+	warmOllamaModels(context.Background(), *cfg, agentReg)
 	orch.WithMachineID(relay.GetMachineID()) // stable 8-char hex, not cfg.MachineID (hostname-dependent)
 	orch.SetGitRoot(detection.Root)
+	if tuiTurnMetrics != nil {
+		orch.SetTurnMetricsWriter(tuiTurnMetrics)
+	}
 	orch.SetAgentRegistry(agentReg)
 	orch.SetHuginnHome(huginnHome)
 	if memStore != nil {
@@ -684,11 +675,14 @@ func main() {
 		tools.RegisterBuiltins(toolReg, cwd, bashTimeout)
 		tools.RegisterGitTools(toolReg, cwd)
 		tools.RegisterTestsTool(toolReg, cwd, bashTimeout)
-		tools.RegisterGitHubTools(toolReg)
+		tools.RegisterGitHubTools(toolReg, cwd)
 		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+		tools.RegisterGitLabTools(toolReg, cwd)
+		toolReg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, cwd)
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+		tools.RegisterWriteWorkflowTool(toolReg, huginnHome)
 
 		// Register integration (OAuth) tools for all configured connections.
 		{
@@ -916,7 +910,18 @@ func main() {
 						cfg.Backend.APIKey = apiKey
 					}
 					backendMu.Unlock()
-					return cfg.Save()
+					// Read-modify-write against the CURRENT on-disk config, not
+					// this process's long-lived in-memory cfg snapshot: cfg.Save()
+					// here would write cfg's stale copy of every other field
+					// (tools_enabled, web_ui.port, ...) over whatever the config
+					// API has saved since this process started, reverting it.
+					return config.UpdateDefault(func(disk *config.Config) {
+						disk.Backend.Provider = provider
+						disk.Backend.Endpoint = endpoint
+						if apiKey != "" {
+							disk.Backend.APIKey = apiKey
+						}
+					})
 				},
 				PullModel: func(name string) error {
 					baseURL := cfg.OllamaBaseURL
@@ -2234,7 +2239,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		logger.Info("backend: using cloud provider (serve mode)", "provider", "vertex",
 			"project", cfg.Backend.Project, "location", cfg.Backend.Location)
 	default:
-		b = backend.NewExternalBackend(endpoint)
+		eb := backend.NewExternalBackend(endpoint)
+		eb.SetKeepAlive(cfg.Backend.KeepAlive)
+		b = eb
 		go func(ep string, be backend.Backend) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -2250,12 +2257,32 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		models.Reasoner = cfg.ReasonerModel
 	}
 
-	// Permissions gate for server mode: auto-approve all tool calls (headless).
-	// Also used by the relay dispatcher to deliver remote permission responses.
+	// Permissions gate for server mode: auto-approve prompts (headless).
+	// skipAll is not allow-all-providers — each agent run forks this gate
+	// with AllowedProviders from the agent's toolbelt. An empty toolbelt
+	// fails closed. Also used by the relay dispatcher to deliver remote
+	// permission responses.
 	serverGate := permissions.NewGate(true, nil)
+	// PermExec-level tools (bash) always require a human approval prompt in
+	// serve mode, regardless of skipAll — skipAll otherwise auto-approves
+	// every non-read tool call with nobody watching. The prompt itself is
+	// wired below (serverGate.SetPromptFunc(srv.PermissionPromptFunc()))
+	// once the WS hub (srv) exists; until then bash calls fail closed
+	// (promptFunc nil → ReasonPromptUnavailable) rather than silently running.
+	serverGate.SetExecRequiresPrompt(true)
+	// delegate_to_agent is PermExec too, but it runs no code itself and
+	// already has its own approval step (DelegationPreviewGate, manual by
+	// default). Without this exemption every delegation would raise a second,
+	// redundant "wants to run" banner ahead of the delegation preview card,
+	// and any run with no human attached (scheduled workflow, heartbeat)
+	// could not delegate at all. The delegated agent's own bash calls still
+	// prompt — they are checked against that agent's forked gate.
+	serverGate.SetExecPromptExempt([]string{"delegate_to_agent"})
 
 	// Orchestrator (minimal setup for serve mode)
-	orch, err := agent.NewOrchestrator(b, models, nil, nil, nil, nil)
+	registry := modelconfig.NewRegistry(models)
+	startModelCapabilityProbe(cfg.OllamaBaseURL, registry)
+	orch, err := agent.NewOrchestrator(b, models, nil, registry, nil, nil)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -2365,6 +2392,15 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 
 	srv = newServerWithRuntime(*cfg, orch, sessStore, token, huginnHome, connMgr, connStore, connProviders)
 
+	// Bridge PermExec (bash) permission prompts to the web UI: emits
+	// permission_request over the session's WS connection and blocks until
+	// the browser answers (or the gate's own timeout denies). See
+	// serverGate.SetExecRequiresPrompt(true) above for why this is needed.
+	serverGate.SetPromptFunc(srv.PermissionPromptFunc())
+	// Ctx-aware variant: lets a cancelled chat_cancel unblock the WS round
+	// trip itself instead of only being abandoned by the gate's own wait.
+	serverGate.SetPromptFuncCtx(srv.PermissionPromptFuncCtx())
+
 	// Wire the BackendCache into the server so handleUpdateConfig can push key
 	// changes into running backends without requiring a restart.
 	srv.WithBackendCache(serveCache)
@@ -2435,7 +2471,19 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		} else {
 			spaceStore = spaces.NewSQLiteSpaceStore(sqlDB)
 			srv.SetSpaceStore(spaceStore)
+			// New already wires this; set again so huginn serve is explicit.
+			srv.SetSpaceThreadRunner(srv.RunSpaceThreadAgent)
 			autoCreateDMSpaces(spaceStore)
+			// Create() already denies non-members when a SpaceID is set, but
+			// the checker was never wired — so delegate_to_agent could spawn
+			// Steve from a Tess-only DM. Standalone sessions have no SpaceID
+			// and keep the all-agents path.
+			if checker, ok := spaceStore.(threadmgr.SpaceMembershipChecker); ok {
+				tm.SetMembershipChecker(checker)
+			}
+			if gate, ok := spaceStore.(threadmgr.CompanyGate); ok {
+				tm.SetCompanyGate(gate)
+			}
 		}
 	}
 
@@ -2446,6 +2494,24 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	}
 	if symbolStore != nil {
 		cleanupFns = append(cleanupFns, func() { symbolStore.Close() })
+	}
+
+	// Wire turn-latency telemetry (perf wave foundation): a bounded async
+	// writer persists per-turn t_request/t_first_token/t_complete stamps to
+	// turn_metrics, and /api/v1/metrics/turns serves recent rows + a
+	// per-model p50/p95 summary. sqlDB == nil (degraded mode) leaves both
+	// orch and srv without a writer — RunLoop's MetricsWriter check is nil-safe.
+	if sqlDB != nil {
+		if migrErr := sqlDB.Migrate(turnmetrics.Migrations()); migrErr != nil {
+			fmt.Fprintf(os.Stderr, "huginn: warning: turn metrics migration failed: %v\n", migrErr)
+		} else {
+			tmWriter := turnmetrics.NewWriter(sqlDB)
+			tmCtx, tmCancel := context.WithCancel(context.Background())
+			tmWriter.Start(tmCtx)
+			cleanupFns = append(cleanupFns, tmCancel)
+			orch.SetTurnMetricsWriter(tmWriter)
+			srv.SetTurnMetricsReader(tmWriter)
+		}
 	}
 
 	// Wire cloud vault memory replicator — drains cloud_vault_queue and pushes agent
@@ -2524,8 +2590,9 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			logger.Warn("huginn: create workflows dir", "err", err)
 		}
 		sched.SetWorkflowsDir(workflowsDir)
-		sched.Start(context.Background())
-		cleanupFns = append(cleanupFns, func() { sched.Stop(context.Background()) })
+		// Start is deferred until the runner and delivery queue are wired —
+		// otherwise the watcher initial sync fails (runner nil) and the
+		// queue worker never starts.
 		srv.SetScheduler(sched)
 		workflowRunsDir := filepath.Join(huginnHome, "workflow-runs")
 
@@ -2765,9 +2832,36 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				return run.Steps[len(run.Steps)-1].Output, nil
 			}),
 			scheduler.WithDeliveryQueue(deliveryQueue),
+			scheduler.WithCompanyGate(func(companyID, agentName string) error {
+				if strings.TrimSpace(companyID) == "" || strings.TrimSpace(agentName) == "" {
+					return nil
+				}
+				type companyWallStore interface {
+					AgentInCompany(agent, companyID string) (bool, error)
+					GetCompany(id string) (*spaces.Company, error)
+				}
+				wall, ok := spaceStore.(companyWallStore)
+				if !ok {
+					return nil
+				}
+				seated, err := wall.AgentInCompany(agentName, companyID)
+				if err != nil {
+					return err
+				}
+				if seated {
+					return nil
+				}
+				name := companyID
+				if co, gerr := wall.GetCompany(companyID); gerr == nil && co != nil && co.Name != "" {
+					name = co.Name
+				}
+				return scheduler.ErrCompanyWall(name, agentName)
+			}),
 		)
 		sched.SetWorkflowRunner(wfRunner)
 		sched.SetWorkflowRunStore(workflowRunStore)
+		sched.Start(context.Background())
+		cleanupFns = append(cleanupFns, func() { sched.Stop(context.Background()) })
 		if err := sched.LoadWorkflows(workflowsDir); err != nil {
 			logger.Warn("huginn: load workflows", "err", err)
 		}
@@ -2777,6 +2871,11 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 	// during web chat. Agents are loaded fresh; failure is non-fatal.
 	if agentsCfg, agentsErr := agentslib.LoadAgents(); agentsErr == nil && agentsCfg != nil && len(agentsCfg.Agents) > 0 {
 		srvUsername := memory.ResolveUsername("")
+		// One-time canonical vault-name migration (<slug>-huginn ->
+		// huginn:agent:<user>:<name>) must run on the serve path too — the
+		// daemon is the long-lived process; TUI-only migration would leave
+		// serve-created hires unmigrated until someone opens the TUI.
+		agentslib.MigrateLegacyVaultNamesDefault(agentsCfg, srvUsername)
 		agentReg := agentslib.BuildRegistryWithUsername(agentsCfg, models, srvUsername)
 		logger.Info("startServer: wiring agents", "count", len(agentsCfg.Agents), "names", agentReg.Names())
 		orch.SetAgentRegistry(agentReg)
@@ -2811,14 +2910,45 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// missing this registration, so applyToolbelt returned empty schemas for
 		// any agent with local_tools configured (["*"] or named list).
 		toolReg := tools.NewRegistry()
-		tools.RegisterBuiltins(toolReg, srvCWD, srvBashTimeout)
+		// Shared with initCheckpoints below (A1) — checkpoint_revert_run
+		// must serialize against write_file/edit_file through the SAME
+		// FileLockManager instance, or the two lock tables never intersect.
+		srvFileLock := tools.NewFileLockManager()
+		tools.RegisterBuiltinsWithLocker(toolReg, srvCWD, srvBashTimeout, srvFileLock)
 		tools.RegisterGitTools(toolReg, srvCWD)
 		tools.RegisterTestsTool(toolReg, srvCWD, srvBashTimeout)
-		tools.RegisterGitHubTools(toolReg)
+		tools.RegisterGitHubTools(toolReg, srvCWD)
 		toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+		tools.RegisterGitLabTools(toolReg, srvCWD)
+		toolReg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 		toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 		tools.RegisterWorktreeTools(toolReg, srvCWD)
 		tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+		// create_agent is grant-gated (named local_tools only). Do not tag
+		// builtin — God Mode ["*"] must not receive it.
+		createAgentTool := srv.NewCreateAgentTool()
+		createAgentTool.Deps.Registry = toolReg
+		toolReg.Register(createAgentTool)
+
+		// Register LSP tools (graceful if no LSP configured). Parity with the
+		// TUI toolsEnabled block above — server mode was missing this
+		// registration entirely, so find_definition/list_symbols (tagged
+		// "builtin" and pulled in by God Mode ["*"]) returned "unknown tool".
+		{
+			lspMgrs := make(map[string]tools.LSPManager)
+			for _, lang := range lsp.SupportedLanguages() {
+				if detected := lsp.Detect(lang); detected.Command != "" {
+					mgr := lsp.NewManager(lang, detected)
+					go func(m *lsp.Manager, language string) {
+						if err := m.Start(srvCWD); err != nil {
+							logger.Info("LSP start failed", "lang", language, "err", err)
+						}
+					}(mgr, lang)
+					lspMgrs[lang] = mgr
+				}
+			}
+			tools.RegisterLSPTools(toolReg, srvCWD, lspMgrs)
+		}
 		// Honor AllowedTools/DisallowedTools config filters (parity with TUI mode).
 		if len(cfg.AllowedTools) > 0 {
 			toolReg.SetAllowed(cfg.AllowedTools)
@@ -2826,6 +2956,17 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		if len(cfg.DisallowedTools) > 0 {
 			toolReg.SetBlocked(cfg.DisallowedTools)
 		}
+		// Run checkpoints: shadow-git snapshots per thread run, revert/diff
+		// tools + authed REST under /api/v1/checkpoints/. Failure to init is
+		// non-fatal (logged) — the server runs without undo rather than not
+		// at all, and the absence is visible via the missing tools/routes.
+		if ckptMgr, ckptTeardown, ckptErr := initCheckpoints(context.Background(), huginnHome, srvCWD, toolReg, tm, srvFileLock); ckptErr != nil {
+			logger.Warn("checkpoints disabled: init failed", "err", ckptErr)
+		} else {
+			srv.SetCheckpointHandler(checkpoint.HTTPHandler(ckptMgr))
+			cleanupFns = append(cleanupFns, ckptTeardown)
+		}
+
 		delegateTool := &threadmgr.DelegateToAgentTool{
 			Fn: func(ctx context.Context, p threadmgr.DelegateParams) threadmgr.DelegateResult {
 				sessionID := agent.GetSessionID(ctx)
@@ -2840,16 +2981,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					logger.Error("delegate_to_agent: unknown agent", "agent", p.AgentName)
 					return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: unknown agent %q", p.AgentName)}
 				}
+				if caller := threadmgr.GetCallingAgent(ctx); caller != "" && strings.EqualFold(caller, p.AgentName) {
+					logger.Warn("delegate_to_agent: self-delegation rejected", "agent", p.AgentName)
+					return threadmgr.DelegateResult{Err: fmt.Errorf("delegate_to_agent: cannot delegate to yourself (%s) — do that work directly or pick a specialist", caller)}
+				}
 				logger.Info("delegate_to_agent: agent validated", "agent", p.AgentName)
 
-				// Load the session for SpawnThread (may be a stub if not yet persisted).
+				// Load the real session. Never silently stub — empty session ID
+				// already returned above; missing rows are persisted with SpaceID
+				// from context so desk-mesh Create can run.
 				var warnings []string
-				sess, loadErr := sessStore.Load(sessionID)
+				sess, loadErr := session.LoadForDelegate(sessStore, sessionID, agent.GetSpaceID(ctx))
 				if loadErr != nil {
-					logger.Warn("delegate_to_agent: session load failed, using stub", "err", loadErr)
-					sess = &session.Session{ID: sessionID}
-					warnings = append(warnings,
-						"session history could not be loaded — the delegated agent will start WITHOUT prior chat context; include all necessary context in the task description")
+					logger.Error("delegate_to_agent: session load failed", "err", loadErr, "session_id", sessionID)
+					return threadmgr.DelegateResult{Err: loadErr}
 				}
 				logger.Info("delegate_to_agent: session loaded", "space_id", sess.SpaceID())
 
@@ -2869,6 +3014,23 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				})
 				if createErr != nil {
 					logger.Error("delegate_to_agent: thread create failed", "agent", p.AgentName, "err", createErr)
+					reason := "create_failed"
+					errText := createErr.Error()
+					if errors.Is(createErr, threadmgr.ErrAgentNotSpaceMember) {
+						reason = "not_in_roster"
+					} else if errors.Is(createErr, threadmgr.ErrAgentNotInCompany) {
+						reason = "not_in_company"
+						// Hover/diagnose keeps the existing fail token;
+						// tool Error (and speech) stay the teammate sentence.
+						errText = "DELEGATE_FAIL: " + errText
+					}
+					srv.BroadcastToSession(sessionID, "delegation_error", map[string]any{
+						"session_id":    sessionID,
+						"parent_msg_id": parentMsgID,
+						"agent":         p.AgentName,
+						"error":         errText,
+						"reason":        reason,
+					})
 					return threadmgr.DelegateResult{Err: createErr}
 				}
 				logger.Info("delegate_to_agent: thread created", "thread_id", t.ID, "agent", p.AgentName)
@@ -2933,6 +3095,13 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 					logger.Error("delegate_to_agent: server context is nil, falling back to request ctx")
 					spawnCtx = ctx
 				}
+				if sid := agent.GetSessionID(ctx); sid != "" {
+					spawnCtx = agent.SetSessionID(spawnCtx, sid)
+				}
+				if sp := agent.GetSpaceID(ctx); sp != "" {
+					spawnCtx = agent.SetSpaceID(spawnCtx, sp)
+				}
+				spawnCtx = threadmgr.CarryDelegationContext(spawnCtx, ctx)
 
 				// Check if context is already cancelled before spawning.
 				if spawnCtx.Err() != nil {
@@ -2955,6 +3124,180 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			},
 		}
 		toolReg.Register(delegateTool)
+
+		// spawn_specialist is grant-gated (named local_tools only, CoS-only
+		// by convention — same as create_agent) and never implied by God
+		// Mode or a toolbelt wildcard (agent_dispatcher.go step 4b). It
+		// brings in a one-off ephemeral specialist for a single thread —
+		// never seated on the roster (agents.AgentRegistry's ephemeral
+		// overlay, S1), never carries the hiring tools forward (S11:
+		// stripHireGrant), always goes through the delegation preview gate
+		// with a DENY-on-timeout default (S10), and auto-evicts the moment
+		// its thread lands terminal (S5, via tm.SetSpecialistEvictor below).
+		// S14: promotion counter. Persists {company, capability_label, model,
+		// thread_id, timestamp} for every successful spawn_specialist call, so
+		// the CoS can be told (never auto-hire) when it has brought in the
+		// same capability a 3rd time within a 14-day window.
+		specialistPromo := server.NewSpecialistPromotionTracker(huginnHome)
+
+		spawnSpecialistTool := &tools.SpawnSpecialistTool{Deps: tools.SpawnSpecialistDeps{
+			ValidateName: func(name string) error {
+				return agentslib.AgentDef{Name: name}.Validate()
+			},
+			NameTaken: func(name string) bool {
+				_, ok := agentReg.ByName(name)
+				return ok
+			},
+			ResolveModel: func(model string) (tools.ModelChoice, bool) {
+				canonical := modelslib.GlobalProviderCatalog().Resolve("", model)
+				info := modelslib.GlobalProviderCatalog().Info("", canonical)
+				if info == nil || info.Deprecated {
+					return tools.ModelChoice{}, false
+				}
+				if info.InputCostPerMTok == 0 && info.OutputCostPerMTok == 0 {
+					return tools.ModelChoice{}, false
+				}
+				return tools.ModelChoice{
+					DisplayName:       info.DisplayName,
+					InputCostPerMTok:  info.InputCostPerMTok,
+					OutputCostPerMTok: info.OutputCostPerMTok,
+				}, true
+			},
+			Spawn: func(ctx context.Context, req tools.SpawnSpecialistRequest) (string, error) {
+				sessionID := agent.GetSessionID(ctx)
+				if sessionID == "" {
+					return "", fmt.Errorf("spawn_specialist: no session ID in context")
+				}
+				canonical := modelslib.GlobalProviderCatalog().Resolve("", req.Model)
+				info := modelslib.GlobalProviderCatalog().Info("", canonical)
+
+				specialist := &agentslib.Agent{
+					Name:          req.Name,
+					ModelID:       canonical,
+					SystemPrompt:  fmt.Sprintf("You are %s, a one-off specialist brought in for a single thread: %s. You are not a hire — you will be archived the moment this thread finishes.", req.Name, req.Task),
+					MemoryEnabled: false, // S6: specialists never open a vault
+					VaultName:     "",
+				}
+				if err := agentReg.RegisterEphemeral(specialist); err != nil {
+					return "", err
+				}
+
+				sess, loadErr := session.LoadForDelegate(sessStore, sessionID, agent.GetSpaceID(ctx))
+				if loadErr != nil {
+					agentReg.UnregisterEphemeral(req.Name)
+					return "", loadErr
+				}
+
+				companyID, _ := srv.SpaceCompanyIDForSpawn(sess.SpaceID())
+				tm.SetSpecialistCompany(req.Name, companyID)
+
+				parentMsgID := agent.GetParentMessageID(ctx)
+				t, createErr := tm.Create(threadmgr.CreateParams{
+					SessionID:       sessionID,
+					AgentID:         req.Name,
+					Task:            req.Task,
+					Rationale:       req.Rationale,
+					SpaceID:         sess.SpaceID(),
+					ParentMessageID: parentMsgID,
+					Specialist:      true,
+					SpecialistModel: canonical,
+				})
+				if createErr != nil {
+					agentReg.UnregisterEphemeral(req.Name)
+					tm.ClearSpecialistCompany(req.Name)
+					return "", createErr
+				}
+				tm.RegisterSpecialistThread(t.ID, req.Name)
+				tm.ResolveDependencies(t.ID)
+
+				broadcastFn := func(sid, msgType string, payload map[string]any) {
+					srv.BroadcastToSession(sid, msgType, payload)
+				}
+
+				previewInfo := threadmgr.SpecialistPreviewInfo{Model: canonical}
+				if info != nil {
+					previewInfo.InputCostPerMTok = info.InputCostPerMTok
+					previewInfo.OutputCostPerMTok = info.OutputCostPerMTok
+				}
+				if !previewGate.ApproveSpecialist(ctx, sessionID, t.ID, req.Name, req.Task, parentMsgID, previewInfo, broadcastFn) {
+					tm.Cancel(t.ID)
+					agentReg.UnregisterEphemeral(req.Name)
+					tm.ClearSpecialistCompany(req.Name)
+					return "", fmt.Errorf("spawn_specialist: bringing in %q was not approved", req.Name)
+				}
+
+				spawnCtx := srv.Context()
+				if spawnCtx == nil {
+					spawnCtx = ctx
+				}
+				if sid := agent.GetSessionID(ctx); sid != "" {
+					spawnCtx = agent.SetSessionID(spawnCtx, sid)
+				}
+				if sp := agent.GetSpaceID(ctx); sp != "" {
+					spawnCtx = agent.SetSpaceID(spawnCtx, sp)
+				}
+				spawnCtx = threadmgr.CarryDelegationContext(spawnCtx, ctx)
+
+				if tm.IsReady(t.ID) {
+					tid := t.ID
+					dagFn := func() {
+						tm.EvaluateDAG(spawnCtx, sessionID, sessStore, sess, agentReg, b, broadcastFn, ca)
+					}
+					tm.SpawnThread(spawnCtx, tid, sessStore, sess, agentReg, b, broadcastFn, ca, dagFn)
+				}
+				// S14: record this spawn for the promotion counter. Written on
+				// success only, after the preview gate approved and the thread
+				// exists — best-effort, must never fail the spawn itself.
+				if err := specialistPromo.RecordSpawn(companyID, tools.SpecialistDomain(req.Name), canonical, t.ID); err != nil {
+					logger.Info("specialist promotion: record spawn failed", "err", err)
+				}
+				return t.ID, nil
+			},
+		}}
+		toolReg.Register(spawnSpecialistTool)
+
+		// S5: auto-evict a specialist from the ephemeral overlay the moment
+		// its thread lands terminal (or via the TTL sweep fallback below),
+		// and post the deterministic S13 finish line into the owning
+		// session so the specialist's departure is visible, not silent.
+		tm.SetSpecialistEvictor(func(name, threadID string) {
+			// Eviction is unconditional — the overlay entry must go on ANY
+			// terminal status (done, cancelled, error) and on the TTL sweep.
+			agentReg.UnregisterEphemeral(name)
+			th, ok := tm.Get(threadID)
+			if !ok || th.SessionID == "" {
+				return
+			}
+			// The S13 finish line is only true for work that actually
+			// FINISHED. A cancelled thread reaches this hook too — including
+			// the spawn-denied path, which cancels the thread the instant the
+			// human refuses the preview. Saying "<Name> is done and gone."
+			// there would tell the user a specialist they just declined ran
+			// and completed. Stay silent on every non-done terminal status;
+			// the deny/cancel path already reports itself.
+			if th.Status != threadmgr.StatusDone {
+				return
+			}
+			finishSpeech := tools.SpecialistFinishSpeech(name)
+			// S14: promotion counter. If this specialist was the 3rd of its
+			// capability label spawned within the trailing 14-day window,
+			// append a recommendation — never an auto-hire — to the finish
+			// line the CoS speaks when the specialist's thread lands.
+			label := tools.SpecialistDomain(name)
+			if recommend, err := specialistPromo.ShouldRecommendHire(label); err != nil {
+				logger.Info("specialist promotion: check failed", "err", err)
+			} else if recommend {
+				lowerLabel := strings.ToLower(label)
+				finishSpeech += fmt.Sprintf(" That's the 3rd %s specialist this fortnight — want me to hire a permanent %s teammate? Just say so.", lowerLabel, lowerLabel)
+			}
+			srv.BroadcastToSession(th.SessionID, "thread_result", map[string]any{
+				"session_id": th.SessionID,
+				"thread_id":  threadID,
+				"agent":      name,
+				"summary":    finishSpeech,
+				"status":     "archived",
+			})
+		})
 
 		// list_team_status — lets a lead agent see all thread statuses in its session.
 		listTeamTool := &threadmgr.ListTeamStatusTool{
@@ -2993,9 +3336,6 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 				if sessionID == "" {
 					return threadmgr.WaitReport{}, fmt.Errorf("no session ID in context")
 				}
-				if len(threadIDs) == 0 {
-					threadIDs = tm.ActiveThreadIDs(sessionID)
-				}
 				return tm.WaitForThreads(ctx, sessionID, threadIDs, timeout), nil
 			},
 		}
@@ -3018,13 +3358,40 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// integration tools, external MCP server tools, and skill PromptTools.
 		// Order matters: connection tools and MCP tools BEFORE orch.SetTools so
 		// applyToolbelt sees them when filtering per-agent schemas.
-		initConnectionTools(*cfg, huginnHome, sqlDB, toolReg)
+		initConnectionTools(*cfg, huginnHome, srvCWD, sqlDB, toolReg)
 		var mcpMgr *mcp.ServerManager
 		if len(cfg.MCPServers) > 0 {
 			mcpMgr = mcp.NewServerManager(cfg.MCPServers)
 			mcpMgr.StartAll(context.Background(), toolReg)
 			cleanupFns = append(cleanupFns, func() { mcpMgr.StopAll(context.Background()) })
 			logger.Info("huginn: MCP servers started for server mode", "count", len(cfg.MCPServers))
+			srv.SetMCPManager(mcpMgr)
+
+			// MCP tools are outward-facing (arbitrary internet access, form
+			// submission, browser automation) and register with
+			// tools.PermWrite (see MCPToolAdapter.Permission). "Auto-approve
+			// all tools in server mode" below would otherwise silently run
+			// them with nobody watching, the same gap SetExecRequiresPrompt
+			// closes for bash. Mark every configured MCP server name as a
+			// base-watched provider so calls always reach the same
+			// permission_request WS prompt bash uses, regardless of whether
+			// a given agent's toolbelt entry set approval_gate. This does
+			// not change bash's own PermExec handling.
+			// approval_gate: false is the per-server opt-out (V4b) — an
+			// operator-trusted server explicitly marked with it is excluded
+			// from base-watch, so its tools run unprompted like any other
+			// builtin. Default (nil/unset) stays gated.
+			mcpProviders := make(map[string]bool, len(cfg.MCPServers))
+			for _, mcfg := range cfg.MCPServers {
+				if mcfg.Name != "" && mcfg.ApprovalGateEnabled() {
+					mcpProviders[mcfg.Name] = true
+				}
+			}
+			serverGate.SetBaseWatchedProviders(mcpProviders)
+			// V3: same set, plumbed to applyToolbelt so a narrow-toolbelt
+			// agent's call to a configured MCP tool reaches the base-watch
+			// prompt above instead of a silent provider_not_allowed deny.
+			orch.SetConfiguredMCPProviders(mcpProviders)
 		}
 
 		// Auto-approve all tools in server mode — reuse the gate created above.
@@ -3036,6 +3403,18 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// values degrade specific features but never block boot.
 		orch.SetGitRoot(srvCWD)
 		orch.SetHuginnHome(huginnHome)
+		// G10/G1: PreToolUse/PostToolUse chain + edit-time syntax validation
+		// (blocks syntactically-broken Go/Python writes; per-repo overridable
+		// via .huginn/workspace.json syntax_validation).
+		orch.EnableToolHooks()
+		// User-configurable hooks (hooks.json): off by default, only active
+		// once the user (or an agent they confirmed) creates one of these
+		// files. Load errors (malformed JSON) are logged loudly, never
+		// swallowed — the reload endpoint (POST /api/v1/hooks/reload)
+		// surfaces the same error after an edit.
+		if _, err := orch.EnableUserHooks(); err != nil {
+			logger.Warn("huginn: user hooks.json failed to load", "err", err)
+		}
 		// Wire agent memory store so cross-session summaries and recall work.
 		// Mirrors lines ~440-451 in TUI mode but scoped to server mode.
 		var srvMemStore agentslib.MemoryStoreIface
@@ -3088,11 +3467,20 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			// present in the user's original message, preventing double-delegation
 			// when the assistant echoes back an @mention the user typed.
 			dedupedMsg := threadmgr.DedupMentions(originalUserMsg, assistantMsg)
+			// Same roster as user-text addressee routing: DM = that one agent,
+			// channel = lead + members. Empty means standalone / no roster.
+			var spaceMemberNames []string
+			if spaceStore != nil && spaceID != "" {
+				if sp, spErr := spaceStore.GetSpace(spaceID); spErr == nil {
+					spaceMemberNames = spaces.RosterNames(sp)
+				}
+			}
 			logger.Info("mentionDelegate: resolved context",
 				"session_id", sessionID, "caller_agent", callerAgent,
 				"space_id", spaceID, "sess_nil", sess == nil,
-				"deduped", dedupedMsg != assistantMsg)
-			threadmgr.CreateFromMentions(spawnCtx, sessionID, dedupedMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent)
+				"deduped", dedupedMsg != assistantMsg,
+				"roster", spaceMemberNames)
+			threadmgr.CreateFromMentions(spawnCtx, sessionID, dedupedMsg, parentMsgID, agentReg, sessStore, sess, b, broadcastFn, ca, tm, callerAgent, spaceMemberNames)
 			logger.Info("mentionDelegate: CreateFromMentions returned", "session_id", sessionID)
 		})
 
@@ -3270,10 +3658,21 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// notes, web, GitHub CLI) filtered by each agent's local_tools config —
 		// intentional parity with TUI mode.
 		tm.SetToolRegistry(toolReg)
-		// Gate-wrapped executor: server mode uses auto-approve (NewGate(true,nil)).
-		// Captured here so threadmgr stays free of the permissions package.
-		// Future interactive modes can swap in a gate that prompts the user.
+		// Legacy fallback executor (used only when the runtime preparer is
+		// unset). Production threads go through PrepareAgentRuntime, which
+		// forks serverGate with the agent's AllowedProviders. skipAll here
+		// means auto-approve, not "every provider in the global registry".
 		tm.SetToolExecutor(func(ctx context.Context, name string, args map[string]any) (string, error) {
+			if t, ok := toolReg.Get(name); ok {
+				if !serverGate.Check(permissions.PermissionRequest{
+					ToolName: name,
+					Level:    t.Permission(),
+					Args:     args,
+					Provider: toolReg.ProviderFor(name),
+				}) {
+					return "", fmt.Errorf("permission denied")
+				}
+			}
 			return toolReg.Execute(ctx, name, args)
 		})
 
@@ -3287,6 +3686,24 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 		// forking, and session env setup; threadmgr just consumes the
 		// resulting AgentRuntime.
 		tm.SetAgentRuntimePreparer(orch.PrepareAgentRuntime)
+
+		// Productized vet loop: a completed delegated coding thread whose
+		// owning agent has vet_work on (explicit, or via the strict-reviewer
+		// personality default) gets a one-shot adversarial reviewer pass.
+		// This runs ASYNCHRONOUSLY, after the thread is already StatusDone —
+		// by design, nobody blocks on it (a vet pass can take up to
+		// agent.VetTimeout). The verdict attaches to the thread later via
+		// AttachVetResult and surfaces wherever that thread's Summary is
+		// read: the thread panel, and the persisted summary record. A lead
+		// agent's WaitForThreads call returns on the thread's terminal
+		// status and will usually complete before the verdict lands — this
+		// is expected, not a bug, and the result is never gated on the vet
+		// pass. Wired the same way as checkpoints — via tm's existing
+		// OnStatusChange hook, no threadmgr changes needed. Non-fatal by
+		// construction: initVet never errors.
+		cleanupFns = append(cleanupFns, initVet(srvCWD, agentReg, tm, func(provider, endpoint, apiKey, model string) (backend.Backend, error) {
+			return serveCache.For(provider, endpoint, apiKey, model)
+		}, b))
 	}
 
 	// Wire relay config if HuginnCloud is configured.
@@ -3548,7 +3965,18 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 						cfg.Backend.APIKey = apiKey
 					}
 					backendMu.Unlock()
-					return cfg.Save()
+					// Read-modify-write against the CURRENT on-disk config, not
+					// this process's long-lived in-memory cfg snapshot: cfg.Save()
+					// here would write cfg's stale copy of every other field
+					// (tools_enabled, web_ui.port, ...) over whatever the config
+					// API has saved since this process started, reverting it.
+					return config.UpdateDefault(func(disk *config.Config) {
+						disk.Backend.Provider = provider
+						disk.Backend.Endpoint = endpoint
+						if apiKey != "" {
+							disk.Backend.APIKey = apiKey
+						}
+					})
 				},
 				PullModel: func(name string) error {
 					baseURL := cfg.OllamaBaseURL

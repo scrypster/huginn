@@ -1,30 +1,56 @@
 import { computed, type Ref } from 'vue'
 import type { SpaceMessage } from './useSpaceTimeline'
 import type { ChatMessage } from './useSessions'
+import { classifyHarnessDisplay, visibleToolCalls } from '../utils/honesty'
+import {
+  HALLWAY_TZ,
+  calendarDayKey,
+  calendarDaysBetween,
+  messageCreatedAt,
+  messageTimeMs,
+} from '../utils/relativeTime'
 
 // ── Pure utility functions ──────────────────────────────────────────────
 
 /** Human-friendly date label for message dividers ("Today", "Yesterday", "Mon, Mar 15"). */
-export function dateLabelFor(ts: string | undefined): string {
+export function dateLabelFor(ts: string | undefined, now: Date = new Date()): string {
   if (!ts) return ''
   const d = new Date(ts)
   if (isNaN(d.getTime())) return ''
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const msgDay = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const diffDays = Math.round((today.getTime() - msgDay.getTime()) / 86400000)
+  const diffDays = calendarDaysBetween(now, d)
+  if (!Number.isFinite(diffDays)) return ''
   if (diffDays === 0) return 'Today'
   if (diffDays === 1) return 'Yesterday'
-  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  return d.toLocaleDateString('en-US', { timeZone: HALLWAY_TZ, weekday: 'short', month: 'short', day: 'numeric' })
 }
 
-/** Check whether two ISO timestamps fall on the same calendar day. */
+/** Check whether two ISO timestamps fall on the same America/New_York calendar day. */
 export function isSameDay(a: string | undefined, b: string | undefined): boolean {
-  if (!a || !b) return false
-  const da = new Date(a), db = new Date(b)
-  return da.getFullYear() === db.getFullYear() &&
-    da.getMonth() === db.getMonth() &&
-    da.getDate() === db.getDate()
+  const ka = calendarDayKey(a)
+  const kb = calendarDayKey(b)
+  return !!ka && ka === kb
+}
+
+export type ChronologicalMessage = {
+  id?: string
+  seq?: number
+  createdAt?: string
+  created_at?: string
+  ts?: string
+}
+
+/** Slack order: oldest first, newest last. Tie-break seq (stream placeholders last), then id. */
+export function sortMessagesChronological<T extends ChronologicalMessage>(msgs: T[]): T[] {
+  return [...msgs].sort((a, b) => {
+    const dt = messageTimeMs(a) - messageTimeMs(b)
+    if (dt !== 0) return dt
+    const sa = a.seq ?? 0
+    const sb = b.seq ?? 0
+    const na = sa < 0 ? Number.MAX_SAFE_INTEGER : sa
+    const nb = sb < 0 ? Number.MAX_SAFE_INTEGER : sb
+    if (na !== nb) return na - nb
+    return String(a.id ?? '').localeCompare(String(b.id ?? ''))
+  })
 }
 
 /**
@@ -37,7 +63,7 @@ export function adaptSpaceMessages(msgs: SpaceMessage[]): ChatMessage[] {
     role: m.role as 'user' | 'assistant',
     content: m.content,
     agent: m.agent || undefined,
-    createdAt: m.ts,
+    createdAt: messageCreatedAt(m) || undefined,
     // stream- prefix means the message is in-flight (status placeholder or live
     // token stream). Show the blinking cursor so the user knows content is arriving.
     streaming: m.id.startsWith('stream-'),
@@ -56,7 +82,11 @@ export function adaptSpaceMessages(msgs: SpaceMessage[]): ChatMessage[] {
     // Thread summary completion cards in main timeline.
     threadSummary: (m as any).threadSummary,
     threadSummaryThreadId: (m as any).threadSummaryThreadId,
-  })) as ChatMessage[]
+    parent_id: m.parent_id,
+    spaceReplyCount: m.reply_count ?? 0,
+    lastPreview: m.last_preview ?? '',
+    newSince: m.new_since ?? 0,
+  })).map(applyHarnessClassification) as ChatMessage[]
 }
 
 // ── Enriched message type ──────────────────────────────────────────────
@@ -64,6 +94,20 @@ export function adaptSpaceMessages(msgs: SpaceMessage[]): ChatMessage[] {
 export type EnrichedMessage = ChatMessage & {
   showHeader: boolean
   dateLabel?: string
+  systemLine?: boolean
+  hideFailSpeech?: boolean
+}
+
+function applyHarnessClassification<T extends ChatMessage>(msg: T): T & { systemLine?: boolean; hideFailSpeech?: boolean } {
+  const display = classifyHarnessDisplay(msg)
+  return {
+    ...msg,
+    threadSummary: display.threadSummary || msg.threadSummary,
+    threadSummaryFailed: display.threadSummaryFailed || (msg as any).threadSummaryFailed || undefined,
+    systemLine: display.systemLine || undefined,
+    hideFailSpeech: display.hideFailSpeech || undefined,
+    toolCalls: msg.toolCalls ? visibleToolCalls(msg.toolCalls) : msg.toolCalls,
+  }
 }
 
 /**
@@ -71,16 +115,19 @@ export type EnrichedMessage = ChatMessage & {
  *   showHeader  — false when this is a continuation from same agent (collapses avatar + name)
  *   dateLabel   — set to "Today" / "Yesterday" / "Mon, Mar 15" when a date boundary is crossed
  */
-export function enrichMessages(msgs: ChatMessage[]): EnrichedMessage[] {
+export function enrichMessages(msgs: ChatMessage[], now: Date = new Date()): EnrichedMessage[] {
   const result: EnrichedMessage[] = []
-  for (let i = 0; i < msgs.length; i++) {
-    const msg = msgs[i]!
+  const ordered = sortMessagesChronological(msgs)
+  for (let i = 0; i < ordered.length; i++) {
+    const msg = applyHarnessClassification(ordered[i]!)
     const prev = result[i - 1]
 
-    // Date divider: show when this message is on a different day from the previous
-    const ts = (msg as any).createdAt as string | undefined
-    const prevTs = prev ? (prev as any).createdAt as string | undefined : undefined
-    const dateLabel = (i === 0 || !isSameDay(ts, prevTs)) ? dateLabelFor(ts) : undefined
+    // Date divider: only when the calendar day changes between consecutive
+    // (already chronological) messages. Never emit a backward "Yesterday"
+    // under a just-now reply.
+    const ts = messageCreatedAt(msg) || undefined
+    const prevTs = prev ? messageCreatedAt(prev) || undefined : undefined
+    const dateLabel = (i === 0 || !isSameDay(ts, prevTs)) ? dateLabelFor(ts, now) : undefined
 
     // Header suppression: hide avatar+name for continuations from same agent.
     // A message is a "continuation" when all of:
@@ -93,8 +140,8 @@ export function enrichMessages(msgs: ChatMessage[]): EnrichedMessage[] {
     let showHeader = true
     if (prev && !dateLabel) {
       const sameRole = msg.role === prev.role
-      const prevIsThreadSummary = !!(prev as any).threadSummary
-      const currIsThreadSummary = !!(msg as any).threadSummary
+      const prevIsThreadSummary = !!(prev as any).threadSummary || !!(prev as any).systemLine
+      const currIsThreadSummary = !!(msg as any).threadSummary || !!(msg as any).systemLine
       const currIsFollowUp = !!(msg as any).isFollowUp
       // Time gap check: if > 60s between messages, treat as new thought (show header).
       // This naturally separates Tom's @mention response from Tom's follow-up synthesis,

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestLoadProjectInstructions_HuginnMd(t *testing.T) {
@@ -122,6 +123,63 @@ func TestLoadProjectInstructions_WhitespaceStripped(t *testing.T) {
 	}
 }
 
+func TestLoadProjectInstructions_OversizedFileTruncatesWithMarker(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 5 KB over the 32KB cap.
+	over := 5 * 1024
+	content := strings.Repeat("a", maxProjectInstructionsBytes+over)
+	if err := os.WriteFile(filepath.Join(dir, ".huginn.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadProjectInstructions(dir)
+	if !strings.Contains(got, "…[truncated, 5 KB over cap]") {
+		t.Errorf("expected truncation marker, got tail: %q", got[len(got)-80:])
+	}
+	// The kept content should be exactly the cap, plus the marker.
+	if len(got) >= len(content) {
+		t.Errorf("expected truncated content to be shorter than original: got %d, original %d", len(got), len(content))
+	}
+	if !strings.HasPrefix(got, strings.Repeat("a", 100)) {
+		t.Error("expected truncated content to retain the file's leading bytes")
+	}
+}
+
+func TestLoadProjectInstructions_SmallFileUntouched(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "# Small\nJust a normal small instructions file."
+	if err := os.WriteFile(filepath.Join(dir, ".huginn.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadProjectInstructions(dir)
+	if got != content {
+		t.Errorf("small file should be untouched: got %q, want %q", got, content)
+	}
+	if strings.Contains(got, "truncated") {
+		t.Error("small file should not carry a truncation marker")
+	}
+}
+
+func TestLoadProjectInstructions_ExactCapUntouched(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("b", maxProjectInstructionsBytes)
+	if err := os.WriteFile(filepath.Join(dir, ".huginn.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadProjectInstructions(dir)
+	if got != content {
+		t.Error("file exactly at the cap should not be truncated")
+	}
+}
+
 func TestLoadGlobalInstructions_Missing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -196,5 +254,31 @@ func TestBuildAgentSystemPrompt_InstructionInjection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTruncateInstructions_RuneSafe verifies that when the byte cap lands in
+// the middle of a multi-byte UTF-8 rune, truncation backs off to a rune
+// boundary so the prompt never carries invalid UTF-8. Regression for the
+// raw-byte-slice truncation that could split a rune.
+func TestTruncateInstructions_RuneSafe(t *testing.T) {
+	// "€" is 3 bytes (E2 82 AC). Pad so the cap (maxProjectInstructionsBytes)
+	// falls one byte into a euro sign, guaranteeing a mid-rune boundary.
+	pad := strings.Repeat("a", maxProjectInstructionsBytes-1)
+	s := pad + "€€€€" // first € straddles the cap
+	got := truncateInstructions(s)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated instructions contain invalid UTF-8")
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("expected truncation marker, got tail: %q", got[len(got)-40:])
+	}
+	// Kept body must be valid and no longer than the cap.
+	body := strings.SplitN(got, "\n…[truncated", 2)[0]
+	if len(body) > maxProjectInstructionsBytes {
+		t.Errorf("body %d exceeds cap %d", len(body), maxProjectInstructionsBytes)
+	}
+	if !utf8.ValidString(body) {
+		t.Error("kept body is not valid UTF-8")
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/logger"
 	mcp "github.com/scrypster/huginn/internal/mcp"
 	mem "github.com/scrypster/huginn/internal/memory"
@@ -41,6 +42,65 @@ var (
 	vaultHealthCacheMu sync.Mutex
 	vaultHealthCache   = make(map[string]vaultHealthEntry)
 )
+
+// vaultNegativeCacheTTL bounds how long a failed/unconfigured vault connect
+// is remembered per agent before the next turn is allowed to retry it.
+// Without this, an unconfigured or unreachable vault endpoint is
+// re-attempted (config load + up to vaultMaxAttempts connect retries) on
+// EVERY turn for EVERY agent, adding seconds of latency to turns that only
+// ever fail anyway (see logs: "muninn mcp: config unavailable ... endpoint=").
+const vaultNegativeCacheTTL = 30 * time.Second
+
+// vaultNegativeCacheEntry records the last connect failure for an agent.
+type vaultNegativeCacheEntry struct {
+	warning  string
+	failedAt time.Time
+}
+
+// vaultNegativeCacheGet returns the cached failure warning for agentName if
+// it is still within the TTL window. ok is false on a cache miss or expiry.
+// Scoped to this Orchestrator instance via o.mu (same lazy-init pattern as
+// memoryPrefetchCache) so two orchestrators never share negative-cache state.
+func (o *Orchestrator) vaultNegativeCacheGet(agentName string) (warning string, ok bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.vaultNegCache == nil {
+		return "", false
+	}
+	entry, found := o.vaultNegCache[agentName]
+	if !found || time.Since(entry.failedAt) >= vaultNegativeCacheTTL {
+		return "", false
+	}
+	return entry.warning, true
+}
+
+// vaultNegativeCacheSet records a failed/unconfigured vault connect attempt
+// for agentName, keyed per-agent so one agent's failure never suppresses a
+// retry for a different agent.
+func (o *Orchestrator) vaultNegativeCacheSet(agentName, warning string) {
+	if agentName == "" {
+		return
+	}
+	o.mu.Lock()
+	if o.vaultNegCache == nil {
+		o.vaultNegCache = make(map[string]vaultNegativeCacheEntry)
+	}
+	o.vaultNegCache[agentName] = vaultNegativeCacheEntry{warning: warning, failedAt: time.Now()}
+	o.mu.Unlock()
+}
+
+// vaultNegativeCacheClear removes any cached failure for agentName. Called
+// after a successful vault connect so a subsequent failure (e.g. the vault
+// goes down mid-session) is retried immediately rather than trusting stale
+// negative-cache state from before the config became valid.
+func (o *Orchestrator) vaultNegativeCacheClear(agentName string) {
+	if agentName == "" {
+		return
+	}
+	o.mu.Lock()
+	delete(o.vaultNegCache, agentName)
+	o.mu.Unlock()
+}
 
 // isVaultConnectionError reports whether err indicates a lost transport connection
 // to the MuninnDB vault (EOF, closed pipe, reset). Intentional teardowns such as
@@ -108,9 +168,10 @@ func connectVaultWithRetry(ctx context.Context, buildFn func() (*mcp.MCPClient, 
 type VaultReconnector struct {
 	mu            sync.Mutex
 	buildFn       func() (*mcp.MCPClient, func()) // captures endpoint+muninnCfg; re-reads token each call
-	sessionReg    *tools.Registry                  // the per-session fork (never the shared parent)
-	toolNames     []string                         // names currently registered, for cleanup
-	cancelCurrent func()                           // closes the current MCP transport
+	sessionReg    *tools.Registry                 // the per-session fork (never the shared parent)
+	toolNames     []string                        // names currently registered, for cleanup
+	cancelCurrent func()                          // closes the current MCP transport
+	vaultName     string                          // pinned on every muninn_* call; omit → Muninn default
 
 	// warnOnce gates the "vault lost" StreamWarning per connection lifetime.
 	// Stored as atomic.Pointer so TryReconnect (under mu) can reset it without
@@ -127,12 +188,14 @@ func newVaultReconnector(
 	sessionReg *tools.Registry,
 	toolNames []string,
 	cancelFn func(),
+	vaultName string,
 ) *VaultReconnector {
 	vr := &VaultReconnector{
 		buildFn:       buildFn,
 		sessionReg:    sessionReg,
 		toolNames:     append([]string(nil), toolNames...),
 		cancelCurrent: cancelFn,
+		vaultName:     pinMuninnVault(vaultName),
 	}
 	vr.warnOnce.Store(warnOnceKey{}, new(sync.Once))
 	return vr
@@ -177,7 +240,7 @@ func (vr *VaultReconnector) TryReconnect(ctx context.Context) bool {
 
 	newNames := make([]string, 0, len(mcpTools))
 	for _, t := range mcpTools {
-		vr.sessionReg.Register(mcp.NewMCPToolAdapter(client, t))
+		vr.sessionReg.Register(pinMuninnTool(mcp.NewMCPToolAdapter(client, t), t, vr.vaultName))
 		vr.sessionReg.TagTools([]string{t.Name}, "muninndb")
 		newNames = append(newNames, t.Name)
 	}
@@ -204,6 +267,15 @@ func (vr *VaultReconnector) Close() {
 		vr.cancelCurrent()
 		vr.cancelCurrent = nil
 	}
+}
+
+// logVaultUnavailable records a vault setup failure for operators.
+// The web UI shows a dismissible chip instead of a StreamWarning chat bubble.
+func logVaultUnavailable(agentName, sessionID, warning string) {
+	if warning == "" {
+		return
+	}
+	slog.Warn("vault unavailable for agent session", "agent", agentName, "session_id", sessionID, "warning", warning)
 }
 
 // vaultResult holds the outcome of a connectAgentVault call.
@@ -253,12 +325,12 @@ func ProbeVaultConnectivity(ctx context.Context, cfgPath, vaultName string) (int
 	}
 	vaultHealthCacheMu.Unlock()
 
-	muninnCfg, err := mem.LoadGlobalConfig(cfgPath)
-	if err != nil || muninnCfg.Endpoint == "" {
-		if err != nil {
-			return 0, "", fmt.Errorf("muninn config load: %w", err)
-		}
-		return 0, "", fmt.Errorf("muninn endpoint not configured")
+	muninnCfg, _, err := mem.LoadAndPinGlobalConfig(cfgPath)
+	if err != nil {
+		return 0, "", fmt.Errorf("muninn config load: %w", err)
+	}
+	if muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
+		return 0, "", fmt.Errorf("muninn config load: %w", mem.ErrEmptyMuninnEndpoint)
 	}
 
 	token, err := mem.MCPTokenFor(muninnCfg, vaultName)
@@ -352,42 +424,60 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	// Always fork the shared registry — per-session tools go into the fork only.
 	sessionReg := sharedReg.Fork()
 
-	if ag == nil || !ag.MemoryEnabled || ag.VaultName == "" {
-		logger.Warn("muninn mcp: skipping vault connect", "agent_nil", ag == nil,
-			"memory_enabled", ag != nil && ag.MemoryEnabled, "vault_name", func() string {
-				if ag != nil {
-					return ag.VaultName
-				}
-				return ""
-			}())
+	if ag == nil || !ag.MemoryEnabled {
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}}
 	}
 
-	logger.Warn("muninn mcp: connecting vault", "agent", ag.Name, "vault", ag.VaultName)
+	// Negative cache: a vault that just failed/was unconfigured for this
+	// agent is not worth re-attempting on every single turn.
+	if warning, cached := o.vaultNegativeCacheGet(ag.Name); cached {
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warning}
+	}
 
 	o.mu.Lock()
 	cfgPath := o.muninnCfgPath
 	o.mu.Unlock()
 
-	if cfgPath == "" {
-		logger.Warn("muninn mcp: config path not set", "agent", ag.Name)
-		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: "muninn config path not set"}
+	// Harness default: pin huginn only. Do not invent winston-huginn.
+	if strings.TrimSpace(ag.VaultName) == "" {
+		if strings.TrimSpace(cfgPath) == "" {
+			return vaultResult{sessionReg: sessionReg, cancel: func() {}}
+		}
+		ag.VaultName = "huginn"
 	}
 
-	muninnCfg, err := mem.LoadGlobalConfig(cfgPath)
-	if err != nil || muninnCfg.Endpoint == "" {
+	logger.Info("muninn mcp: connecting vault", "agent", ag.Name, "vault", ag.VaultName)
+
+	if cfgPath == "" {
+		logger.Warn("muninn mcp: config path not set", "agent", ag.Name)
+		warn := "muninn config path not set"
+		o.vaultNegativeCacheSet(ag.Name, warn)
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
+	}
+
+	muninnCfg, usedPath, err := mem.LoadAndPinGlobalConfig(cfgPath)
+	if err != nil {
 		warn := "muninn config unavailable"
 		if err != nil {
 			warn = fmt.Sprintf("muninn config load: %v", err)
 		}
-		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", cfgPath, "err", err, "endpoint", muninnCfg.Endpoint)
+		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", usedPath, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
+	if muninnCfg == nil || strings.TrimSpace(muninnCfg.Endpoint) == "" {
+		logger.Warn("muninn mcp: config unavailable", "agent", ag.Name, "cfg_path", usedPath, "err", mem.ErrEmptyMuninnEndpoint)
+		warn := "muninn config load: " + mem.ErrEmptyMuninnEndpoint.Error()
+		o.vaultNegativeCacheSet(ag.Name, warn)
+		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
+	}
+	logger.Info("muninn mcp: config loaded", "agent", ag.Name, "endpoint_set", strings.TrimSpace(muninnCfg.Endpoint) != "")
 
 	token, err := mem.MCPTokenFor(muninnCfg, ag.VaultName)
 	if err != nil {
 		warn := fmt.Sprintf("no MCP token configured (set mcp_token in muninn.json or add vault token for %q)", ag.VaultName)
 		logger.Warn("muninn mcp: no MCP token", "agent", ag.Name, "vault", ag.VaultName, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
@@ -395,6 +485,7 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	if err != nil {
 		warn := fmt.Sprintf("invalid muninn endpoint: %v", err)
 		logger.Warn("muninn mcp: invalid endpoint", "agent", ag.Name, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
@@ -416,13 +507,14 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	if err != nil {
 		warn := fmt.Sprintf("connect: %v", err)
 		logger.Warn("muninn mcp: connect failed", "agent", ag.Name, "vault", ag.VaultName, "err", err)
+		o.vaultNegativeCacheSet(ag.Name, warn)
 		return vaultResult{sessionReg: sessionReg, cancel: func() {}, warning: warn}
 	}
 
 	// Register vault tools into the FORK only — never the shared parent registry.
 	toolNames := make([]string, 0, len(mcpTools))
 	for _, t := range mcpTools {
-		sessionReg.Register(mcp.NewMCPToolAdapter(client, t))
+		sessionReg.Register(pinMuninnTool(mcp.NewMCPToolAdapter(client, t), t, ag.VaultName))
 		sessionReg.TagTools([]string{t.Name}, "muninndb")
 		toolNames = append(toolNames, t.Name)
 	}
@@ -430,15 +522,57 @@ func (o *Orchestrator) connectAgentVault(ctx context.Context, ag *agents.Agent, 
 	// Construct a reconnector that owns the vault MCP client lifecycle.
 	// cancel delegates to reconnector.Close() so existing defer vr.cancel() callers
 	// continue to work without modification.
-	reconnector := newVaultReconnector(buildFn, sessionReg, toolNames, cancelFn)
+	reconnector := newVaultReconnector(buildFn, sessionReg, toolNames, cancelFn, ag.VaultName)
 
 	// memoryBlock is only populated on successful connection.
 	block := agents.BuildMemoryBlock(ag)
 	logger.Info("muninn mcp: vault connected", "agent", ag.Name, "vault", ag.VaultName, "tools", len(mcpTools))
+	o.vaultNegativeCacheClear(ag.Name)
 	return vaultResult{
 		sessionReg:  sessionReg,
 		cancel:      reconnector.Close,
 		reconnector: reconnector,
 		memoryBlock: block,
 	}
+}
+
+// vaultPinnedTool injects vault= on Muninn calls when the model or harness omits it.
+// Muninn treats a missing vault as `default` — never allow that.
+type vaultPinnedTool struct {
+	inner tools.Tool
+	vault string
+}
+
+func pinMuninnTool(inner tools.Tool, t mcp.MCPTool, vault string) tools.Tool {
+	if inner == nil {
+		return inner
+	}
+	if _, ok := t.InputSchema.Properties["vault"]; !ok {
+		return inner
+	}
+	return &vaultPinnedTool{inner: inner, vault: pinMuninnVault(vault)}
+}
+
+func (t *vaultPinnedTool) Name() string                      { return t.inner.Name() }
+func (t *vaultPinnedTool) Description() string               { return t.inner.Description() }
+func (t *vaultPinnedTool) Permission() tools.PermissionLevel { return t.inner.Permission() }
+func (t *vaultPinnedTool) Schema() backend.Tool              { return t.inner.Schema() }
+
+func (t *vaultPinnedTool) Execute(ctx context.Context, args map[string]any) tools.ToolResult {
+	if args == nil {
+		args = map[string]any{}
+	} else {
+		cp := make(map[string]any, len(args)+1)
+		for k, v := range args {
+			cp[k] = v
+		}
+		args = cp
+	}
+	raw, _ := args["vault"].(string)
+	if strings.TrimSpace(raw) == "" {
+		args["vault"] = pinMuninnVault(t.vault)
+	} else {
+		args["vault"] = pinMuninnVault(raw)
+	}
+	return t.inner.Execute(ctx, args)
 }

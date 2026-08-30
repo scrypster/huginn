@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scrypster/huginn/internal/oneshot"
 )
 
 // --- workspaceHash ---
@@ -331,12 +333,12 @@ func TestRun_WithAgentPrompt_PopulatesAgentOutputFields(t *testing.T) {
 		Prompt:    "Summarize recent changes",
 		Agent:     "Coder",
 		SessionID: "sess-1",
-		AgentRun: func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
+		AgentRun: func(ctx context.Context, agentName, prompt, sessionID string) (string, []oneshot.ToolCall, int, error) {
 			called = true
 			if agentName != "Coder" || prompt != "Summarize recent changes" || sessionID != "sess-1" {
 				t.Fatalf("unexpected AgentRun args: agent=%q prompt=%q session=%q", agentName, prompt, sessionID)
 			}
-			return "summary output", []string{"search_code", "read_file"}, 321, nil
+			return "summary output", []oneshot.ToolCall{{Name: "search_code"}, {Name: "read_file"}}, 321, nil
 		},
 	}
 
@@ -367,7 +369,7 @@ func TestRun_WithAgentPrompt_ErrorIsRecorded(t *testing.T) {
 	cfg := HeadlessConfig{
 		CWD:    dir,
 		Prompt: "Summarize recent changes",
-		AgentRun: func(ctx context.Context, agentName, prompt, sessionID string) (string, []string, int, error) {
+		AgentRun: func(ctx context.Context, agentName, prompt, sessionID string) (string, []oneshot.ToolCall, int, error) {
 			return "", nil, 0, context.DeadlineExceeded
 		},
 	}

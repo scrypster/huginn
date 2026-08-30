@@ -52,6 +52,7 @@ type mockTool struct {
 	name        string
 	result      tools.ToolResult
 	callCount   int
+	lastArgs    map[string]any
 	mu          sync.Mutex
 	shouldPanic bool
 }
@@ -62,13 +63,14 @@ func (t *mockTool) Permission() tools.PermissionLevel { return tools.PermRead }
 func (t *mockTool) Schema() backend.Tool {
 	return backend.Tool{Function: backend.ToolFunction{Name: t.name}}
 }
-func (t *mockTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
+func (t *mockTool) Execute(_ context.Context, args map[string]any) tools.ToolResult {
 	if t.shouldPanic {
 		panic(fmt.Sprintf("mockTool %s intentional panic", t.name))
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.callCount++
+	t.lastArgs = args
 	return t.result
 }
 
@@ -186,6 +188,310 @@ func TestRunLoop_ToolCallExecuted(t *testing.T) {
 	}
 }
 
+func TestRunLoop_ContentJSONExecutesTool(t *testing.T) {
+	tool := &mockTool{
+		name:   "bash",
+		result: tools.ToolResult{Output: "testhost"},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				Content:    `{"name": "bash", "arguments": {"command": "hostname"}}`,
+				DoneReason: "stop",
+			},
+			stopResponse("the hostname is testhost"),
+		},
+	}
+	reg := newRegistryWith(tool)
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    reg,
+		Messages: []backend.Message{{Role: "user", Content: "what host?"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Fatalf("bash was not executed: callCount=%d (content JSON should become a tool call)", tool.callCount)
+	}
+	if result.TurnCount != 2 {
+		t.Errorf("TurnCount = %d, want 2", result.TurnCount)
+	}
+	if result.FinalContent != "the hostname is testhost" {
+		t.Errorf("FinalContent = %q", result.FinalContent)
+	}
+}
+
+func TestRunLoop_FollowUpWaitForThreadsJSONIsPromoted(t *testing.T) {
+	// Live 2026-08-26 10:29 ET: Winston called delegate_to_agent, then wrote
+	// {"name": "wait_for_threads"} as the entire next completion. That must
+	// be promoted and executed — never returned as the final answer.
+	delegate := &mockTool{
+		name:   "delegate_to_agent",
+		result: tools.ToolResult{Output: `delegated task to agent "Reggie" (thread 01M0Z7KQ4F6EZY4VTS6WSMBDK4) — spawned immediately. Use wait_for_threads to block until it finishes and collect the result.`},
+	}
+	wait := &mockTool{
+		name:   "wait_for_threads",
+		result: tools.ToolResult{Output: "Reggie: PONG"},
+	}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_delegate_1",
+					Function: backend.ToolCallFunction{
+						Name: "delegate_to_agent",
+						Arguments: map[string]any{
+							"agent": "Reggie",
+							"task":  "reply PONG",
+						},
+					},
+				}},
+			},
+			{
+				Content:    `{"name": "wait_for_threads"}`,
+				DoneReason: "stop",
+			},
+			stopResponse("He said PONG. 7 times 8 is 56."),
+		},
+	}
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 8,
+		Backend:  mb,
+		Tools:    newRegistryWith(delegate, wait),
+		Messages: []backend.Message{{Role: "user", Content: "Ask Reggie to reply PONG. Wait for him. Then tell me what he said, and also what is 7 times 8."}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if delegate.callCount != 1 {
+		t.Fatalf("delegate_to_agent callCount=%d, want 1", delegate.callCount)
+	}
+	if wait.callCount != 1 {
+		t.Fatalf("wait_for_threads was not executed: callCount=%d (name-only content JSON must be promoted)", wait.callCount)
+	}
+	if wait.lastArgs == nil {
+		t.Fatal("wait_for_threads lastArgs is nil")
+	}
+	if len(wait.lastArgs) != 0 {
+		t.Errorf("wait_for_threads args = %#v, want empty (default wait for spawned threads)", wait.lastArgs)
+	}
+	if result.FinalContent != "He said PONG. 7 times 8 is 56." {
+		t.Errorf("FinalContent = %q, want the real answer (not the wait JSON)", result.FinalContent)
+	}
+	if strings.Contains(result.FinalContent, `"name"`) || strings.Contains(result.FinalContent, "wait_for_threads") {
+		t.Errorf("tool JSON leaked as FinalContent: %q", result.FinalContent)
+	}
+	if result.TurnCount != 3 {
+		t.Errorf("TurnCount = %d, want 3 (delegate, wait, answer)", result.TurnCount)
+	}
+	var toolNames []string
+	for _, msg := range result.Messages {
+		if msg.Role == "tool" {
+			toolNames = append(toolNames, msg.ToolName)
+		}
+	}
+	if len(toolNames) != 2 || toolNames[0] != "delegate_to_agent" || toolNames[1] != "wait_for_threads" {
+		t.Errorf("executed tools = %v, want [delegate_to_agent wait_for_threads]", toolNames)
+	}
+}
+
+func TestRunLoop_FailTokenNotFinalContent(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "testhost"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("bash", "call-1"),
+			{Content: "TOOL_FAIL", DoneReason: "stop"},
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "hostname"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Fatalf("bash callCount=%d, want 1", tool.callCount)
+	}
+	if strings.Contains(result.FinalContent, "TOOL_FAIL") || strings.Contains(result.FinalContent, "bash") {
+		t.Errorf("FinalContent leaked fail token / tool name: %q", result.FinalContent)
+	}
+}
+
+func TestRunLoop_ContentJSONThenProseHidesJSONAndDoesNotExecute(t *testing.T) {
+	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
+	var streamed strings.Builder
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{Content: mixed, DoneReason: "stop"},
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "@Steve say PONG and nothing else"}},
+		OnToken:  func(s string) { streamed.WriteString(s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("mixed JSON+prose must not execute bash, callCount=%d", tool.callCount)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+	if strings.Contains(streamed.String(), `{"name"`) {
+		t.Errorf("tool JSON leaked into OnToken: %q", streamed.String())
+	}
+	if streamed.String() != "PONG" {
+		t.Errorf("streamed %q, want PONG", streamed.String())
+	}
+}
+
+// tokenStreamBackend fires OnToken per rune then StreamDone, matching Ollama
+// parseSSE + the WS onEvent that used to close the bubble before RunLoop Finish.
+type tokenStreamBackend struct {
+	content string
+}
+
+func (b *tokenStreamBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	for _, r := range b.content {
+		if req.OnToken != nil {
+			req.OnToken(string(r))
+		}
+	}
+	if req.OnEvent != nil {
+		req.OnEvent(backend.StreamEvent{Type: backend.StreamDone})
+	}
+	return &backend.ChatResponse{Content: b.content, DoneReason: "stop"}, nil
+}
+func (b *tokenStreamBackend) Health(_ context.Context) error   { return nil }
+func (b *tokenStreamBackend) Shutdown(_ context.Context) error { return nil }
+func (b *tokenStreamBackend) ContextWindow() int               { return 128_000 }
+
+func TestRunLoop_StreamedJSONThenPONG_NoONGFork(t *testing.T) {
+	const mixed = `{"name":"bash","arguments":{"command":"echo PONG"}}PONG`
+	var tokens []string
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 1,
+		Backend:  &tokenStreamBackend{content: mixed},
+		Tools:    newRegistryWith(&mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}),
+		Messages: []backend.Message{{Role: "user", Content: "@Steve say PONG and nothing else"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("streamed %q tokens %q, want PONG (dropped or forked first char?)", got, tokens)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+	for _, tok := range tokens {
+		if tok == "ONG" {
+			t.Fatalf("forked ONG after StreamDone: %q", tokens)
+		}
+	}
+}
+
+func TestRunLoop_StreamedPlainPONG_DoesNotDropFirstChar(t *testing.T) {
+	var tokens []string
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 1,
+		Backend:  &tokenStreamBackend{content: "PONG"},
+		Messages: []backend.Message{{Role: "user", Content: "ping"}},
+		OnToken:  func(s string) { tokens = append(tokens, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(tokens, "")
+	if got != "PONG" {
+		t.Errorf("plain PONG streamed %q tokens %q", got, tokens)
+	}
+	if result.FinalContent != "PONG" {
+		t.Errorf("FinalContent = %q, want PONG", result.FinalContent)
+	}
+}
+
+func TestRunLoop_ContentProseDoesNotExecuteTool(t *testing.T) {
+	tool := &mockTool{name: "bash", result: tools.ToolResult{Output: "nope"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			stopResponse("hello"),
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool),
+		Messages: []backend.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("prose should not execute bash, callCount=%d", tool.callCount)
+	}
+	if result.StopReason != "stop" || result.TurnCount != 1 {
+		t.Errorf("StopReason=%q TurnCount=%d", result.StopReason, result.TurnCount)
+	}
+}
+
+func TestRunLoop_NativeToolCallsNotDoubleParsed(t *testing.T) {
+	tool := &mockTool{name: "read_file", result: tools.ToolResult{Output: "ok"}}
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			{
+				Content:    `{"name": "bash", "arguments": {"command": "hostname"}}`,
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_native",
+					Function: backend.ToolCallFunction{
+						Name:      "read_file",
+						Arguments: map[string]any{"file_path": "main.go"},
+					},
+				}},
+			},
+			stopResponse("done"),
+		},
+	}
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    newRegistryWith(tool, &mockTool{name: "bash"}),
+		Messages: []backend.Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.callCount != 1 {
+		t.Errorf("read_file callCount=%d, want 1", tool.callCount)
+	}
+	// Content JSON must not be promoted into a second bash call.
+	var toolNames []string
+	for _, msg := range result.Messages {
+		if msg.Role == "tool" {
+			toolNames = append(toolNames, msg.ToolName)
+		}
+	}
+	if len(toolNames) != 1 || toolNames[0] != "read_file" {
+		t.Errorf("executed tools = %v, want [read_file] only", toolNames)
+	}
+}
+
 // TestRunLoop_MaxTurnsReached verifies that a backend that never stops tool calls
 // is cut off at MaxTurns with StopReason="max_turns".
 func TestRunLoop_MaxTurnsReached(t *testing.T) {
@@ -269,7 +575,7 @@ func TestRunLoop_UnknownToolName(t *testing.T) {
 	if result.StopReason != "stop" {
 		t.Errorf("StopReason = %q, want %q", result.StopReason, "stop")
 	}
-	// Verify the second backend call included an "unknown tool" error message.
+	// Verify the second backend call included a teammate deny, not a crash token.
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	if len(mb.lastRequests) < 2 {
@@ -278,13 +584,13 @@ func TestRunLoop_UnknownToolName(t *testing.T) {
 	secondReqMsgs := mb.lastRequests[1].Messages
 	found := false
 	for _, msg := range secondReqMsgs {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "unknown tool") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "I don't have nonexistent_tool.") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'unknown tool' error in second backend call messages")
+		t.Error("expected teammate deny I don't have nonexistent_tool. in second backend call messages")
 	}
 }
 
@@ -827,16 +1133,16 @@ func TestRunLoop_ToolNotInSchemaBlocked(t *testing.T) {
 	if tool.callCount != 0 {
 		t.Errorf("expected tool NOT executed, got %d calls", tool.callCount)
 	}
-	// Verify the denial message is in the conversation history.
+	// Verify the denial message is a teammate no, not a crash token.
 	found := false
 	for _, msg := range result.Messages {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "not available") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "I don't have secret_tool.") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'not available' error in tool result message")
+		t.Error("expected teammate deny I don't have secret_tool. in tool result message")
 	}
 }
 
@@ -1073,10 +1379,10 @@ func TestRunLoop_PanicPath_OnToolDoneStillFires(t *testing.T) {
 	var doneIsError bool
 
 	_, err := RunLoop(context.Background(), RunLoopConfig{
-		MaxTurns: 5,
-		Backend:  mb,
-		Tools:    reg,
-		Messages: []backend.Message{{Role: "user", Content: "trigger panic"}},
+		MaxTurns:   5,
+		Backend:    mb,
+		Tools:      reg,
+		Messages:   []backend.Message{{Role: "user", Content: "trigger panic"}},
 		OnToolCall: func(callID string, name string, args map[string]any) {},
 		OnToolDone: func(callID string, name string, result tools.ToolResult) {
 			doneCalled = true
@@ -1095,5 +1401,33 @@ func TestRunLoop_PanicPath_OnToolDoneStillFires(t *testing.T) {
 	}
 	if !doneIsError {
 		t.Error("expected OnToolDone result.IsError=true after panic")
+	}
+}
+
+func TestRunLoop_ImageAskDoesNotCallCreateAgent(t *testing.T) {
+	var calls int
+	hire := &mockTool{name: "create_agent", result: tools.ToolResult{Output: "created"}}
+	mb := &mockBackend{responses: []*backend.ChatResponse{
+		toolCallResponse("create_agent", "call_1"),
+		stopResponse("created"),
+	}}
+	_ = calls
+	res, err := RunLoop(context.Background(), RunLoopConfig{
+		Backend:     mb,
+		Tools:       newRegistryWith(hire),
+		ToolSchemas: []backend.Tool{{Function: backend.ToolFunction{Name: "create_agent"}}},
+		Messages:    []backend.Message{{Role: "user", Content: "generate an image of a red cube"}},
+	})
+	if err != nil {
+		t.Fatalf("RunLoop error: %v", err)
+	}
+	if mb.callCount != 0 {
+		t.Fatalf("model completions = %d, want 0 (image deny before tools)", mb.callCount)
+	}
+	if hire.callCount != 0 {
+		t.Fatalf("create_agent ran %d times", hire.callCount)
+	}
+	if res.FinalContent != "I can't make images." {
+		t.Fatalf("final = %q", res.FinalContent)
 	}
 }

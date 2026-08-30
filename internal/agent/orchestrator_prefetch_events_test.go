@@ -28,6 +28,25 @@ func (t *muninnFixtureTool) Execute(_ context.Context, _ map[string]any) tools.T
 	return tools.ToolResult{Output: t.output}
 }
 
+// capturingMuninnTool records the args it was called with, for asserting on
+// what query text recall actually received.
+type capturingMuninnTool struct {
+	name     string
+	output   string
+	lastArgs map[string]any
+}
+
+func (t *capturingMuninnTool) Name() string                      { return t.name }
+func (t *capturingMuninnTool) Description() string               { return "fixture muninn tool" }
+func (t *capturingMuninnTool) Permission() tools.PermissionLevel { return tools.PermRead }
+func (t *capturingMuninnTool) Schema() backend.Tool {
+	return backend.Tool{Function: backend.ToolFunction{Name: t.name}}
+}
+func (t *capturingMuninnTool) Execute(_ context.Context, args map[string]any) tools.ToolResult {
+	t.lastArgs = args
+	return tools.ToolResult{Output: t.output}
+}
+
 // orchForPrefetch creates a minimal orchestrator suitable for prefetch tests.
 func orchForPrefetch(t *testing.T) *Orchestrator {
 	t.Helper()
@@ -202,5 +221,62 @@ func TestPrefetchMemoryContextWithEvents_DefaultConversationalMode(t *testing.T)
 	}
 	if !strings.Contains(got, "### Recent Orientation") {
 		t.Fatalf("expected conversational orientation section, got %q", got)
+	}
+}
+
+// TestPrefetchMemoryContextWithEvents_RecallQueryStripsLeadingMention
+// verifies the exact reproduction from the live Winston DM defect
+// (2026-08-27): a DM opens with a leading @mention ("@Winston what's our
+// production database called?"), and the mention noise must not pollute the
+// semantic query sent to muninn_recall — only the user's actual ask should
+// reach the vault.
+func TestPrefetchMemoryContextWithEvents_RecallQueryStripsLeadingMention(t *testing.T) {
+	t.Parallel()
+
+	o := orchForPrefetch(t)
+	reg := tools.NewRegistry()
+	reg.Register(&muninnFixtureTool{name: "muninn_where_left_off", output: "orientation"})
+	recall := &capturingMuninnTool{name: "muninn_recall", output: "our production database is named yggdrasil"}
+	reg.Register(recall)
+
+	userMsg := "@Winston what's our production database called?"
+	got := o.prefetchMemoryContextWithEvents(context.Background(), reg, "winston", "huginn", userMsg, nil)
+	if got == "" {
+		t.Fatal("expected non-empty memory context block")
+	}
+
+	ctxArg, ok := recall.lastArgs["context"].([]string)
+	if !ok || len(ctxArg) != 1 {
+		t.Fatalf("expected recall context arg to be a single-element []string, got %#v", recall.lastArgs["context"])
+	}
+	if strings.Contains(ctxArg[0], "@Winston") {
+		t.Errorf("recall context still contains leading mention: %q", ctxArg[0])
+	}
+	if !strings.Contains(ctxArg[0], "production database") {
+		t.Errorf("recall context lost the user's actual ask: %q", ctxArg[0])
+	}
+}
+
+// TestPrefetchMemoryContextWithEvents_RecallQueryTruncated verifies a very
+// long user message is truncated before being sent as the recall query, so a
+// rambling turn can't blow the semantic query past what the vault expects.
+func TestPrefetchMemoryContextWithEvents_RecallQueryTruncated(t *testing.T) {
+	t.Parallel()
+
+	o := orchForPrefetch(t)
+	reg := tools.NewRegistry()
+	reg.Register(&muninnFixtureTool{name: "muninn_where_left_off", output: "orientation"})
+	recall := &capturingMuninnTool{name: "muninn_recall", output: "hit"}
+	reg.Register(recall)
+
+	longMsg := strings.Repeat("database ", 200) + "what's it called?"
+	o.prefetchMemoryContextWithEvents(context.Background(), reg, "winston2", "huginn", longMsg, nil)
+
+	ctxArg, ok := recall.lastArgs["context"].([]string)
+	if !ok || len(ctxArg) != 1 {
+		t.Fatalf("expected recall context arg to be a single-element []string, got %#v", recall.lastArgs["context"])
+	}
+	if len(ctxArg[0]) >= len(longMsg) {
+		t.Errorf("expected recall query to be truncated shorter than the original %d chars, got %d chars", len(longMsg), len(ctxArg[0]))
 	}
 }

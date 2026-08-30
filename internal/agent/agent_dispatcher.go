@@ -11,6 +11,7 @@ import (
 	"github.com/scrypster/huginn/internal/agent/session"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/swarm"
 	"github.com/scrypster/huginn/internal/threadmgr"
@@ -50,7 +51,11 @@ func GetDelegationContext(ctx context.Context) *workforce.DelegationContext {
 // the forked registry. Without this bypass, an agent with a non-empty toolbelt
 // (e.g. only "aws") would have allowedProviders={"aws"}, causing the gate to
 // reject every muninn tool call with "permission denied".
-func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate) ([]backend.Tool, *permissions.Gate) {
+// configuredMCPProviders is the set of configured MCP server names (matches
+// main.go's mcpProviders / serverGate.SetBaseWatchedProviders). Passing nil
+// or empty is safe — no MCP providers are added to allowedProviders and
+// behavior is unchanged from before V3.
+func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate, configuredMCPProviders map[string]bool) ([]backend.Tool, *permissions.Gate) {
 	var schemas []backend.Tool
 
 	// 1. Resolve local builtin tools from LocalTools allowlist.
@@ -82,26 +87,66 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		}
 	}
 
-	// 4. Always inject delegation tools when registered in the registry.
-	// Delegation tools (delegate_to_agent, list_team_status, recall_thread_result)
-	// are tagged "builtin" in main.go so agents with LocalTools:["*"] already get
-	// them via step 1. But agents with a named LocalTools list only get those
-	// explicit names — delegation is excluded, causing the LLM to never call
-	// delegate_to_agent and the loop to exit early (Bug 2 / Bug 1).
-	// reg.Get returns (nil, false) when a tool is not registered, making this
-	// a safe no-op in environments that don't register delegation tools.
+	// 4. Inject delegation tools when the agent's model supports delegation.
+	// TierLow (7b) must not see delegate_to_agent — InferCapabilities sets
+	// SupportsDelegation=false. Empty/unknown model IDs stay optimistic.
+	// LocalTools:["*"] would otherwise pull them via step 1; strip in that case.
 	{
 		delegationNames := []string{"delegate_to_agent", "list_team_status", "recall_thread_result", "wait_for_threads"}
-		seenDelegation := make(map[string]bool, len(schemas))
-		for _, s := range schemas {
-			seenDelegation[s.Function.Name] = true
-		}
-		for _, dname := range delegationNames {
-			if !seenDelegation[dname] {
-				if dt, ok := reg.Get(dname); ok {
-					schemas = append(schemas, dt.Schema())
+		if agents.AgentSupportsDelegation(ag) {
+			seenDelegation := make(map[string]bool, len(schemas))
+			for _, s := range schemas {
+				seenDelegation[s.Function.Name] = true
+			}
+			for _, dname := range delegationNames {
+				if !seenDelegation[dname] {
+					if dt, ok := reg.Get(dname); ok {
+						schemas = append(schemas, dt.Schema())
+					}
 				}
 			}
+		} else {
+			deny := make(map[string]bool, len(delegationNames))
+			for _, dname := range delegationNames {
+				deny[dname] = true
+			}
+			filtered := schemas[:0]
+			for _, s := range schemas {
+				if !deny[s.Function.Name] {
+					filtered = append(filtered, s)
+				}
+			}
+			schemas = filtered
+		}
+	}
+
+	// 4b. create_agent and spawn_specialist are never implied by God Mode or
+	// a toolbelt wildcard. Only an explicit local_tools: ["create_agent"] /
+	// ["spawn_specialist"] grant may keep the respective schema (S11:
+	// spawn_specialist is CoS-only, same convention as create_agent).
+	{
+		namedHire := false
+		namedSpawnSpecialist := false
+		for _, n := range ag.LocalTools {
+			if n == tools.CreateAgentName {
+				namedHire = true
+			}
+			if n == tools.SpawnSpecialistName {
+				namedSpawnSpecialist = true
+			}
+		}
+		if !namedHire || !namedSpawnSpecialist {
+			filtered := schemas[:0]
+			for _, s := range schemas {
+				if !namedHire && s.Function.Name == tools.CreateAgentName {
+					continue
+				}
+				if !namedSpawnSpecialist && s.Function.Name == tools.SpawnSpecialistName {
+					continue
+				}
+				filtered = append(filtered, s)
+			}
+			schemas = filtered
 		}
 	}
 
@@ -110,22 +155,42 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 	var agentGate *permissions.Gate
 	if gate != nil {
 		// Always allow "muninndb" (vault tools) and "builtin" (delegation tools and
-		// other builtins) even when the agent has an explicit toolbelt. Without this,
-		// the gate would reject calls to delegate_to_agent (tagged "builtin") and
-		// muninn tools (tagged "muninndb") with "permission denied" for agents that
-		// have a non-empty toolbelt. The schemas are already included by steps 3 and
-		// 4 above; the gate bypass ensures those calls are also permitted at runtime.
+		// other builtins) even when the agent has an explicit (or empty) toolbelt.
+		// Without this, the gate would reject calls to delegate_to_agent (tagged
+		// "builtin") and muninn tools (tagged "muninndb") with "permission denied"
+		// once AllowedProviders is a non-nil map. The schemas are already included
+		// by steps 3 and 4 above; the gate bypass keeps those calls permitted.
 		allowed := agents.AllowedProviders(ag.Toolbelt)
-		if allowed != nil {
+		// Empty map = deny external providers. Wildcard {"*": true} is
+		// explicit allow-all and already covers vault/delegation tags.
+		if allowed != nil && !allowed["*"] {
 			allowed["muninndb"] = true
 			allowed["builtin"] = true
+			// V3 policy: configured MCP server names are REACHABLE-BUT-PROMPTED,
+			// not silently denied. Without this, a narrow-toolbelt agent's call
+			// to a configured MCP tool (e.g. browser_navigate) is rejected with
+			// provider_not_allowed before ever reaching the base-watch prompt
+			// main.go's SetBaseWatchedProviders set up for exactly these
+			// servers — the prompt never fires. Adding the name here only lets
+			// the request past the provider gate; the base-watch/session-allow
+			// logic downstream in Gate.CheckDetailedCtx still decides prompt
+			// vs. auto-approve. Providers that are neither in the toolbelt nor
+			// a configured MCP server stay denied.
+			for name := range configuredMCPProviders {
+				allowed[name] = true
+			}
 		}
 		agentGate = gate.Fork(
 			agents.WatchedProviders(ag.Toolbelt),
 			allowed,
 		)
+		// Pre-seed persisted "always allow" grants (from a prior
+		// "Always allow for <Agent>" decision) so this run doesn't
+		// re-prompt for tools the human already approved for this agent.
+		agentGate.SeedSessionAllowed(ag.ApprovedTools)
 	}
 
+	schemas = filterMuninnSchemas(schemas, ag.MemoryMode)
 	return schemas, agentGate
 }
 
@@ -139,7 +204,10 @@ type toolGetter interface {
 // context carries a space context. It is a no-op when there is no space context
 // or when the tool is already present in schemas. The original slice is never
 // mutated if it is unchanged.
-func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg toolGetter) []backend.Tool {
+func injectDelegationTools(ctx context.Context, schemas []backend.Tool, reg toolGetter, ag *agents.Agent) []backend.Tool {
+	if !agents.AgentSupportsDelegation(ag) {
+		return schemas
+	}
 	if workforce.GetSpaceContext(ctx) == "" {
 		return schemas
 	}
@@ -295,6 +363,15 @@ func (o *Orchestrator) SwarmWithAgents(ctx context.Context, agentNames, prompts 
 
 // ErrSessionBusy is returned when a swarm is requested on a session that is already running.
 var ErrSessionBusy = fmt.Errorf("session is busy: concurrent runs are not supported")
+
+// ErrQueueWaitTimeout marks a ChatWithAgent error as "this queued turn could
+// not claim its session's exclusive run slot within one wait ceiling" — a
+// queuing fact, never a real failure. A predecessor that is still
+// legitimately running (a slow local model can take minutes) is expected
+// to eventually finish; callers must keep retrying (with errors.Is on this
+// sentinel) rather than ever surfacing the wrapping error as assistant
+// speech or a persisted chat row.
+var ErrQueueWaitTimeout = fmt.Errorf("queue wait timeout")
 
 // SwarmWithAgentsBroadcast runs a multi-agent swarm and broadcasts WebSocket events to the
 // given session. Returns nil immediately (202-style async); the swarm runs in background
@@ -472,6 +549,22 @@ func (o *Orchestrator) Dispatch(
 // completion without tools.
 var errToolsNotSupported = fmt.Errorf("model does not support tools")
 
+// toolResultDisplayText returns the text a UI/onEvent consumer should show for
+// a tool call's result. A successful call shows its Output; a failed call
+// shows Error (falling back to Output if Error is somehow empty) so a failure
+// never renders as a blank "result" — matching what the model itself sees in
+// its own next-turn context (loop.go prefixes IsError results with "error: ").
+// Without this, a live-captured tool_result wire payload for a failed
+// read_file call showed {"result":"","success":false} — the real error text
+// ("no such file or directory") was silently dropped, leaving only the model's
+// own guess about what went wrong visible anywhere.
+func toolResultDisplayText(result tools.ToolResult) string {
+	if result.IsError && result.Error != "" {
+		return result.Error
+	}
+	return result.Output
+}
+
 // agentTurnOpts captures the parameters that differ between ChatWithAgent and
 // TaskWithAgent so that both can delegate their shared core logic to
 // runAgentTurn. Fields that are common to every turn (agent, userMsg, session,
@@ -516,6 +609,55 @@ type agentTurnOpts struct {
 	// injected and before RunLoop is invoked. It allows the caller to perform
 	// additional context mutations (e.g. SetSessionID, delegation context).
 	ctxSetup func(ctx context.Context) context.Context
+	// vaultPrefetch, when non-nil, supplies a precomputed vault connection +
+	// memory prefetch (see startVaultPrefetch). Callers start this goroutine
+	// BEFORE building systemPromptBase so vault connect + prefetch overlaps
+	// with contextBuilder.Build / loadAgentSummaries instead of running after
+	// it. When nil, runAgentTurn falls back to computing it inline (serially).
+	// Never consulted for trivial asks, which skip vault MCP entirely.
+	vaultPrefetch func() vaultPrefetchOutcome
+}
+
+// vaultPrefetchOutcome bundles what runAgentTurn's vault-connect + prefetch
+// step used to compute serially: the vault connection, ctx with the memory
+// gate applied, and the memory-context system-prompt addendum (memory-mode
+// instruction + prefetched muninn_where_left_off / muninn_recall output).
+type vaultPrefetchOutcome struct {
+	vr          vaultResult
+	ctx         context.Context
+	memAddendum string
+}
+
+// startVaultPrefetch runs connectAgentVault followed by
+// prefetchMemoryContextWithEvents in a goroutine and returns a function that
+// blocks for the result. Call it as early as possible — before building the
+// (often slow: repo search, summary loading) system-prompt base — so the two
+// independent phases overlap instead of running serially. This is DEFECT B
+// phase 2: on a local 14b, contextBuilder.Build/loadAgentSummaries and the
+// vault connect (2 retry attempts) + up to 3 sequential 2s-timeout MCP calls
+// were previously back-to-back on every non-trivial turn.
+func (o *Orchestrator) startVaultPrefetch(
+	ctx context.Context,
+	ag *agents.Agent,
+	reg *tools.Registry,
+	sessionID, userMsg string,
+	prefetchCb func(toolName string, args map[string]any, output string, cached bool),
+) func() vaultPrefetchOutcome {
+	resultCh := make(chan vaultPrefetchOutcome, 1)
+	go func() {
+		vr := o.connectAgentVault(ctx, ag, reg)
+		gctx := WithMemoryGate(ctx, ag.MemoryMode, sessionID, ag.Name)
+		addendum := ""
+		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+			slog.Info("vault tools available", "agent", ag.Name, "session_id", sessionID, "vault", ag.VaultName)
+			addendum = memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(gctx, vr.sessionReg, ag.Name, ag.VaultName, userMsg, prefetchCb); memCtx != "" {
+			addendum += memCtx
+		}
+		resultCh <- vaultPrefetchOutcome{vr: vr, ctx: gctx, memAddendum: addendum}
+	}()
+	return func() vaultPrefetchOutcome { return <-resultCh }
 }
 
 // runAgentTurn is the shared core of ChatWithAgent (tool-registry path) and
@@ -534,30 +676,42 @@ type agentTurnOpts struct {
 // error prefix, latency slot, maxTurns) are captured in opts.
 func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) error {
 	ag := opts.ag
+	trivial := IsTrivialAsk(opts.userMsg)
 
-	// 1. Connect vault — forks the shared registry; safe to call even when vault
-	// is unconfigured (returns a no-op registry fork with cancel=func(){}).
-	vr := o.connectAgentVault(ctx, ag, opts.reg)
+	// 1+2. Connect vault and prefetch memory context — forks the shared
+	// registry; safe to call even when vault is unconfigured (returns a
+	// no-op registry fork with cancel=func(){}). Trivial asks skip vault MCP
+	// entirely so 14b never sees muninn / hire tools.
+	//
+	// When opts.vaultPrefetch is set, the caller already started this work
+	// concurrently with building systemPromptBase (contextBuilder.Build /
+	// loadAgentSummaries) — we just join it here. Otherwise fall back to
+	// computing it inline (serially), preserving old behavior for any caller
+	// that doesn't opt in.
+	var vr vaultResult
+	systemPrompt := opts.systemPromptBase
+	if trivial {
+		vr = vaultResult{sessionReg: opts.reg, cancel: func() {}}
+	} else if opts.vaultPrefetch != nil {
+		outcome := opts.vaultPrefetch()
+		vr = outcome.vr
+		ctx = outcome.ctx
+		systemPrompt += outcome.memAddendum
+	} else {
+		vr = o.connectAgentVault(ctx, ag, opts.reg)
+		ctx = WithMemoryGate(ctx, ag.MemoryMode, opts.sessionID, ag.Name)
+		if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
+			slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
+			systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
+		}
+		if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
+			systemPrompt += memCtx
+		}
+	}
 	defer vr.cancel()
 
 	if vr.warning != "" {
-		slog.Warn("vault unavailable for agent session", "agent", ag.Name, "session_id", opts.sessionID, "warning", vr.warning)
-		if opts.onEvent != nil {
-			opts.onEvent(backend.StreamEvent{
-				Type:    backend.StreamWarning,
-				Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-			})
-		}
-	}
-
-	// 2. Augment system prompt with memory-mode instructions and prefetched context.
-	systemPrompt := opts.systemPromptBase
-	if _, ok := vr.sessionReg.Get("muninn_recall"); ok {
-		slog.Info("vault tools available", "agent", ag.Name, "session_id", opts.sessionID, "vault", ag.VaultName)
-		systemPrompt += memoryModeInstruction(ag.MemoryMode, ag.VaultName, ag.VaultDescription)
-	}
-	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, ag.Name, ag.VaultName, opts.userMsg, opts.prefetchCb); memCtx != "" {
-		systemPrompt += memCtx
+		logVaultUnavailable(ag.Name, opts.sessionID, vr.warning)
 	}
 
 	// 3. Build message list: system + history snapshot + user turn.
@@ -565,10 +719,45 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	messages = append(messages, backend.Message{Role: "system", Content: systemPrompt})
 	messages = append(messages, opts.history...)
 	messages = append(messages, backend.Message{Role: "user", Content: opts.userMsg})
+	if !isTrivialPing(normalizeTrivialAsk(opts.userMsg)) {
+		kept := messages[:0]
+		for _, m := range messages {
+			if m.Role == "assistant" && backend.IsLeftoverPongSpeech(m.Content) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		messages = kept
+	}
+
+	// Trivial: tools-free completion. Empty ToolSchemas means "all tools
+	// allowed" in RunLoop, so we must not enter the tool loop with a nil belt.
+	// Last-chance strip keeps wait/delegate/consult off if schemas are rebuilt.
+	if trivial {
+		if opts.ctxSetup != nil {
+			ctx = opts.ctxSetup(ctx)
+		}
+		return o.completeTrivialAsk(ctx, opts, messages)
+	}
 
 	// 4. Resolve tool schemas and permission gate for this agent run.
-	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
-	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg)
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate, o.getConfiguredMCPProviders())
+	// agentGate is a per-turn fork of opts.gate (see Gate.Fork): it owns its
+	// own sweep goroutine and relayChans, independent of the parent gate and
+	// any sibling forks. It must be closed when this turn ends or its sweeper
+	// leaks forever — one per agent dispatch. Deferred immediately so every
+	// exit path below (success, RunLoop error, errToolsNotSupported) closes
+	// it exactly once; Close is idempotent and safe on a nil-check guard.
+	if agentGate != nil {
+		defer agentGate.Close()
+	}
+	schemas = injectDelegationTools(ctx, schemas, vr.sessionReg, ag)
+	if IsHireAsk(opts.userMsg) {
+		schemas = stripHireDelegationTools(schemas)
+		if len(messages) > 0 && messages[0].Role == "system" {
+			messages[0].Content += "\n\nHiring is your job via create_agent. If the human already gave a name and a role, call create_agent now. Do not dump a form. Do not delegate hiring."
+		}
+	}
 
 	// 5. Create isolated session environment (temp dir, env vars).
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
@@ -592,6 +781,7 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 
 	// 7. Run the tool-calling loop.
 	cfg := RunLoopConfig{
+		Hooks:              o.toolHooks(),
 		MaxTurns:           opts.maxTurns,
 		ModelName:          ag.GetModelID(),
 		Messages:           messages,
@@ -606,6 +796,16 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		OnEvent:            opts.onEvent,
 		VaultWarnOnce:      &sync.Once{},
 		VaultReconnector:   vr.reconnector,
+		MemoryMode:         ag.MemoryMode,
+		MemoryVault:        pinMuninnVault(ag.VaultName),
+		MemoryAgent:        ag.Name,
+		MemoryUserMsg:      opts.userMsg,
+		MemorySession:      opts.sessionID,
+		MemoryHome:         o.huginnHome,
+		AgentName:          ag.Name,
+		SessionID:          opts.sessionID,
+		MetricsWriter:      o.runLoopMetrics(),
+		TurnKind:           opts.latencySlot,
 	}
 
 	start := time.Now().UnixNano()
@@ -620,17 +820,126 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
 	}
 
-	// 8. Persist new messages into session history.
+	// 8. Persist new messages into session history (after memory gate).
 	initialCount := 1 + len(opts.history) + 1 // system + history + user
+	var newMsgs []backend.Message
 	if loopResult.Messages != nil && len(loopResult.Messages) > initialCount {
-		opts.sess.appendHistory(loopResult.Messages[initialCount:]...)
-	} else {
-		opts.sess.appendHistory(
-			backend.Message{Role: "user", Content: opts.userMsg},
-			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
-		)
+		newMsgs = loopResult.Messages[initialCount:]
 	}
-	o.compactHistory(ctx, opts.sess)
+	appendHistoryHonoringGate(opts.sess, opts.userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
+	o.compactHistoryAsync(opts.sess)
+	return nil
+}
+
+// completeTrivialAsk is the tools-free hallway path: skeleton persona plus
+// space/clock stay, but 14b never sees wait_for_threads / delegate_to_agent /
+// consult_agent, and the full team roster never gets built for this turn.
+func (o *Orchestrator) completeTrivialAsk(ctx context.Context, opts agentTurnOpts, messages []backend.Message) error {
+	if opts.onEvent != nil {
+		opts.onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
+	}
+	if len(messages) > 0 && messages[0].Role == "system" {
+		messages[0].Content += "\n\nAnswer the current user message only. If they asked who is here or how many people are in this channel, name the teammates from the roster. Do not repeat the local clock unless they asked the time. Do not repeat Pong unless they pinged."
+		if line := channelMembersLine(opts.userMsg, workforce.GetChannelMembers(ctx)); line != "" {
+			messages[0].Content += "\n\n" + line + ". Answer who-is-here / how many people from this list only, not the desk."
+		}
+		if company, ok := backend.NamedCompanyRosterAsk(opts.userMsg); ok {
+			if line := namedCompanyMembersLine(company, workforce.GetCompanyRoster(ctx, company)); line != "" {
+				messages[0].Content += "\n\n" + line + ". Answer who-is-in-" + company + " from this list only, not this channel."
+			}
+		}
+	}
+	if !backend.IsTimeAsk(opts.userMsg) {
+		kept := messages[:0]
+		for _, m := range messages {
+			if m.Role == "assistant" && backend.IsLeftoverClockSpeech(m.Content) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		messages = kept
+	}
+	if !isTrivialPing(normalizeTrivialAsk(opts.userMsg)) {
+		kept := messages[:0]
+		for _, m := range messages {
+			if m.Role == "assistant" && backend.IsLeftoverPongSpeech(m.Content) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		messages = kept
+	}
+	ag := opts.ag
+	if isTrivialPing(normalizeTrivialAsk(opts.userMsg)) {
+		const pong = "Pong."
+		if opts.onToken != nil {
+			opts.onToken(pong)
+		}
+		appendHistoryHonoringGate(opts.sess, opts.userMsg, pong, nil, false)
+		o.compactHistoryAsync(opts.sess)
+		return nil
+	}
+	if speech := backend.TrivialAckSpeech(opts.userMsg); speech != "" {
+		if opts.onToken != nil {
+			opts.onToken(speech)
+		}
+		appendHistoryHonoringGate(opts.sess, opts.userMsg, speech, nil, false)
+		o.compactHistoryAsync(opts.sess)
+		return nil
+	}
+	if company, ok := backend.NamedCompanyRosterAsk(opts.userMsg); ok {
+		names := workforce.GetCompanyRoster(ctx, company)
+		if speech := backend.FillNamedCompanyRosterPersist("", opts.userMsg, company, names); speech != "" {
+			if opts.onToken != nil {
+				opts.onToken(speech)
+			}
+			appendHistoryHonoringGate(opts.sess, opts.userMsg, speech, nil, false)
+			o.compactHistoryAsync(opts.sess)
+			return nil
+		}
+	}
+	b, backendErr := o.backendFor(ag)
+	if backendErr != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, backendErr)
+	}
+	var buf strings.Builder
+	// Reuse RunLoop's turnMetricsHook (t_request/t_first_token/t_complete,
+	// turn_kind "trivial") so this hallway path shows up in turn_metrics too
+	// — otherwise the prompt-budget win it exists for is invisible in
+	// telemetry (see D2). completeTrivialAsk never calls RunLoop, so nothing
+	// stamps these on its own; building a throwaway RunLoopConfig just to
+	// get the hook's OnToken/OnEvent wrapping is the smallest way to reuse
+	// the exact same stamping logic instead of duplicating it here.
+	metricsCfg := &RunLoopConfig{
+		MetricsWriter: o.runLoopMetrics(),
+		SessionID:     opts.sessionID,
+		AgentName:     ag.Name,
+		ModelName:     ag.GetModelID(),
+		TurnKind:      "trivial",
+		Messages:      messages,
+		OnToken: func(token string) {
+			buf.WriteString(token)
+			if opts.onToken != nil {
+				opts.onToken(token)
+			}
+		},
+		OnEvent: opts.onEvent,
+	}
+	hook := newTurnMetricsHook(metricsCfg)
+	start := time.Now().UnixNano()
+	_, err := b.ChatCompletion(ctx, backend.ChatRequest{
+		Model:    ag.GetModelID(),
+		Messages: messages,
+		OnToken:  metricsCfg.OnToken,
+		OnEvent:  metricsCfg.OnEvent,
+	})
+	o.recordLLMLatency(start, opts.latencySlot)
+	hook.finish(err != nil)
+	if err != nil {
+		return fmt.Errorf("%s(%s): %w", opts.errorPrefix, ag.Name, err)
+	}
+	appendHistoryHonoringGate(opts.sess, opts.userMsg, buf.String(), nil, false)
+	o.compactHistoryAsync(opts.sess)
 	return nil
 }
 
@@ -652,6 +961,7 @@ func (o *Orchestrator) TaskWithAgent(
 	reg := o.toolRegistry
 	gate := o.permGate
 	sess := o.defaultSession()
+	agentReg := o.agentReg
 	o.mu.RUnlock()
 	sess.setState(StateAgentLoop)
 	defer sess.setState(StateIdle)
@@ -659,12 +969,6 @@ func (o *Orchestrator) TaskWithAgent(
 	if reg == nil {
 		return o.ChatWithAgent(ctx, ag, userMsg, GetSessionID(ctx), onToken, nil, onEvent)
 	}
-
-	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
-	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
-	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
-
-	history := sess.snapshotHistory()
 
 	taskPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
 		if cached {
@@ -678,6 +982,27 @@ func (o *Orchestrator) TaskWithAgent(
 			onToolDone(callID, toolName, tools.ToolResult{Output: output})
 		}
 	}
+
+	// Start vault connect + memory prefetch concurrently with
+	// contextBuilder.Build / loadAgentSummaries below (DEFECT B phase 2) —
+	// these two phases are independent until runAgentTurn joins them.
+	// sessionID matches what the agentTurnOpts below carries: "" (TaskWithAgent
+	// does not thread a session ID into opts.sessionID).
+	var vaultPrefetch func() vaultPrefetchOutcome
+	if !IsTrivialAsk(userMsg) {
+		vaultPrefetch = o.startVaultPrefetch(ctx, ag, reg, "", userMsg, taskPrefetchCallback)
+	}
+
+	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
+	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
+	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+	if agentReg != nil {
+		roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+		systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+		systemPromptBase = agents.AppendAvailableModels(systemPromptBase, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
+	}
+
+	history := sess.snapshotHistory()
 
 	return o.runAgentTurn(ctx, agentTurnOpts{
 		ag:               ag,
@@ -696,6 +1021,7 @@ func (o *Orchestrator) TaskWithAgent(
 		onToolDone:       onToolDone,
 		onPermDenied:     onPermDenied,
 		onEvent:          onEvent,
+		vaultPrefetch:    vaultPrefetch,
 	})
 }
 
@@ -731,8 +1057,13 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	}
 	reg := o.toolRegistry
 	gate := o.permGate
+	maxTurns := o.defaultMaxTurns
 	memReplicator := o.optionalMemoryReplicatorLocked()
+	agentReg := o.agentReg
 	o.mu.RUnlock()
+	if maxTurns <= 0 {
+		maxTurns = 50
+	}
 
 	// Slow path: named session not found — create it under write lock (double-check pattern).
 	if sess == nil && sessionID != "" {
@@ -753,10 +1084,15 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 	// Guard against concurrent calls on the same session. Only one agentic loop
 	// may run at a time per session — concurrent calls would interleave history
 	// appends, producing garbled context for future turns.
-	// Uses a separate atomic flag (not the state machine) so outer callers like
-	// ReasonWithAgent can pre-set state to StateAgentLoop without conflict.
-	if !sess.tryBeginRun() {
-		return fmt.Errorf("chat(%s): session %s is already running; concurrent calls are not supported", ag.Name, sessionID)
+	// Queue behind the in-flight run (hallway @mentions share one space-chat
+	// session). Do not fail-closed with "already running" — that leaked into
+	// #Huginn as assistant speech.
+	if !sess.beginExclusiveRun(ctx) {
+		// Wrap ErrQueueWaitTimeout so callers (runWSChat) can tell "still
+		// queued, keep retrying" apart from a real failure with errors.Is
+		// instead of string-sniffing — and MUST NEVER persist this as
+		// assistant speech: a queued turn is not an error.
+		return fmt.Errorf("chat(%s): session %s still busy after queue wait: %w", ag.Name, sessionID, ErrQueueWaitTimeout)
 	}
 	defer sess.endRun()
 	sess.setState(StateAgentLoop)
@@ -766,16 +1102,138 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		return fmt.Errorf("agent %q has no model configured — open Agent settings to assign a model", ag.Name)
 	}
 
-	ctxText := o.contextBuilder.Build(userMsg, ag.GetModelID())
-	recentSummaries := o.loadAgentSummaries(ctx, ag.Name)
-	systemPromptBase := agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+	// Trivial asks (time/clock/date, ping, thanks, who-is-here) skip repo
+	// search, memory summaries, skills, the team roster, and the capability
+	// addendum — a skeleton system prompt only — so the 14b sees the message
+	// in seconds, not after paying prefill on a multi-KB prompt. Space/
+	// channel context and the local clock still stay (who-is-here answers
+	// from the cheap per-turn channelMembersLine, not the full roster).
+	trivial := IsTrivialAsk(userMsg)
+	if onEvent != nil {
+		onEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "thinking"})
+	}
+	if isTrivialPing(normalizeTrivialAsk(userMsg)) {
+		const pong = "Pong."
+		if onToken != nil {
+			onToken(pong)
+		}
+		appendHistoryHonoringGate(sess, userMsg, pong, nil, false)
+		o.compactHistoryAsync(sess)
+		return nil
+	}
+	// "say DELTA" / "repeat X" / "echo X": a bare word to speak back, not a
+	// task. Answering it via a full agentic turn is how a trivial ask ends
+	// up costing 3 LLM calls and minutes on a slow local model — the model
+	// sometimes even delegates it. Skip straight to speaking the word.
+	if word, ok := TrivialSayEchoWord(userMsg); ok {
+		speech := word + "."
+		if onToken != nil {
+			onToken(speech)
+		}
+		appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
+		o.compactHistoryAsync(sess)
+		return nil
+	}
+	if speech := backend.TrivialAckSpeech(userMsg); speech != "" {
+		if onToken != nil {
+			onToken(speech)
+		}
+		appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
+		o.compactHistoryAsync(sess)
+		return nil
+	}
+	if company, ok := backend.NamedCompanyRosterAsk(userMsg); ok {
+		names := workforce.GetCompanyRoster(ctx, company)
+		if speech := backend.FillNamedCompanyRosterPersist("", userMsg, company, names); speech != "" {
+			if onToken != nil {
+				onToken(speech)
+			}
+			appendHistoryHonoringGate(sess, userMsg, speech, nil, false)
+			o.compactHistoryAsync(sess)
+			return nil
+		}
+	}
+	// muninn_recall/muninn_forget are registered session-locally by
+	// connectAgentVault (into a forked registry) — never on the shared
+	// o.toolRegistry that `reg` points to here. Passing `reg` straight to
+	// tryForgetFastPath always missed the tools and silently fell through
+	// to a full ~100s LLM turn (Opus vet, 2026-08-28 — the "forget what I
+	// told you about the staging database" repro). Connect the vault first,
+	// scoped to forget asks only, so every other turn keeps the old
+	// zero-connect trivial-ask fast path untouched.
+	if isForgetAsk(userMsg) {
+		fvr := o.connectAgentVault(ctx, ag, reg)
+		handled := o.tryForgetFastPath(ctx, ag, userMsg, sess, fvr.sessionReg, onToken)
+		fvr.cancel()
+		if handled {
+			return nil
+		}
+	}
+	if o.tryNamedHireFastPath(ctx, ag, userMsg, sess, reg, onToken, onEvent) {
+		return nil
+	}
+
+	// chatPrefetchCallback forwards prefetch-phase tool events (e.g. an
+	// automatic muninn_recall) to onToolEvent so the UI shows "agent recalled
+	// memory" even for calls made before the visible tool loop starts.
+	chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
+		if cached || onToolEvent == nil {
+			return
+		}
+		// "phase": "prefetch" marks these as silent pre-turn calls. Consumers
+		// must key off this, NOT the tool name: muninn_recall is also a tool
+		// the agent calls deliberately mid-loop, and a name-based test would
+		// swallow those real calls (no chip, no persisted record, no
+		// permission audit entry).
+		onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args, "phase": "prefetch"})
+		onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output, "phase": "prefetch"})
+	}
+
+	// Start vault connect + memory prefetch concurrently with
+	// contextBuilder.Build / loadAgentSummaries below (DEFECT B phase 2) —
+	// only worth it on the tool-registry path (reg != nil), which is the only
+	// path that consumes vaultPrefetch; the plain-completion fallback below
+	// never calls runAgentTurn. Trivial asks never touch vault MCP at all.
+	var vaultPrefetch func() vaultPrefetchOutcome
+	if reg != nil && !trivial {
+		vaultPrefetch = o.startVaultPrefetch(ctx, ag, reg, sessionID, userMsg, chatPrefetchCallback)
+	}
+
+	// Prompt budget (perf wave step 2a): a trivial turn that doesn't need the
+	// roster as an answer source gets a skeleton system prompt — identity
+	// line + personality addendum only. Repo context, cross-session memory,
+	// the team roster, and the available-models block cost real prefill time
+	// on local models and change nothing about the answer to "ping" or
+	// "thanks". Who-is-here/headcount trivial asks keep the full roster
+	// (trivialNeedsRoster) since they may need it as a fallback answer
+	// source. Non-trivial turns are byte-for-byte unchanged from before this
+	// optimization.
+	var systemPromptBase string
+	if trivial && !trivialNeedsRoster(userMsg) {
+		systemPromptBase = agents.BuildSkeletonPersonaPrompt(ag)
+	} else {
+		var ctxText string
+		var recentSummaries []agents.SessionSummary
+		if !trivial {
+			ctxText = o.contextBuilder.Build(userMsg, ag.GetModelID())
+			recentSummaries = o.loadAgentSummaries(ctx, ag.Name)
+		}
+		systemPromptBase = agents.BuildPersonaPromptWithMemory(ag, ctxText, recentSummaries)
+		if agentReg != nil {
+			roster := agents.BuildRoster(agentReg, o.ModelInfoFn(), ag.Name)
+			systemPromptBase = agents.AppendTeamRoster(systemPromptBase, roster, agents.AgentSupportsDelegation(ag))
+			systemPromptBase = agents.AppendAvailableModels(systemPromptBase, ag, models.GlobalProviderCatalog().AvailableModelsBlock())
+		}
+	}
 
 	// Per-agent skills fragment. Non-default agents (workflow steps, delegated
 	// workers) need their assigned skills appended just like the default agent
 	// does in mcp_agent_chat.go. Without this they execute with no skills,
 	// which is a major parity gap for scheduled workflows.
-	if skillsFrag := o.SkillsFragmentForAgent(ag); skillsFrag != "" {
-		systemPromptBase += "\n\n" + skillsFrag
+	if !trivial {
+		if skillsFrag := o.SkillsFragmentForAgent(ag); skillsFrag != "" {
+			systemPromptBase += "\n\n" + skillsFrag
+		}
 	}
 
 	// Inject space context (channel/DM metadata) if available.
@@ -795,6 +1253,10 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		systemPromptBase += "\n\n" + connHint
 	}
 
+	// Machine local clock (America/New_York, labeled ET). One short line.
+	// Do not invent a vault — this is the wall clock at inject.
+	systemPromptBase = backend.AppendLocalClock(systemPromptBase, time.Now())
+
 	history := sess.snapshotHistory()
 
 	// When a tool registry is configured, delegate to the shared runAgentTurn
@@ -811,21 +1273,17 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		// Keying by callID (not tool name) fixes the same-tool-twice collision.
 		toolArgsCapture := make(map[string]map[string]any)
 
-		chatPrefetchCallback := func(toolName string, args map[string]any, output string, cached bool) {
-			if cached || onToolEvent == nil {
-				return
-			}
-			onToolEvent("tool_call", map[string]any{"tool": toolName, "args": args})
-			onToolEvent("tool_result", map[string]any{"tool": toolName, "result": output})
-		}
-
 		chatOnToolCall := func(callID string, name string, args map[string]any) {
 			slog.Debug("tool call started", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID)
 			toolArgsMu.Lock()
 			toolArgsCapture[callID] = args
 			toolArgsMu.Unlock()
 			if onToolEvent != nil {
-				onToolEvent("tool_call", map[string]any{"tool": name, "args": args})
+				// Carry the real callID: consumers pair tool_call with
+				// tool_result by it. Tools run in parallel (dispatchTools),
+				// so name-based pairing mis-attributes results between two
+				// concurrent same-name calls.
+				onToolEvent("tool_call", map[string]any{"id": callID, "tool": name, "args": args})
 			} else if onEvent != nil {
 				onEvent(backend.StreamEvent{
 					Type:    backend.StreamToolCall,
@@ -861,7 +1319,17 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			}
 			slog.Debug("tool call done", "agent", ag.Name, "tool", name, "session_id", sessionID, "call_id", callID, "success", result.Error == "")
 			if onToolEvent != nil {
-				payload := map[string]any{"tool": name, "result": result.Output}
+				// id/args/success must match the onEvent branch below: the WS
+				// path routes ALL tools through onToolEvent, so anything
+				// missing here is lost from the tool chip, the persisted
+				// tool-call record, and the permission audit entry.
+				payload := map[string]any{
+					"id":      callID,
+					"tool":    name,
+					"result":  toolResultDisplayText(result),
+					"args":    capturedArgs,
+					"success": result.Error == "",
+				}
 				if result.Metadata != nil {
 					payload["metadata"] = result.Metadata
 				}
@@ -876,7 +1344,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 					"id":      callID,
 					"tool":    name,
 					"success": result.Error == "",
-					"result":  result.Output,
+					"result":  toolResultDisplayText(result),
 					"args":    capturedArgs,
 				}
 				if result.Metadata != nil {
@@ -902,7 +1370,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			sess:             sess,
 			reg:              reg,
 			gate:             gate,
-			maxTurns:         50,
+			maxTurns:         maxTurns,
 			errorPrefix:      "chat",
 			latencySlot:      "agent-chat",
 			sessionID:        sessionID,
@@ -911,12 +1379,26 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 			onToolCall:       chatOnToolCall,
 			onToolDone:       chatOnToolDone,
 			onEvent:          onEvent,
+			vaultPrefetch:    vaultPrefetch,
 			// ctxSetup wires the session ID into ctx and establishes a delegation
 			// context so downstream code (e.g. threadmgr) can trace the lineage.
 			ctxSetup: func(c context.Context) context.Context {
-				c = SetSessionID(c, sessionID)
+				// Space-thread wakes use an ephemeral orch session so leftover
+				// speech cannot land as a hallway root. The runner pre-sets the
+				// real hallway / space session on ctx for delegate_to_agent —
+				// do not overwrite it.
+				if GetSessionID(c) == "" && sessionID != "" {
+					c = SetSessionID(c, sessionID)
+				}
+				if threadmgr.GetCallingAgent(c) == "" {
+					c = threadmgr.SetCallingAgent(c, ag.Name)
+				}
 				if GetDelegationContext(c) == nil {
-					dc := workforce.NewDelegationContext(sessionID, ag.Name, o.maxDelegationDepth())
+					dcSID := GetSessionID(c)
+					if dcSID == "" {
+						dcSID = sessionID
+					}
+					dc := workforce.NewDelegationContext(dcSID, ag.Name, o.maxDelegationDepth())
 					c = WithDelegationContext(c, &dc)
 				}
 				return c
@@ -962,7 +1444,7 @@ func (o *Orchestrator) ChatWithAgent(ctx context.Context, ag *agents.Agent, user
 		backend.Message{Role: "user", Content: userMsg},
 		backend.Message{Role: "assistant", Content: buf.String()},
 	)
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return nil
 }
 

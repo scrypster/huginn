@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/workspace"
 )
 
 const maxRunTestsOutputBytes = 100 * 1024
@@ -31,7 +33,13 @@ func (t *RunTestsTool) Name() string { return "run_tests" }
 func (t *RunTestsTool) Permission() PermissionLevel { return PermExec }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests and return structured results. For go test commands, parses JSON output for structured failures."
+	base := "Run tests and return structured results. For go test commands, parses JSON output for structured failures."
+	if t.SandboxRoot != "" {
+		if remembered := workspace.LoadLastTestCommand(t.SandboxRoot); remembered != "" {
+			base += fmt.Sprintf(" Last command that passed (exit 0) in this workspace: %q — reuse it instead of guessing.", remembered)
+		}
+	}
+	return base
 }
 
 func (t *RunTestsTool) Schema() backend.Tool {
@@ -133,6 +141,14 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) ToolRes
 		}
 	} else {
 		testResult = TestResult{Passed: exitCode == 0, Output: combined}
+	}
+
+	// Remember the command that just passed so future run_tests calls (and
+	// their tool descriptions) don't have to guess between `make test`,
+	// `go test ./...`, etc. Best-effort: a failure to persist never fails the
+	// tool call itself.
+	if exitCode == 0 && t.SandboxRoot != "" {
+		_ = workspace.SaveLastTestCommand(t.SandboxRoot, command)
 	}
 
 	resultJSON, _ := json.Marshal(testResult)

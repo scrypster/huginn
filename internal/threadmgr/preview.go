@@ -113,7 +113,59 @@ func (g *DelegationPreviewGate) Approve(
 			return true
 		}
 	}
+	return g.approveCore(ctx, sessionID, threadID, agentName, task, parentMessageID, mode, nil, true, broadcastFn)
+}
 
+// SpecialistPreviewInfo carries the model and verified per-MTok cost of a
+// one-off specialist spawn, surfaced in the delegation_preview payload so
+// the human approving it can see what it will cost (S10).
+type SpecialistPreviewInfo struct {
+	Model             string
+	InputCostPerMTok  float64
+	OutputCostPerMTok float64
+}
+
+// ApproveSpecialist is Approve's S10 counterpart for spawn_specialist
+// threads: in PreviewModeConditional it ALWAYS requires approval (skips the
+// risky-hint heuristic — every specialist spawn is inherently a judgment
+// call about cost and roster gaps), the broadcast payload carries the
+// specialist's model and estimated cost, and — critically — a timeout with
+// no human response DENIES the spawn instead of auto-approving it. Off and
+// Auto modes behave the same as Approve (global disable / trusted-auto).
+func (g *DelegationPreviewGate) ApproveSpecialist(
+	ctx context.Context,
+	sessionID, threadID, agentName, task, parentMessageID string,
+	info SpecialistPreviewInfo,
+	broadcastFn func(sessionID, msgType string, payload map[string]any),
+) bool {
+	mode := g.mode
+	switch mode {
+	case PreviewModeOff, PreviewModeAuto:
+		return true
+	}
+	extra := map[string]any{
+		"model":                info.Model,
+		"input_cost_per_mtok":  info.InputCostPerMTok,
+		"output_cost_per_mtok": info.OutputCostPerMTok,
+		"specialist":           true,
+	}
+	return g.approveCore(ctx, sessionID, threadID, agentName, task, parentMessageID, mode, extra, false, broadcastFn)
+}
+
+// approveCore is the shared blocking wait behind Approve and
+// ApproveSpecialist. extraPayload, when non-nil, is merged into the
+// delegation_preview broadcast payload. timeoutApproves controls what
+// happens when no human response arrives before g.timeout: true preserves
+// Approve's long-standing default-approve behavior; false is S10's
+// default-deny for specialist spawns.
+func (g *DelegationPreviewGate) approveCore(
+	ctx context.Context,
+	sessionID, threadID, agentName, task, parentMessageID string,
+	mode DelegationPreviewMode,
+	extraPayload map[string]any,
+	timeoutApproves bool,
+	broadcastFn func(sessionID, msgType string, payload map[string]any),
+) bool {
 	ch := make(chan bool, 1)
 	key := ackKey(sessionID, threadID)
 	g.mu.Lock()
@@ -145,6 +197,9 @@ func (g *DelegationPreviewGate) Approve(
 			"mode":               string(mode),
 			"expires_in_seconds": timeoutSeconds,
 		}
+		for k, v := range extraPayload {
+			payload[k] = v
+		}
 		if parentMessageID != "" {
 			payload["parent_message_id"] = parentMessageID
 		}
@@ -173,6 +228,11 @@ func (g *DelegationPreviewGate) Approve(
 				payload["parent_message_id"] = parentMessageID
 			}
 			broadcastFn(sessionID, "delegation_preview_timeout", payload)
+		}
+		if !timeoutApproves {
+			slog.Warn("specialist delegation preview timed out without user ack — denying (S10 default-deny)",
+				"session_id", sessionID, "thread_id", threadID, "agent", agentName, "timeout", g.timeout)
+			return false
 		}
 		slog.Warn("delegation preview timed out without user ack — auto-approving",
 			"session_id", sessionID, "thread_id", threadID, "agent", agentName, "timeout", g.timeout)

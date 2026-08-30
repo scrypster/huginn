@@ -25,6 +25,7 @@ func Migrations() []sqlitedb.Migration {
 		{Name: "memory_replication_queue_v2", Up: migrateMemoryReplicationQueueV2},
 		{Name: "cloud_vault_queue_v1", Up: migrateCloudVaultQueueV1},
 		{Name: "connections_refresh_error_columns_v1", Up: migrateConnectionsRefreshErrorColumnsV1},
+		{Name: "sessions_message_count_backfill_v1", Up: migrateSessionsMessageCountBackfillV1},
 	}
 }
 
@@ -325,6 +326,43 @@ func migrateThreadColumnsAndArtifacts(tx *sql.Tx) error {
 	}
 
 	return nil
+}
+
+// migrateSessionsMessageCountBackfillV1 recomputes sessions.message_count /
+// last_message_id / updated_at from the messages table. Append used to bump
+// those fields only in memory, so existing rows froze at create-time zeros
+// while transcripts accumulated.
+func migrateSessionsMessageCountBackfillV1(tx *sql.Tx) error {
+	var marker int
+	err := tx.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions' LIMIT 1`).Scan(&marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
+		UPDATE sessions
+		SET message_count = (
+		        SELECT COUNT(*) FROM messages
+		        WHERE messages.container_type = 'session'
+		          AND messages.container_id = sessions.id
+		    ),
+		    last_message_id = COALESCE((
+		        SELECT id FROM messages
+		        WHERE messages.container_type = 'session'
+		          AND messages.container_id = sessions.id
+		        ORDER BY seq DESC, ts DESC
+		        LIMIT 1
+		    ), last_message_id),
+		    updated_at = COALESCE((
+		        SELECT ts FROM messages
+		        WHERE messages.container_type = 'session'
+		          AND messages.container_id = sessions.id
+		        ORDER BY seq DESC, ts DESC
+		        LIMIT 1
+		    ), updated_at)`)
+	return err
 }
 
 // isColumnAlreadyExistsError returns true when an ALTER TABLE ADD COLUMN fails

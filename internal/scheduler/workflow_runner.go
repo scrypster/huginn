@@ -566,7 +566,16 @@ func MakeWorkflowRunner(
 				stepStartedAt := time.Now().UTC()
 				slog.Debug("scheduler: workflow step starting",
 					"workflow_id", w.ID, "run_id", run.ID, "step", stepName, "position", step.Position, "agent", step.Agent)
-				output, agentErr := executeStepWithRetry(stepCtx, agentFn, opts, step)
+				var output string
+				var agentErr error
+				if w.CompanyID != "" && step.Agent != "" && cfg.companyGate != nil {
+					if gerr := cfg.companyGate(w.CompanyID, step.Agent); gerr != nil {
+						agentErr = gerr
+					}
+				}
+				if agentErr == nil {
+					output, agentErr = executeStepWithRetry(stepCtx, agentFn, opts, step)
+				}
 				stepCompletedAt := time.Now().UTC()
 				stepLatencyMs := stepCompletedAt.Sub(stepStartedAt).Milliseconds()
 				slog.Debug("scheduler: workflow step completed",

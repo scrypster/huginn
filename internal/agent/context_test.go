@@ -139,3 +139,87 @@ func TestContextBuilder_WithGitRoot_IncludesGitSection(t *testing.T) {
 		t.Error("expected Branch: in git context")
 	}
 }
+
+// TestContextBuilder_WithGitRoot_IncludesProjectInstructions verifies that
+// .huginn.md project instructions are injected into every Build() output via
+// the git root, so every prompt path (web chat, delegated threads, scheduled
+// agents) receives them consistently instead of only the one call site that
+// used to load them directly.
+func TestContextBuilder_WithGitRoot_IncludesProjectInstructions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".huginn.md"), []byte("Always use tabs."), 0644); err != nil {
+		t.Fatalf("write .huginn.md: %v", err)
+	}
+
+	cb := NewContextBuilder(nil, nil, nil)
+	cb.SetGitRoot(dir)
+	result := cb.Build("query", "test-model")
+
+	if !strings.Contains(result, "## Project Instructions") {
+		t.Error("expected ## Project Instructions section in Build output")
+	}
+	if !strings.Contains(result, "Always use tabs.") {
+		t.Error("expected project instructions content in Build output")
+	}
+}
+
+func TestContextBuilder_NoGitRoot_NoProjectInstructionsSection(t *testing.T) {
+	cb := NewContextBuilder(nil, nil, nil)
+	result := cb.Build("query", "test-model")
+
+	if strings.Contains(result, "## Project Instructions") {
+		t.Error("expected no ## Project Instructions section without a git root")
+	}
+}
+
+// TestContextBuilder_WorkspaceRootFallback_NoGitRoot verifies that a plain,
+// non-git workspace still gets .huginn.md project instructions when only
+// SetWorkspaceRoot (not SetGitRoot) is wired — the fallback path for callers
+// that never resolve a git root.
+func TestContextBuilder_WorkspaceRootFallback_NoGitRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".huginn.md"), []byte("Plain dir rule."), 0644); err != nil {
+		t.Fatalf("write .huginn.md: %v", err)
+	}
+
+	cb := NewContextBuilder(nil, nil, nil)
+	cb.SetWorkspaceRoot(dir) // no SetGitRoot call
+	result := cb.Build("query", "test-model")
+
+	if !strings.Contains(result, "## Project Instructions") {
+		t.Error("expected ## Project Instructions section via workspaceRoot fallback")
+	}
+	if !strings.Contains(result, "Plain dir rule.") {
+		t.Error("expected project instructions content via workspaceRoot fallback")
+	}
+	// No git context section, since no git root was set — only the
+	// workspace-root fallback is used for project instructions, not git info.
+	if strings.Contains(result, "## Git Context") {
+		t.Error("expected no git context section when only workspaceRoot is set")
+	}
+}
+
+// TestContextBuilder_GitRootTakesPrecedenceOverWorkspaceRoot verifies gitRoot
+// wins when both are set to different directories with different files.
+func TestContextBuilder_GitRootTakesPrecedenceOverWorkspaceRoot(t *testing.T) {
+	gitDir := t.TempDir()
+	wsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(gitDir, ".huginn.md"), []byte("From git root."), 0644); err != nil {
+		t.Fatalf("write .huginn.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, ".huginn.md"), []byte("From workspace root."), 0644); err != nil {
+		t.Fatalf("write .huginn.md: %v", err)
+	}
+
+	cb := NewContextBuilder(nil, nil, nil)
+	cb.SetWorkspaceRoot(wsDir)
+	cb.SetGitRoot(gitDir)
+	result := cb.Build("query", "test-model")
+
+	if !strings.Contains(result, "From git root.") {
+		t.Error("expected gitRoot's instructions to win")
+	}
+	if strings.Contains(result, "From workspace root.") {
+		t.Error("did not expect workspaceRoot's instructions when gitRoot is set")
+	}
+}

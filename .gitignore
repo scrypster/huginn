@@ -65,3 +65,8 @@ web/src/**/*.d.ts.map
 # Temp build artifacts
 huginn-go-tmp-umask
 huginn_bin*
+
+# Local Huginn runtime dir (workspace-scoped hooks.json, etc.).
+# Introduced with user-configurable hooks — never commit a developer's
+# local hook definitions.
+.huginn/

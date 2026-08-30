@@ -1,5 +1,7 @@
 import { ref, computed } from 'vue'
 import { api } from './useApi'
+import { useBrowserNotifications } from './useBrowserNotifications'
+import { useCompanies } from './useCompanies'
 import type { HuginnWS, WSMessage } from './useHuginnWS'
 
 export interface Space {
@@ -12,6 +14,8 @@ export interface Space {
   color: string
   unseenCount: number
   archivedAt?: string | null
+  companyId: string
+  forYou?: boolean
 }
 
 function mapSpace(raw: Record<string, unknown>): Space {
@@ -25,6 +29,8 @@ function mapSpace(raw: Record<string, unknown>): Space {
     color: (raw.color as string) || '#58a6ff',
     unseenCount: (raw.unseen_count as number) ?? 0,
     archivedAt: (raw.archived_at as string) ?? null,
+    companyId: (raw.company_id as string) ?? '',
+    forYou: Boolean(raw.for_you),
   }
 }
 
@@ -33,7 +39,9 @@ const ACTIVE_SPACE_KEY = 'huginn_active_space_id'
 // Module-level shared state
 const spaces = ref<Space[]>([])
 const activeSpaceId = ref<string | null>(localStorage.getItem(ACTIVE_SPACE_KEY))
-const loading = ref(false)
+// Start true so the chat sidebar does not flash empty-state copy before the
+// first fetchSpaces() (initApp only calls it after token/WS/sessions).
+const loading = ref(true)
 const error = ref<string | null>(null)
 const spaceSessionsMap = ref<Record<string, unknown[]>>({})
 
@@ -98,6 +106,8 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
     }
   }
 
+  const { notify } = useBrowserNotifications()
+
   const onSpaceActivity = (msg: WSMessage): void => {
     const spaceId = msg.payload?.['space_id'] as string | undefined
     const count = msg.payload?.['unseen_count'] as number | undefined
@@ -107,7 +117,18 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
     if (spaceId === activeSpaceId.value && count > 0) return
     const space = spaces.value.find(s => s.id === spaceId)
     if (space) {
+      const prev = space.unseenCount
       space.unseenCount = count
+      // Inactive space whose unseen count went up — desktop notify (no-ops
+      // unless the tab is hidden). space_activity has no preview text.
+      if (spaceId !== activeSpaceId.value && count > prev) {
+        notify(
+          space.name || space.leadAgent,
+          'New message',
+          'space-activity-' + spaceId,
+          () => { window.location.hash = `#/space/${spaceId}` },
+        )
+      }
     }
   }
 
@@ -128,16 +149,32 @@ export function wireSpaceWS(ws: HuginnWS): () => void {
   }
 }
 
+function mergeIncomingSpaces(incoming: Space[]) {
+  // Merge-never-replace: a company-filtered page must not drop desk / other
+  // company spaces already on the rail.
+  if (!incoming.length) return
+  const byId = new Map(spaces.value.map(s => [s.id, s]))
+  for (const s of incoming) byId.set(s.id, s)
+  spaces.value = [...byId.values()]
+}
+
 export function useSpaces() {
-  const channels = computed(() => spaces.value.filter(s => s.kind === 'channel'))
-  const dms = computed(() => spaces.value.filter(s => s.kind === 'dm'))
+  const { effectiveCompanyId, noteFollowUnread, applyFollowUnreadFromSpaces } = useCompanies()
+
+  const visibleSpaces = computed(() => {
+    const cid = effectiveCompanyId.value
+    if (!cid) return spaces.value
+    return spaces.value.filter(s => s.companyId === cid)
+  })
+  const channels = computed(() => visibleSpaces.value.filter(s => s.kind === 'channel'))
+  const dms = computed(() => visibleSpaces.value.filter(s => s.kind === 'dm'))
   const activeSpace = computed(() => spaces.value.find(s => s.id === activeSpaceId.value) ?? null)
 
-  async function fetchSpaces() {
+  async function fetchSpaces(opts?: { companyId?: string }) {
     loading.value = true
     error.value = null
     try {
-      const raw = await api.spaces.list()
+      const raw = await api.spaces.list(opts?.companyId ? { company_id: opts.companyId } : undefined)
       // API returns { Spaces: [...], NextCursor: "" } (paginated). Handle both
       // the legacy plain-array form and the current paginated-result form.
       const items: unknown[] = Array.isArray(raw)
@@ -145,11 +182,18 @@ export function useSpaces() {
         : Array.isArray((raw as Record<string, unknown>)?.Spaces)
           ? ((raw as Record<string, unknown>).Spaces as unknown[])
           : []
-      spaces.value = items.map(r => mapSpace(r as Record<string, unknown>))
-      // Clean up persisted activeSpaceId if the space no longer exists.
-      if (activeSpaceId.value && !spaces.value.some(s => s.id === activeSpaceId.value)) {
-        activeSpaceId.value = null
-        localStorage.removeItem(ACTIVE_SPACE_KEY)
+      const mapped = items.map(r => mapSpace(r as Record<string, unknown>))
+      // Wire first: localStorage is only a cache. API for_you wins.
+      applyFollowUnreadFromSpaces(mapped, opts?.companyId ? 'merge' : 'replace')
+      if (opts?.companyId) {
+        mergeIncomingSpaces(mapped)
+      } else {
+        spaces.value = mapped
+        // Clean up persisted activeSpaceId if the space no longer exists.
+        if (activeSpaceId.value && !spaces.value.some(s => s.id === activeSpaceId.value)) {
+          activeSpaceId.value = null
+          localStorage.removeItem(ACTIVE_SPACE_KEY)
+        }
       }
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : 'Failed to load spaces'
@@ -165,6 +209,8 @@ export function useSpaces() {
       // Optimistically clear the badge — user is now viewing this space.
       const sp = spaces.value.find(s => s.id === id)
       if (sp) sp.unseenCount = 0
+      // Viewing the space clears the company-rail @me mark (persisted).
+      noteFollowUnread(id, false)
       // Persist the read position to the backend so the badge resets on reload.
       api.spaces.markRead(id).catch(() => { /* non-fatal */ })
     } else {
@@ -172,26 +218,59 @@ export function useSpaces() {
     }
   }
 
-  async function openDM(agentName: string): Promise<Space | null> {
+  function upsertSpace(sp: Space): Space {
+    const idx = spaces.value.findIndex(s => s.id === sp.id)
+    if (idx >= 0) spaces.value[idx] = sp
+    else spaces.value.unshift(sp)
+    return sp
+  }
+
+  function findCompanyDM(agentName: string, companyId: string): Space | undefined {
+    const lower = agentName.toLowerCase()
+    return spaces.value.find(s =>
+      s.kind === 'dm' &&
+      s.leadAgent.toLowerCase() === lower &&
+      s.companyId === companyId,
+    )
+  }
+
+  async function openDM(agentName: string, companyId?: string): Promise<Space | null> {
     try {
-      const raw = await api.spaces.getDM(agentName)
+      const raw = await api.spaces.getDM(agentName, companyId ? { company_id: companyId } : undefined)
       const sp = mapSpace(raw as Record<string, unknown>)
-      const idx = spaces.value.findIndex(s => s.id === sp.id)
-      if (idx >= 0) spaces.value[idx] = sp
-      else spaces.value.unshift(sp)
-      return sp
+      // Desk OpenDM is unique-per-agent. If a company was requested and the
+      // server returned the desk DM, do not steal its company_id.
+      if (companyId && sp.companyId !== companyId) return findCompanyDM(agentName, companyId) ?? null
+      return upsertSpace(sp)
     } catch {
-      return null
+      return findCompanyDM(agentName, companyId ?? '') ?? null
     }
   }
 
-  async function createChannel(opts: { name: string; leadAgent: string; memberAgents: string[] }): Promise<Space | null> {
+  // After seating: reuse a company-scoped DM if one exists. Never PATCH the
+  // desk DM's company_id (Winston stays on Desk AND in the company).
+  async function ensureCompanyDM(agentName: string, companyId: string): Promise<Space | null> {
+    if (!agentName || !companyId) return null
+    const existing = findCompanyDM(agentName, companyId)
+    if (existing) return existing
+
+    const opened = await openDM(agentName, companyId)
+    if (opened && opened.companyId === companyId) return opened
+
+    // Do not POST /spaces here: that endpoint mints a channel, not a second DM.
+    // Do not PATCH the desk DM's company_id. Seating still succeeded; the rail
+    // shows the seated person until a company-scoped DM exists.
+    return findCompanyDM(agentName, companyId) ?? null
+  }
+
+  async function createChannel(opts: { name: string; leadAgent: string; memberAgents: string[]; companyId?: string }): Promise<Space | null> {
     error.value = null
     try {
       const raw = await api.spaces.createChannel({
         name: opts.name,
         lead_agent: opts.leadAgent,
         member_agents: opts.memberAgents,
+        company_id: opts.companyId,
       })
       const sp = mapSpace(raw as Record<string, unknown>)
       // Upsert by id: the backend broadcasts space_created on the WebSocket
@@ -229,6 +308,7 @@ export function useSpaces() {
       await api.spaces.markRead(spaceId)
       const sp = spaces.value.find(s => s.id === spaceId)
       if (sp) sp.unseenCount = 0
+      noteFollowUnread(spaceId, false)
     } catch { /* ignore */ }
   }
 
@@ -269,6 +349,7 @@ export function useSpaces() {
 
   return {
     spaces,
+    visibleSpaces,
     channels,
     dms,
     activeSpaceId,
@@ -278,6 +359,7 @@ export function useSpaces() {
     fetchSpaces,
     setActiveSpace,
     openDM,
+    ensureCompanyDM,
     createChannel,
     updateSpace,
     deleteSpace,

@@ -2,10 +2,10 @@
   <div class="flex flex-col h-full bg-huginn-bg">
 
     <!-- No agent selected -->
-    <div v-if="!agentName" class="flex-1 overflow-y-auto p-6">
+    <div v-if="!agentName" data-testid="agents-home" class="flex-1 overflow-y-auto p-6">
 
       <!-- Empty state: no agents at all -->
-      <div v-if="agents.length === 0 && !loading" class="flex flex-col items-center justify-center h-full gap-5 pb-16">
+      <div v-if="agents.length === 0 && !loading" data-testid="agents-empty-state" class="flex flex-col items-center justify-center h-full gap-5 pb-16">
         <div class="w-16 h-16 rounded-2xl flex items-center justify-center select-none"
           style="background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2)">
           <svg class="w-8 h-8 text-huginn-blue opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -13,25 +13,27 @@
           </svg>
         </div>
         <div class="text-center space-y-1">
-          <p class="text-huginn-text text-sm font-medium">Select an agent</p>
-          <p class="text-huginn-muted text-xs">Choose from the sidebar or create a new one</p>
+          <p class="text-huginn-text text-sm font-medium">No teammates yet</p>
+          <p class="text-huginn-muted text-xs">Agents are the teammates who do the work — give one a name, a model, and a job.</p>
         </div>
         <button data-testid="new-agent-btn" @click="createNew"
           class="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-huginn-blue border border-huginn-blue/30 hover:bg-huginn-blue/10 transition-all duration-150 active:scale-95">
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          New agent
+          Hire your first teammate
         </button>
       </div>
 
       <!-- Card grid: agents exist -->
       <template v-else>
-        <div class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+        <div data-testid="agents-grid" class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
           <AgentCard
             v-for="agent in agents"
             :key="agent.name"
             :agent="agent"
+            :advertise-memory="advertiseMemory"
+            :supports-tools="listedSupportsTools(agent.model)"
             @click="openDM(agent)"
             @edit="router.push('/agents/' + agent.name)"
           />
@@ -60,6 +62,13 @@
             <p class="text-xs text-huginn-red flex-1">Delete <strong>{{ form.name }}</strong>? This cannot be undone.</p>
             <button @click="deleteAgent" class="px-3 py-1.5 text-xs font-medium text-huginn-red border border-huginn-red/40 rounded-lg hover:bg-huginn-red/15 transition-all">Delete</button>
             <button @click="showDeleteConfirm = false" class="px-3 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">Cancel</button>
+          </div>
+        </div>
+        <div v-if="showLocalAllowAllConfirm" data-testid="local-access-allow-all-confirm" class="px-4 pt-3">
+          <div class="flex items-center gap-3 px-4 py-3 rounded-xl border border-huginn-red/40 bg-huginn-red/8">
+            <p class="text-xs text-huginn-red flex-1">Enable <strong>all local tools</strong> (God Mode), including shell?</p>
+            <button data-testid="local-access-allow-all-confirm-btn" @click="confirmLocalAllowAll" class="px-3 py-1.5 text-xs font-medium text-huginn-red border border-huginn-red/40 rounded-lg hover:bg-huginn-red/15 transition-all">Confirm</button>
+            <button data-testid="local-access-allow-all-cancel-btn" @click="cancelLocalAllowAll" class="px-3 py-1.5 text-xs text-huginn-muted border border-huginn-border rounded-lg hover:bg-huginn-surface transition-all">Cancel</button>
           </div>
         </div>
         <div v-if="saveMsg" class="px-4 pt-3">
@@ -113,7 +122,7 @@
                 placeholder="Agent name"
                 class="w-full bg-transparent text-base font-semibold text-huginn-text text-center outline-none border-b border-transparent focus:border-huginn-blue/40 transition-colors placeholder:text-huginn-muted/40 pb-0.5" />
               <!-- Model selector — opens modal -->
-              <button @click="showModelPicker = true"
+              <button data-testid="open-model-picker" @click="showModelPicker = true"
                 class="inline-flex items-center gap-1 group focus:outline-none">
                 <!-- No model: amber attention pill -->
                 <div v-if="!form.model"
@@ -128,6 +137,7 @@
                   <svg class="w-2.5 h-2.5 text-huginn-muted/50 group-hover:text-huginn-muted transition-colors flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
               </button>
+              <ModelToolWarning v-if="selectedModelUnreliableTools" class="px-3" />
             </div>
           </div>
 
@@ -146,7 +156,7 @@
                   class="w-6 h-6 rounded-md transition-all duration-150 hover:scale-110 active:scale-95"
                   :class="form.color === c ? 'ring-2 ring-offset-2 ring-offset-huginn-bg scale-110' : ''"
                   :style="{ background: c }" />
-                <input type="color" v-model="form.color" @change="markDirty"
+                <input type="color" v-model="form.color" @change="onColorInputChange"
                   class="w-6 h-6 rounded-md cursor-pointer bg-huginn-surface border border-huginn-border overflow-hidden" title="Custom color" />
               </div>
             </div>
@@ -156,6 +166,17 @@
               <p class="text-[10px] font-semibold text-huginn-muted uppercase tracking-widest">Icon letter</p>
               <input v-model="form.icon" @input="markDirty" placeholder="A" maxlength="2"
                 class="w-full bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 text-sm text-huginn-text text-center font-bold outline-none focus:border-huginn-blue/50 transition-colors tracking-widest" />
+            </div>
+
+            <!-- Description -->
+            <div class="space-y-2">
+              <p class="text-[10px] font-semibold text-huginn-muted uppercase tracking-widest">Description</p>
+              <input
+                data-testid="agent-description-input"
+                v-model="form.description" @input="markDirty"
+                placeholder="One-line role — or leave blank to use the system prompt"
+                maxlength="200"
+                class="w-full bg-huginn-surface border border-huginn-border rounded-lg px-3 py-2 text-xs text-huginn-text outline-none focus:border-huginn-blue/50 transition-colors placeholder:text-huginn-muted/40" />
             </div>
 
             <!-- Memory -->
@@ -289,7 +310,8 @@
 
           <!-- Bottom actions -->
           <div class="px-5 py-4 border-t border-huginn-border space-y-2 flex-shrink-0">
-            <button @click="confirmDelete"
+            <button v-if="!isNewAgent" @click="confirmDelete"
+              data-testid="delete-agent-btn"
               class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-huginn-muted border border-huginn-border hover:border-huginn-red/40 hover:text-huginn-red transition-all duration-150">
               <svg class="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
               Delete agent
@@ -322,6 +344,11 @@
                 <span class="text-[11px] text-huginn-muted">{{ localAccessSummary }}</span>
               </div>
               <p class="text-[11px] text-huginn-muted leading-relaxed">Grant this agent access to the local file system, git, and shell.</p>
+              <div v-if="showLocalAccessToolWarning"
+                data-testid="local-access-model-tools-warning"
+                class="px-3 py-2 rounded-lg border border-huginn-amber/40 bg-huginn-amber/8">
+                <p class="text-[11px] text-huginn-amber leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+              </div>
               <!-- Allow-all quick toggle -->
               <div class="flex items-center gap-2">
                 <button
@@ -348,6 +375,40 @@
                 style="border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,0.55)">
                 <span>✏</span> Manage local access
               </button>
+
+              <!-- Approved without asking: persisted "Always allow for <Agent>"
+                   grants from the serve-mode permission banner. -->
+              <div data-testid="approved-tools-section" class="pt-2 space-y-2">
+                <p class="text-[11px] text-huginn-muted leading-relaxed">Approved without asking — these tools no longer prompt for this agent. Grant here for unattended runs (scheduled workflows have no one to click Allow).</p>
+                <div class="flex flex-wrap gap-2 items-center">
+                  <span
+                    v-for="name in form.approved_tools" :key="name"
+                    data-testid="approved-tool-chip"
+                    class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono"
+                    style="background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.3);color:#3fb950"
+                  >
+                    {{ name }}
+                    <button
+                      data-testid="approved-tool-remove-btn"
+                      @click="removeApprovedTool(name)"
+                      class="hover:opacity-70"
+                      :aria-label="`Remove ${name} from approved tools`"
+                    >✕</button>
+                  </span>
+                  <input
+                    v-model="newApprovedTool"
+                    data-testid="approved-tool-add-input"
+                    placeholder="tool name (e.g. bash)"
+                    class="px-2 py-1 rounded-lg text-[11px] font-mono bg-huginn-surface border border-huginn-border w-40"
+                    @keydown.enter.prevent="addApprovedTool(newApprovedTool); newApprovedTool = ''"
+                  />
+                  <button
+                    data-testid="approved-tool-add-btn"
+                    class="px-2 py-1 rounded-lg text-[11px] border border-huginn-green/30 text-huginn-green hover:bg-huginn-green/10"
+                    @click="addApprovedTool(newApprovedTool); newApprovedTool = ''"
+                  >add</button>
+                </div>
+              </div>
             </section>
 
             <div class="border-t border-huginn-border" />
@@ -434,6 +495,48 @@
                 </svg>
                 Manage skills
               </button>
+
+              <!-- Personality -->
+              <div class="mt-4 border-t border-huginn-border/20 pt-4">
+                <label class="text-[10px] text-huginn-muted/60 font-medium uppercase tracking-wide block mb-1">Personality</label>
+                <select
+                  v-model="form.personality"
+                  @change="markDirty"
+                  data-testid="agent-personality-select"
+                  class="w-full bg-huginn-bg/50 border border-huginn-border/30 rounded px-2 py-1.5 text-[11px] text-huginn-text focus:outline-none focus:border-huginn-blue/50">
+                  <option v-for="p in PERSONALITY_PRESETS" :key="p.value" :value="p.value">{{ p.label }}</option>
+                </select>
+                <p class="mt-1 text-[10px] text-huginn-muted/50 leading-relaxed">
+                  {{ PERSONALITY_PRESETS.find(p => p.value === form.personality)?.description }}
+                </p>
+
+                <div class="flex items-center justify-between mt-3">
+                  <div>
+                    <div class="text-[11px] font-medium text-huginn-text">Vet its own work</div>
+                    <div class="text-[10px] text-huginn-muted/60 mt-0.5">
+                      Runs a one-shot adversarial reviewer pass over file changes before presenting the result
+                      <span v-if="form.vet_work === null" class="text-huginn-muted/40">
+                        (currently {{ form.personality === 'strict-reviewer' ? 'on' : 'off' }} — from Personality)
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="agent-vet-work-toggle"
+                    @click="() => { form.vet_work = !resolvedVetWork; markDirty() }"
+                    :class="resolvedVetWork ? 'bg-huginn-blue' : 'bg-huginn-muted/20'"
+                    class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none">
+                    <span
+                      :class="resolvedVetWork ? 'translate-x-4' : 'translate-x-0'"
+                      class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" />
+                  </button>
+                </div>
+                <button v-if="form.vet_work !== null" type="button"
+                  @click="() => { form.vet_work = null; markDirty() }"
+                  class="mt-1 text-[10px] text-huginn-blue/70 hover:text-huginn-blue transition-colors">
+                  Reset to personality default
+                </button>
+              </div>
 
               <!-- Heartbeat -->
               <div class="mt-4 border-t border-huginn-border/20 pt-4">
@@ -969,6 +1072,12 @@
             </div>
           </div>
 
+          <div v-if="selectedModelUnreliableTools"
+            data-testid="model-picker-tools-warning"
+            class="mx-4 mt-2 px-3 py-2 rounded-lg border border-huginn-amber/40 bg-huginn-amber/8">
+            <p class="text-[11px] text-huginn-amber leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+          </div>
+
           <!-- List -->
           <div class="overflow-y-auto flex-1 py-2">
 
@@ -1001,6 +1110,7 @@
 
               <!-- Models in group — indented -->
               <button v-for="m in group.models" :key="m.name"
+                :data-testid="'pick-model-' + m.name"
                 @click="selectModel(m.name, m.source)"
                 class="w-full flex items-center gap-3 pl-10 pr-4 py-2 text-left transition-colors hover:bg-huginn-surface/60"
                 :class="form.model === m.name ? 'bg-huginn-blue/8' : ''">
@@ -1211,6 +1321,12 @@
           </div>
           <button @click="showLocalAccessModal = false" class="ml-auto" style="color:rgba(255,255,255,0.35)">✕</button>
         </div>
+        <p v-if="selectedModelUnreliableTools"
+          data-testid="local-access-modal-model-tools-warning"
+          class="text-[11px] text-huginn-amber leading-snug px-5 py-2 border-b"
+          style="border-color:#30363d">
+          {{ MODEL_TOOL_WARNING }}
+        </p>
         <!-- Body: two columns -->
         <div class="flex flex-1 overflow-hidden" style="min-height:0">
           <!-- Available -->
@@ -1313,10 +1429,12 @@
 </template>
 
 <script setup lang="ts">
-import { toRef } from 'vue'
+import { computed, ref, toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import AgentCard from '../components/AgentCard.vue'
+import ModelToolWarning from '../components/ModelToolWarning.vue'
 import { useAgentsViewState } from './agents/useAgentsViewState'
+import { PERSONALITY_PRESETS } from '../utils/personalityPresets'
 
 const props = defineProps<{ agentName?: string }>()
 const router = useRouter()
@@ -1334,6 +1452,7 @@ const {
   loadError,
   loadErrorMsg,
   showDeleteConfirm,
+  showLocalAllowAllConfirm,
   wildcardStripped,
   availableModels,
   showModelPicker,
@@ -1357,6 +1476,10 @@ const {
   modalSkills,
   colorPalette,
   filteredModelGroups,
+  selectedModelUnreliableTools,
+  showLocalAccessToolWarning,
+  listedSupportsTools,
+  MODEL_TOOL_WARNING,
   memoryModes,
   availableSkills,
   connectionLabel,
@@ -1382,10 +1505,14 @@ const {
   isLocalAllowAll,
   localAccessSummary,
   toggleLocalAllowAll,
+  confirmLocalAllowAll,
+  cancelLocalAllowAll,
   showLocalAccessModal,
   LOCAL_TOOL_CATALOG,
   SHELL_TOOLS,
   modalLocalTools,
+  addApprovedTool,
+  removeApprovedTool,
   hoveredGrantedIdx,
   hoveredAvailableName,
   hoveredAvailableConn,
@@ -1408,7 +1535,19 @@ const {
   confirmDelete,
   deleteAgent,
   createNew,
+  isNewAgent,
+  advertiseMemory,
+  onColorInputChange,
 } = useAgentsViewState(toRef(props, 'agentName'), router)
+
+const newApprovedTool = ref('')
+
+// Mirrors internal/agents.ResolveVetWork: an explicit form.vet_work always
+// wins; null (no override) falls back to the personality preset's default
+// (true only for strict-reviewer) purely for the toggle's display state.
+const resolvedVetWork = computed(() =>
+  form.value.vet_work !== null ? form.value.vet_work : form.value.personality === 'strict-reviewer',
+)
 </script>
 
 <style scoped>

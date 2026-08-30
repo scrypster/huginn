@@ -25,15 +25,36 @@ func ToolbeltProviders(tb []ToolbeltEntry) []string {
 	return out
 }
 
-// AllowedProviders returns the set of all provider names referenced by the
-// toolbelt. Returns nil for an empty toolbelt; nil means all providers allowed.
+// isAllowAllEntry reports whether a toolbelt entry is an explicit allow-all
+// wildcard. Either provider: "*" or connection_id: "*" grants every external
+// provider (used by operators who opt in, e.g. Astra on MJ Mac).
+func isAllowAllEntry(e ToolbeltEntry) bool {
+	return e.Provider == "*" || e.ConnectionID == "*"
+}
+
+// AllowedProviders returns the set of connection providers this toolbelt
+// grants. Semantics are fail-closed:
+//
+//   - nil or empty toolbelt → empty map (deny every external provider)
+//   - any entry with provider "*" or connection_id "*" → {"*": true} (explicit allow-all)
+//   - otherwise → the named providers
+//
+// An empty map is not the same as nil. Callers that pass the result to
+// permissions.Gate should keep that distinction: the gate treats nil as
+// unrestricted (legacy / no toolbelt configured on the gate itself) and an
+// empty map as deny-all external providers.
 func AllowedProviders(tb []ToolbeltEntry) map[string]bool {
 	if len(tb) == 0 {
-		return nil
+		return map[string]bool{}
 	}
 	out := make(map[string]bool, len(tb))
 	for _, e := range tb {
-		out[e.Provider] = true
+		if isAllowAllEntry(e) {
+			return map[string]bool{"*": true}
+		}
+		if e.Provider != "" {
+			out[e.Provider] = true
+		}
 	}
 	return out
 }

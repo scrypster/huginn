@@ -255,3 +255,27 @@ func TestSearchFilesTool_Execute_SkipsGitDir(t *testing.T) {
 		t.Error("expected .git directory contents to be skipped")
 	}
 }
+
+// G2: search_files output should lead with a count summary.
+func TestSearchFilesTool_Execute_SummaryHeader(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "b.go", "c.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tool := &SearchFilesTool{SandboxRoot: root}
+	result := tool.Execute(nil, map[string]any{"pattern": "*.go"})
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	lines := strings.Split(result.Output, "\n")
+	if len(lines) == 0 || !strings.Contains(lines[0], "3 files matched") {
+		t.Errorf("expected '3 files matched' summary on first line, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "a.go") {
+		t.Error("expected a.go in output")
+	}
+}

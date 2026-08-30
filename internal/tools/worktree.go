@@ -4,23 +4,55 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/scrypster/huginn/internal/agent/session"
 	"github.com/scrypster/huginn/internal/backend"
 )
 
 // runGit runs a native git command in workdir and returns (stdout, stderr, error).
-// Uses native git binary, NOT go-git, to avoid known worktree reliability issues.
+// Uses native git binary, NOT go-git, to avoid known worktree reliability issues
+// and — for commit/push — so the user's own git identity, hooks (pre-commit,
+// commit-msg, pre-push), and commit signing configuration are honored exactly
+// as they would be from the user's own terminal.
 func runGit(ctx context.Context, workdir string, args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = workdir
+	if sessionEnv := session.EnvFrom(ctx); len(sessionEnv) > 0 {
+		cmd.Env = mergeEnv(os.Environ(), sessionEnv)
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// detectDefaultBranchTimeout bounds the single local git call used to
+// discover the repo's default branch at tool-registration time — cheap and
+// local-only (no network), but capped so a misbehaving repo can't stall
+// startup.
+const detectDefaultBranchTimeout = 2 * time.Second
+
+// detectDefaultBranch returns the repo's default branch (e.g. "main"),
+// resolved from the local `origin/HEAD` ref, or "" if it can't be
+// determined (not a repo, no remote, no cached origin/HEAD). Best-effort
+// only — used to hint forge tool descriptions, never a hard dependency.
+func detectDefaultBranch(sandboxRoot string) string {
+	if sandboxRoot == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), detectDefaultBranchTimeout)
+	defer cancel()
+	stdout, _, err := runGit(ctx, sandboxRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(stdout), "origin/")
 }
 
 // --- git_worktree_create ---
@@ -33,7 +65,8 @@ type GitWorktreeCreateTool struct {
 func (t *GitWorktreeCreateTool) Name() string { return "git_worktree_create" }
 func (t *GitWorktreeCreateTool) Description() string {
 	return "Create a new git worktree with a new branch. " +
-		"Path defaults to ../{repo-name}-{branch} if not specified."
+		"Path defaults to <sandbox-root>/.huginn/worktrees/{branch} if not specified, " +
+		"so structured file tools (read/edit/write) can still reach it."
 }
 func (t *GitWorktreeCreateTool) Permission() PermissionLevel { return PermWrite }
 func (t *GitWorktreeCreateTool) Schema() backend.Tool {
@@ -66,8 +99,11 @@ func (t *GitWorktreeCreateTool) Execute(ctx context.Context, args map[string]any
 
 	wtPath, _ := args["path"].(string)
 	if strings.TrimSpace(wtPath) == "" {
-		repoName := filepath.Base(t.SandboxRoot)
-		wtPath = filepath.Join(filepath.Dir(t.SandboxRoot), repoName+"-"+branch)
+		// Default INSIDE the sandbox root (not a sibling directory outside it) —
+		// a worktree created outside SandboxRoot is unreachable by every
+		// structured file tool (read_file/edit_file/write_file), stranding the
+		// agent the moment it switches into the new worktree.
+		wtPath = filepath.Join(t.SandboxRoot, ".huginn", "worktrees", branch)
 	}
 
 	// Resolve to absolute path.

@@ -2,17 +2,28 @@ package threadmgr
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
-// stubChecker implements SpaceMembershipChecker for tests.
+// stubChecker implements SpaceMembershipChecker (and DeskFloorChecker) for tests.
 type stubChecker struct {
-	members []string
-	err     error
+	members   []string
+	err       error
+	deskPeers []string
+	deskDM    bool
 }
 
 func (s *stubChecker) SpaceMembers(_ string) ([]string, error) {
 	return s.members, s.err
+}
+
+func (s *stubChecker) DeskPeerNames() ([]string, error) {
+	return s.deskPeers, s.err
+}
+
+func (s *stubChecker) SpaceIsDeskDM(_ string) (bool, error) {
+	return s.deskDM, nil
 }
 
 func TestCreate_SpaceIDGuard_MemberAllowed(t *testing.T) {
@@ -45,6 +56,12 @@ func TestCreate_SpaceIDGuard_NonMemberDenied(t *testing.T) {
 	}
 	if !errors.Is(err, ErrAgentNotSpaceMember) {
 		t.Errorf("expected ErrAgentNotSpaceMember, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "DELEGATE_FAIL") {
+		t.Errorf("expected DELEGATE_FAIL in error so the agent can see it, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "eve") {
+		t.Errorf("expected denied agent name in error, got: %v", err)
 	}
 }
 

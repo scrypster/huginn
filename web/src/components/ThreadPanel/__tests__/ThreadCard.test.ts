@@ -271,6 +271,16 @@ describe('ThreadCard — tool calls section', () => {
     expect(wrapper.html()).toContain('running')
   })
 
+  it('shows "failed" instead of "done" when the tool result is an error', async () => {
+    const wrapper = mountCard(makeThread({
+      toolCalls: [{ tool: 'json', done: true, resultSummary: 'error: tool "json" is not available' }],
+    }))
+    const toolsBtn = wrapper.findAll('button').find(b => b.text().includes('tool call'))
+    await toolsBtn!.trigger('click')
+    expect(wrapper.html()).toContain('failed')
+    expect(wrapper.text()).not.toMatch(/\bdone\b/)
+  })
+
   it('shows "done" indicator for a completed tool call when expanded', async () => {
     const wrapper = mountCard(makeThread({
       toolCalls: [{ tool: 'read_file', done: true }],
@@ -376,6 +386,40 @@ describe('ThreadCard — summary metadata', () => {
     }))
     expect(wrapper.html()).toContain('Use composition API')
     expect(wrapper.html()).toContain('Remove legacy store')
+  })
+
+  // Fails without the feature: before VetLabel existed on FinishSummary,
+  // there was no surface at all for the vet loop's verdict in the UI.
+  it('renders a "Vetted: no findings" badge', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done', VetLabel: 'no findings' },
+    }))
+    expect(wrapper.get('[data-testid="thread-vet-badge"]').text()).toContain('Vetted: no findings')
+  })
+
+  it('renders a findings-count badge', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done', VetLabel: '2 findings', VetFindings: '- missing check' },
+    }))
+    expect(wrapper.get('[data-testid="thread-vet-badge"]').text()).toContain('Vetted: 2 findings')
+  })
+
+  it('renders an honest "did not complete" badge rather than hiding the failure', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done', VetLabel: 'did not complete' },
+    }))
+    expect(wrapper.get('[data-testid="thread-vet-badge"]').text()).toContain('Vetted: did not complete')
+  })
+
+  it('does not render a vet badge when the thread was never vetted', () => {
+    const wrapper = mountCard(makeThread({
+      Status: 'done',
+      Summary: { Summary: 'Shipped it', Status: 'done' },
+    }))
+    expect(wrapper.find('[data-testid="thread-vet-badge"]').exists()).toBe(false)
   })
 
   it('does not render summary section when thread is running', () => {
@@ -536,5 +580,29 @@ describe('ThreadCard — activity heartbeat', () => {
   it('renders no activity line when no heartbeat has arrived', () => {
     const wrapper = mountCard(makeThread({ Status: 'thinking' }))
     expect(wrapper.text()).not.toContain('may be stalled')
+  })
+})
+
+// ── S4: specialist "temporary" pill + model id ────────────────────────────
+
+describe('ThreadCard — specialist (spawn_specialist) badge', () => {
+  it('renders a "temporary" pill for a specialist thread', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: true, ModelID: 'claude-opus-4-6' }))
+    expect(wrapper.text()).toContain('temporary')
+  })
+
+  it('renders the specialist model id', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: true, ModelID: 'claude-opus-4-6' }))
+    expect(wrapper.text()).toContain('claude-opus-4-6')
+  })
+
+  it('does not render the temporary pill for a regular (roster) thread', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: false }))
+    expect(wrapper.text()).not.toContain('temporary')
+  })
+
+  it('does not render a model id line when not a specialist', () => {
+    const wrapper = mountCard(makeThread({ IsSpecialist: false, ModelID: 'claude-opus-4-6' }))
+    expect(wrapper.text()).not.toContain('claude-opus-4-6')
   })
 })

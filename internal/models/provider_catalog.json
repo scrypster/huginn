@@ -8,7 +8,10 @@
         "context_window": 200000,
         "max_output_tokens": 32768,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 5.00,
+        "output_cost_per_mtok": 25.00,
+        "strengths": ["deep reasoning", "hard multi-step tasks", "large codebase refactors"]
       },
       "claude-sonnet-4-6": {
         "display_name": "Claude Sonnet 4.6",
@@ -16,7 +19,10 @@
         "context_window": 200000,
         "max_output_tokens": 65536,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 3.00,
+        "output_cost_per_mtok": 15.00,
+        "strengths": ["general coding", "everyday production workloads", "balanced cost/quality"]
       },
       "claude-haiku-4-5-20251001": {
         "display_name": "Claude Haiku 4.5",
@@ -24,7 +30,10 @@
         "context_window": 200000,
         "max_output_tokens": 8096,
         "supports_tools": true,
-        "tier": "medium"
+        "tier": "medium",
+        "input_cost_per_mtok": 1.00,
+        "output_cost_per_mtok": 5.00,
+        "strengths": ["fast turnaround", "high-volume simple tasks", "low cost"]
       },
       "claude-haiku-4-5": {
         "display_name": "Claude Haiku 4.5 (deprecated)",
@@ -33,7 +42,9 @@
         "context_window": 200000,
         "max_output_tokens": 8096,
         "supports_tools": true,
-        "tier": "medium"
+        "tier": "medium",
+        "input_cost_per_mtok": 1.00,
+        "output_cost_per_mtok": 5.00
       },
       "claude-opus-4-5": {
         "display_name": "Claude Opus 4.5",
@@ -42,7 +53,9 @@
         "context_window": 200000,
         "max_output_tokens": 32768,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 5.00,
+        "output_cost_per_mtok": 25.00
       },
       "claude-sonnet-4-5": {
         "display_name": "Claude Sonnet 4.5",
@@ -51,7 +64,9 @@
         "context_window": 200000,
         "max_output_tokens": 65536,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 3.00,
+        "output_cost_per_mtok": 15.00
       },
       "claude-3-5-sonnet-20241022": {
         "display_name": "Claude 3.5 Sonnet",
@@ -60,7 +75,9 @@
         "context_window": 200000,
         "max_output_tokens": 8096,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 3.00,
+        "output_cost_per_mtok": 15.00
       },
       "claude-3-5-haiku-20241022": {
         "display_name": "Claude 3.5 Haiku",
@@ -69,7 +86,9 @@
         "context_window": 200000,
         "max_output_tokens": 8096,
         "supports_tools": true,
-        "tier": "medium"
+        "tier": "medium",
+        "input_cost_per_mtok": 0.80,
+        "output_cost_per_mtok": 4.00
       }
     },
     "openai": {
@@ -79,7 +98,10 @@
         "context_window": 128000,
         "max_output_tokens": 16384,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 2.50,
+        "output_cost_per_mtok": 10.00,
+        "strengths": ["multimodal", "general purpose", "vision + text"]
       },
       "gpt-4o-mini": {
         "display_name": "GPT-4o Mini",
@@ -87,7 +109,10 @@
         "context_window": 128000,
         "max_output_tokens": 16384,
         "supports_tools": true,
-        "tier": "medium"
+        "tier": "medium",
+        "input_cost_per_mtok": 0.15,
+        "output_cost_per_mtok": 0.60,
+        "strengths": ["fast", "low cost", "simple tasks"]
       },
       "o1": {
         "display_name": "OpenAI o1",
@@ -95,7 +120,10 @@
         "context_window": 200000,
         "max_output_tokens": 32768,
         "supports_tools": false,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 15.00,
+        "output_cost_per_mtok": 60.00,
+        "strengths": ["complex reasoning", "math and science"]
       },
       "o3": {
         "display_name": "OpenAI o3",
@@ -103,7 +131,10 @@
         "context_window": 200000,
         "max_output_tokens": 100000,
         "supports_tools": false,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 2.00,
+        "output_cost_per_mtok": 8.00,
+        "strengths": ["complex reasoning", "agentic tool planning"]
       },
       "o3-mini": {
         "display_name": "OpenAI o3-mini",
@@ -111,7 +142,10 @@
         "context_window": 200000,
         "max_output_tokens": 65536,
         "supports_tools": false,
-        "tier": "medium"
+        "tier": "medium",
+        "input_cost_per_mtok": 1.10,
+        "output_cost_per_mtok": 4.40,
+        "strengths": ["reasoning on a budget"]
       },
       "gpt-4-turbo": {
         "display_name": "GPT-4 Turbo",
@@ -120,7 +154,9 @@
         "context_window": 128000,
         "max_output_tokens": 4096,
         "supports_tools": true,
-        "tier": "high"
+        "tier": "high",
+        "input_cost_per_mtok": 10.00,
+        "output_cost_per_mtok": 30.00
       },
       "gpt-3.5-turbo": {
         "display_name": "GPT-3.5 Turbo",
@@ -129,7 +165,9 @@
         "context_window": 16385,
         "max_output_tokens": 4096,
         "supports_tools": true,
-        "tier": "low"
+        "tier": "low",
+        "input_cost_per_mtok": 0.50,
+        "output_cost_per_mtok": 1.50
       }
     }
   }

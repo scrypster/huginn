@@ -61,6 +61,13 @@ type MCPToolCallResult struct {
 type MCPContent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// Data and MimeType are set on image content blocks (type == "image"),
+	// per the MCP spec: Data is the raw base64-encoded image bytes (no
+	// "data:" prefix), MimeType is e.g. "image/png". Both are empty for
+	// text content. See MCPToolAdapter.Execute for how these are surfaced
+	// (bounded, as a data URI) rather than silently dropped.
+	Data     string `json:"data,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 type initializeParams struct {

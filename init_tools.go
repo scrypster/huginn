@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	agentslib "github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
+	connproviders "github.com/scrypster/huginn/internal/connections/providers"
 	conntools "github.com/scrypster/huginn/internal/connections/tools"
 	"github.com/scrypster/huginn/internal/mcp"
 	"github.com/scrypster/huginn/internal/permissions"
@@ -65,14 +67,17 @@ func initTools(
 	tools.RegisterBuiltins(toolReg, cwd, bashTimeout)
 	tools.RegisterGitTools(toolReg, cwd)
 	tools.RegisterTestsTool(toolReg, cwd, bashTimeout)
-	tools.RegisterGitHubTools(toolReg)
+	tools.RegisterGitHubTools(toolReg, cwd)
 	toolReg.TagTools(tools.GitHubCLIToolNames(), "github_cli")
+	tools.RegisterGitLabTools(toolReg, cwd)
+	toolReg.TagTools(tools.GitLabCLIToolNames(), "gitlab_cli")
 	toolReg.TagTools(tools.BuiltinToolNames(), "builtin")
 	tools.RegisterWorktreeTools(toolReg, cwd)
 	tools.RegisterNotesTool(toolReg, huginnHome, agentReg)
+	tools.RegisterWriteWorkflowTool(toolReg, huginnHome)
 
 	// --- Connection (OAuth) tools ---
-	initConnectionTools(cfg, huginnHome, sqlDB, toolReg)
+	initConnectionTools(cfg, huginnHome, cwd, sqlDB, toolReg)
 
 	// --- Skill PromptTools ---
 	for _, s := range loadedSkills {
@@ -123,7 +128,7 @@ func initTools(
 }
 
 // initConnectionTools registers OAuth integration tools for all configured connections.
-func initConnectionTools(cfg config.Config, huginnHome string, sqlDB *sqlitedb.DB, toolReg *tools.Registry) {
+func initConnectionTools(cfg config.Config, huginnHome string, cwd string, sqlDB *sqlitedb.DB, toolReg *tools.Registry) {
 	connStorePath := filepath.Join(huginnHome, "connections.json")
 	if sqlDB != nil {
 		if err := connections.MigrateFromJSON(connStorePath, sqlDB); err != nil {
@@ -142,6 +147,13 @@ func initConnectionTools(cfg config.Config, huginnHome string, sqlDB *sqlitedb.D
 		}
 	}
 	if connStore == nil {
+		// No connection store: the bitbucket_pr_* belt still registers
+		// below (it's not CLI-gated like gh/glab), but every call will
+		// fail with the "no connection configured" error unless
+		// BITBUCKET_ACCESS_TOKEN is set — matches gh/glab's own "clear
+		// actionable error, never a silent no-op" discipline.
+		tools.RegisterBitbucketTools(toolReg, cwd, nil)
+		toolReg.TagTools(tools.BitbucketToolNames(), "bitbucket")
 		return
 	}
 
@@ -155,7 +167,37 @@ func initConnectionTools(cfg config.Config, huginnHome string, sqlDB *sqlitedb.D
 	if regErr := conntools.RegisterAll(toolReg, connMgr, connStore); regErr != nil {
 		slog.Info("connections: tool registration failed", "err", regErr)
 	}
-	_ = connMgr
+
+	tools.RegisterBitbucketTools(toolReg, cwd, bitbucketClientFunc(connMgr, connStore))
+	toolReg.TagTools(tools.BitbucketToolNames(), "bitbucket")
+}
+
+// bitbucketProviderForConnMgr is a minimal IntegrationProvider — only its
+// OAuthConfig is used by Manager.GetHTTPClient to build the refresh-capable
+// oauth2 client; it never needs real client credentials since the tokens
+// it's asked to refresh were already issued against the user's own OAuth
+// app registration at connect time.
+var bitbucketProviderForConnMgr = connproviders.NewBitbucket("", "")
+
+// bitbucketClientFunc adapts the connections.Manager/Store into a
+// tools.BitbucketClientFunc: on every call it looks up the first configured
+// Bitbucket connection and returns an HTTP client whose Authorization
+// header the oauth2 transport keeps fresh. Returns a clear, actionable
+// error when no Bitbucket connection exists yet — never a panic or an
+// unauthenticated client.
+func bitbucketClientFunc(connMgr *connections.Manager, connStore connections.StoreInterface) tools.BitbucketClientFunc {
+	return func(ctx context.Context) (*http.Client, error) {
+		conns, err := connStore.List()
+		if err != nil {
+			return nil, fmt.Errorf("bitbucket: list connections: %w", err)
+		}
+		for _, c := range conns {
+			if c.Provider == connections.ProviderBitbucket {
+				return connMgr.GetHTTPClient(ctx, c.ID, bitbucketProviderForConnMgr)
+			}
+		}
+		return nil, fmt.Errorf("bitbucket: no Bitbucket connection configured — connect Bitbucket in Settings → Connections")
+	}
 }
 
 // langExtensions maps language names to the file extensions that indicate
@@ -163,9 +205,11 @@ func initConnectionTools(cfg config.Config, huginnHome string, sqlDB *sqlitedb.D
 var langExtensions = map[string][]string{
 	"go":         {".go"},
 	"typescript": {".ts", ".tsx"},
-	"javascript": {".js", ".jsx"},
+	"javascript": {".js", ".jsx", ".mjs", ".cjs"},
 	"rust":       {".rs"},
 	"python":     {".py"},
+	"ruby":       {".rb"},
+	"php":        {".php"},
 }
 
 // projectHasLanguage reports whether cwd (or its immediate subdirectories)

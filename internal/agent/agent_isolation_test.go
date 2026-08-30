@@ -35,7 +35,7 @@ func TestAgentToolbelt_SchemasSentToModel_OnlyDeclaredProviders(t *testing.T) {
 	reg := newTestToolsReg()
 	ag := agentWithToolbelt([]string{"github"}, false)
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	if len(schemas) != 1 {
 		t.Fatalf("expected 1 schema for github-only toolbelt, got %d", len(schemas))
@@ -56,7 +56,7 @@ func TestAgentToolbelt_NoToolbelt_NoSchemasAvailable(t *testing.T) {
 	reg := newTestToolsReg()
 	ag := &agents.Agent{Name: "open-agent"} // no toolbelt, no local tools
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	if len(schemas) != 0 {
 		t.Errorf("expected 0 schemas with default-deny when no toolbelt and no local tools set, got %d", len(schemas))
@@ -77,7 +77,7 @@ func TestAgentToolbelt_ApprovalGate_SetsWatchedProvider(t *testing.T) {
 		return permissions.Deny
 	})
 
-	_, agentGate := applyToolbelt(ag, reg, gate)
+	_, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	// A write-level call for the watched "github" provider should still prompt
 	// even when skipAll=true.
@@ -105,7 +105,7 @@ func TestAgentToolbelt_NoApprovalGate_ProviderNotWatched(t *testing.T) {
 		return permissions.Deny
 	})
 
-	_, agentGate := applyToolbelt(ag, reg, gate)
+	_, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	allowed := agentGate.Check(permissions.PermissionRequest{
 		ToolName: "github_list_prs",
@@ -229,8 +229,8 @@ func TestCrossAgent_ConnectionsNotShared(t *testing.T) {
 	agA := agentWithToolbelt([]string{"github"}, false)
 	agB := agentWithToolbelt([]string{"slack"}, false)
 
-	schemasA, _ := applyToolbelt(agA, reg, nil)
-	schemasB, _ := applyToolbelt(agB, reg, nil)
+	schemasA, _ := applyToolbelt(agA, reg, nil, nil)
+	schemasB, _ := applyToolbelt(agB, reg, nil, nil)
 
 	// Agent A: must only contain github tools.
 	if len(schemasA) != 1 {
@@ -273,7 +273,7 @@ func TestAgentToolbelt_ChatWithAgent_SchemasFiltered(t *testing.T) {
 
 	// Build a github-only agent and compute the filtered schema list.
 	ag := agentWithToolbelt([]string{"github"}, false)
-	filteredSchemas, _ := applyToolbelt(ag, reg, nil)
+	filteredSchemas, _ := applyToolbelt(ag, reg, nil, nil)
 
 	// Sanity: applyToolbelt must have returned exactly the github tool.
 	if len(filteredSchemas) != 1 {

@@ -1,8 +1,10 @@
 package memory_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/memory"
@@ -235,5 +237,90 @@ func TestSaveGlobalConfig_AtomicWrite(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Errorf("expected 0600 permissions, got %o", info.Mode().Perm())
+	}
+}
+
+func TestResolveGlobalConfigPath_BothDefaultLocations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	xdg := filepath.Join(home, ".config", "huginn", "muninn.json")
+	legacy := filepath.Join(home, ".huginn", "muninn.json")
+
+	if got := memory.ResolveGlobalConfigPath(""); !strings.HasSuffix(got, filepath.Join(".config", "huginn", "muninn.json")) {
+		t.Fatalf("empty home fallback = %q", got)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"endpoint":"http://127.0.0.1:8750"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := memory.ResolveGlobalConfigPath(""); got != legacy {
+		t.Fatalf("legacy path: got %q want %q", got, legacy)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(xdg), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(xdg, []byte(`{"endpoint":"http://10.0.0.1:3030"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := memory.ResolveGlobalConfigPath(""); got != xdg {
+		t.Fatalf("xdg wins when both exist: got %q want %q", got, xdg)
+	}
+}
+
+func TestLoadAndPinGlobalConfig_ReadsXDGAndLegacy(t *testing.T) {
+	for _, rel := range []string{
+		filepath.Join(".config", "huginn", "muninn.json"),
+		filepath.Join(".huginn", "muninn.json"),
+	} {
+		t.Run(rel, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"endpoint":"http://127.0.0.1:8750","mcp_token":"mdb_test"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, used, err := memory.LoadAndPinGlobalConfig("")
+			if err != nil {
+				t.Fatalf("LoadAndPinGlobalConfig: %v", err)
+			}
+			if used != path {
+				t.Fatalf("used %q want %q", used, path)
+			}
+			if cfg.Endpoint != "http://127.0.0.1:8750" {
+				t.Fatalf("endpoint %q", cfg.Endpoint)
+			}
+			if cfg.Endpoint == "" {
+				t.Fatal("empty endpoint after valid load")
+			}
+		})
+	}
+}
+
+func TestLoadAndPinGlobalConfig_EmptyEndpointIllegalWhenFileValid(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "huginn", "muninn.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"endpoint":"","username":"root"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, used, err := memory.LoadAndPinGlobalConfig(path)
+	if err == nil {
+		t.Fatalf("expected empty-endpoint error, cfg=%+v used=%q", cfg, used)
+	}
+	if !errors.Is(err, memory.ErrEmptyMuninnEndpoint) {
+		t.Fatalf("err = %v, want ErrEmptyMuninnEndpoint", err)
+	}
+	if used != path {
+		t.Fatalf("used %q want %q", used, path)
 	}
 }

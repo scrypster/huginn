@@ -36,6 +36,16 @@
       </div>
     </TransitionGroup>
 
+    <Transition name="ws-banner">
+      <div v-if="spaceMentionToast"
+        data-testid="space-reply-mention-toast"
+        class="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs font-medium"
+        style="background:rgba(88,166,255,0.12);border-bottom:1px solid rgba(88,166,255,0.25);color:rgba(88,166,255,0.96)">
+        <span>You were mentioned in a thread — {{ spaceMentionToast }}</span>
+        <button type="button" class="px-2 py-0.5 rounded border border-huginn-blue/40 text-[11px]" @click="spaceMentionToast = null">Dismiss</button>
+      </div>
+    </Transition>
+
     <!-- ── No session/space selected ──────────────────────────────── -->
     <div v-if="!sessionId && !spaceId" class="flex flex-col items-center justify-center h-full gap-6 pb-16">
       <div class="w-20 h-20 rounded-3xl flex items-center justify-center select-none"
@@ -160,7 +170,7 @@
 
           <!-- Agents chip (space context) -->
           <button v-if="activeSpace"
-            @click="toggleMemberPanel()"
+            @click="activeSpace.kind === 'channel' ? (rosterOpen = true) : toggleMemberPanel()"
             class="flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs transition-all duration-150 hover:bg-huginn-surface active:scale-95"
             style="border:1px solid rgba(255,255,255,0.08)"
             title="Manage agents"
@@ -253,6 +263,24 @@
         </div>
       </div>
 
+      <div v-if="displayAgentUnreliableTools"
+        data-testid="chat-model-tools-warning"
+        class="flex-shrink-0 px-5 py-1.5 border-b border-huginn-yellow/25 bg-huginn-yellow/8">
+        <p class="text-[11px] text-huginn-yellow leading-snug">{{ MODEL_TOOL_WARNING }}</p>
+      </div>
+
+      <MemoryVaultChip
+        v-if="memoryChip"
+        :chip="memoryChip"
+        :agent-name="memoryChip.agentName"
+        :agent-vault-name="(memoryChipAgent as { vault_name?: string } | null)?.vault_name || ''"
+        :agent-memory-mode="(memoryChipAgent as { memory_mode?: string } | null)?.memory_mode || ''"
+        :known-agents="agentsList"
+        @dismiss="dismissMemoryChip"
+        @connected="onMemoryVaultConnected"
+        @status="onMuninnChipStatus"
+      />
+
       <!-- ── In-chat search bar (Ctrl+F) ────────────────────────── -->
       <Transition
         enter-active-class="transition-all duration-150 ease-out"
@@ -299,7 +327,8 @@
       </Transition>
 
       <!-- Messages scroll area (position:relative for unread pill) -->
-      <div ref="messagesEl" class="flex-1 overflow-y-auto relative" @click="handleMessagesClick" @scroll="onMessagesScroll">
+      <div ref="messagesEl" class="flex-1 overflow-y-auto relative" @click="handleMessagesClick" @scroll="onMessagesScroll"
+        @touchstart.passive="onHallwayTouchStart" @touchmove.passive="onHallwayTouchMove" @touchend="onHallwayTouchEnd">
 
         <!-- Infinite scroll sentinel — observed by IntersectionObserver to load older space messages -->
         <div v-if="spaceId" ref="topSentinelEl" class="h-1 w-full" />
@@ -349,8 +378,9 @@
           </div>
         </div>
 
-        <!-- Empty chat -->
-        <div v-else-if="messages.length === 0 && !streaming" class="flex flex-col items-center justify-center h-full gap-3 pb-16">
+        <!-- Empty chat — hide while a space timeline is still hydrating so /space/:id
+             does not flash "Send your first message" over the spinner. -->
+        <div v-else-if="messages.length === 0 && !streaming && !spaceLoadingInitial" class="flex flex-col items-center justify-center h-full gap-3 pb-16">
           <div class="w-12 h-12 rounded-2xl flex items-center justify-center select-none"
             :style="displayAgent
               ? `background:${displayAgent.color}18;border:1px solid ${displayAgent.color}33`
@@ -368,36 +398,57 @@
             <div :data-msg-id="msg.id" style="position:relative;height:0" />
 
             <!-- Date divider -->
-            <div v-if="msg.dateLabel" class="flex items-center gap-3 my-4">
+            <div v-if="msg.dateLabel" class="flex items-center gap-3 my-4" data-testid="hallway-day-sep">
               <div class="flex-1 h-px bg-huginn-border/40" />
               <span class="text-[11px] text-huginn-muted/50 font-medium select-none">{{ msg.dateLabel }}</span>
               <div class="flex-1 h-px bg-huginn-border/40" />
             </div>
 
-            <!-- Thread completion summary card — visually distinct from regular messages -->
+            <!-- Thread completion summary card — visually distinct from regular messages.
+                 Failed (StatusError/timeout) completions reuse the same card shape but in
+                 the fail-red palette so a reaper timeout never reads as an accomplishment. -->
             <div v-if="msg.threadSummary"
               class="flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl mx-2 mt-4"
-              style="background:rgba(46,160,67,0.07);border:1px solid rgba(46,160,67,0.22)">
-              <svg class="w-3.5 h-3.5 text-huginn-green/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              :style="msg.threadSummaryFailed
+                ? 'background:rgba(248,81,73,0.07);border:1px solid rgba(248,81,73,0.22)'
+                : 'background:rgba(46,160,67,0.07);border:1px solid rgba(46,160,67,0.22)'"
+              :data-testid="msg.threadSummaryFailed ? 'thread-summary-failed' : 'thread-summary'">
+              <svg v-if="msg.threadSummaryFailed" class="w-3.5 h-3.5 text-huginn-red/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <svg v-else class="w-3.5 h-3.5 text-huginn-green/70 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
               </svg>
               <div class="flex-1 min-w-0">
-                <div class="md-content text-xs leading-relaxed" style="color:rgba(46,160,67,0.85)"
+                <div class="md-content text-xs leading-relaxed" :style="msg.threadSummaryFailed ? 'color:rgba(248,81,73,0.85)' : 'color:rgba(46,160,67,0.85)'"
                   v-html="renderWithMentions(msg.content)" />
                 <button v-if="msg.threadSummaryThreadId"
                   @click="openThreadDetailById(msg.threadSummaryThreadId!)"
                   class="mt-1 text-[10px] font-medium hover:underline"
-                  style="color:rgba(46,160,67,0.55)">
+                  :style="msg.threadSummaryFailed ? 'color:rgba(248,81,73,0.55)' : 'color:rgba(46,160,67,0.55)'">
                   View thread →
                 </button>
               </div>
             </div>
 
+            <!-- Harness announcement — system/delegation row, not teammate voice -->
+            <div v-else-if="msg.systemLine"
+              class="flex items-center justify-center gap-2 px-3 my-2"
+              data-testid="system-line">
+              <div class="flex-1 h-px bg-huginn-border/40" />
+              <span class="text-[11px] text-huginn-muted/70 text-center max-w-[80%]">{{ msg.content }}</span>
+              <div class="flex-1 h-px bg-huginn-border/40" />
+            </div>
+
             <!-- User message (right-aligned bubble) -->
             <div v-else-if="msg.role === 'user'" class="group flex flex-col items-end" :class="msg.showHeader ? 'mt-4' : 'mt-1'">
-              <div class="md-content max-w-[75%] px-4 py-3 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words"
-                style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
-                v-html="renderWithMentions(msg.content)" />
+              <MsgTimeReveal :created-at="msg.createdAt" :revealed="hallwayTimesRevealed" align="end">
+                <div class="md-content max-w-[75%] px-4 py-3 rounded-2xl rounded-tr-sm text-sm text-huginn-text leading-relaxed break-words cursor-pointer"
+                  style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.22)"
+                  data-testid="space-root-bubble"
+                  @click="spaceId && openReplyThread(msg)"
+                  v-html="renderWithMentions(msg.content)" />
+              </MsgTimeReveal>
               <p v-if="msg.id === lastSeenMessageId"
                  class="text-[10px] text-right pr-3 -mt-1"
                  style="color:#8b949e">
@@ -407,7 +458,20 @@
                 class="opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
                 :agent-vault-name="''"
+                :show-reply="!!spaceId"
+                :show-diagnose="!!spaceId && !!msg.delegatedThreads?.length"
                 @retry="handleRetry"
+                @reply="openReplyThread(msg)"
+                @diagnose="diagnoseMessage(msg)"
+              />
+              <SpaceReplyChip
+                v-if="spaceId && !msg.parent_id"
+                :count="msg.spaceReplyCount ?? 0"
+                :preview="msg.lastPreview"
+                :typing-agent="spaceReplyTyping[msg.id]"
+                :participant="!!msg.spaceReplyParticipant || (msg.role === 'user')"
+                :new-since="msg.newSince ?? 0"
+                @open="openReplyThread(msg)"
               />
               <!-- Delegated thread activity rows (also shown for user-parented threads) -->
               <div v-if="msg.delegatedThreads?.length" class="mt-1.5 space-y-1 w-full max-w-[75%]">
@@ -447,6 +511,10 @@
                       <polyline points="9 18 15 12 9 6" />
                     </svg>
                   </button>
+                  <!-- Checkpoint affordance: "Snapshotted — Undo available" once this
+                       delegated run has a checkpoint ledger entry; amber "Not snapshotted"
+                       when its capture failed (honesty requirement — never hidden). -->
+                  <CheckpointBadge :thread-id="d.threadId" :done="d.done" />
                   <!-- Delegated agent thinking indicator -->
                   <div
                     v-if="isThreadThinking(d.threadId)"
@@ -522,30 +590,46 @@
               <div class="flex-1 min-w-0 pt-0.5">
                 <!-- Per-message agent attribution header (only on first message of a run) -->
                 <AgentMessageHeader
-                  v-if="msg.showHeader && msg.agent"
-                  :agent-name="msg.agent"
+                  v-if="msg.showHeader && hallwayName(msg)"
+                  :agent-name="hallwayName(msg)"
                   :created-at="msg.createdAt"
-                  :agent-description="agentsList.find(a => a.name === msg.agent)?.description"
+                  :agent-description="agentsList.find(a => a.name === hallwayName(msg))?.description"
                 />
-                <!-- Message text -->
-                <div v-if="msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words"
-                  v-html="renderWithMentions(msg.content)" />
-                <!-- Active (in-flight) tool calls — anchored inside this message bubble so
-                     it always appears below the content, never floating above it. -->
-                <div v-if="msg.streaming && activeToolCalls.length" class="mt-2">
-                  <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50">
-                    <div class="flex gap-0.5 flex-shrink-0">
-                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:0ms" />
-                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:120ms" />
-                      <span class="w-1 h-1 rounded-full bg-huginn-yellow animate-bounce" style="animation-delay:240ms" />
-                    </div>
-                    <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                      <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-                    </svg>
-                    <span class="text-xs text-huginn-text">
-                      {{ activeMemoryChipText || `${activeToolCalls.length} tool call${activeToolCalls.length === 1 ? '' : 's'}` }}
-                    </span>
-                    <span class="text-[11px] text-huginn-muted animate-pulse flex-shrink-0">· running</span>
+                <!-- Message text — system-fail prefixes are not teammate speech -->
+                <SystemFailLine
+                  v-if="isBareFailSpeech(visibleAssistantText(msg) || msg.content)"
+                  :content="visibleAssistantText(msg) || msg.content"
+                  :tool-name="failDisplayFor(msg.content, msg.toolCalls)?.toolName"
+                />
+                <MsgTimeReveal
+                  v-else-if="visibleAssistantText(msg) && !msg.hideFailSpeech"
+                  :created-at="msg.createdAt"
+                  :revealed="hallwayTimesRevealed"
+                  align="start"
+                >
+                  <div class="md-content text-sm text-huginn-text leading-relaxed break-words cursor-pointer"
+                    data-testid="space-root-bubble"
+                    @click="spaceId && openReplyThread(msg)"
+                    v-html="renderWithMentions(visibleAssistantText(msg))" />
+                </MsgTimeReveal>
+                <!-- Live tool ticker: tool calls as they happen, anchored inside this
+                     message bubble so it always appears below the content, never
+                     floating above it. Spinner on the in-flight call, ✓ on completed
+                     ones. Collapses into the "N tool calls · done" chip below once no
+                     tool call is still in flight (no duplicate surfaces). -->
+                <div v-if="msg.streaming && visibleToolCalls(activeToolCallsFor(msg)).length" class="mt-2" data-testid="tool-ticker">
+                  <div class="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 px-3 py-1.5 rounded-xl border border-huginn-border bg-huginn-surface/50 text-xs text-huginn-text">
+                    <template v-for="(entry, i) in toolTicker(msg)" :key="entry.id">
+                      <span v-if="i > 0" class="text-huginn-muted">·</span>
+                      <span class="inline-flex items-center gap-1"
+                        :data-testid="entry.done ? 'tool-ticker-done-entry' : 'tool-ticker-active-entry'">
+                        <svg v-if="!entry.done" class="w-3 h-3 flex-shrink-0 animate-spin text-huginn-yellow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" d="M12 3a9 9 0 100 18" />
+                        </svg>
+                        <span v-else class="text-huginn-green flex-shrink-0">✓</span>
+                        {{ entry.label }}
+                      </span>
+                    </template>
                   </div>
                 </div>
                 <!-- Follow-up thinking indicator: lead agent is preparing their synthesis -->
@@ -555,6 +639,16 @@
                   <span class="w-1.5 h-1.5 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:150ms" />
                   <span class="w-1.5 h-1.5 rounded-full bg-huginn-blue animate-bounce" style="animation-delay:300ms" />
                 </div>
+
+                <SpaceReplyChip
+                  v-if="spaceId && !msg.parent_id"
+                  :count="msg.spaceReplyCount ?? 0"
+                  :preview="msg.lastPreview"
+                  :typing-agent="spaceReplyTyping[msg.id]"
+                  :participant="!!msg.spaceReplyParticipant"
+                  :new-since="msg.newSince ?? 0"
+                  @open="openReplyThread(msg)"
+                />
 
                 <!-- Delegated thread reply strips (Slack-style compact) -->
                 <div v-if="msg.delegatedThreads?.length" class="mt-1.5 space-y-1">
@@ -598,6 +692,8 @@
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </button>
+                    <!-- Checkpoint affordance — see the equivalent comment above. -->
+                    <CheckpointBadge :thread-id="d.threadId" :done="d.done" />
                     <!-- Delegated agent thinking indicator -->
                     <div
                       v-if="isThreadThinking(d.threadId)"
@@ -703,19 +799,33 @@
                 <!-- Tool call chip (completed, attached to this message).
                      Visible as soon as no tool calls are actively running, so the
                      chip persists below the content even while text is still streaming. -->
-                <div v-if="msg.toolCalls?.length && (!msg.streaming || !activeToolCalls.length)" class="mt-2">
+                <div v-if="msg.toolCalls?.length && !isBareFailSpeech(visibleAssistantText(msg) || msg.content) && (!msg.streaming || !visibleToolCalls(activeToolCallsFor(msg)).length)" class="mt-2">
                   <!-- Collapsed chip -->
                   <button @click="toggleMsgToolCalls(msg.id)"
-                    class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100">
+                    class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100"
+                    :title="messageToolChipFailed(msg.content, msg.toolCalls) ? failDisplayFor(msg.content, msg.toolCalls)?.diagnostic : undefined"
+                    :aria-description="messageToolChipFailed(msg.content, msg.toolCalls) ? failDisplayFor(msg.content, msg.toolCalls)?.diagnostic : undefined">
                     <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                       <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                     </svg>
-                    <span class="text-xs text-huginn-text">
-                      {{ isMemoryOnlyToolCalls(msg.toolCalls)
-                        ? `🧠 Memory: ${summarizeMemoryToolCalls(msg.toolCalls)}`
-                        : `${msg.toolCalls.length} tool call${msg.toolCalls.length === 1 ? '' : 's'}` }}
+                    <span
+                      v-if="isMemoryOnlyToolCalls(msg.toolCalls)"
+                      class="text-xs text-huginn-text"
+                    >
+                      🧠 Memory: {{ summarizeMemoryToolCalls(msg.toolCalls) }}
                     </span>
-                    <span class="text-[11px] text-huginn-green">· done</span>
+                    <span
+                      v-else-if="messageToolChipFailed(msg.content, msg.toolCalls)"
+                      class="text-xs text-huginn-red"
+                    >
+                      {{ failChipLabel() }}
+                    </span>
+                    <template v-else>
+                      <span class="text-xs text-huginn-text">
+                        {{ `${msg.toolCalls.length} tool call${msg.toolCalls.length === 1 ? '' : 's'}` }}
+                      </span>
+                      <span class="text-[11px] text-huginn-green">· done</span>
+                    </template>
                     <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                       :class="expandedMsgCalls.has(msg.id) ? 'rotate-180' : ''"
                       viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -728,7 +838,10 @@
                       class="rounded-xl overflow-hidden border border-huginn-border">
                       <button @click="toggleToolCall(tc)"
                         class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-huginn-surface/80 transition-colors duration-100">
-                        <span class="text-xs font-medium text-huginn-text flex-1">{{ tc.name }}</span>
+                        <span
+                          class="text-xs font-medium text-huginn-text flex-1"
+                          :title="isFailedToolResult(tc.result) ? `${tc.name}${tc.result ? ` · ${tc.result}` : ''}` : undefined"
+                        >{{ isFailedToolResult(tc.result) ? failChipLabel() : tc.name }}</span>
                         <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                           :class="expandedToolCalls.has(tc.id) ? 'rotate-180' : ''"
                           viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -749,10 +862,42 @@
                     </div>
                   </div>
                 </div>
+
+                <!-- Diff card: renders only when this turn's tool calls actually
+                     changed a file (write_file/edit_file attach a diff). Collapsed
+                     by default; independent of the tool-call chip above so it reads
+                     as the work product, not another tool-invocation detail. -->
+                <DiffCard
+                  v-if="msg.toolCalls?.length && !msg.streaming"
+                  :diffs="msg.toolCalls.map(tc => tc.diff)"
+                />
+                <!-- PR card: renders only when this turn's tool calls include
+                     a successful gh_pr_create/glab_mr_create — the
+                     deliverable itself, alongside the diff that produced it. -->
+                <PRCard
+                  v-if="msg.toolCalls?.length && !msg.streaming"
+                  :tool-calls="msg.toolCalls"
+                />
+                <!-- Completion line: prefers the PR-as-deliverable handoff
+                     line (a run that both changed files and opened a PR)
+                     over the plain changed-files fallback, and both are
+                     suppressed when the model's own speech already said it. -->
+                <p
+                  v-if="!msg.streaming && prCompletionLineFor(msg)"
+                  class="mt-1 text-[11px] text-huginn-muted italic"
+                >{{ prCompletionLineFor(msg) }}</p>
+                <p
+                  v-else-if="!msg.streaming && changedFilesLineFor(msg)"
+                  class="mt-1 text-[11px] text-huginn-muted italic"
+                >{{ changedFilesLineFor(msg) }}</p>
               <MessageActions
                 class="mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 :msg="msg"
                 :agent-vault-name="activeAgentVaultName"
+                :show-reply="!!spaceId"
+                :show-diagnose="!!spaceId && !!msg.delegatedThreads?.length"
+                @reply="openReplyThread(msg)"
+                @diagnose="diagnoseMessage(msg)"
               />
               </div>
             </div>
@@ -773,11 +918,17 @@
             <span class="text-xs text-huginn-yellow font-semibold">Permission required</span>
           </div>
           <p class="text-xs text-huginn-muted mb-3 ml-5.5">{{ permissionDesc }}</p>
-          <div class="flex gap-2 ml-5.5">
-            <button @click="approvePermission(true)"
+          <div class="flex gap-2 ml-5.5 flex-wrap">
+            <button @click="approvePermission('once')" data-testid="permission-allow-once"
               class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
-                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Allow</button>
-            <button @click="approvePermission(false)"
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Allow once</button>
+            <button @click="approvePermission('always_agent')" data-testid="permission-allow-always"
+              class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Always allow for {{ permissionAgentName }}</button>
+            <button @click="approvePermission('always_agent_all')" data-testid="permission-allow-always-all"
+              class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-green transition-all duration-150
+                     border border-huginn-green/30 hover:bg-huginn-green/15 active:scale-95">Always allow everything for {{ permissionAgentName }}</button>
+            <button @click="approvePermission('deny')" data-testid="permission-deny"
               class="px-3 py-1.5 rounded-lg text-xs font-medium text-huginn-red transition-all duration-150
                      border border-huginn-red/30 hover:bg-huginn-red/15 active:scale-95">Deny</button>
           </div>
@@ -882,93 +1033,124 @@
       </Transition>
 
       <Transition name="ws-banner">
-        <div v-if="prestreamThinking"
+        <div v-if="prestreamThinking && !trivialAskPending"
           class="flex-shrink-0 text-xs px-4 py-1.5"
           style="background:rgba(88,166,255,0.06);border-top:1px solid rgba(88,166,255,0.14);color:rgba(139,148,158,0.95)">
-          Preparing context and delegation plan…
+          {{ displayAgent?.name ?? 'Agent' }} is responding… · {{ latestRunStatus }}<template v-if="streamingElapsed >= 10"> ({{ formatElapsed(streamingElapsed) }})</template>
         </div>
       </Transition>
 
-      <div v-if="streaming || queuedRunIds.length > 0" class="px-4 pb-2 flex-shrink-0">
-        <div class="flex items-center gap-2 text-[11px]">
-          <span class="text-huginn-muted/80">When you send now:</span>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="chatIntent === 'update_active_work'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="chatIntent = 'update_active_work'"
+      <!-- Interrupt / route diagnose stays offstage. @ is the room route.
+           Mid-turn send defaults to a new hallway line (new_request / queue). -->
+      <div
+        v-if="streaming || queuedRunIds.length > 0"
+        data-testid="composer-send-options"
+        class="px-4 pb-1 flex-shrink-0"
+      >
+        <details
+          class="text-[11px] text-huginn-muted/55"
+          :open="sendOptionsOpen"
+          @toggle="onSendOptionsToggle"
+        >
+          <summary
+            data-testid="composer-send-options-summary"
+            class="cursor-pointer select-none text-huginn-muted/45 hover:text-huginn-muted/80 list-none [&::-webkit-details-marker]:hidden"
           >
-            Update active work
-          </button>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="chatIntent === 'new_request'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="chatIntent = 'new_request'"
-          >
-            Start new request
-          </button>
-          <span v-if="queuedRunIds.length > 0" class="ml-auto text-huginn-yellow/90">
-            {{ queuedRunIds.length }} queued
-          </span>
-        </div>
-        <div v-if="chatIntent === 'update_active_work'" class="mt-1.5 flex items-center gap-2 text-[11px]">
-          <span class="text-huginn-muted/70">Route:</span>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="updateRoute === 'all_active'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="updateRoute = 'all_active'"
-          >
-            All active delegates
-          </button>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="updateRoute === 'lead_only'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="updateRoute = 'lead_only'"
-          >
-            Lead only
-          </button>
-          <button
-            type="button"
-            class="px-2 py-1 rounded-md border transition-colors"
-            :class="updateRoute === 'specific_delegate'
-              ? 'border-huginn-blue/40 text-huginn-blue bg-huginn-blue/10'
-              : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
-            @click="updateRoute = 'specific_delegate'"
-          >
-            Specific delegate
-          </button>
-          <select
-            v-if="updateRoute === 'specific_delegate' && activeDelegateAgents.length > 0"
-            v-model="updateTargetAgent"
-            class="ml-1 bg-huginn-surface/50 border border-huginn-border rounded px-2 py-1 text-[11px] text-huginn-text"
-          >
-            <option v-for="agent in activeDelegateAgents" :key="agent" :value="agent">
-              {{ agent }}
-            </option>
-          </select>
-          <span v-else-if="updateRoute === 'specific_delegate'" class="text-huginn-muted/60">
-            no active delegates
-          </span>
-        </div>
+            <span v-if="queuedRunIds.length > 0">{{ queuedRunIds.length }} queued · </span>Send options
+          </summary>
+          <div v-if="sendOptionsOpen" class="mt-1.5 flex items-center gap-2">
+            <span class="text-huginn-muted/80">When you send now:</span>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="chatIntent === 'update_active_work'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="chatIntent = 'update_active_work'"
+            >
+              Update active work
+            </button>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="chatIntent === 'new_request'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="chatIntent = 'new_request'"
+            >
+              Start new request
+            </button>
+          </div>
+          <div v-if="sendOptionsOpen && chatIntent === 'update_active_work'" class="mt-1.5 flex items-center gap-2">
+            <span class="text-huginn-muted/70">Route:</span>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="updateRoute === 'all_active'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="updateRoute = 'all_active'"
+            >
+              All active delegates
+            </button>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="updateRoute === 'lead_only'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="updateRoute = 'lead_only'"
+            >
+              Lead only
+            </button>
+            <button
+              type="button"
+              class="px-2 py-1 rounded-md border transition-colors"
+              :class="updateRoute === 'specific_delegate'
+                ? 'border-huginn-border text-huginn-text bg-huginn-surface/60'
+                : 'border-huginn-border text-huginn-muted hover:text-huginn-text'"
+              @click="updateRoute = 'specific_delegate'"
+            >
+              Specific delegate
+            </button>
+            <select
+              v-if="updateRoute === 'specific_delegate' && activeDelegateAgents.length > 0"
+              v-model="updateTargetAgent"
+              class="ml-1 bg-huginn-surface/50 border border-huginn-border rounded px-2 py-1 text-[11px] text-huginn-text"
+            >
+              <option v-for="agent in activeDelegateAgents" :key="agent" :value="agent">
+                {{ agent }}
+              </option>
+            </select>
+            <span v-else-if="updateRoute === 'specific_delegate'" class="text-huginn-muted/60">
+              no active delegates
+            </span>
+          </div>
+        </details>
       </div>
+
+      <!-- ── First-run welcome card (above composer, dismissible) ──── -->
+      <WelcomeCard
+        v-if="showWelcomeCard"
+        :agent-name="displayAgent?.name ?? 'your Chief of Staff'"
+        :agent-icon="displayAgent?.icon"
+        :agent-color="displayAgent?.color"
+        :model-configured="firstRunModelConfigured"
+        @dismiss="dismissWelcome"
+        @use-example="useWelcomeExample"
+      />
 
       <!-- ── Input area ──────────────────────────────────────────── -->
       <div class="px-4 pb-4 flex-shrink-0">
+        <p v-if="displayAgentUnreliableTools"
+          data-testid="composer-model-tools-warning"
+          class="text-[10px] text-huginn-yellow/90 leading-snug px-1 pb-2">
+          {{ MODEL_TOOL_WARNING }}
+        </p>
         <ChatEditor
           ref="chatEditorRef"
-          :disabled="streaming"
           :placeholder="activeSpace ? `Message ${activeSpace.name}...` : undefined"
+          :member-names="mentionMemberNames"
           @send="handleEditorSend"
         />
       </div>
@@ -1000,6 +1182,23 @@
         @reject-artifact="threadDetail.handleRejectArtifact"
         @inject="handleThreadDetailInject"
         @start-follow-up="handleThreadFollowUp"
+      />
+
+      <ReplyThread
+        :visible="!!replyThreadParent && !!spaceId"
+        :space-id="spaceId || ''"
+        :parent="replyThreadParent"
+        :incoming="spaceReplyIncoming"
+        :typing-agent="replyThreadParent ? spaceReplyTyping[replyThreadParent.id] : ''"
+        :stream-agent="replyThreadParent ? spaceReplyStream[replyThreadParent.id]?.agent : ''"
+        :stream-text="replyThreadParent ? spaceReplyStream[replyThreadParent.id]?.text : ''"
+        :member-names="mentionMemberNames"
+        :fallback-agent="displayAgent?.name || activeSpace?.leadAgent || ''"
+        :snag-agent="replyThreadParent ? spaceReplySnag[replyThreadParent.id]?.agent : ''"
+        :snag-reason="replyThreadParent ? spaceReplySnag[replyThreadParent.id]?.reason : ''"
+        @close="closeReplyThread"
+        @posted="onSpaceReplyPosted"
+        @seen="onSpaceThreadSeen"
       />
 
       <!-- Member panel (channel view only, right side) -->
@@ -1074,24 +1273,37 @@
 </template>
 
 <script setup lang="ts">
-import { ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
+import { reactive, ref, shallowRef, computed, nextTick, inject, watch, onMounted, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useSpaceTimeline } from '../composables/useSpaceTimeline'
+import { useSpaceTimeline, getSessionSpaceId, getSpaceTimelineState } from '../composables/useSpaceTimeline'
 import { ChatEditor } from '../components/ChatEditor'
+import { mentionableNames, spaceRosterNames } from '../components/ChatEditor/mentionSuggestions'
 import { ThreadPanel } from '../components/ThreadPanel'
 import SwarmStatus from '../components/SwarmStatus.vue'
 import ThreadDetail from '../components/ThreadDetail.vue'
+import ReplyThread from '../components/ReplyThread.vue'
+import SpaceReplyChip from '../components/SpaceReplyChip.vue'
 import AgentRosterModal from '../components/AgentRosterModal.vue'
 import ToolCallModal from '../components/ToolCallModal.vue'
+import DiffCard from '../components/DiffCard.vue'
+import CheckpointBadge from '../components/CheckpointBadge.vue'
+import PRCard from '../components/PRCard.vue'
+import { changedFilesLine } from '../utils/changedFilesLine'
+import { prCompletionLine } from '../utils/prCompletionLine'
 import AgentMessageHeader from '../components/AgentMessageHeader.vue'
+import MsgTimeReveal from '../components/MsgTimeReveal.vue'
 import MessageActions from '../components/MessageActions.vue'
+import SystemFailLine from '../components/SystemFailLine.vue'
 import type { HuginnWS, WSMessage } from '../composables/useHuginnWS'
-import { api, apiFetch } from '../composables/useApi'
+import { api, apiFetch, type FileDiff } from '../composables/useApi'
+import MemoryVaultChip from '../components/MemoryVaultChip.vue'
+import { isVaultMemoryWarning, resolveMemoryChip, type MuninnPresence } from '../utils/memoryChip'
 import { useSessions, hydrationQueueOverflowed, type ToolCallRecord, type ChatMessage, type DelegatedThread, type PermissionDenial } from '../composables/useSessions'
 import { useThreads, isRunning } from '../composables/useThreads'
 import { useThreadDetail } from '../composables/useThreadDetail'
 import { useSpaces } from '../composables/useSpaces'
+import { useCompanies } from '../composables/useCompanies'
 import { useSwarmStatus } from '../composables/useSwarmStatus'
 import { adaptSpaceMessages, useMessageEnrichment } from '../composables/useMessageEnrichment'
 import { useMarkdownRenderer } from '../composables/useMarkdownRenderer'
@@ -1101,7 +1313,16 @@ import { useChatStreaming } from '../composables/useChatStreaming'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
 import { useReplicationStatus } from '../composables/useReplicationStatus'
 import { useChatViewHeaderAndMembers } from './chat/useChatViewHeaderAndMembers'
+import { hallwayAuthorName } from './chat/respondingAgent'
+import { visibleAssistantContent } from '../utils/visibleAssistantContent'
+import { isTrivialAsk } from '../utils/trivialAsk'
+import { MODEL_TOOL_WARNING, modelUnreliableForTools } from './agents/modelToolCapabilities'
 import ChannelMemberPanel from '../components/ChannelMemberPanel.vue'
+import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed, toolTickerEntries, visibleToolCalls } from '../utils/honesty'
+import WelcomeCard from '../components/WelcomeCard.vue'
+import { useFirstRun } from '../composables/useFirstRun'
+import { useConfig } from '../composables/useConfig'
+import { isModelConfigured } from '../utils/firstRun'
 
 interface Agent {
   name: string
@@ -1127,6 +1348,7 @@ const props = defineProps<{ sessionId?: string; spaceId?: string }>()
 const router  = useRouter()
 const wsRef   = inject<Ref<HuginnWS | null>>('ws')!
 const markSpaceSeen = inject<(spaceId: string) => void>('markSpaceSeen')
+const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 
 // ── Space timeline mode ────────────────────────────────────────────────────────
 // currentSpaceTimeline holds the active space timeline instance.
@@ -1154,13 +1376,15 @@ watch(() => props.spaceId, async (newId) => {
   // Clear stale unseen-badge entries for this space after hydration so
   // sessionToSpaceMap is populated and getSessionSpaceId returns correct results.
   markSpaceSeen?.(newId)
-  // Hydrate thread badges for each session visible in this space.
-  const spMsgs = tl.getState().messages ?? []
-  const sessionIds = [...new Set(spMsgs.map(m => m.session_id).filter(Boolean))]
-  for (const sid of sessionIds) {
+  // Load REST threads + reply badges for the active session and every
+  // session_id on the timeline so ThreadPanel / strips work in space mode.
+  for (const sid of collectSpaceSessionIds(tl)) {
+    await loadThreads(sid)
     await hydrateThreadBadges(sid)
+    applyLiveThreadSummaries(sid)
   }
   await scrollToBottom()
+  markCurrentSessionSeen()
 
   // Set up IntersectionObserver on the top sentinel for infinite scroll.
   await nextTick()
@@ -1180,7 +1404,21 @@ watch(() => props.spaceId, async (newId) => {
 
 const { sessions, getMessages, fetchMessages, queueIfHydrating, formatSessionLabel, renameSession,
   getLastSeenMessageId, setLastSeenMessageId } = useSessions()
-const { activeSpace } = useSpaces()
+const { activeSpace, dms, openDM } = useSpaces()
+const { companies } = useCompanies()
+const mentionMemberNames = computed(() => {
+  const space = activeSpace.value
+  const roster = spaceRosterNames(space)
+  if (roster === undefined) return undefined
+  const companyId = space?.companyId?.trim()
+  if (!companyId) return roster
+  const seated = companies.value.find(c => c.id === companyId)?.members ?? []
+  return mentionableNames(space, seated)
+})
+
+function isKnownSession(id: string): boolean {
+  return sessions.value.some(s => s.id === id)
+}
 
 // ── Hydration overflow toast ──────────────────────────────────────────────────
 // When the pre-hydration WS event queue overflows (> 500 events dropped while
@@ -1294,11 +1532,24 @@ const {
   resetStreaming,
 } = useChatStreaming()
 const messagesEl        = ref<HTMLElement>()
+const hallwayTimesRevealed = ref(false)
+let hallwayTouchX = 0
 const pendingPermission = ref<WSMessage | null>(null)
+const pendingPermissionBySpace = new Map<string, WSMessage>()
+
+// Permission prompts are per owner space. Switching Tess → Steve must not
+// keep Tess's modal on Steve; reopening Tess restores it.
+watch(() => props.spaceId, (newId, oldId) => {
+  if (oldId && oldId !== newId) {
+    if (pendingPermission.value) pendingPermissionBySpace.set(oldId, pendingPermission.value)
+    else pendingPermissionBySpace.delete(oldId)
+  }
+  pendingPermission.value = (newId && pendingPermissionBySpace.get(newId)) || null
+})
 const runtimeState      = ref('')
 // pendingToolResults buffers tool results that arrive before the assistant message exists
 // (e.g. prefetch tools like muninn_recall/muninn_where_left_off that fire before streaming starts).
-const pendingToolResults = ref<Array<{ id: string; name: string; args: Record<string, unknown>; result: string }>>([])
+const pendingToolResults = ref<Array<{ id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff; image?: string }>>([])
 
 // flushPendingToolResults attaches any buffered tool results to the current last assistant message.
 function flushPendingToolResults(sessionId: string) {
@@ -1308,7 +1559,7 @@ function flushPendingToolResults(sessionId: string) {
   if (!last) return
   if (!last.toolCalls) last.toolCalls = []
   for (const tc of pendingToolResults.value) {
-    last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true })
+    last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true, diff: tc.diff, image: tc.image })
   }
   pendingToolResults.value = []
 }
@@ -1371,6 +1622,56 @@ const agentsList        = ref<Agent[]>([])
 const selectedAgentName = ref('')
 const agentDropdownOpen = ref(false)
 const rosterOpen        = ref(false)
+const muninnStatus = ref<MuninnPresence>({})
+const memoryChipDismissed = ref(false)
+
+function agentDMNeedle(id: string): string {
+  return id.toLowerCase()
+}
+
+function findDMForAgent(name: string) {
+  const needle = agentDMNeedle(name)
+  return dms.value.find(dm => dm.leadAgent.toLowerCase() === needle)
+}
+
+function findAgentByName(name: string) {
+  const needle = agentDMNeedle(name)
+  return agentsList.value.find(a => a.name.toLowerCase() === needle)
+}
+
+// True when /chat/:sessionId is an agent name (Steve), not a real session id.
+// Used to block send/fetch so we never persist a session named after the agent.
+function isAgentDMAlias(id: string | undefined): boolean {
+  if (!id || isKnownSession(id)) return false
+  return !!findDMForAgent(id) || !!findAgentByName(id)
+}
+
+// Bookmarks like /#/chat/Steve are not session IDs — they collide with the
+// agent DM at /space/<ulid>. Resolve via dms, then openDM for a known agent.
+async function redirectUnknownSessionToAgentDM(sessionId: string): Promise<boolean> {
+  if (!sessionId || props.spaceId || isKnownSession(sessionId)) return false
+  const existing = findDMForAgent(sessionId)
+  if (existing?.id) {
+    await router.replace(`/space/${existing.id}`)
+    return true
+  }
+  if (!findAgentByName(sessionId)) return false
+  const space = await openDM(sessionId)
+  if (space?.id) {
+    await router.replace(`/space/${space.id}`)
+    return true
+  }
+  return false
+}
+
+watch(
+  [() => props.sessionId, agentsList, dms],
+  async ([id]) => {
+    if (!id || props.spaceId || isKnownSession(id)) return
+    await redirectUnknownSessionToAgentDM(id)
+  },
+  { immediate: true },
+)
 
 // ── Extracted composables (depend on agentsList / messagesEl / messages) ──
 const { renderWithMentions } = useMarkdownRenderer(agentsList)
@@ -1385,17 +1686,73 @@ watch(() => swarmState.value?.sessionId, (id) => {
 const agentProfile      = ref<Agent | null>(null) // agent shown in read-only profile modal
 
 // ── Thread panel state ────────────────────────────────────────────────
-const { getSessionThreads, getActiveThreadCount, loadThreads, wireWS: wireThreadWS, getSessionPreviews, clearSessionPreviews, ackPreview, threadsError } = useThreads()
 const threadPanelOpen   = ref(false)
 const threadPanelPinned = ref(false) // true = don't auto-close when threads finish
 
 // ── Thread detail (per-message thread slide-in) ───────────────────────
 const threadDetail = useThreadDetail()
 const threadDetailRef = ref<InstanceType<typeof ThreadDetail> | null>(null)
+const replyThreadParent = ref<any>(null)
+const spaceReplyIncoming = ref<any>(null)
+const spaceReplyTyping = reactive<Record<string, string>>({})
+const spaceReplyStream = reactive<Record<string, { agent: string; text: string }>>({})
+const spaceReplySnag = reactive<Record<string, { agent: string; reason?: string }>>({})
+const spaceMentionToast = ref<string | null>(null)
+
+function diagnoseMessage(msg: any) {
+  const d = msg?.delegatedThreads?.[0]
+  if (d) openThreadDetail(d)
+}
+
+function hallwayName(msg: { agent?: string } | null | undefined): string {
+  return hallwayAuthorName(msg?.agent, displayAgent.value?.name || activeSpace.value?.leadAgent || selectedAgentName.value)
+}
+
+function openReplyThread(msg: any) {
+  if (!props.spaceId || !msg?.id) return
+  closeThreadDetail()
+  const named = hallwayName(msg)
+  replyThreadParent.value = named && !msg.agent ? { ...msg, agent: named } : msg
+}
+
+function closeReplyThread() {
+  replyThreadParent.value = null
+}
+
+function onSpaceReplyPosted(count: number, parentId: string) {
+  applySpaceReplyMeta(parentId, { reply_count: count })
+}
+
+function onSpaceThreadSeen(parentId: string) {
+  applySpaceReplyMeta(parentId, { new_since: 0 })
+}
+
+function applySpaceReplyMeta(parentId: string, patch: { reply_count?: number; last_preview?: string; new_since?: number }) {
+  const tl = currentSpaceTimeline.value?.getState()
+  const target = tl?.messages.find((m: any) => m.id === parentId)
+  if (target) {
+    if (patch.reply_count != null) {
+      (target as any).reply_count = patch.reply_count
+      ;(target as any).spaceReplyCount = patch.reply_count
+    }
+    if (patch.last_preview != null) (target as any).last_preview = patch.last_preview
+    if (patch.new_since != null) (target as any).new_since = patch.new_since
+  }
+  if (replyThreadParent.value?.id === parentId) {
+    replyThreadParent.value = {
+      ...replyThreadParent.value,
+      spaceReplyCount: patch.reply_count ?? replyThreadParent.value.spaceReplyCount,
+      reply_count: patch.reply_count ?? replyThreadParent.value.reply_count,
+      lastPreview: patch.last_preview ?? replyThreadParent.value.lastPreview,
+      newSince: patch.new_since ?? replyThreadParent.value.newSince,
+    }
+  }
+}
 // Track live thread info for the currently-open ThreadDetail
 const openThreadLiveId = ref<string>('')
 
 function openThreadDetail(d: { threadId: string; agentId: string; msgId?: string }) {
+  closeReplyThread()
   // msgId is the parent message ID for the API call (GET /api/v1/messages/{id}/thread).
   // Try badge's msgId first, then fall back to live thread state for older sessions.
   const msgId = d.msgId || getThreadById(d.threadId)?.parentMessageId
@@ -1419,12 +1776,13 @@ async function openThreadDetailById(threadId: string) {
     return
   }
   // Thread not in live state — fetch from API to get parentMessageId
-  if (!props.sessionId) {
+  const lookupSessionId = resolvedThreadSessionId.value
+  if (!lookupSessionId) {
     threadPanelOpen.value = true
     return
   }
   try {
-    const fetched = await api.threads.get(props.sessionId, threadId)
+    const fetched = await api.threads.get(lookupSessionId, threadId)
     if (fetched?.parentMessageId) {
       threadPanelOpen.value = false
       openThreadLiveId.value = threadId
@@ -1482,6 +1840,34 @@ function openAgentAccess(agentName: string) {
 // refresh. Calls GET /api/v1/containers/{id}/threads which returns root messages
 // that have at least one reply (thread_reply_count > 0), then attaches
 // delegatedThreads to the matching message in the UI.
+function collectSpaceSessionIds(tl: { getState: () => { activeSessionId: string | null; messages: Array<{ session_id?: string }> } }): string[] {
+  const state = tl.getState()
+  const ids = new Set<string>()
+  if (state.activeSessionId) ids.add(state.activeSessionId)
+  for (const m of state.messages ?? []) {
+    if (m.session_id) ids.add(m.session_id)
+  }
+  return [...ids]
+}
+
+function applyLiveThreadSummaries(sessionId: string) {
+  if (!sessionId) return
+  const threads = getSessionThreads(sessionId)
+  if (!threads.length) return
+  const msgs = getSourceMessages()
+  for (const t of threads) {
+    const summary = t.Summary?.Summary
+    if (!summary) continue
+    for (const m of msgs) {
+      const entry = m.delegatedThreads?.find(d => d.threadId === t.ID)
+      if (entry && !entry.inlineSummary) {
+        entry.inlineSummary = summary
+        if (!isRunning(t)) entry.done = true
+      }
+    }
+  }
+}
+
 const hydratingBadgesFor = new Set<string>()
 async function hydrateThreadBadges(sessionId: string) {
   if (!sessionId || hydratingBadgesFor.has(sessionId)) return
@@ -1544,6 +1930,26 @@ function getSourceMessages(): ChatMessage[] {
   return props.sessionId ? getMessages(props.sessionId) : []
 }
 
+// Owner-space routing: /#/space/:id has no route sessionId, so isForActiveSession
+// is true for every event. Write timeline rows to the space that owns
+// msg.session_id (via getSessionSpaceId), not the room currently on screen.
+function getOwnerMessages(sessionId?: string): ChatMessage[] | null {
+  if (props.sessionId) {
+    if (sessionId && sessionId !== props.sessionId) return null
+    return getMessages(props.sessionId)
+  }
+  if (!props.spaceId || !sessionId) return null
+  const ownerSpaceId = getSessionSpaceId(sessionId)
+  if (!ownerSpaceId) return null
+  return getSpaceTimelineState(ownerSpaceId).messages as ChatMessage[]
+}
+
+function isOwnerView(sessionId?: string): boolean {
+  if (props.sessionId) return !sessionId || sessionId === props.sessionId
+  if (!props.spaceId || !sessionId) return false
+  return getSessionSpaceId(sessionId) === props.spaceId
+}
+
 const messages = computed(() => {
   if (props.spaceId) {
     const spMsgs = currentSpaceTimeline.value?.getState().messages ?? []
@@ -1591,13 +1997,23 @@ const {
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (chatSearchInputEl satisfies unknown)
 
+const spaceIdRef = computed(() => props.spaceId)
 const {
   atBottom, unreadCount, onMessagesScroll, markCurrentSessionSeen, jumpToUnread,
-} = useUnreadTracking(sessionIdRef, messages as any, messagesEl)
+} = useUnreadTracking(sessionIdRef, messages as any, messagesEl, spaceIdRef)
 
 const selectedAgent = computed(() =>
   agentsList.value.find(a => a.name === selectedAgentName.value) ?? null
 )
+
+const inFlightUserContent = computed(() => {
+  if (!streaming.value) return ''
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m?.role === 'user') return m.content ?? ''
+  }
+  return ''
+})
 
 const {
   headerEditing,
@@ -1619,14 +2035,94 @@ const {
   spaceId: computed(() => props.spaceId),
   formatSessionLabel: formatSessionLabel as (s: { id: string; title?: string }) => string,
   renameSession,
-  activeSpace: activeSpace as Ref<{ leadAgent: string; memberAgents: string[] } | null>,
+  activeSpace: activeSpace as Ref<{ kind?: string; leadAgent: string; memberAgents: string[] } | null>,
   agentsList: agentsList as Ref<Array<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string }>>,
   selectedAgentName,
   threadPanelOpen,
   selectedAgent: selectedAgent as Ref<{ name: string; icon?: string; model?: string; description?: string; vault_name?: string; color?: string } | null>,
+  streaming,
+  inFlightUserContent,
 })
 // vue-tsc does not count template ref bindings as reads; this satisfies noUnusedLocals.
 void (headerInputEl satisfies unknown)
+
+// ── First-run welcome card ────────────────────────────────────────────
+const { welcomeSpaceId, welcomeDismissed, dismissWelcome } = useFirstRun()
+const { config: firstRunConfig, loadConfig: loadFirstRunConfig } = useConfig()
+
+const showWelcomeCard = computed(() =>
+  !!props.spaceId &&
+  props.spaceId === welcomeSpaceId.value &&
+  !welcomeDismissed.value &&
+  messages.value.length === 0,
+)
+
+const firstRunModelConfigured = computed(() => isModelConfigured(firstRunConfig.value))
+
+watch(showWelcomeCard, (visible) => {
+  if (visible && !firstRunConfig.value) loadFirstRunConfig().catch(() => {})
+}, { immediate: true })
+
+function useWelcomeExample(text: string) {
+  chatEditorRef.value?.setText?.(text)
+  chatEditorRef.value?.focus()
+}
+
+const displayAgentUnreliableTools = computed(() =>
+  modelUnreliableForTools({
+    name: displayAgent.value?.model,
+    supportsTools: (displayAgent.value as { supportsTools?: boolean } | null)?.supportsTools,
+  }),
+)
+
+const memoryChipAgent = computed(() => {
+  const shown = displayAgent.value
+  const name = shown?.name || selectedAgentName.value || activeSpace.value?.leadAgent || ''
+  if (!name) return null
+  return agentsList.value.find(a => a.name === name) ?? shown ?? { name }
+})
+
+const memoryChip = computed(() => {
+  const agent = memoryChipAgent.value
+  return resolveMemoryChip({
+    agentName: agent?.name,
+    vaultName: (agent as { vault_name?: string } | null)?.vault_name,
+    memoryType: (agent as { memory_type?: string } | null)?.memory_type,
+    contextNotesEnabled: !!(agent as { context_notes_enabled?: boolean } | null)?.context_notes_enabled,
+    muninn: muninnStatus.value,
+    dismissed: memoryChipDismissed.value,
+    inChat: !!(props.sessionId || props.spaceId),
+  })
+})
+
+function dismissMemoryChip() {
+  memoryChipDismissed.value = true
+}
+
+function onMuninnChipStatus(status: MuninnPresence) {
+  // `status` here reports local-daemon reachability (from muninn.connectLocal),
+  // not whether this agent's vault is attached — that only becomes true once
+  // the user actually confirms a vault (see onMemoryVaultConnected). Merging
+  // its `connected` in would prematurely resolve the memory chip to null and
+  // yank the connect modal out from under the user mid-flow.
+  const { connected: _daemonConnected, ...availability } = status
+  muninnStatus.value = { ...muninnStatus.value, ...availability }
+}
+
+async function onMemoryVaultConnected() {
+  await Promise.all([loadMuninnStatus(), loadAgents()])
+}
+
+async function loadMuninnStatus() {
+  try {
+    const data = await api.muninn?.status?.()
+    if (data) muninnStatus.value = data
+  } catch { /* ignore */ }
+}
+
+watch(() => memoryChipAgent.value?.name, () => {
+  memoryChipDismissed.value = false
+})
 
 function exportSession() {
   if (!messages.value.length) return
@@ -1649,12 +2145,26 @@ function exportSession() {
   URL.revokeObjectURL(url)
 }
 
+// Session-mode uses props.sessionId. Space-mode DMs/channels have an empty
+// sessionId prop — resolve to the timeline's active session (and every other
+// session_id on the timeline) so the same thread helpers work.
+const resolvedThreadSessionId = computed(() => {
+  if (props.sessionId) return props.sessionId
+  return currentSpaceTimeline.value?.getState().activeSessionId ?? ''
+})
+
+const spaceThreadSessionIds = computed(() => {
+  if (props.sessionId) return [props.sessionId]
+  if (!currentSpaceTimeline.value) return []
+  return collectSpaceSessionIds(currentSpaceTimeline.value)
+})
+
 const sessionThreads = computed(() =>
-  props.sessionId ? getSessionThreads(props.sessionId) : []
+  spaceThreadSessionIds.value.flatMap(id => getSessionThreads(id))
 )
 
 const activeThreadCount = computed(() =>
-  props.sessionId ? getActiveThreadCount(props.sessionId) : 0
+  spaceThreadSessionIds.value.reduce((n, id) => n + getActiveThreadCount(id), 0)
 )
 
 const blockedThreadCount = computed(() =>
@@ -1663,8 +2173,16 @@ const blockedThreadCount = computed(() =>
 
 // Pending delegation previews for this session (shown as approval banners).
 const sessionPreviews = computed(() =>
-  props.sessionId ? getSessionPreviews(props.sessionId) : []
+  spaceThreadSessionIds.value.flatMap(id => getSessionPreviews(id))
 )
+
+watch(resolvedThreadSessionId, (sid, prev) => {
+  if (!props.spaceId || !sid || sid === prev) return
+  loadThreads(sid).then(() => {
+    hydrateThreadBadges(sid)
+    applyLiveThreadSummaries(sid)
+  })
+})
 
 const agentColorMap = computed(() => {
   const m: Record<string, string> = {}
@@ -1679,7 +2197,6 @@ const agentIconMap = computed(() => {
 })
 
 // Replication status chip
-const spaceIdRef = computed(() => props.spaceId)
 const { chipText: replChipText, chipClass: replChipClass } = useReplicationStatus(spaceIdRef)
 
 // Auto-show panel when threads appear; auto-hide 4s after all finish (unless pinned)
@@ -1688,7 +2205,7 @@ watch(activeThreadCount, (count) => {
     threadPanelOpen.value = true
   } else if (!threadPanelPinned.value && sessionThreads.value.length > 0) {
     setTimeout(() => {
-      if (getActiveThreadCount(props.sessionId ?? '') === 0 && !threadPanelPinned.value) {
+      if (activeThreadCount.value === 0 && !threadPanelPinned.value) {
         threadPanelOpen.value = false
       }
     }, 4000)
@@ -1698,7 +2215,14 @@ watch(activeThreadCount, (count) => {
 const permissionDesc = computed(() => {
   if (!pendingPermission.value?.payload) return ''
   const p = pendingPermission.value.payload as Record<string, string>
-  return `${p.tool ?? ''}: ${p.command ?? p.args ?? ''}`
+  const action = p.command || p.args || p.tool || ''
+  if (p.agent) return `${p.agent} wants to run: ${action}`
+  return `${p.tool ?? ''}: ${action}`
+})
+
+const permissionAgentName = computed(() => {
+  const p = pendingPermission.value?.payload as Record<string, string> | undefined
+  return p?.agent || 'this agent'
 })
 
 
@@ -1720,6 +2244,14 @@ function isForActiveSession(msg: WSMessage): boolean {
   return sid === props.sessionId
 }
 
+function visibleAssistantText(msg: { role?: string; content?: string; toolCalls?: unknown[] }): string {
+  const content = msg.content ?? ''
+  if (msg.role !== 'assistant') return content
+  // Once tools ran on this message, leftover tool / result JSON is residue,
+  // not speech; the chips carry the facts.
+  return visibleAssistantContent(content, { afterTools: !!msg.toolCalls?.length })
+}
+
 function isMemoryToolName(name: string): boolean {
   return name.startsWith('muninn_')
 }
@@ -1739,11 +2271,40 @@ function isMemoryOnlyToolCalls(calls?: ToolCallRecord[]): boolean {
   return !!calls?.length && calls.every(tc => isMemoryToolName(tc.name))
 }
 
-const activeMemoryChipText = computed(() => {
-  if (!activeToolCalls.value.length) return ''
-  if (!activeToolCalls.value.every(tc => isMemoryToolName(tc.name))) return ''
-  return `🧠 Memory: ${summarizeMemoryToolCalls(activeToolCalls.value)}`
-})
+// changedFilesLineFor adapts the pure changedFilesLine util to a ChatMessage:
+// derives the visible speech text and this turn's diffs, then delegates.
+// Suppressed when prCompletionLineFor already has a deliverable-handoff line
+// to show for this turn (PR + diffs) — that line supersedes the plain
+// changed-files fallback rather than stacking under it.
+function changedFilesLineFor(msg: ChatMessage): string {
+  if (prCompletionLineFor(msg)) return ''
+  const diffs = (msg.toolCalls ?? []).map(tc => tc.diff)
+  return changedFilesLine(visibleAssistantText(msg), diffs)
+}
+
+// prCompletionLineFor adapts the pure prCompletionLine util to a
+// ChatMessage: derives this turn's diffs, then delegates. See
+// prCompletionLine.ts — PR-as-deliverable completion summary, UI-side only.
+function prCompletionLineFor(msg: ChatMessage): string {
+  const diffs = (msg.toolCalls ?? []).map(tc => tc.diff)
+  return prCompletionLine(msg.toolCalls, diffs)
+}
+
+// activeToolCallsFor scopes the shared activeToolCalls list to one message's
+// agent, so two agents streaming concurrently in the same space (e.g. a
+// channel with a lead + delegate both replying) don't bleed each other's
+// tool calls into the wrong bubble's ticker. A call with no agent (legacy
+// wire payloads, no-agent chat sessions) or a message with no agent still
+// matches — attribution only narrows when both sides know the agent.
+function activeToolCallsFor(msg: { agent?: string }) {
+  return activeToolCalls.value.filter(tc => !tc.agent || !msg.agent || tc.agent === msg.agent)
+}
+
+// toolTicker returns the merged completed+in-flight tool call list for a
+// streaming message's live activity line — see toolTickerEntries (honesty.ts).
+function toolTicker(msg: { agent?: string; toolCalls?: ToolCallRecord[] }) {
+  return toolTickerEntries(msg.toolCalls, activeToolCallsFor(msg))
+}
 
 // ── Thread helpers ────────────────────────────────────────────────────
 function getThreadById(threadId: string) {
@@ -1768,7 +2329,7 @@ function formatThreadStatus(status: string): string {
 async function loadAgents() {
   try {
     const data = await api.agents.list()
-    agentsList.value = data as unknown as Agent[]
+    agentsList.value = Array.isArray(data) ? (data as unknown as Agent[]) : []
   } catch { /* ignore */ }
 }
 
@@ -1805,11 +2366,129 @@ watch(() => activeSpace.value?.id, (_newId, _oldId) => {
 })
 type ChatIntent = 'update_active_work' | 'new_request'
 type UpdateRoute = 'all_active' | 'lead_only' | 'specific_delegate'
-const chatIntent = ref<ChatIntent>('update_active_work')
+const chatIntent = ref<ChatIntent>('new_request')
 const updateRoute = ref<UpdateRoute>('all_active')
 const updateTargetAgent = ref('')
 const queuedRunIds = ref<string[]>([])
 const prestreamThinking = ref(false)
+const trivialAskPending = ref(false)
+// DEFAULT_RUN_STATUS / latestRunStatus back the pre-first-token status line.
+// It must reflect what the turn is actually doing phase-by-phase ("thinking…",
+// "asking Steve…", "recalling memory", "writing" — see runWSChat's status
+// translation layer in internal/server/ws.go) and must NEVER fall back to a
+// static "Preparing context and delegation plan…" placeholder.
+const DEFAULT_RUN_STATUS = 'thinking…'
+const latestRunStatus = ref(DEFAULT_RUN_STATUS)
+const sendOptionsOpen = ref(false)
+
+function armTrivialAskPending(markdown: string) {
+  trivialAskPending.value = isTrivialAsk(markdown)
+}
+
+function rearmDelegationPlanFromLiveWork() {
+  if (!trivialAskPending.value) return
+  trivialAskPending.value = false
+  if (streaming.value) prestreamThinking.value = true
+  latestRunStatus.value = DEFAULT_RUN_STATUS
+}
+
+function onSendOptionsToggle(e: Event) {
+  sendOptionsOpen.value = (e.target as HTMLDetailsElement).open
+}
+
+function resetComposerSendOptions() {
+  sendOptionsOpen.value = false
+  chatIntent.value = 'new_request'
+  updateRoute.value = 'all_active'
+}
+
+// Per-space run chrome. ChatView is reused across /space/:id, so a single
+// streaming / currentRunId / queuedRunIds / prestreamThinking would paint
+// Steve's quiet DM as busy while Tess is the one running, and queue Steve's
+// next send against Tess's turn.
+type OwnerRunState = {
+  streaming: boolean
+  prestreamThinking: boolean
+  trivialAskPending: boolean
+  currentRunId: string
+  queuedRunIds: string[]
+  statusText: string
+}
+const runByOwner = ref<Record<string, OwnerRunState>>({})
+
+function snapshotOwnerRun(): OwnerRunState {
+  return {
+    streaming: streaming.value,
+    prestreamThinking: prestreamThinking.value,
+    trivialAskPending: trivialAskPending.value,
+    currentRunId: currentRunId.value,
+    queuedRunIds: [...queuedRunIds.value],
+    statusText: latestRunStatus.value,
+  }
+}
+
+function persistOwnerRun(key: string) {
+  if (!key) return
+  runByOwner.value = { ...runByOwner.value, [key]: snapshotOwnerRun() }
+}
+
+function applyOwnerRun(state: OwnerRunState) {
+  streaming.value = state.streaming
+  prestreamThinking.value = state.prestreamThinking
+  trivialAskPending.value = state.trivialAskPending
+  currentRunId.value = state.currentRunId
+  queuedRunIds.value = [...state.queuedRunIds]
+  latestRunStatus.value = state.statusText || DEFAULT_RUN_STATUS
+  if (state.streaming) {
+    startStreamingWatchdog(runActivityProbe)
+    startElapsedTimer()
+  } else {
+    clearStreamingWatchdog()
+    stopElapsedTimer()
+  }
+}
+
+function restoreOwnerRun(key: string) {
+  if (!key) return
+  const saved = runByOwner.value[key]
+  applyOwnerRun(saved ?? { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [], statusText: DEFAULT_RUN_STATUS })
+}
+
+function finishStoredOwnerRun(key: string) {
+  const saved = runByOwner.value[key]
+  if (!saved) return
+  if (saved.queuedRunIds.length > 0) {
+    const next = saved.queuedRunIds[0]!
+    const rest = saved.queuedRunIds.slice(1)
+    runByOwner.value = {
+      ...runByOwner.value,
+      [key]: { streaming: true, prestreamThinking: true, trivialAskPending: false, currentRunId: next, queuedRunIds: rest, statusText: DEFAULT_RUN_STATUS },
+    }
+    return
+  }
+  runByOwner.value = {
+    ...runByOwner.value,
+    [key]: { streaming: false, prestreamThinking: false, trivialAskPending: false, currentRunId: '', queuedRunIds: [], statusText: DEFAULT_RUN_STATUS },
+  }
+}
+
+function finishBackgroundOwnerRun(runId: string): boolean {
+  const key = Object.entries(runByOwner.value).find(([, s]) => s.currentRunId === runId)?.[0]
+  if (!key) return false
+  finishStoredOwnerRun(key)
+  return true
+}
+
+watch(() => props.spaceId, (newId, oldId) => {
+  if (oldId && oldId !== newId) persistOwnerRun(oldId)
+  if (newId) restoreOwnerRun(newId)
+  sendOptionsOpen.value = false
+})
+
+watch([streaming, queuedRunIds], ([isStreaming, queued]) => {
+  if (!isStreaming && queued.length === 0) resetComposerSendOptions()
+})
+
 const activeDelegateAgents = computed(() => {
   const out = new Set<string>()
   for (const t of sessionThreads.value) {
@@ -1847,7 +2526,9 @@ function promoteNextQueuedRun() {
   currentRunId.value = next
   streaming.value = true
   prestreamThinking.value = true
-  startStreamingWatchdog()
+  latestRunStatus.value = DEFAULT_RUN_STATUS
+  trivialAskPending.value = false
+  startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
   pendingToolResults.value = []
   if (props.sessionId) {
@@ -1867,7 +2548,10 @@ async function handleEditorSend(markdown: string) {
   const ws = wsRef.value
   if (!ws) return
   const runId = nextRunId()
-  const intent = chatIntent.value
+  const sendingWhileStreaming = streaming.value
+  // Idle send is just a hallway line. Mid-turn send defaults to a new
+  // request (Slack-like queue) unless diagnose Send options picked interrupt.
+  const intent = sendingWhileStreaming ? chatIntent.value : 'new_request'
   const payload: Record<string, unknown> = { intent }
   if (intent === 'update_active_work') {
     payload.update_route = updateRoute.value
@@ -1876,7 +2560,6 @@ async function handleEditorSend(markdown: string) {
       if (target) payload.target_agent = target
     }
   }
-  const sendingWhileStreaming = streaming.value
 
   // ── Space mode ─────────────────────────────────────────────────────
   if (props.spaceId) {
@@ -1900,18 +2583,22 @@ async function handleEditorSend(markdown: string) {
       currentRunId.value = runId
       streaming.value = true
       prestreamThinking.value = true
-      startStreamingWatchdog()
+      latestRunStatus.value = DEFAULT_RUN_STATUS
+      armTrivialAskPending(markdown)
+      startStreamingWatchdog(runActivityProbe)
       startElapsedTimer()
     } else {
       queueRun(runId)
     }
 
     // Optimistic user message into the space timeline.
+    const sentAt = new Date().toISOString()
     tl.getState().messages.push({
       id: `u-${Date.now()}`,
       session_id: targetSessionId,
       seq: -1,
-      ts: new Date().toISOString(),
+      ts: sentAt,
+      created_at: sentAt,
       role: 'user',
       content: markdown,
       agent: '',
@@ -1930,7 +2617,7 @@ async function handleEditorSend(markdown: string) {
   }
 
   // ── Session mode ────────────────────────────────────────────────────
-  if (!props.sessionId) return
+  if (!props.sessionId || isAgentDMAlias(props.sessionId)) return
 
   // Auto-select default agent on first send if none chosen yet
   if (!selectedAgentName.value && agentsList.value.length > 0) {
@@ -1939,12 +2626,14 @@ async function handleEditorSend(markdown: string) {
   }
 
   const msgs = getMessages(props.sessionId)
-  msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown })
+  msgs.push({ id: `u-${Date.now()}`, role: 'user', content: markdown, createdAt: new Date().toISOString() })
   if (!sendingWhileStreaming) {
     currentRunId.value = runId
     streaming.value = true
     prestreamThinking.value = true
-    startStreamingWatchdog()
+    latestRunStatus.value = DEFAULT_RUN_STATUS
+    armTrivialAskPending(markdown)
+    startStreamingWatchdog(runActivityProbe)
     startElapsedTimer()
     pendingToolResults.value = [] // reset stale buffered prefetch results from prior response
     msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true, agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
@@ -1970,10 +2659,10 @@ function handleRetry(content: string) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   currentRunId.value = runId
   streaming.value = true
-  startStreamingWatchdog()
+  startStreamingWatchdog(runActivityProbe)
   startElapsedTimer()
   const msgs = getMessages(props.sessionId)
-  msgs.push({ id: `u-${Date.now()}`, role: 'user', content })
+  msgs.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: new Date().toISOString() })
   msgs.push({ id: `h-${Date.now()}`, role: 'assistant', content: '', streaming: true,
     agent: selectedAgentName.value || undefined, createdAt: new Date().toISOString() })
   setLastSeenMessageId(props.sessionId, null)
@@ -1984,15 +2673,16 @@ function handleRetry(content: string) {
 
 function cancelThread(threadId: string) {
   const ws = wsRef.value
-  if (!ws || !props.sessionId) return
-  ws.send({ type: 'thread_cancel', payload: { thread_id: threadId }, session_id: props.sessionId })
+  const sessionId = getThreadById(threadId)?.SessionID || resolvedThreadSessionId.value
+  if (!ws || !sessionId) return
+  ws.send({ type: 'thread_cancel', payload: { thread_id: threadId }, session_id: sessionId })
 }
 
 function injectThread(threadId: string, content: string) {
   const ws = wsRef.value
   if (!ws) return
   const threadSessionId = getThreadById(threadId)?.SessionID
-  const sessionId = threadSessionId || props.sessionId
+  const sessionId = threadSessionId || resolvedThreadSessionId.value
   if (!sessionId) return
   ws.send({ type: 'thread_inject', payload: { thread_id: threadId, content }, session_id: sessionId })
 }
@@ -2014,14 +2704,16 @@ function handleThreadFollowUp(_threadId: string, draft?: string) {
 }
 
 
-function approvePermission(approved: boolean) {
+function approvePermission(scope: 'once' | 'always_agent' | 'always_agent_all' | 'deny') {
   const ws = wsRef.value
   if (!ws || !pendingPermission.value) return
+  const id = (pendingPermission.value.payload as Record<string, string>)?.id
   ws.send({
     type: 'permission_response',
-    payload: { id: (pendingPermission.value.payload as Record<string, string>)?.id, approved },
+    payload: { id, scope, approved: scope !== 'deny' },
   })
   pendingPermission.value = null
+  if (props.spaceId) pendingPermissionBySpace.delete(props.spaceId)
 }
 
 async function fetchStatus() {
@@ -2038,9 +2730,20 @@ const { notify } = useBrowserNotifications()
 // handlers accumulating across component remounts, e.g. when navigating away and back).
 const wsCleanupFns: (() => void)[] = []
 
+// Any WS traffic while a run is live counts as "the run is still working" for
+// the streaming watchdog ('done'/'error' clear the watchdog themselves).
+let lastRunActivityMs = 0
+function runActivityProbe(): boolean {
+  return Date.now() - lastRunActivityMs < 60_000
+}
+
 function registerWS(ws: HuginnWS, type: string, fn: (msg: WSMessage) => void) {
-  ws.on(type, fn)
-  wsCleanupFns.push(() => ws.off(type, fn))
+  const wrapped = (msg: WSMessage) => {
+    lastRunActivityMs = Date.now()
+    fn(msg)
+  }
+  ws.on(type, wrapped)
+  wsCleanupFns.push(() => ws.off(type, wrapped))
 }
 
 watch(wsRef, (ws) => {
@@ -2062,16 +2765,46 @@ watch(wsRef, (ws) => {
       const lastUser = [...msgs].reverse().find(m => m.role === 'user')
       if (lastUser) setLastSeenMessageId(sid, lastUser.id)
     }
-    startStreamingWatchdog() // reset watchdog on each token to detect true inactivity
+    startStreamingWatchdog(runActivityProbe) // reset watchdog on each token to detect true inactivity
     const apply = () => {
       prestreamThinking.value = false
       // Flush buffered prefetch tool results now that the assistant message exists.
       flushPendingToolResults(sid)
       const msgs = getMessages(sid)
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
+      // A replace-correction can race the 'done' that closed the streaming
+      // bubble. If no bubble is streaming any more, repaint the last
+      // assistant bubble in place — never mint a second bubble for it.
+      if (msg.payload?.replace && !streamMsg?.streaming) {
+        const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
+        if (lastAssistant) {
+          lastAssistant.content = visibleAssistantContent(msg.content ?? '')
+          scrollToBottom()
+          return
+        }
+      }
       if (streamMsg?.streaming) {
-        streamMsg.content += msg.content ?? ''
+        // A server-side rewrite (e.g. the harness clock label settling into
+        // "It's {stamp}." once the stamp finishes streaming) can change text
+        // already sent to the client. The server flags that correction with
+        // payload.replace so the bubble is repainted from scratch instead of
+        // appending — appending here would double up or permanently strand
+        // the client on stale partial text (huginn: hallway fast-path
+        // leading-prefix drop).
+        if (msg.payload?.replace) {
+          streamMsg.content = msg.content ?? ''
+        } else {
+          streamMsg.content += msg.content ?? ''
+        }
+        streamMsg.content = visibleAssistantContent(streamMsg.content)
         scrollToBottom()
+        return
+      }
+      // Resume replay of a finished hire must not mint a ghost bubble
+      // ("They're here.") for an already-persisted assistant row.
+      const lastPersisted = [...msgs].reverse().find(m => m.role === 'assistant' && !m.streaming)
+      const incoming = (msg.content ?? '').trim()
+      if (incoming && lastPersisted && typeof lastPersisted.content === 'string' && lastPersisted.content.includes(incoming)) {
         return
       }
       // If a queued run starts after the previous one completed, tokens can
@@ -2079,7 +2812,7 @@ watch(wsRef, (ws) => {
       msgs.push({
         id: `h-${Date.now()}`,
         role: 'assistant',
-        content: msg.content ?? '',
+        content: visibleAssistantContent(msg.content ?? ''),
         streaming: true,
         agent: selectedAgentName.value || undefined,
         createdAt: new Date().toISOString(),
@@ -2092,11 +2825,13 @@ watch(wsRef, (ws) => {
 
 registerWS(ws, 'tool_call', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
+    rearmDelegationPlanFromLiveWork()
     const p = msg.payload as Record<string, unknown>
     activeToolCalls.value.push({
       id: (p?.id as string) ?? Date.now().toString(),
       name: (p?.tool as string) ?? '',
       args: (p?.args as Record<string, unknown>) ?? {},
+      agent: (p?.agent as string) || undefined,
     })
     scrollToBottom()
   })
@@ -2110,17 +2845,21 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
       id,
       name: (p?.tool as string) ?? '',
       args: (p?.args as Record<string, unknown>) ?? {},
+      agent: (p?.agent as string) || undefined,
     }
+    const metadata = p?.metadata as Record<string, unknown> | undefined
+    const diff = (metadata?.diff as FileDiff | undefined) ?? undefined
+    const image = (metadata?.image_data_uri as string | undefined) ?? undefined
     if (props.sessionId) {
       const msgs = getMessages(props.sessionId)
       const last = [...msgs].reverse().find(m => m.role === 'assistant')
       if (last) {
         if (!last.toolCalls) last.toolCalls = []
-        last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string, done: true })
+        last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string, done: true, diff, image })
       } else {
         // No assistant message yet (prefetch tool fired before streaming started).
         // Buffer the result and flush it once the assistant message is created.
-        pendingToolResults.value.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string ?? '' })
+        pendingToolResults.value.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string ?? '', diff, image })
       }
     }
     activeToolCalls.value = activeToolCalls.value.filter(t => t.id !== id)
@@ -2128,9 +2867,34 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
   })
 
 registerWS(ws, 'permission_request', (msg: WSMessage) => {
-    if (!isForActiveSession(msg)) return
+    if (props.sessionId) {
+      if (!isForActiveSession(msg)) return
+      pendingPermission.value = msg
+      scrollToBottom()
+      return
+    }
+    if (!props.spaceId || !msg.session_id) return
+    const ownerSpaceId = getSessionSpaceId(msg.session_id)
+    if (!ownerSpaceId) return
+    pendingPermissionBySpace.set(ownerSpaceId, msg)
+    if (ownerSpaceId !== props.spaceId) return
     pendingPermission.value = msg
     scrollToBottom()
+  })
+
+registerWS(ws, 'permission_cancelled', (msg: WSMessage) => {
+    // The server gave up waiting (prompt timed out). Take the banner down —
+    // leaving it up would show live-looking buttons that silently do nothing,
+    // because the server no longer knows this request id.
+    const id = (msg.payload as Record<string, string> | undefined)?.id
+    const matches = (m: WSMessage | null | undefined) =>
+      !!m && (!id || (m.payload as Record<string, string> | undefined)?.id === id)
+
+    if (matches(pendingPermission.value)) pendingPermission.value = null
+    const ownerSpaceId = msg.session_id ? getSessionSpaceId(msg.session_id) : ''
+    if (ownerSpaceId && matches(pendingPermissionBySpace.get(ownerSpaceId))) {
+      pendingPermissionBySpace.delete(ownerSpaceId)
+    }
   })
 
 registerWS(ws, 'done', (msg: WSMessage) => {
@@ -2138,6 +2902,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     // Ignore stale done events from previous chat runs (e.g. buffered in the WS connection).
     // run_id was introduced alongside this guard; old messages without run_id are also ignored.
     if (!msg.run_id || msg.run_id !== currentRunId.value) {
+      if (msg.run_id && finishBackgroundOwnerRun(msg.run_id)) return
       console.debug('[done] ignoring stale done, run_id=', msg.run_id, 'expected=', currentRunId.value)
       return
     }
@@ -2145,6 +2910,7 @@ registerWS(ws, 'done', (msg: WSMessage) => {
     stopElapsedTimer()
     streaming.value = false
     prestreamThinking.value = false
+    trivialAskPending.value = false
     // Move any still-active tool calls to the last assistant message rather than
     // just discarding them. This preserves tool calls that completed during
     // streaming but whose results haven't been attached yet (e.g. timing edge cases).
@@ -2178,19 +2944,21 @@ registerWS(ws, 'done', (msg: WSMessage) => {
       }
     }
     promoteNextQueuedRun()
+    if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
     fetchStatus()
     // Browser notification — only fires when tab is hidden (checked inside notify())
-    if (props.sessionId) {
-      const msgs = getMessages(props.sessionId)
+    if (props.sessionId || props.spaceId) {
+      const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
       const last = msgs.at(-1)
       const agentName = last?.agent ?? 'Agent'
-      const preview = last?.content?.slice(0, 80) ?? ''
+      const preview = visibleAssistantContent(last?.content ?? '').slice(0, 80)
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName,
         preview || 'Finished responding',
-        `session-done-${props.sessionId}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        `session-done-${props.spaceId || props.sessionId}`,
+        () => router.push(dest)
       )
     }
   })
@@ -2199,26 +2967,43 @@ registerWS(ws, 'error', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
     // Allow errors without run_id (e.g. "orchestrator not initialized" sent before any run_id is
     // established). Errors that DO carry a run_id must match the current run to avoid stale errors.
-    if (msg.run_id && msg.run_id !== currentRunId.value) return
+    if (msg.run_id && msg.run_id !== currentRunId.value) {
+      if (finishBackgroundOwnerRun(msg.run_id)) return
+      return
+    }
     clearStreamingWatchdog()
     stopElapsedTimer()
     streaming.value = false
     prestreamThinking.value = false
+    trivialAskPending.value = false
     activeToolCalls.value = []
     if (props.sessionId) {
       const streamMsg = [...getMessages(props.sessionId)].reverse().find(m => m.streaming)
       if (streamMsg?.streaming) { streamMsg.content += `\n\nerror: ${msg.content}`; streamMsg.streaming = false }
     }
     promoteNextQueuedRun()
+    if (props.spaceId) persistOwnerRun(props.spaceId)
     scrollToBottom()
   })
 
-registerWS(ws, 'warning', (msg: WSMessage) => {
+  // Phase-true status line: content varies by what the turn is actually
+  // doing ("thinking…", "asking Steve…", "recalling memory", "writing" —
+  // see runWSChat's status translation in internal/server/ws.go). Never
+  // falls back to a static placeholder; an empty/unrecognised content still
+  // resolves to DEFAULT_RUN_STATUS.
+  registerWS(ws, 'status', (msg: WSMessage) => {
     if (!isForActiveSession(msg)) return
-    // Non-fatal warning from the backend (e.g. vault/MuninnDB unavailable).
-    // Surface it inline so the user knows memory tools are disabled rather
-    // than silently missing tool calls.
+    latestRunStatus.value = (msg.content ?? '').trim() || DEFAULT_RUN_STATUS
+    if (props.spaceId) persistOwnerRun(props.spaceId)
+  })
+
+registerWS(ws, 'warning', (msg: WSMessage) => {
+    if (isVaultMemoryWarning(msg.content ?? '')) {
+      // Vault setup is a chip, not agent speech.
+      return
+    }
     if (props.sessionId) {
+      if (!isForActiveSession(msg)) return
       const msgs = getMessages(props.sessionId)
       const warningForQueuedRun = !!msg.run_id && msg.run_id !== currentRunId.value
       const streamMsg = [...msgs].reverse().find(m => m.streaming)
@@ -2228,22 +3013,22 @@ registerWS(ws, 'warning', (msg: WSMessage) => {
         const id = `warn-${Date.now()}`
         msgs.push({ id, role: 'assistant', content: msg.content ?? '', createdAt: new Date().toISOString(), toolCalls: [] })
       }
-    } else if (props.spaceId && currentSpaceTimeline.value) {
-      const st = currentSpaceTimeline.value.getState()
-      const sessionId = st.activeSessionId
-      if (sessionId) {
-        st.messages.push({
-          id: `warn-${Date.now()}`,
-          session_id: sessionId,
-          seq: -1,
-          ts: new Date().toISOString(),
-          role: 'assistant',
-          content: msg.content ?? '',
-          agent: '',
-        })
-      }
+      scrollToBottom()
+      return
     }
-    scrollToBottom()
+    if (!props.spaceId) return
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
+    msgs.push({
+      id: `warn-${Date.now()}`,
+      session_id: msg.session_id as string,
+      seq: -1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: msg.content ?? '',
+      agent: '',
+    } as ChatMessage)
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
 registerWS(ws, 'primary_agent_changed', (msg: WSMessage) => {
@@ -2283,6 +3068,7 @@ registerWS(ws, 'thread_started', (msg: WSMessage) => {
 registerWS(ws, 'thread_help', (_msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && _msg.session_id !== props.sessionId) return
+    if (props.spaceId && !isOwnerView(_msg.session_id)) return
     const p = (_msg.payload as Record<string, unknown> | undefined) ?? {}
     const threadId = typeof p.thread_id === 'string' ? p.thread_id : ''
     const helpMessage = typeof p.message === 'string' ? p.message : ''
@@ -2293,12 +3079,13 @@ registerWS(ws, 'thread_help', (_msg: WSMessage) => {
       agent: agentName,
       message: helpMessage,
     })
-    if (props.sessionId) {
+    if (props.sessionId || props.spaceId) {
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         `${agentName} needs input`,
         helpMessage || 'A delegated thread is blocked and waiting for guidance.',
         `thread-help-${threadId || Date.now().toString()}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        () => router.push(dest)
       )
     }
   })
@@ -2347,7 +3134,8 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const agentName = p?.agent as string | undefined
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Only add if there isn't already a follow-up streaming bubble
     const alreadyExists = msgs.some(m => (m as any).followUpStreaming)
     if (!alreadyExists) {
@@ -2368,7 +3156,7 @@ registerWS(ws, 'follow_up_start', (msg: WSMessage) => {
         fupStreamMsg.ts = new Date().toISOString()
       }
       msgs.push(fupStreamMsg)
-      scrollToBottom()
+      if (isOwnerView(msg.session_id)) scrollToBottom()
     }
   })
 
@@ -2381,7 +3169,8 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
     const agentName = p?.agent as string | undefined
     const token = p?.token as string | undefined
     if (!token) return
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Find the existing follow-up streaming bubble or create one
     const existing = [...msgs].reverse().find(m => (m as any).followUpStreaming)
     if (existing) {
@@ -2403,7 +3192,7 @@ registerWS(ws, 'follow_up_token', (msg: WSMessage) => {
       }
       msgs.push(fupFallback)
     }
-    scrollToBottom()
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
 // agent_follow_up: final persisted follow-up reply from the lead agent.
@@ -2417,7 +3206,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
     const agentName = p?.agent as string | undefined
     const content = p?.content as string | undefined
     if (!content) return
-    const msgs = props.sessionId ? getMessages(props.sessionId) : getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Remove the streaming bubble if it exists
     const streamIdx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (streamIdx >= 0) msgs.splice(streamIdx, 1)
@@ -2439,13 +3229,14 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
       fupMsg.ts = new Date().toISOString()
     }
     msgs.push(fupMsg)
-    scrollToBottom()
-    if (props.sessionId) {
+    if (isOwnerView(msg.session_id)) scrollToBottom()
+    if (props.sessionId || isOwnerView(msg.session_id)) {
+      const dest = props.spaceId ? `/space/${props.spaceId}` : `/chat/${props.sessionId}`
       notify(
         agentName ?? 'Agent',
         'Has a follow-up for you',
-        `follow-up-${props.sessionId}`,
-        () => router.push(`/chat/${props.sessionId}`)
+        `follow-up-${props.spaceId || props.sessionId}`,
+        () => router.push(dest)
       )
     }
   })
@@ -2455,7 +3246,8 @@ registerWS(ws, 'agent_follow_up', (msg: WSMessage) => {
 registerWS(ws, 'follow_up_cancelled', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && msg.session_id !== props.sessionId) return
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     // Remove the thinking bubble if it exists
     const idx = msgs.findIndex(m => (m as any).followUpStreaming)
     if (idx >= 0) msgs.splice(idx, 1)
@@ -2485,18 +3277,23 @@ registerWS(ws, 'thread_inject_error', (_msg: WSMessage) => {
   // in side panels for delegated outcomes.
 registerWS(ws, 'thread_done', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
-    // In session mode, verify session_id matches. In space mode, accept any
-    // thread_done for sessions in this space (the WS subscription handles scoping).
+    // In session mode, verify session_id matches. In space mode, write the
+    // completion card onto the owner space (getSessionSpaceId), not the
+    // currently viewed room — the WS subscription is not per-space.
     if (props.sessionId && msg.session_id !== props.sessionId) return
     const p = msg.payload as Record<string, unknown>
     const threadId = p?.thread_id as string | undefined
     if (!threadId) return
     const summary = typeof p?.summary === 'string' ? p.summary : ''
     const agentId = p?.agent_id as string | undefined
+    // A reaper/watchdog timeout (or any other hard failure) sets status
+    // "error" — that must read as a failure notice, not an accomplishment.
+    const failed = typeof p?.status === 'string' && p.status.toLowerCase() === 'error'
     // Mark any delegatedThread entry for this thread as done so the badge
     // reflects the final status without requiring a page refresh.
     const replyCount = p?.reply_count as number | undefined
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
     for (const m of msgs) {
       const dt = m.delegatedThreads
       if (dt) {
@@ -2522,18 +3319,23 @@ registerWS(ws, 'thread_done', (msg: WSMessage) => {
     // Remove any stale streaming tool calls scoped to the completed thread's
     // agent so they don't linger in the active tool call list.
     if (agentId) {
-      activeToolCalls.value = activeToolCalls.value.filter(tc => (tc as any).agent !== agentId)
+      activeToolCalls.value = activeToolCalls.value.filter(tc => tc.agent !== agentId)
     }
     if (summary) {
       const alreadyPosted = msgs.some(m => m.threadSummaryThreadId === threadId)
       if (!alreadyPosted) {
+        const label = agentId || 'Delegate'
+        const content = failed
+          ? `**${label}**'s delegated task failed: ${summary}`
+          : `**${label}** completed delegated work: ${summary}`
         const completionMsg: ChatMessage = {
           id: `thread-summary-${threadId}-${Date.now()}`,
           role: 'assistant',
-          content: `**${agentId || 'Delegate'}** completed delegated work: ${summary}`,
+          content,
           agent: agentId || undefined,
           createdAt: new Date().toISOString(),
           threadSummary: true,
+          threadSummaryFailed: failed || undefined,
           threadSummaryThreadId: threadId,
           ...(props.spaceId && msg.session_id ? {
             session_id: msg.session_id as string,
@@ -2558,8 +3360,9 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
     const agentId = typeof p.agent_id === 'string'
       ? p.agent_id
       : (typeof p.agent === 'string' ? p.agent : 'Delegate')
-    showAutoApproveNotice(agentId)
-    const msgs = getSourceMessages()
+    const msgs = getOwnerMessages(msg.session_id)
+    if (!msgs) return
+    if (isOwnerView(msg.session_id)) showAutoApproveNotice(agentId)
     const eventId = `preview-timeout-${threadId}`
     if (msgs.some(m => m.id === eventId)) return
     const timeoutLabel = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 30
@@ -2574,12 +3377,79 @@ registerWS(ws, 'delegation_preview_timeout', (msg: WSMessage) => {
         ts: new Date().toISOString(),
       } : {}),
     })
-    scrollToBottom()
+    if (isOwnerView(msg.session_id)) scrollToBottom()
   })
 
   // thread_reply_updated: parent message reply count changed in persistence.
   // This event is message-scoped, so only apply the count when there is a
   // single delegated thread anchored to that parent message.
+registerWS(ws, 'space_reply', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    if (!parentId) return
+    const count = typeof p.reply_count === 'number' ? p.reply_count : undefined
+    const preview = typeof p.last_preview === 'string' ? p.last_preview : undefined
+    applySpaceReplyMeta(parentId, { reply_count: count, last_preview: preview })
+    const raw = p.message as any
+    if (raw && raw.id && replyThreadParent.value?.id === parentId) {
+      spaceReplyIncoming.value = raw
+    }
+    delete spaceReplyStream[parentId]
+  })
+
+registerWS(ws, 'space_reply_typing', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    const agent = typeof p.agent === 'string' ? p.agent : ''
+    if (!parentId || !agent) return
+    spaceReplyTyping[parentId] = agent
+    delete spaceReplySnag[parentId]
+  })
+
+registerWS(ws, 'space_reply_token', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    const agent = typeof p.agent === 'string' ? p.agent : ''
+    const token = typeof p.token === 'string' ? p.token : ''
+    if (!parentId || !token) return
+    const prev = spaceReplyStream[parentId]
+    spaceReplyStream[parentId] = {
+      agent: agent || prev?.agent || '',
+      text: (prev?.text ?? '') + token,
+    }
+  })
+
+registerWS(ws, 'space_reply_typing_done', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!props.spaceId || sid !== props.spaceId) return
+    const parentId = typeof p.parent_id === 'string' ? p.parent_id : ''
+    if (!parentId) return
+    delete spaceReplyTyping[parentId]
+    delete spaceReplyStream[parentId]
+    const agent = typeof p.agent === 'string' ? p.agent : ''
+    const err = typeof p.error === 'string' ? p.error : ''
+    if (err && agent) {
+      spaceReplySnag[parentId] = { agent, reason: err }
+    }
+  })
+
+registerWS(ws, 'space_reply_mention', (msg: WSMessage) => {
+    const p = (msg.payload ?? {}) as Record<string, unknown>
+    const sid = typeof p.space_id === 'string' ? p.space_id : ''
+    if (!sid) return
+    if (props.spaceId === sid && replyThreadParent.value) return
+    const preview = typeof p.preview === 'string' && p.preview ? p.preview : 'You were mentioned in a thread'
+    spaceMentionToast.value = preview
+    setTimeout(() => { if (spaceMentionToast.value === preview) spaceMentionToast.value = null }, 6000)
+  })
+
 registerWS(ws, 'thread_reply_updated', (msg: WSMessage) => {
     if (!props.sessionId && !props.spaceId) return
     if (props.sessionId && msg.session_id !== props.sessionId) return
@@ -2663,7 +3533,7 @@ registerWS(ws, 'thread_permission_denied', (msg: WSMessage) => {
   })
 
   // Wire thread events via useThreads composable
-  const cleanupThreadWS = wireThreadWS(ws, () => props.sessionId ?? '')
+  const cleanupThreadWS = wireThreadWS(ws, () => resolvedThreadSessionId.value)
   if (typeof cleanupThreadWS === 'function') {
     wsCleanupFns.push(cleanupThreadWS)
   }
@@ -2694,8 +3564,12 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   if (oldSessionId && oldSessionId !== newSessionId) {
     clearSessionPreviews(oldSessionId)
   }
+  // Leaving session mode (e.g. /chat/:id → /space/:id) must not wipe
+  // space-keyed run chrome that restoreOwnerRun just applied.
+  if (!newSessionId) return
   resetStreaming()
   prestreamThinking.value = false
+  trivialAskPending.value = false
   queuedRunIds.value = []
   dismissAllBlockedThreadToasts()
   pendingPermission.value = null
@@ -2705,7 +3579,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
   fetchStatus()
   nextTick(() => chatEditorRef.value?.focus())
   // Load existing threads and message history for this session
-  if (props.sessionId) {
+  if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     loadThreads(props.sessionId)
     // Only show skeleton if the session has no cached messages yet
     const alreadyCached = getMessages(props.sessionId).length > 0
@@ -2713,6 +3587,7 @@ watch(() => props.sessionId, async (newSessionId, oldSessionId) => {
     await fetchMessages(props.sessionId)
     sessionSwitching.value = false
     hydrateThreadBadges(props.sessionId)
+    applyLiveThreadSummaries(props.sessionId)
     // Mark session as seen on switch (starts unread count from here)
     markCurrentSessionSeen()
     await scrollToBottom()
@@ -2725,6 +3600,19 @@ function handleOutsideClick(e: MouseEvent) {
     const target = e.target as HTMLElement
     if (!target.closest('.relative')) agentDropdownOpen.value = false
   }
+}
+
+function onHallwayTouchStart(e: TouchEvent) {
+  hallwayTouchX = e.touches[0]?.clientX ?? 0
+}
+function onHallwayTouchMove(e: TouchEvent) {
+  const x = e.touches[0]?.clientX ?? hallwayTouchX
+  const dx = x - hallwayTouchX
+  if (dx < -36) hallwayTimesRevealed.value = true
+  if (dx > 36) hallwayTimesRevealed.value = false
+}
+function onHallwayTouchEnd() {
+  // reveal persists until swipe-right
 }
 
 // Handle clicks on @agent-mention spans rendered inside v-html markdown.
@@ -2764,7 +3652,8 @@ onMounted(async () => {
   await loadAgents()
   syncSessionAgent()
   fetchStatus()
-  if (props.sessionId) {
+  void loadMuninnStatus()
+  if (props.sessionId && !isAgentDMAlias(props.sessionId)) {
     await fetchMessages(props.sessionId)
     hydrateThreadBadges(props.sessionId)
     markCurrentSessionSeen()

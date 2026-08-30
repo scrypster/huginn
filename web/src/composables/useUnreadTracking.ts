@@ -4,21 +4,28 @@ import type { ChatMessage } from './useSessions'
 /**
  * Composable for unread-message tracking and the "jump to unread" pill.
  *
- * @param sessionId — reactive getter for the current session ID
- * @param messages — reactive message list
+ * @param sessionId — reactive session ID (regular chat)
+ * @param messages — reactive message list (session or space timeline)
  * @param messagesEl — ref to the scrollable messages container
+ * @param spaceId — space timeline id in /space/:id mode. When set, unread is
+ *   keyed on the space (or its active session), not the empty route sessionId.
  */
 export function useUnreadTracking(
   sessionId: Ref<string | undefined>,
   messages: Ref<ChatMessage[]>,
   messagesEl: Ref<HTMLElement | undefined>,
+  spaceId?: Ref<string | undefined>,
 ) {
   const lastSeenMessageCount = ref<Record<string, number>>({})
   const atBottom = ref(true)
 
+  // Space mode has no route sessionId; key on the timeline so a scrolled-up
+  // DM/channel can show a jump pill > 0.
+  const trackingKey = computed(() => spaceId?.value || sessionId.value)
+
   const unreadCount = computed(() => {
-    if (!sessionId.value) return 0
-    const seen = lastSeenMessageCount.value[sessionId.value] ?? 0
+    if (!trackingKey.value) return 0
+    const seen = lastSeenMessageCount.value[trackingKey.value] ?? 0
     const total = messages.value.filter(m => m.role === 'assistant' || m.role === 'user').length
     return Math.max(0, total - seen)
   })
@@ -28,20 +35,20 @@ export function useUnreadTracking(
     if (!el) return
     const threshold = 80
     atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
-    if (atBottom.value && sessionId.value) {
+    if (atBottom.value && trackingKey.value) {
       markCurrentSessionSeen()
     }
   }
 
   function markCurrentSessionSeen() {
-    if (!sessionId.value) return
+    if (!trackingKey.value) return
     const count = messages.value.filter(m => m.role === 'assistant' || m.role === 'user').length
-    lastSeenMessageCount.value = { ...lastSeenMessageCount.value, [sessionId.value]: count }
+    lastSeenMessageCount.value = { ...lastSeenMessageCount.value, [trackingKey.value]: count }
   }
 
   function jumpToUnread() {
-    if (!sessionId.value) return
-    const seen = lastSeenMessageCount.value[sessionId.value] ?? 0
+    if (!trackingKey.value) return
+    const seen = lastSeenMessageCount.value[trackingKey.value] ?? 0
     const relevant = messages.value.filter(m => m.role === 'assistant' || m.role === 'user')
     const firstUnread = relevant[seen]
     if (firstUnread) {

@@ -407,7 +407,7 @@ export function useModelsViewState(providerFromRoute: Ref<string | undefined>, r
   async function loadAgentsList() {
     try {
       const data = await api.agents.list() as Array<{ name: string; model?: string }>
-      agentsList.value = data
+      agentsList.value = Array.isArray(data) ? data : []
     } catch {
       agentsList.value = []
     }

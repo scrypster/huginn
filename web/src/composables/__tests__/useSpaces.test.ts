@@ -1,7 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { useSpaces, wireSpaceWS } from '../useSpaces'
+import { useCompanies } from '../useCompanies'
 import { setToken } from '../useApi'
 import type { HuginnWS, WSMessage } from '../useHuginnWS'
+
+const { mockNotify } = vi.hoisted(() => ({
+  mockNotify: vi.fn(),
+}))
+
+vi.mock('../useBrowserNotifications', () => ({
+  useBrowserNotifications: () => ({
+    notify: mockNotify,
+  }),
+}))
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -42,9 +53,12 @@ const sampleDM = {
 
 beforeEach(() => {
   setToken('test-token')
+  mockNotify.mockClear()
+  localStorage.clear()
   // Reset shared state between tests
   const { clearSpaces } = useSpaces()
   clearSpaces()
+  useCompanies().clearCompanies()
 })
 
 afterEach(() => {
@@ -303,6 +317,21 @@ describe('setActiveSpace', () => {
     setActiveSpace(null)
     expect(activeSpaceId.value).toBeNull()
   })
+
+  it('clears a persisted follow/@me mark for the viewed space only', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okJson({ ok: true }))
+    const { noteFollowUnread, followUnreadBySpace, companyFollowUnread } = useCompanies()
+    noteFollowUnread('ch-lab', true)
+    noteFollowUnread('ch-other', true)
+    const { setActiveSpace } = useSpaces()
+    setActiveSpace('ch-lab')
+    expect(followUnreadBySpace.value['ch-lab']).toBeUndefined()
+    expect(followUnreadBySpace.value['ch-other']).toBe(true)
+    expect(JSON.parse(localStorage.getItem('huginn_follow_unread_space_ids') || '[]')).toEqual(['ch-other'])
+    expect(companyFollowUnread('lab', [
+      { id: 'ch-lab', companyId: 'lab', kind: 'channel', unseenCount: 0 },
+    ])).toBe(false)
+  })
 })
 
 // ── mapSpace defaults ─────────────────────────────────────────────────────────
@@ -322,6 +351,46 @@ describe('mapSpace defaults', () => {
     const { fetchSpaces, spaces } = useSpaces()
     await fetchSpaces()
     expect(spaces.value[0].unseenCount).toBe(5)
+  })
+
+  it('does not treat channel unseen_count as a follow/@me rail mark', async () => {
+    const sp = { ...sampleChannel, company_id: 'lab', unseen_count: 4 }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson([sp]))
+    const { fetchSpaces, spaces } = useSpaces()
+    await fetchSpaces()
+    const { followUnreadBySpace, companyFollowUnread } = useCompanies()
+    expect(followUnreadBySpace.value['ch-1']).toBeUndefined()
+    expect(companyFollowUnread('lab', spaces.value.map(s => ({
+      id: s.id, companyId: s.companyId, kind: s.kind, unseenCount: s.unseenCount, forYou: s.forYou,
+    })))).toBe(false)
+  })
+
+  it('rehydrates follow/@me from API for_you before localStorage cache', async () => {
+    localStorage.setItem('huginn_follow_unread_space_ids', JSON.stringify(['stale-ch']))
+    useCompanies().noteFollowUnread('stale-ch', true)
+    const sp = { ...sampleChannel, company_id: 'lab', for_you: true, unseen_count: 0 }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson([sp]))
+    const { fetchSpaces, spaces } = useSpaces()
+    await fetchSpaces()
+    expect(spaces.value[0].forYou).toBe(true)
+    const { followUnreadBySpace, companyFollowUnread } = useCompanies()
+    expect(followUnreadBySpace.value['ch-1']).toBe(true)
+    expect(followUnreadBySpace.value['stale-ch']).toBeUndefined()
+    expect(JSON.parse(localStorage.getItem('huginn_follow_unread_space_ids') || '[]')).toEqual(['ch-1'])
+    expect(companyFollowUnread('lab', spaces.value.map(s => ({
+      id: s.id, companyId: s.companyId, kind: s.kind, unseenCount: s.unseenCount, forYou: s.forYou,
+    })))).toBe(true)
+  })
+
+  it('API for_you=false clears a stale localStorage follow mark', async () => {
+    useCompanies().noteFollowUnread('ch-1', true)
+    const sp = { ...sampleChannel, company_id: 'lab', for_you: false, unseen_count: 4 }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson([sp]))
+    const { fetchSpaces } = useSpaces()
+    await fetchSpaces()
+    const { followUnreadBySpace } = useCompanies()
+    expect(followUnreadBySpace.value['ch-1']).toBeUndefined()
+    expect(JSON.parse(localStorage.getItem('huginn_follow_unread_space_ids') || '[]')).toEqual([])
   })
 })
 
@@ -617,6 +686,43 @@ describe('wireSpaceWS', () => {
     ws._emit(makeMsg('space_activity', { space_id: 'dm-1', unseen_count: 5 }))
 
     expect(spaces.value[0].unseenCount).toBe(5)
+    // Spectator/unrelated activity must not light the company-rail follow mark.
+    expect(useCompanies().followUnreadBySpace.value['dm-1']).toBeUndefined()
+  })
+
+  it('space_activity increment on inactive space calls notify', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson([sampleDM]))
+    const { fetchSpaces } = useSpaces()
+    await fetchSpaces()
+
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+    ws._emit(makeMsg('space_activity', { space_id: 'dm-1', unseen_count: 5 }))
+
+    expect(mockNotify).toHaveBeenCalledTimes(1)
+    expect(mockNotify).toHaveBeenCalledWith(
+      'atlas',
+      'New message',
+      'space-activity-dm-1',
+      expect.any(Function),
+    )
+  })
+
+  it('space_activity increment on active space does not call notify', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(okJson([sampleDM]))
+      .mockResolvedValueOnce(okJson([]))   // fetchSpaceSessions triggered by setActiveSpace
+    const { fetchSpaces, setActiveSpace, spaces } = useSpaces()
+    await fetchSpaces()
+    setActiveSpace('dm-1')
+    expect(spaces.value[0].unseenCount).toBe(0)
+
+    const ws = makeWsStub()
+    wireSpaceWS(ws)
+    ws._emit(makeMsg('space_activity', { space_id: 'dm-1', unseen_count: 3 }))
+
+    expect(spaces.value[0].unseenCount).toBe(0)
+    expect(mockNotify).not.toHaveBeenCalled()
   })
 
   it('space_activity ignores increments for the active space', async () => {
@@ -840,3 +946,62 @@ describe('fetchSpaceSessions', () => {
     expect(spaceSessionsMap.value['ch-1']).toBeUndefined()
   })
 })
+
+// ── company_id mapping + rail filter ─────────────────────────────────────────
+
+describe('company filter', () => {
+  const acmeChannel = { ...sampleChannel, id: 'ch-acme', name: 'acme-eng', company_id: 'acme' }
+  const deskChannel = { ...sampleChannel, id: 'ch-desk', name: 'general', company_id: '' }
+  const acmeDM = { ...sampleDM, id: 'dm-acme', name: 'acme-bot', lead_agent: 'acme-bot', company_id: 'acme' }
+  const deskDM = { ...sampleDM, id: 'dm-desk', name: 'winston', lead_agent: 'winston', company_id: '' }
+
+  it('maps company_id onto Space.companyId', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(okJson([acmeChannel]))
+    const { fetchSpaces, spaces } = useSpaces()
+    await fetchSpaces()
+    expect(spaces.value[0].companyId).toBe('acme')
+  })
+
+  it('desk shows all spaces; picking a company filters channels and dms', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/companies')) {
+        return Promise.resolve(okJson([{ id: 'acme', name: 'Acme' }]))
+      }
+      return Promise.resolve(okJson([acmeChannel, deskChannel, acmeDM, deskDM]))
+    })
+    const { fetchSpaces, channels, dms } = useSpaces()
+    const { fetchCompanies, selectCompany } = useCompanies()
+    await fetchCompanies()
+    await fetchSpaces()
+
+    expect(channels.value.map(s => s.id).sort()).toEqual(['ch-acme', 'ch-desk'])
+    expect(dms.value.map(s => s.id).sort()).toEqual(['dm-acme', 'dm-desk'])
+
+    selectCompany('acme')
+    expect(channels.value.map(s => s.id)).toEqual(['ch-acme'])
+    expect(dms.value.map(s => s.id)).toEqual(['dm-acme'])
+
+    selectCompany(null)
+    expect(channels.value.map(s => s.id).sort()).toEqual(['ch-acme', 'ch-desk'])
+    expect(dms.value.map(s => s.id).sort()).toEqual(['dm-acme', 'dm-desk'])
+  })
+
+  it('company-filtered fetch merges and never replaces the rail', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('company_id=acme')) {
+        return Promise.resolve(okJson([acmeChannel]))
+      }
+      return Promise.resolve(okJson([deskChannel, deskDM]))
+    })
+    const { fetchSpaces, spaces } = useSpaces()
+    await fetchSpaces()
+    expect(spaces.value.map(s => s.id).sort()).toEqual(['ch-desk', 'dm-desk'])
+
+    await fetchSpaces({ companyId: 'acme' })
+    expect(fetchSpy.mock.calls.some(([u]) => String(u).includes('company_id=acme'))).toBe(true)
+    expect(spaces.value.map(s => s.id).sort()).toEqual(['ch-acme', 'ch-desk', 'dm-desk'])
+  })
+})
+

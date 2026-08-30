@@ -14,7 +14,11 @@ func TestDefaultTable_KnownModels(t *testing.T) {
 		wantPrompt     float64
 		wantCompletion float64
 	}{
-		{"claude-opus-4-6", 3.00, 15.00},
+		// claude-opus-4-6 verified 2026-08-28 against
+		// https://platform.claude.com/docs/en/about-claude/pricing:
+		// $5/$25 per MTok, NOT the same as sonnet (previously a
+		// copy-paste defect priced it identically to sonnet-4-6).
+		{"claude-opus-4-6", 5.00, 25.00},
 		{"claude-sonnet-4-6", 3.00, 15.00},
 		{"gpt-4o", 2.50, 10.00},
 		{"gpt-4o-mini", 0.15, 0.60},

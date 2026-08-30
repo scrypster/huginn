@@ -60,6 +60,10 @@ const PERMANENT_CLOSE_CODES = new Set([1000, 1001, 4001])
 // When full, the oldest entry is dropped (backpressure: prefer fresh messages).
 const OUTBOX_MAX = 100
 
+// Sec-WebSocket-Protocol prefix carrying the auth token. Must match the
+// server's wsTokenSubprotocolPrefix in internal/server/ws_auth.go.
+const WS_TOKEN_SUBPROTOCOL_PREFIX = 'huginn-token.'
+
 // Maximum number of sessions to send a "resume" for after a reconnect.
 // The active session always goes first; other sessions this tab has seen
 // seq-stamped traffic for follow, capped to stay well under the server's
@@ -301,7 +305,12 @@ export function useHuginnWS(token: string) {
     if (intentionallyClosed) return
     connectionState.value = reconnectAttempts.value === 0 ? 'connecting' : 'reconnecting'
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    ws = new WebSocket(`${protocol}//${location.host}/ws?token=${token}`)
+    // Authenticate via the Sec-WebSocket-Protocol subprotocol rather than a
+    // ?token= query param. A failed connection attempt logs the full request
+    // URL (including query string) to the browser console/network panel —
+    // putting the server token there would leak it into those logs. The
+    // subprotocol is not logged the same way. Server side: ws_auth.go.
+    ws = new WebSocket(`${protocol}//${location.host}/ws`, `${WS_TOKEN_SUBPROTOCOL_PREFIX}${token}`)
 
     ws.onopen = () => {
       connected.value = true

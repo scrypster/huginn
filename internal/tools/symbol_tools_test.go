@@ -303,3 +303,86 @@ func TestRegisterLSPTools_WithNonGoManager(t *testing.T) {
 		t.Error("find_definition not registered")
 	}
 }
+
+// F7: with only a Go LSP manager registered, find_definition on a .ts file
+// must return a clean "no language server configured" message — never
+// route to the Go server and return its (meaningless-for-TS) result.
+func TestFindDefinitionTool_RoutesByExtension_TSFileWithOnlyGoManager(t *testing.T) {
+	goMgr := &mockLSPMgr{
+		defs: []lsp.Location{
+			{URI: "file:///project/main.go", Range: lsp.Range{Start: lsp.Position{Line: 9}}},
+		},
+	}
+	reg := tools.NewRegistry()
+	tools.RegisterLSPTools(reg, "/project", map[string]tools.LSPManager{"go": goMgr})
+
+	tool, ok := reg.Get("find_definition")
+	if !ok {
+		t.Fatal("find_definition not registered")
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"path":   "app.ts",
+		"line":   float64(1),
+		"column": float64(1),
+	})
+	if result.IsError {
+		t.Fatalf("expected a clean unavailable message, not an error: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "main.go") {
+		t.Fatalf("find_definition on a .ts file returned the Go server's result (garbage): %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "no language server configured") &&
+		!strings.Contains(result.Output, "No language server configured") {
+		t.Errorf("expected a clean 'no language server configured' message, got: %s", result.Output)
+	}
+}
+
+// A .go file with only a Go manager registered must still work normally —
+// the extension-routing fix must not regress the common single-language case.
+func TestFindDefinitionTool_RoutesByExtension_GoFileWithOnlyGoManager(t *testing.T) {
+	goMgr := &mockLSPMgr{
+		defs: []lsp.Location{
+			{URI: "file:///project/main.go", Range: lsp.Range{Start: lsp.Position{Line: 9}}},
+		},
+	}
+	reg := tools.NewRegistry()
+	tools.RegisterLSPTools(reg, "/project", map[string]tools.LSPManager{"go": goMgr})
+
+	tool, ok := reg.Get("find_definition")
+	if !ok {
+		t.Fatal("find_definition not registered")
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"path":   "main.go",
+		"line":   float64(42),
+		"column": float64(15),
+	})
+	if result.IsError {
+		t.Fatalf("error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "main.go") {
+		t.Errorf("expected main.go in output, got: %s", result.Output)
+	}
+}
+
+// list_symbols with a Go and a Python manager registered must fan the
+// query out to both, not return results from only whichever manager
+// map-iteration happened to land on.
+func TestListSymbolsTool_FansOutAcrossManagers(t *testing.T) {
+	goMgr := &mockLSPMgr{syms: []lsp.SymbolInformation{{Name: "GoHandler", Kind: 12}}}
+	pyMgr := &mockLSPMgr{syms: []lsp.SymbolInformation{{Name: "PyHandler", Kind: 12}}}
+	reg := tools.NewRegistry()
+	tools.RegisterLSPTools(reg, "/project", map[string]tools.LSPManager{"go": goMgr, "python": pyMgr})
+
+	tool, ok := reg.Get("list_symbols")
+	if !ok {
+		t.Fatal("list_symbols not registered")
+	}
+	result := tool.Execute(context.Background(), map[string]any{"query": "Handler"})
+	if result.IsError {
+		t.Fatalf("error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "GoHandler") || !strings.Contains(result.Output, "PyHandler") {
+		t.Errorf("expected symbols from both managers, got: %s", result.Output)
+	}
+}

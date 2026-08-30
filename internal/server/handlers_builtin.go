@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/runtime"
 )
@@ -249,7 +250,10 @@ func (s *Server) handleBuiltinActivate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cfg.Backend.Type = "managed"
 	s.cfg.Backend.BuiltinModel = body.Model
-	if err := s.saveConfig(&s.cfg); err != nil {
+	if err := s.updateConfig(func(c *config.Config) {
+		c.Backend.Type = "managed"
+		c.Backend.BuiltinModel = body.Model
+	}); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())
 		return
 	}

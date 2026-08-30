@@ -3,23 +3,30 @@ import { setupApiMocks } from './helpers/mock-api'
 import { blockWS, setupConnectedWS } from './helpers/mock-ws'
 
 /**
- * Navigate to the agents section.
+ * Navigate to the Agents section.
  *
- * App.vue uses watch(activeSection) — the watcher only fires on change, not on
- * initial mount. Navigating directly to /#/agents means activeSection starts as
- * 'agents' with no prior value, so loadAgents() is never called. Work around
- * this by first landing on a non-agents route, then clicking the Agents nav
- * button so the watcher detects a transition and calls loadAgents().
+ * /agents is a top-level section (AgentsView.vue) — App.vue's context-panel
+ * aside is chat-only (see utils/navLayout.ts showContextPanel) and never
+ * renders for /agents, so there is no separate "sidebar" list to wait on.
+ * AgentsView itself renders either the card grid (agents-grid) or the
+ * empty state (agents-empty-state) once agents finish loading.
  */
 async function gotoAgents(page: import('@playwright/test').Page) {
-  // Start somewhere other than agents so activeSection begins as 'chat'
   await page.goto('/#/')
-  // Wait for app to initialize (token fetch completes)
   await page.waitForSelector('nav', { timeout: 5000 })
-  // Now click the Agents nav button — this changes activeSection and fires the watcher
-  await page.click('button:has-text("Agents")')
-  // Wait for at least the agent-list container to appear
-  await page.waitForSelector('[data-testid="agent-list"]', { timeout: 5000 })
+  await page.click('button[title="Agents"]')
+  await expect(page).toHaveURL(/#\/agents$/, { timeout: 5000 })
+  await page.waitForSelector('[data-testid="agents-grid"], [data-testid="agents-empty-state"]', { timeout: 5000 })
+}
+
+/**
+ * Open an agent's editor from the card grid. Cards open a DM on a plain
+ * click — the per-card "Edit" button (data-testid="agent-card-edit") is
+ * what navigates to /agents/:name and shows the editor.
+ */
+async function openAgentEditor(page: import('@playwright/test').Page, name: string) {
+  await page.click(`[data-testid="agent-card"]:has-text("${name}") [data-testid="agent-card-edit"]`)
+  await expect(page).toHaveURL(new RegExp(`#/agents/${name}$`), { timeout: 5000 })
 }
 
 test.describe('AgentsView — Toolbelt', () => {
@@ -28,21 +35,20 @@ test.describe('AgentsView — Toolbelt', () => {
     await setupApiMocks(page)
   })
 
-  test('displays agent list in sidebar', async ({ page }) => {
+  test('displays agent grid on the Agents view', async ({ page }) => {
     await gotoAgents(page)
 
-    const agentList = page.locator('[data-testid="agent-list"]')
-    await expect(agentList).toBeVisible()
+    const grid = page.locator('[data-testid="agents-grid"]')
+    await expect(grid).toBeVisible()
 
     // Fixture has 2 agents: Coder and GitAgent
-    const items = page.locator('[data-testid="agent-item"]')
-    await expect(items).toHaveCount(2)
+    const cards = page.locator('[data-testid="agent-card"]')
+    await expect(cards).toHaveCount(2)
   })
 
   test('shows toolbelt entries for agent with connections', async ({ page }) => {
     await gotoAgents(page)
-    // Click on GitAgent in the sidebar
-    await page.click('[data-testid="agent-item"]:has-text("GitAgent")')
+    await openAgentEditor(page, 'GitAgent')
 
     const toolbeltSection = page.locator('[data-testid="toolbelt-section"]')
     await expect(toolbeltSection).toBeVisible()
@@ -59,8 +65,7 @@ test.describe('AgentsView — Toolbelt', () => {
 
   test('shows empty toolbelt for agent with no connections', async ({ page }) => {
     await gotoAgents(page)
-    // Click on Coder in the sidebar
-    await page.click('[data-testid="agent-item"]:has-text("Coder")')
+    await openAgentEditor(page, 'Coder')
 
     const toolbeltSection = page.locator('[data-testid="toolbelt-section"]')
     await expect(toolbeltSection).toBeVisible()
@@ -72,10 +77,8 @@ test.describe('AgentsView — Toolbelt', () => {
 
   test('add toolbelt entry button is visible', async ({ page }) => {
     await gotoAgents(page)
-    await page.click('[data-testid="agent-item"]:has-text("Coder")')
+    await openAgentEditor(page, 'Coder')
 
-    // The add-toolbelt-btn container renders when addableConnections.length > 0.
-    // Coder has an empty toolbelt so conn-gh-1 (from connectionsFixture) is addable.
     const addBtn = page.locator('[data-testid="add-toolbelt-btn"]')
     await expect(addBtn).toBeVisible()
   })
@@ -99,7 +102,7 @@ test.describe('AgentsView — Toolbelt', () => {
 
   test('save button is present on agent editor', async ({ page }) => {
     await gotoAgents(page)
-    await page.click('[data-testid="agent-item"]:has-text("Coder")')
+    await openAgentEditor(page, 'Coder')
 
     // The save button only renders when dirty=true. Trigger dirty by typing in the name field.
     // The agent name input has placeholder="Agent name".
@@ -131,15 +134,15 @@ test.describe('AgentsView — fresh install (no agents)', () => {
     })
   })
 
-  test('sidebar shows blank-canvas empty state with no phantom agents', async ({ page }) => {
+  test('shows blank-canvas empty state with no phantom agents', async ({ page }) => {
     await page.goto('/#/')
     await page.waitForSelector('nav', { timeout: 5000 })
-    await page.click('button:has-text("Agents")')
-    await page.waitForSelector('[data-testid="agent-list"]', { timeout: 5000 })
+    await page.click('button[title="Agents"]')
+    await page.waitForSelector('[data-testid="agents-empty-state"]', { timeout: 5000 })
 
-    const list = page.locator('[data-testid="agent-list"]')
-    await expect(list).toContainText('No agents configured')
-    await expect(list.locator('[data-testid="agent-item"]')).toHaveCount(0)
+    const empty = page.locator('[data-testid="agents-empty-state"]')
+    await expect(empty).toContainText('No teammates yet')
+    await expect(page.locator('[data-testid="agent-card"]')).toHaveCount(0)
   })
 
   test('New agent button navigates to editor on fresh install', async ({ page }) => {
@@ -193,10 +196,9 @@ test.describe('AgentsView — fresh install (no agents)', () => {
     await expect(saveBtn).toBeVisible({ timeout: 3000 })
     await saveBtn.click()
 
-    // Save sends PUT to /api/v1/agents/FirstAgent and shows confirmation.
-    // Page stays on /agents/new (no redirect after save — user can keep editing).
+    // Save sends PUT, then opens the new agent's DM (fallback: /agents/FirstAgent).
     expect(saveRequestMade).toBe(true)
-    await expect(page.locator('text=Saved successfully')).toBeVisible({ timeout: 3000 })
+    await expect(page).toHaveURL(/#\/(space\/.+|agents\/FirstAgent)/, { timeout: 8000 })
   })
 })
 
@@ -222,8 +224,9 @@ test.describe('AgentsView — token auto-init race', () => {
 
     await page.goto('/#/agents')
 
-    const agentList = page.locator('[data-testid="agent-list"]')
-    await expect(agentList).toBeVisible({ timeout: 8000 })
+    // No agents configured in this mock — AgentsView renders the empty state.
+    const emptyState = page.locator('[data-testid="agents-empty-state"]')
+    await expect(emptyState).toBeVisible({ timeout: 8000 })
 
     // No auth error should surface to the user.
     await expect(page.locator('text=401')).toHaveCount(0)

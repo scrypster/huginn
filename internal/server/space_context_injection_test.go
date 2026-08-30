@@ -97,6 +97,60 @@ func TestInjectSpaceContext_ChannelSession_InjectsTeamContext(t *testing.T) {
 	if !strings.Contains(spaceCtx, "Delegation protocol") {
 		t.Errorf("expected delegation protocol instructions, got:\n%s", spaceCtx)
 	}
+
+	gotNames := workforce.GetChannelMembers(enrichedCtx)
+	joined := strings.Join(gotNames, ",")
+	for _, want := range []string{"Tom", "Sam", "Dave"} {
+		found := false
+		for _, n := range gotNames {
+			if strings.EqualFold(n, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("channel members missing %s: %s", want, joined)
+		}
+	}
+}
+
+func TestInjectSpaceContext_AttachesCompanyRosters(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	if _, err := spaceStore.CreateCompany("Lab", "", []string{"Sam", "Winston"}, "", ""); err != nil {
+		t.Fatalf("create Lab: %v", err)
+	}
+	ch, err := spaceStore.CreateChannel("Huginn", "Winston", []string{"Reggie", "Steve"}, "", "")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sess := sessStore.New("test-lab-roster", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Winston"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	ag := &agents.Agent{Name: "Winston"}
+	enriched := srv.InjectSpaceContext(context.Background(), sess.ID, ag)
+	got := workforce.GetCompanyRoster(enriched, "Lab")
+	joined := strings.Join(got, ",")
+	for _, want := range []string{"Sam", "Winston"} {
+		found := false
+		for _, n := range got {
+			if strings.EqualFold(n, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Lab roster missing %s: %s", want, joined)
+		}
+	}
 }
 
 func TestInjectSpaceContext_DMSession_NoTeamContext(t *testing.T) {
@@ -332,6 +386,7 @@ func TestBuildSpaceContextBlock_LeadAgent_ContainsAllElements(t *testing.T) {
 		{"Dave listed", "Dave"},
 		{"Dave description", "DevOps specialist"},
 		{"Main channel discipline", "Main channel discipline"},
+		{"User @mention is a real address", "user @mention addresses that agent"},
 	}
 
 	for _, check := range checks {
@@ -479,8 +534,8 @@ func TestResolveAgentForMessage_ChannelAtMention(t *testing.T) {
 
 	sess := sessStore.New("test-mention", "/workspace", "model")
 	sess.Manifest.SpaceID = ch.ID
-	// Do NOT set sess.Manifest.Agent — in channels, routing should come from
-	// the space lead agent + @mention logic, not a hardcoded primary agent.
+	// Stamp the lead the way handleCreateSession does. @Sam must still win.
+	sess.Manifest.Agent = "Tom"
 	_ = sessStore.SaveManifest(sess)
 
 	srv.agentLoader = func() (*agents.AgentsConfig, error) {
@@ -528,13 +583,21 @@ func TestResolveAgentForMessage_ChannelAtMention_NonMember_FallsToLead(t *testin
 		}, nil
 	}
 
-	// @Dave is not a member — should fall back to Tom (lead agent).
+	// @Dave is a known agent but not a channel member — stay with lead Tom.
 	ag := srv.resolveAgentForMessage(sess.ID, "@Dave deploy to staging")
 	if ag == nil {
 		t.Fatal("expected agent, got nil")
 	}
 	if ag.Name != "Tom" {
 		t.Errorf("expected fallback to lead agent Tom for non-member mention, got %q", ag.Name)
+	}
+
+	ag = srv.resolveAgentForMessage(sess.ID, "please ask @Dave about hostname")
+	if ag == nil {
+		t.Fatal("expected agent for mid-text non-member, got nil")
+	}
+	if ag.Name != "Tom" {
+		t.Errorf("expected mid-text @Dave in a Tom/Sam channel to stay with Tom, got %q", ag.Name)
 	}
 }
 
@@ -581,12 +644,13 @@ func TestExtractLeadMention(t *testing.T) {
 		{"@Sam can you review?", "Sam"},
 		{"@Dave-ops deploy to staging", "Dave-ops"},
 		{"@Tom_lead what's the plan?", "Tom_lead"},
-		{"hello @Sam", ""},              // not at start
+		{"hello @Sam", "Sam"},            // first @ anywhere
 		{"@", ""},                        // bare @
 		{"@123invalid", ""},              // starts with digit
 		{"no mention here", ""},          // no @
-		{"", ""},                          // empty
+		{"", ""},                         // empty
 		{"  @Sam leading spaces", "Sam"}, // trimmed
+		{"alice@Bob", ""},                // email-style, not a mention
 	}
 
 	for _, tt := range tests {
@@ -597,3 +661,115 @@ func TestExtractLeadMention(t *testing.T) {
 	}
 }
 
+func TestInjectSpaceContext_DeskDM_ListsDeskPeers(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	steveDM, err := spaceStore.OpenDM("Steve")
+	if err != nil {
+		t.Fatalf("OpenDM Steve: %v", err)
+	}
+	if _, err := spaceStore.OpenDM("Winston"); err != nil {
+		t.Fatalf("OpenDM Winston: %v", err)
+	}
+
+	sess := sessStore.New("steve-dm", "/workspace", "model")
+	sess.Manifest.SpaceID = steveDM.ID
+	sess.Manifest.Agent = "Steve"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	ag := &agents.Agent{Name: "Steve"}
+	enriched := srv.InjectSpaceContext(context.Background(), sess.ID, ag)
+	spaceCtx := workforce.GetSpaceContext(enriched)
+	if !strings.Contains(spaceCtx, "[Desk Floor]") {
+		t.Fatalf("expected desk floor context, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "Winston") {
+		t.Fatalf("expected Winston in desk floor context, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "delegate_to_agent") {
+		t.Fatalf("expected delegate_to_agent in desk floor context, got:\n%s", spaceCtx)
+	}
+}
+
+func TestInjectSpaceContext_CapabilityCardsIncludeTier(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	ch, err := spaceStore.CreateChannel("Engineering", "Tom", []string{"Sam"}, "", "")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sess := sessStore.New("tier-cards", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Tom"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{
+			Agents: []agents.AgentDef{
+				{Name: "Tom", Description: "Team lead.", Model: "claude-sonnet-4"},
+				{Name: "Sam", Description: "Backend engineer.", Model: "qwen2.5-coder:7b"},
+			},
+		}, nil
+	}
+
+	ag := &agents.Agent{Name: "Tom", ModelID: "claude-sonnet-4"}
+	spaceCtx := workforce.GetSpaceContext(srv.InjectSpaceContext(context.Background(), sess.ID, ag))
+	if spaceCtx == "" {
+		t.Fatal("expected space context")
+	}
+	if !strings.Contains(spaceCtx, "tools:") {
+		t.Fatalf("expected infoFn tools annotation on capability cards, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "low") {
+		t.Fatalf("expected 7b Sam card to show low tier, got:\n%s", spaceCtx)
+	}
+}
+
+func TestInjectSpaceContext_ChannelNamesCompany(t *testing.T) {
+	srv, _ := newTestServer(t)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+	sessStore := makeSessionStore(t)
+	srv.SetSpaceStore(spaceStore)
+	srv.store = sessStore
+
+	co, err := spaceStore.CreateCompany("Huginn", "", []string{"Winston"}, "", "")
+	if err != nil {
+		t.Fatalf("create company: %v", err)
+	}
+	ch, err := spaceStore.CreateChannelForCompany("Huginn", "Winston", []string{"Steve"}, "", "", co.ID)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Winston"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	srv.agentLoader = func() (*agents.AgentsConfig, error) {
+		return &agents.AgentsConfig{Agents: []agents.AgentDef{{Name: "Winston"}, {Name: "Steve"}}}, nil
+	}
+	ctx := srv.InjectSpaceContext(context.Background(), sess.ID, &agents.Agent{Name: "Winston"})
+	spaceCtx := workforce.GetSpaceContext(ctx)
+	if !strings.Contains(spaceCtx, "**Company:** Huginn") {
+		t.Fatalf("expected company name in space context, got:\n%s", spaceCtx)
+	}
+	if !strings.Contains(spaceCtx, "This channel is in the Huginn company") {
+		t.Fatalf("expected company sentence, got:\n%s", spaceCtx)
+	}
+}

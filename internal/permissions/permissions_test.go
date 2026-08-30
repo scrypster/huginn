@@ -344,6 +344,47 @@ func TestFormatRequest_UnknownTool_EmptyArgs(t *testing.T) {
 	}
 }
 
+// TestFormatRequest_BrowserTool_RendersURLReadably is V9: a browser_*/MCP
+// tool call must render its url argument readably ("browser_navigate:
+// https://...") instead of falling through to the generic Go map dump
+// ("browser_navigate: map[url:https://...]").
+func TestFormatRequest_BrowserTool_RendersURLReadably(t *testing.T) {
+	req := PermissionRequest{
+		ToolName: "browser_navigate",
+		Provider: "playwright",
+		Level:    tools.PermWrite,
+		Args:     map[string]any{"url": "https://example.com/path"},
+	}
+	result := FormatRequest(req)
+	want := "browser_navigate: https://example.com/path"
+	if result != want {
+		t.Errorf("FormatRequest = %q, want %q", result, want)
+	}
+	if strings.Contains(result, "map[") {
+		t.Errorf("expected no Go map dump in output, got: %q", result)
+	}
+}
+
+// TestFormatRequest_MCPTool_RendersArgsReadably verifies a provider-tagged
+// tool with no url/selector/text/query arg still renders key=value pairs
+// instead of a Go map dump.
+func TestFormatRequest_MCPTool_RendersArgsReadably(t *testing.T) {
+	req := PermissionRequest{
+		ToolName: "browser_wait_for",
+		Provider: "playwright",
+		Level:    tools.PermWrite,
+		Args:     map[string]any{"timeout": 30},
+	}
+	result := FormatRequest(req)
+	want := "browser_wait_for: timeout=30"
+	if result != want {
+		t.Errorf("FormatRequest = %q, want %q", result, want)
+	}
+	if strings.Contains(result, "map[") {
+		t.Errorf("expected no Go map dump in output, got: %q", result)
+	}
+}
+
 func TestFormatRequest_EmptyToolName(t *testing.T) {
 	req := PermissionRequest{
 		ToolName: "",
@@ -432,11 +473,31 @@ func TestDecisionConstants_Distinct(t *testing.T) {
 
 func TestGate_AllowedProviders_NilAllowsAll(t *testing.T) {
 	g := NewGate(false, func(r PermissionRequest) Decision { return Allow })
-	// nil allowedProviders — any provider allowed
+	// nil allowedProviders — any provider allowed (legacy / unscoped gate)
 	g.SetAllowedProviders(nil)
 	req := PermissionRequest{ToolName: "slack_post", Level: tools.PermRead, Provider: "slack"}
 	if !g.Check(req) {
 		t.Error("expected allowed when allowedProviders is nil")
+	}
+}
+
+func TestGate_AllowedProviders_EmptyMapDeniesExternal(t *testing.T) {
+	// Empty map is fail-closed. skipAll auto-approves prompts; it must not
+	// grant every provider just because the toolbelt was empty.
+	g := NewGate(true, nil)
+	g.SetAllowedProviders(map[string]bool{})
+	req := PermissionRequest{ToolName: "aws_ec2_terminate_instance", Level: tools.PermWrite, Provider: "aws"}
+	if g.Check(req) {
+		t.Error("expected empty AllowedProviders to deny aws even when skipAll=true")
+	}
+}
+
+func TestGate_AllowedProviders_WildcardAllowsAll(t *testing.T) {
+	g := NewGate(true, nil)
+	g.SetAllowedProviders(map[string]bool{"*": true})
+	req := PermissionRequest{ToolName: "aws_ec2_terminate_instance", Level: tools.PermWrite, Provider: "aws"}
+	if !g.Check(req) {
+		t.Error("expected provider \"*\" to allow aws")
 	}
 }
 

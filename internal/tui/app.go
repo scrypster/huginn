@@ -12,18 +12,16 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
-	"github.com/charmbracelet/glamour"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
-	"github.com/scrypster/huginn/internal/swarm"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/modelconfig"
 	"github.com/scrypster/huginn/internal/notepad"
 	"github.com/scrypster/huginn/internal/permissions"
-	"github.com/scrypster/huginn/internal/vision"
 	"github.com/scrypster/huginn/internal/pricing"
 	"github.com/scrypster/huginn/internal/repo"
 	"github.com/scrypster/huginn/internal/session"
@@ -31,6 +29,8 @@ import (
 	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/storage"
 	"github.com/scrypster/huginn/internal/streaming"
+	"github.com/scrypster/huginn/internal/swarm"
+	"github.com/scrypster/huginn/internal/vision"
 )
 
 // PermissionPromptMsg is sent by main.go's forwarder goroutine when the permission
@@ -121,15 +121,15 @@ type App struct {
 	width  int
 	height int
 
-	queuedMsg         string               // message typed during streaming, waiting to auto-send
-	ctrlCPending      bool                 // true after first ctrl+c — next ctrl+c quits
-	attachments       []string             // relative paths of files attached via @ picker (max 10)
+	queuedMsg         string                // message typed during streaming, waiting to auto-send
+	ctrlCPending      bool                  // true after first ctrl+c — next ctrl+c quits
+	attachments       []string              // relative paths of files attached via @ picker (max 10)
 	pendingImageParts []backend.ContentPart // image parts built from attachments, sent with next message
-	chipFocused  bool        // true when keyboard focus is in the attachment chip row
-	chipCursor   int         // index of focused chip (when chipFocused)
-	shellContext string      // output of last ! command, prepended to next LLM message
-	autoRun      bool        // whether tool calls are auto-approved (default true)
-	autoRunAtom  *atomic.Bool // shared with gate promptFunc so the gate can read autoRun atomically
+	chipFocused       bool                  // true when keyboard focus is in the attachment chip row
+	chipCursor        int                   // index of focused chip (when chipFocused)
+	shellContext      string                // output of last ! command, prepended to next LLM message
+	autoRun           bool                  // whether tool calls are auto-approved (default true)
+	autoRunAtom       *atomic.Bool          // shared with gate promptFunc so the gate can read autoRun atomically
 
 	// Permission prompting (statePermAwait): set when a tool call needs user approval.
 	permPending *PermissionPromptMsg // non-nil while awaiting user decision
@@ -159,9 +159,9 @@ type App struct {
 	swarmEvents <-chan swarm.SwarmEvent
 
 	// Overlay states for full-screen views.
-	artifactOverlay  artifactOverlayState
-	threadOverlay    threadOverlayState
-	observationDeck  observationDeckState
+	artifactOverlay artifactOverlayState
+	threadOverlay   threadOverlayState
+	observationDeck observationDeckState
 
 	// Primary agent — name displayed in the footer header and toggled by ctrl+p.
 	primaryAgent string
@@ -175,11 +175,16 @@ type App struct {
 	muninnConnected bool
 
 	// Sidebar, DM picker, channel picker, @-mention autocomplete.
-	sidebar        sidebarModel
-	dmPicker       dmPickerModel
-	channelPicker  channelPickerModel
-	atMention      atMentionModel
-	activeChannel  string // currently active channel (empty = DM mode)
+	sidebar           sidebarModel
+	dmPicker          dmPickerModel
+	channelPicker     channelPickerModel
+	atMention         atMentionModel
+	activeChannel     string // currently active channel (empty = DM mode)
+	activeSpaceID     string // space id for the active channel/DM hallway
+	spaceStore        spaceMessageAPI
+	replyThread       replyThreadState
+	selectedHallwayID string
+	selectedReplyIdx  int // -1 = parent, 0..n-1 = reply
 
 	// activeAgents tracks agents that are currently active (used by sidebar and briefing).
 	activeAgents map[string]bool
@@ -236,6 +241,14 @@ type chatLine struct {
 	swarmTitle  string
 	swarmAgents []swarmAgentStatus
 	swarmDone   bool
+
+	// Slack-style hallway root (space-messages). Distinct from work-inspector thread-header.
+	isHallwayRoot bool
+	spaceMsgID    string
+	replyCount    int
+	lastPreview   string
+	newSince      int
+	createdAt     string
 }
 
 // New creates and initializes the App model.
@@ -447,6 +460,21 @@ func (a *App) SetChannels(names []string) {
 	a.channelPicker.SetChannels(names)
 }
 
+// SetSpaceRail maps GET /spaces for_you + unseen into the TUI sidebar/company rail.
+func (a *App) SetSpaceRail(spaces []SidebarSpace, companies []SidebarCompany) {
+	a.sidebar.SetSpaceRail(spaces, companies)
+	names := make([]string, 0, len(spaces))
+	for _, sp := range spaces {
+		if sp.Kind == "dm" {
+			continue
+		}
+		names = append(names, sp.Name)
+	}
+	if len(names) > 0 {
+		a.channelPicker.SetChannels(names)
+	}
+}
+
 // SetChannelLeads sets the mapping of channel name → lead agent name.
 // Used to pre-select the right primary agent when switching to a channel.
 func (a *App) SetChannelLeads(leads map[string]string) {
@@ -600,6 +628,16 @@ func (a *App) View() string {
 	if a.width == 0 {
 		return "Loading…"
 	}
+	switch a.state {
+	case stateReplyThread:
+		return a.renderReplyThread()
+	case stateThreadOverlay:
+		return a.renderThreadOverlay()
+	case stateArtifactView:
+		return a.renderArtifactOverlay()
+	case stateObservationDeck:
+		return a.renderObservationDeck()
+	}
 
 	// ── Viewport (no border box — raw scrollable content) ───────────────────
 	vp := a.viewport.View()
@@ -700,7 +738,7 @@ func (a *App) submitMessage(raw string) tea.Cmd {
 		displayMsg = strings.Join(names, "  ") + "\n\n" + raw
 	}
 	a.addLine("user", displayMsg)
-	a.chat.tokenCount = 0  // reset token counter for new stream
+	a.chat.tokenCount = 0    // reset token counter for new stream
 	a.state = stateStreaming // set before refreshViewport so generating spinner renders
 	a.refreshViewport()
 
@@ -908,4 +946,3 @@ func Run(cfg *config.Config, orch *agent.Orchestrator, models *modelconfig.Model
 	_, err := p.Run()
 	return err
 }
-

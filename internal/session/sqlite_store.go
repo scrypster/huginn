@@ -269,7 +269,8 @@ func (s *SQLiteSessionStore) List() ([]Manifest, error) {
 	return out, nil
 }
 
-// Append adds a message to the session in SQLite and increments MessageCount on the in-memory session.
+// Append adds a message to the session in SQLite and increments MessageCount
+// on both the sessions row (same transaction) and the in-memory session.
 func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 	if len(msg.Content) > maxMessageContentBytes {
 		return fmt.Errorf("session: message content exceeds %d byte limit (%d bytes)", maxMessageContentBytes, len(msg.Content))
@@ -357,6 +358,21 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 		}
 	}
 
+	// Persist session counters in the same transaction so List/stats cannot
+	// keep reporting the create-time zeros after messages exist.
+	now := time.Now().UTC()
+	if _, err := tx.Exec(`
+		UPDATE sessions
+		SET message_count = message_count + 1,
+		    last_message_id = ?,
+		    updated_at = ?
+		WHERE id = ?`,
+		msg.ID, now.Format(time.RFC3339), sess.ID,
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("session sqlite: update session counters for %s: %w", msg.ID, err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("session sqlite: commit message %s: %w", msg.ID, err)
 	}
@@ -369,6 +385,7 @@ func (s *SQLiteSessionStore) Append(sess *Session, msg SessionMessage) error {
 	sess.mu.Lock()
 	sess.Manifest.MessageCount++
 	sess.Manifest.LastMessageID = msg.ID
+	sess.Manifest.UpdatedAt = now
 	sess.mu.Unlock()
 
 	return nil

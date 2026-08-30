@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,41 @@ const (
 	KindDM      = "dm"
 	KindChannel = "channel"
 )
+
+// RosterNames is the mention/addressee roster for a space — the same set
+// used to decide who may be @addressed or extra-spawned.
+// DMs are 1:1 (the DM agent only). Channels are lead + members.
+// A nil or empty result means no roster (standalone / lookup failed).
+func RosterNames(sp *Space) []string {
+	if sp == nil {
+		return nil
+	}
+	if sp.Kind == KindDM {
+		if sp.LeadAgent == "" {
+			return nil
+		}
+		return []string{sp.LeadAgent}
+	}
+	out := make([]string, 0, len(sp.Members)+1)
+	if sp.LeadAgent != "" {
+		out = append(out, sp.LeadAgent)
+	}
+	for _, m := range sp.Members {
+		if !strings.EqualFold(m, sp.LeadAgent) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// IsDeskDM reports a 1:1 desk DM (kind=dm, empty company_id).
+// Desk A2A is a floor mesh; company DMs stay company-roster.
+func IsDeskDM(sp *Space) bool {
+	if sp == nil {
+		return false
+	}
+	return sp.Kind == KindDM && strings.TrimSpace(sp.CompanyID) == ""
+}
 
 // Space represents a DM or Channel conversation space.
 type Space struct {
@@ -22,10 +58,15 @@ type Space struct {
 	Icon        string     `json:"icon"`
 	Color       string     `json:"color"`
 	TeamID      string     `json:"team_id,omitempty"`
+	CompanyID   string     `json:"company_id,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 	UnseenCount int        `json:"unseen_count"`
+	// ForYou is the mention/@me rail flag. Set when space_reply_mention
+	// fires; cleared on MarkRead. Spectator unseen_count stays a count
+	// and must not become this badge.
+	ForYou bool `json:"for_you"`
 }
 
 // ListOpts controls filtering and pagination for ListSpaces.
@@ -37,6 +78,9 @@ type ListOpts struct {
 	// When set, results are fetched from the position after the last item in the
 	// previous page. Empty string means start from the beginning.
 	Cursor string
+	// CompanyID, when non-empty, returns only spaces belonging to that company.
+	// Empty means no company filter (desk-level and company spaces).
+	CompanyID string
 }
 
 // ListSpacesResult is the return type for ListSpaces. It bundles the page of
@@ -92,6 +136,9 @@ type SpaceUpdates struct {
 	Color     *string
 	Members   *[]string
 	LeadAgent *string
+	// CompanyID assigns the space to a company. Empty string means desk-level
+	// (no company). A non-empty value must refer to an existing company.
+	CompanyID *string
 }
 
 // SessionRef is a lightweight session summary returned by ListSessionsForSpace.
@@ -110,6 +157,19 @@ type SpaceMessageToolCall struct {
 	Name   string         `json:"name"`
 	Args   map[string]any `json:"args,omitempty"`
 	Result string         `json:"result,omitempty"`
+	// Diff carries the unified file diff captured by write/edit tools
+	// (path, unified, added, removed, truncated, is_new, is_delete) so the
+	// hallway DiffCard survives a reload. Mirrors session.PersistedToolCall.
+	Diff map[string]any `json:"diff,omitempty"`
+	// ChecksStatus mirrors session.PersistedToolCall.ChecksStatus for the
+	// hallway PR card (authoritative CI state, not a keyword guess).
+	ChecksStatus string `json:"checks_status,omitempty"`
+	// Image mirrors session.PersistedToolCall.Image — a bounded,
+	// inline-renderable data URI for tools whose result included image
+	// content (e.g. browser_take_screenshot) — so screenshots survive the
+	// space/hallway lane the same way they already do for single-session
+	// chats.
+	Image string `json:"image,omitempty"`
 }
 
 // SpaceMessage is a single message returned by ListSpaceMessages.
@@ -119,11 +179,22 @@ type SpaceMessage struct {
 	Seq       int64  `json:"seq"`
 	// Ts is assigned by SQLite (strftime default); lexicographic string comparison
 	// is safe for cursor pagination because SQLite is single-writer.
-	Ts        string                 `json:"ts"`
+	Ts string `json:"ts"`
+	// CreatedAt is the same instant as Ts, exposed for hallway/thread timestamps.
+	CreatedAt string                 `json:"created_at,omitempty"`
 	Role      string                 `json:"role"`
 	Content   string                 `json:"content"`
 	Agent     string                 `json:"agent"`
 	ToolCalls []SpaceMessageToolCall `json:"toolCalls,omitempty"`
+	// ParentID is the Slack-style reply parent. Empty = channel/DM root.
+	// Distinct from work-inspector parent_message_id.
+	ParentID string `json:"parent_id,omitempty"`
+	// ReplyCount is the number of Slack-style replies under this root.
+	ReplyCount int `json:"reply_count,omitempty"`
+	// LastPreview is honesty-stripped last teammate/human speech in the thread.
+	LastPreview string `json:"last_preview,omitempty"`
+	// NewSince is unseen replies for a participant only. Spectators get 0.
+	NewSince int `json:"new_since,omitempty"`
 }
 
 // SpaceMessagesResult is the paginated result of ListSpaceMessages.
@@ -212,6 +283,25 @@ type StoreInterface interface {
 	// already loaded — enabling infinite scroll upward.
 	// limit is clamped to [1, 100]; defaults to 20 when 0.
 	ListSpaceMessages(spaceID string, before *SpaceMsgCursor, limit int) (SpaceMessagesResult, error)
+	// PostSpaceMessage persists a user message in the space. parentID empty
+	// creates a channel root; non-empty attaches a Slack-style reply (flattened
+	// to one level — replies to replies hang off the root).
+	PostSpaceMessage(spaceID, content, parentID string) (*SpaceMessage, error)
+	// ListSpaceReplies returns Slack-style replies for parentID, oldest first.
+	ListSpaceReplies(spaceID, parentID string) ([]SpaceMessage, error)
+	// GetSpaceMessage loads one space message (typically the thread root).
+	GetSpaceMessage(spaceID, msgID string) (*SpaceMessage, error)
+	// DeleteSpaceMessage removes one space message. If it is a hallway root,
+	// its Slack-style thread replies are deleted with it. Does not wipe the space.
+	DeleteSpaceMessage(spaceID, msgID string) error
+	// InsertSpaceThreadMessage persists a thread-scoped message (assistant wake).
+	InsertSpaceThreadMessage(spaceID, content, parentID, role, agent string) (*SpaceMessage, error)
+	// HasThreadParticipation reports whether the human posted the root or a reply.
+	HasThreadParticipation(spaceID, parentID, viewer string) (bool, error)
+	// MarkThreadRead records last-seen for a participant. Spectators are a no-op.
+	MarkThreadRead(spaceID, parentID, viewer string) error
+	// ThreadUnseenForViewer returns unseen replies for a participant; 0 for spectators.
+	ThreadUnseenForViewer(spaceID, parentID, viewer string) (int, error)
 	// FindChannelByName returns the first non-archived channel whose name
 	// matches name (case-insensitive), or nil if no such channel exists.
 	// Use this for O(1) duplicate-name checks before inserting a new channel.
@@ -229,3 +319,52 @@ type SpaceError struct {
 }
 
 func (e *SpaceError) Error() string { return e.Message }
+
+// EnsureCreatedAt copies Ts onto CreatedAt when the alias is empty.
+func (m *SpaceMessage) EnsureCreatedAt() {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(m.CreatedAt) == "" {
+		m.CreatedAt = m.Ts
+	}
+}
+
+// MarshalJSON always emits created_at (from CreatedAt or Ts) so web/TUI
+// clients can render hallway and thread ages without a second field lookup.
+func (m SpaceMessage) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		ID          string                 `json:"id"`
+		SessionID   string                 `json:"session_id"`
+		Seq         int64                  `json:"seq"`
+		Ts          string                 `json:"ts"`
+		CreatedAt   string                 `json:"created_at"`
+		Role        string                 `json:"role"`
+		Content     string                 `json:"content"`
+		Agent       string                 `json:"agent"`
+		ToolCalls   []SpaceMessageToolCall `json:"toolCalls,omitempty"`
+		ParentID    string                 `json:"parent_id,omitempty"`
+		ReplyCount  int                    `json:"reply_count,omitempty"`
+		LastPreview string                 `json:"last_preview,omitempty"`
+		NewSince    int                    `json:"new_since,omitempty"`
+	}
+	created := m.CreatedAt
+	if strings.TrimSpace(created) == "" {
+		created = m.Ts
+	}
+	return json.Marshal(wire{
+		ID:          m.ID,
+		SessionID:   m.SessionID,
+		Seq:         m.Seq,
+		Ts:          m.Ts,
+		CreatedAt:   created,
+		Role:        m.Role,
+		Content:     m.Content,
+		Agent:       m.Agent,
+		ToolCalls:   m.ToolCalls,
+		ParentID:    m.ParentID,
+		ReplyCount:  m.ReplyCount,
+		LastPreview: m.LastPreview,
+		NewSince:    m.NewSince,
+	})
+}

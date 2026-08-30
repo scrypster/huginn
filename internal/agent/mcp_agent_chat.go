@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/scrypster/huginn/internal/agents"
@@ -45,11 +44,11 @@ func (o *Orchestrator) AgentChat(
 
 	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
 
-	o.mu.Lock()
-	wsRoot := o.workspaceRoot
-	o.mu.Unlock()
 	globalInstructions := LoadGlobalInstructions()
-	projectInstructions := LoadProjectInstructions(wsRoot)
+	// Project instructions (.huginn.md) now flow through ctxText via
+	// ContextBuilder.BuildCtx (internal/agent/context.go), which every prompt
+	// path shares — so they don't need loading again here.
+	projectInstructions := ""
 
 	// Resolve the default agent once — used for vault connection, system prompt, and toolbelt.
 	var defaultAgent *agents.Agent
@@ -76,12 +75,8 @@ func (o *Orchestrator) AgentChat(
 	vr := o.connectAgentVault(ctx, defaultAgent, reg)
 	defer vr.cancel()
 
-	// Surface MCP setup failures as a visible warning in the chat stream.
-	if vr.warning != "" && onEvent != nil {
-		onEvent(backend.StreamEvent{
-			Type:    backend.StreamWarning,
-			Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-		})
+	if vr.warning != "" {
+		logVaultUnavailable(agentName, "", vr.warning)
 	}
 
 	// Resolve skills fragment: per-agent if assigned, global fallback otherwise.
@@ -99,6 +94,11 @@ func (o *Orchestrator) AgentChat(
 	messages = append(messages, history...)
 	messages = append(messages, backend.Message{Role: "user", Content: userMsg})
 
+	ctx = WithMemoryGate(ctx, agentMemoryMode, GetSessionID(ctx), agentName)
+	if memCtx := o.prefetchMemoryContextWithEvents(ctx, vr.sessionReg, agentName, agentVaultName, userMsg, nil); memCtx != "" {
+		messages[0].Content += memCtx
+	}
+
 	// Check if the model supports tools; fall back to plain chat if not.
 	if o.registry != nil && !o.registry.ModelSupportsTools(o.defaultModelName()) {
 		return o.Chat(ctx, userMsg, onToken, onEvent)
@@ -109,18 +109,27 @@ func (o *Orchestrator) AgentChat(
 	var schemas []backend.Tool
 	runGate := gate // fallback: shared gate with no provider restrictions
 	if defaultAgent != nil {
-		schemas, runGate = applyToolbelt(defaultAgent, vr.sessionReg, gate)
+		schemas, runGate = applyToolbelt(defaultAgent, vr.sessionReg, gate, o.getConfiguredMCPProviders())
+		// runGate is now a per-run fork (own sweep goroutine) — close it when
+		// this run ends or the sweeper leaks. Guarded so the shared fallback
+		// gate above is never closed.
+		if runGate != nil && runGate != gate {
+			forked := runGate
+			defer forked.Close()
+		}
 	}
 	if schemas == nil {
 		// No agent configured (or no default agent): allow all registered tools.
 		schemas = vr.sessionReg.AllSchemas()
 	}
+	schemas = filterMuninnSchemas(schemas, agentMemoryMode)
 
 	_, agentChatModel, agentChatBackend, agentChatErr := o.resolveDefaultAgent()
 	if agentChatErr != nil {
 		return agentChatErr
 	}
 	cfg := RunLoopConfig{
+		Hooks:              o.toolHooks(),
 		MaxTurns:           maxTurns,
 		Messages:           messages,
 		Tools:              vr.sessionReg,
@@ -135,6 +144,18 @@ func (o *Orchestrator) AgentChat(
 		OnPermissionDenied: onPermDenied,
 		OnBeforeWrite:      onBeforeWrite,
 		VaultReconnector:   vr.reconnector,
+		SessionID:          GetSessionID(ctx),
+		MetricsWriter:      o.runLoopMetrics(),
+		TurnKind:           "agent-loop",
+	}
+	if defaultAgent != nil {
+		cfg.AgentName = defaultAgent.Name
+		cfg.MemoryMode = agentMemoryMode
+		cfg.MemoryVault = pinMuninnVault(agentVaultName)
+		cfg.MemoryAgent = agentName
+		cfg.MemoryUserMsg = userMsg
+		cfg.MemorySession = GetSessionID(ctx)
+		cfg.MemoryHome = o.huginnHome
 	}
 
 	loopStart := time.Now().UnixNano()
@@ -151,17 +172,12 @@ func (o *Orchestrator) AgentChat(
 	// The loop's Messages slice starts with the messages we passed in (system + history + user).
 	// We only want to append the NEW messages from this loop (tool calls, tool results, final assistant).
 	initialCount := 1 + len(history) + 1 // system msg + history msgs + user msg
+	var newMsgs []backend.Message
 	if loopResult.Messages != nil && len(loopResult.Messages) > initialCount {
-		newMsgs := loopResult.Messages[initialCount:]
-		sess.appendHistory(newMsgs...)
-	} else {
-		// Fallback: at minimum record user + final response.
-		sess.appendHistory(
-			backend.Message{Role: "user", Content: userMsg},
-			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
-		)
+		newMsgs = loopResult.Messages[initialCount:]
 	}
-	o.compactHistory(ctx, sess)
+	appendHistoryHonoringGate(sess, userMsg, loopResult.FinalContent, newMsgs, loopResult.HoldClose)
+	o.compactHistoryAsync(sess)
 
 	return nil
 }

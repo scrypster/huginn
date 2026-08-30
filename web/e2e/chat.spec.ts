@@ -193,12 +193,14 @@ test.describe('Chat — tool calls', () => {
       run_id: runId,
     }))
 
-    // "running" chip should appear inside the message
-    const runningChip = page.locator('text=· running')
-    await expect(runningChip).toBeVisible({ timeout: 3000 })
+    // Live tool ticker (the in-message "running" indicator, see honesty.ts
+    // toolTickerEntries) should appear with a spinner on the in-flight call.
+    const ticker = page.locator('[data-testid="tool-ticker"]')
+    await expect(ticker).toBeVisible({ timeout: 3000 })
+    await expect(page.locator('[data-testid="tool-ticker-active-entry"]')).toBeVisible({ timeout: 3000 })
 
-    // Verify the chip text includes the tool call count
-    await expect(page.locator('text=1 tool call')).toBeVisible({ timeout: 3000 })
+    // Verify the ticker entry's label (derived from the tool args)
+    await expect(ticker).toContainText('ls')
   })
 
   test('running chip disappears and done chip appears after tool_result', async ({ page }) => {
@@ -218,7 +220,9 @@ test.describe('Chat — tool calls', () => {
       run_id: runId,
     }))
 
-    await expect(page.locator('text=· running')).toBeVisible({ timeout: 3000 })
+    const ticker = page.locator('[data-testid="tool-ticker"]')
+    await expect(ticker).toBeVisible({ timeout: 3000 })
+    await expect(page.locator('[data-testid="tool-ticker-active-entry"]')).toBeVisible({ timeout: 3000 })
 
     // Send tool_result
     ws.send(JSON.stringify({
@@ -228,8 +232,9 @@ test.describe('Chat — tool calls', () => {
       run_id: runId,
     }))
 
-    // "running" chip should disappear, "done" chip should appear
-    await expect(page.locator('text=· running')).not.toBeVisible({ timeout: 3000 })
+    // Live ticker (the "running" indicator) should disappear once no tool
+    // call is in flight, and collapse into the "done" chip below it.
+    await expect(ticker).not.toBeVisible({ timeout: 3000 })
     await expect(page.locator('text=· done')).toBeVisible({ timeout: 3000 })
     await expect(page.locator('text=1 tool call')).toBeVisible({ timeout: 3000 })
   })
@@ -543,7 +548,7 @@ test.describe('Chat — streaming indicator', () => {
     await expect(banner).not.toBeVisible({ timeout: 3000 })
   })
 
-  test('send button disabled while streaming', async ({ page }) => {
+  test('composer stays editable while streaming so a second message can be queued', async ({ page }) => {
     const ws = createInteractiveWS()
     await page.routeWebSocket('**/ws**', ws.handler)
     await gotoChatSession(page)
@@ -553,12 +558,9 @@ test.describe('Chat — streaming indicator', () => {
     const runId = await ws.waitForRunId()
     ws.send(JSON.stringify({ type: 'token', session_id: SESSION, content: 'Streaming...', run_id: runId }))
 
-    // The ProseMirror editor should be non-editable while streaming
-    // (ChatEditor :disabled="streaming" sets editable:false on the editor)
     const editor = page.locator('.editor-content .ProseMirror')
-    await expect(editor).toHaveAttribute('contenteditable', 'false', { timeout: 3000 })
+    await expect(editor).toHaveAttribute('contenteditable', 'true', { timeout: 3000 })
 
-    // Send done — editor should become editable again
     ws.send(JSON.stringify({ type: 'done', session_id: SESSION, run_id: runId }))
     await expect(editor).toHaveAttribute('contenteditable', 'true', { timeout: 3000 })
   })

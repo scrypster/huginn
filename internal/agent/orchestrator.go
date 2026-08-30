@@ -21,6 +21,7 @@ import (
 	"github.com/scrypster/huginn/internal/skills"
 	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/turnmetrics"
 )
 
 // sessionIDCtxKey is an unexported context key type to avoid collisions.
@@ -50,6 +51,20 @@ func SetParentMessageID(ctx context.Context, id string) context.Context {
 // GetParentMessageID retrieves the parent message ID set by SetParentMessageID. Returns "" if not set.
 func GetParentMessageID(ctx context.Context) string {
 	v, _ := ctx.Value(parentMessageIDCtxKey{}).(string)
+	return v
+}
+
+type spaceIDCtxKey struct{}
+
+// SetSpaceID attaches the space ID so delegate_to_agent can bind Create
+// to desk-mesh / roster membership even when the orch session is ephemeral.
+func SetSpaceID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, spaceIDCtxKey{}, id)
+}
+
+// GetSpaceID retrieves the space ID set by SetSpaceID. Returns "" if not set.
+func GetSpaceID(ctx context.Context) string {
+	v, _ := ctx.Value(spaceIDCtxKey{}).(string)
 	return v
 }
 
@@ -89,9 +104,21 @@ type Orchestrator struct {
 	workspaceRoot    string                // set by SetGitRoot; used to load .huginn.md project instructions
 	huginnHome       string                // set by SetHuginnHome; used to locate agent memory files
 	skillsReg        *skills.SkillRegistry // set by SetSkillsRegistry; used for per-agent skill injection
+	hooks            *HookRegistry         // PreToolUse/PostToolUse chain (G10); nil until SetHooks. Carries G1 syntax validation.
+	userHooks        *UserHookRunner       // user-configurable hooks.json chain; nil until EnableUserHooks.
+
+	// configuredMCPProviders is the set of configured MCP server names (same
+	// set main.go base-watches via serverGate.SetBaseWatchedProviders). Set
+	// by SetConfiguredMCPProviders. applyToolbelt adds these to a narrow
+	// toolbelt agent's allowedProviders so a configured MCP tool call reaches
+	// the base-watch prompt instead of being silently denied (V3 policy).
+	configuredMCPProviders map[string]bool
 
 	// defaultModel is the fallback model name when no agent registry is configured.
 	defaultModel string
+
+	// defaultMaxTurns caps ChatWithAgent's RunLoop. 0 means the loop default (50).
+	defaultMaxTurns int
 
 	// sessionStore is the persistent session store for history hydration.
 	sessionStore huginsession.StoreInterface
@@ -112,8 +139,22 @@ type Orchestrator struct {
 	// memoryPrefetchCache caches MuninnDB memory briefing results per agent/session key.
 	memoryPrefetchCache *prefetchCache
 
+	// vaultNegCache remembers a failed/unconfigured vault connect per agent
+	// name for vaultNegativeCacheTTL, so connectAgentVault does not
+	// re-attempt config load + connect on every single turn. Scoped to the
+	// Orchestrator instance (not a package-level var) so two orchestrators
+	// — or two tests — never leak cached failures into each other.
+	vaultNegCache map[string]vaultNegativeCacheEntry
+
 	// semanticPrefetchCache caches semantic search results per query key.
 	semanticPrefetchCache *prefetchCache
+
+	// memoryGuided records immersive muninn_guide session keys (once per session).
+	memoryGuided sync.Map
+
+	// memoryPulled tracks session-start / last-topic pull so conversational
+	// and passive modes do not MCP-call every sentence.
+	memoryPulled sync.Map
 
 	// optionals groups optional integrations so future wiring can evolve without
 	// expanding the top-level mutable surface area.
@@ -126,6 +167,28 @@ type Orchestrator struct {
 
 	lastUsagePrompt     atomic.Int64
 	lastUsageCompletion atomic.Int64
+
+	// turnMetrics is the async writer for per-turn latency telemetry (nil =
+	// disabled, set by SetTurnMetricsWriter from main.go). RunLoop call
+	// sites read it via runLoopMetrics() and pass it through
+	// RunLoopConfig.MetricsWriter.
+	turnMetrics *turnmetrics.Writer
+}
+
+// SetTurnMetricsWriter wires the turn-latency telemetry writer. Called once
+// from main.go after the writer is constructed and its migration applied.
+// Nil disables telemetry (default; safe for tests).
+func (o *Orchestrator) SetTurnMetricsWriter(w *turnmetrics.Writer) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.turnMetrics = w
+}
+
+// runLoopMetrics returns the turn metrics writer for RunLoopConfig.MetricsWriter.
+func (o *Orchestrator) runLoopMetrics() *turnmetrics.Writer {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.turnMetrics
 }
 
 // NewOrchestrator creates an Orchestrator ready for use.
@@ -312,11 +375,8 @@ func (o *Orchestrator) CodeWithAgent(
 	vr := o.connectAgentVault(ctx, ag, reg)
 	defer vr.cancel()
 
-	if vr.warning != "" && onEvent != nil {
-		onEvent(backend.StreamEvent{
-			Type:    backend.StreamWarning,
-			Content: fmt.Sprintf("\u26a0\ufe0f Memory vault unavailable: %s. Memory features are disabled for this session.", vr.warning),
-		})
+	if vr.warning != "" {
+		logVaultUnavailable(ag.Name, "", vr.warning)
 	}
 
 	ctxText := o.contextBuilder.Build(userMsg, o.defaultModelName())
@@ -333,7 +393,12 @@ func (o *Orchestrator) CodeWithAgent(
 	messages = append(messages, history...)
 	messages = append(messages, backend.Message{Role: "user", Content: userMsg})
 
-	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate)
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, gate, o.getConfiguredMCPProviders())
+	// agentGate is a per-run fork (own sweep goroutine); close it when this
+	// run ends or the sweeper leaks (same pattern as runAgentTurn).
+	if agentGate != nil {
+		defer agentGate.Close()
+	}
 
 	// Create isolated session environment for this agent run.
 	agentSess, sessErr := session.BuildAndSetup(agentToolbelt(ag))
@@ -350,6 +415,7 @@ func (o *Orchestrator) CodeWithAgent(
 		return agCodeErr
 	}
 	cfg := RunLoopConfig{
+		Hooks:              o.toolHooks(),
 		MaxTurns:           maxTurns,
 		Messages:           messages,
 		Tools:              vr.sessionReg,
@@ -363,6 +429,10 @@ func (o *Orchestrator) CodeWithAgent(
 		OnPermissionDenied: onPermDenied,
 		OnEvent:            onEvent,
 		VaultReconnector:   vr.reconnector,
+		AgentName:          ag.Name,
+		SessionID:          GetSessionID(ctx),
+		MetricsWriter:      o.runLoopMetrics(),
+		TurnKind:           "agent-loop",
 	}
 
 	agentLoopStart := time.Now().UnixNano()
@@ -381,7 +451,7 @@ func (o *Orchestrator) CodeWithAgent(
 			backend.Message{Role: "assistant", Content: loopResult.FinalContent},
 		)
 	}
-	o.compactHistory(ctx, sess)
+	o.compactHistoryAsync(sess)
 	return nil
 }
 

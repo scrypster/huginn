@@ -2,6 +2,38 @@
   <div class="space-y-6">
     <p class="text-xs text-huginn-muted">Model Context Protocol servers provide external tools and data to your agents.</p>
 
+    <section class="space-y-3">
+      <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Browser</h3>
+      <div class="px-4 py-3 rounded-xl border border-huginn-border bg-huginn-surface/50 space-y-3">
+        <SettingsToggleRow
+          :model-value="browserEnabled"
+          label="Browser automation"
+          hint="Lets agents navigate pages, click, and take screenshots via Playwright. Outward-facing — every use always requires your approval, regardless of an agent's toolbelt settings."
+          @update:model-value="$emit('toggleBrowser', $event)"
+        />
+        <div v-if="browserEnabled" class="text-[11px] flex items-center gap-2">
+          <template v-if="browserStatus === undefined">
+            <span class="w-1.5 h-1.5 rounded-full bg-huginn-muted/50" />
+            <span class="text-huginn-muted">Checking status…</span>
+          </template>
+          <template v-else-if="browserStatus.connected && browserStatus.circuit_state !== 'open'">
+            <span class="w-1.5 h-1.5 rounded-full bg-huginn-green" />
+            <span class="text-huginn-muted">Running · {{ browserStatus.tool_count }} tools available</span>
+          </template>
+          <template v-else-if="!browserStatus.binary_found">
+            <span class="w-1.5 h-1.5 rounded-full bg-huginn-yellow flex-shrink-0" />
+            <span class="text-huginn-yellow">{{ browserStatus.install_hint || 'Not installed.' }}</span>
+          </template>
+          <template v-else>
+            <span class="w-1.5 h-1.5 rounded-full bg-huginn-red" />
+            <span class="text-huginn-muted">Unavailable — will retry automatically. Restart huginn after installing.</span>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <div class="border-t border-huginn-border" />
+
     <section v-if="mcpServers.length > 0" class="space-y-3">
       <h3 class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest">Configured Servers</h3>
       <div class="space-y-2">
@@ -81,7 +113,9 @@
 
 <script setup lang="ts">
 import SettingsFieldRow from './SettingsFieldRow.vue'
+import SettingsToggleRow from './SettingsToggleRow.vue'
 import type { MCPServer } from '../../composables/useConfig'
+import type { MCPServerStatus } from '../../composables/useApi'
 
 defineProps<{
   mcpServers: MCPServer[]
@@ -94,10 +128,13 @@ defineProps<{
     envText: string
   }
   mcpAddError: string
+  browserEnabled: boolean
+  browserStatus?: MCPServerStatus
 }>()
 
 defineEmits<{
   (e: 'addMcpServer'): void
   (e: 'removeMcpServer', idx: number): void
+  (e: 'toggleBrowser', enabled: boolean): void
 }>()
 </script>

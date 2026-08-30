@@ -105,8 +105,11 @@ func (t *EditFileTool) Execute(_ context.Context, args map[string]any) ToolResul
 	if replaceAll {
 		replacements = count
 	}
+	metadata := map[string]any{"replacements": replacements}
+	attachDiffMetadata(metadata, filePath, content, result)
+
 	return ToolResult{
 		Output:   fmt.Sprintf("edited %s: replaced %d occurrence(s)", filePath, replacements),
-		Metadata: map[string]any{"replacements": replacements},
+		Metadata: metadata,
 	}
 }

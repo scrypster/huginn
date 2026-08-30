@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
-import { ref, nextTick } from 'vue'
+import { ref, reactive, nextTick } from 'vue'
 
 // ── Composable mocks (hoisted before component import) ────────────────
 
@@ -39,7 +39,7 @@ vi.mock('../../composables/useSessions', () => {
 
 const mockGetSessionThreads = vi.fn().mockReturnValue([])
 const mockGetActiveThreadCount = vi.fn().mockReturnValue(0)
-const mockLoadThreads = vi.fn()
+const mockLoadThreads = vi.fn(() => Promise.resolve())
 const mockWireWS = vi.fn()
 const mockGetSessionPreviews = vi.fn().mockReturnValue([])
 const mockClearSessionPreviews = vi.fn()
@@ -59,27 +59,45 @@ vi.mock('../../composables/useThreads', () => ({
 }))
 
 const mockActiveSpace = ref<any>(null)
+const mockDms = ref<any[]>([])
+const mockOpenDM = vi.fn().mockResolvedValue(null)
 
 vi.mock('../../composables/useSpaces', () => ({
   useSpaces: () => ({
     activeSpace: mockActiveSpace,
+    dms: mockDms,
+    openDM: mockOpenDM,
   }),
 }))
 
 const mockApiAgentsList = vi.fn().mockResolvedValue([])
 const mockApiRuntimeStatus = vi.fn().mockResolvedValue({ state: 'idle' })
 const mockApiSessionsCreate = vi.fn()
+const mockApiMuninnStatus = vi.fn().mockResolvedValue({ connected: false, installed: false, running: false })
+const mockApiMuninnConnectLocal = vi.fn().mockResolvedValue({ ok: true, connected: true, running: true, vaults: [] })
+const mockApiMuninnVaults = vi.fn().mockResolvedValue({ vaults: [] })
+const mockApiMuninnCreateVault = vi.fn()
+const mockApiAgentsGet = vi.fn().mockResolvedValue({ name: 'Winston', vault_name: '' })
+const mockApiAgentsUpdate = vi.fn().mockResolvedValue({})
 
 vi.mock('../../composables/useApi', () => ({
   api: {
     agents: {
       list: (...args: unknown[]) => mockApiAgentsList(...args),
+      get: (...args: unknown[]) => mockApiAgentsGet(...args),
+      update: (...args: unknown[]) => mockApiAgentsUpdate(...args),
     },
     runtime: {
       status: () => mockApiRuntimeStatus(),
     },
     sessions: {
       create: (...args: unknown[]) => mockApiSessionsCreate(...args),
+    },
+    muninn: {
+      status: () => mockApiMuninnStatus(),
+      connectLocal: () => mockApiMuninnConnectLocal(),
+      vaults: () => mockApiMuninnVaults(),
+      createVault: (...args: unknown[]) => mockApiMuninnCreateVault(...args),
     },
   },
   getToken: vi.fn().mockReturnValue('test-token'),
@@ -88,7 +106,7 @@ vi.mock('../../composables/useApi', () => ({
 // ── useSpaceTimeline mock ─────────────────────────────────────────────
 // Provides a controllable timeline with a real Map for sessionToSpaceMap
 // so .set() / .has() calls work correctly in production code.
-const makeSpaceState = () => ({
+const makeSpaceState = () => reactive({
   messages: [] as any[],
   sessionToSpaceMap: new Map<string, string>(),
   activeSessionId: null as string | null,
@@ -100,24 +118,65 @@ const makeSpaceState = () => ({
 })
 
 let mockSpaceState = makeSpaceState()
+const spaceStateById = new Map<string, ReturnType<typeof makeSpaceState>>()
 const mockSpaceHydrate = vi.fn().mockResolvedValue(undefined)
-const mockSpaceTimeline = {
-  getState: () => mockSpaceState,
-  hydrate: mockSpaceHydrate,
-  loadMore: vi.fn().mockResolvedValue(null),
-  retryHydrate: vi.fn(),
+
+function getOrCreateSpaceState(spaceId: string) {
+  let st = spaceStateById.get(spaceId)
+  if (!st) {
+    const alreadyRegistered = [...spaceStateById.values()].includes(mockSpaceState)
+    st = alreadyRegistered ? makeSpaceState() : mockSpaceState
+    spaceStateById.set(spaceId, st)
+  }
+  return st
 }
-const mockUseSpaceTimeline = vi.fn(() => mockSpaceTimeline)
+
+const mockUseSpaceTimeline = vi.fn((spaceId?: unknown) => {
+  if (typeof spaceId === 'string') {
+    mockSpaceState = getOrCreateSpaceState(spaceId)
+  }
+  return {
+    getState: () => mockSpaceState,
+    hydrate: mockSpaceHydrate,
+    loadMore: vi.fn().mockResolvedValue(null),
+    retryHydrate: vi.fn(),
+  }
+})
+
+function mockGetSessionSpaceId(sessionId: string): string | null {
+  for (const [spaceId, st] of spaceStateById.entries()) {
+    if (st.sessionToSpaceMap.has(sessionId)) return spaceId
+  }
+  return null
+}
+
+function mockGetSpaceTimelineState(spaceId: string) {
+  return getOrCreateSpaceState(spaceId)
+}
 
 vi.mock('../../composables/useSpaceTimeline', () => ({
   useSpaceTimeline: (...args: unknown[]) => mockUseSpaceTimeline(...args),
+  getSessionSpaceId: (sessionId: string) => mockGetSessionSpaceId(sessionId),
+  getSpaceTimelineState: (spaceId: string) => mockGetSpaceTimelineState(spaceId),
   clearSpaceTimeline: vi.fn(),
   wireSpaceTimelineWS: vi.fn(),
 }))
 
+const { mockRouterPush, mockRouterReplace, mockNotify } = vi.hoisted(() => ({
+  mockRouterPush: vi.fn(),
+  mockRouterReplace: vi.fn(),
+  mockNotify: vi.fn(),
+}))
+
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: {}, query: {} }),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
+}))
+
+vi.mock('../../composables/useBrowserNotifications', () => ({
+  useBrowserNotifications: () => ({
+    notify: mockNotify,
+  }),
 }))
 
 // Stub heavy child components
@@ -183,11 +242,15 @@ function mountChatView(
     global: {
       stubs: {
         Teleport: true,
+        SystemFailLine: false,
+        MemoryVaultChip: false,
+        MsgTimeReveal: false,
         RouterLink: { template: '<a><slot /></a>' },
         ChatEditor: {
           name: 'ChatEditor',
           template: '<div class="chat-editor-stub" />',
-          emits: ['send'],
+          props: ['disabled', 'placeholder', 'memberNames'],
+          emits: ['send', 'unknown-mention'],
           // Expose a focus() method so the component's onMounted hook doesn't error
           setup() {
             return { focus: vi.fn() }
@@ -201,17 +264,31 @@ function mountChatView(
   })
 }
 
+async function openComposerSendOptions(wrapper: ReturnType<typeof mountChatView>) {
+  const details = wrapper.find('[data-testid="composer-send-options"] details')
+  expect(details.exists()).toBe(true)
+  const el = details.element as HTMLDetailsElement
+  el.open = true
+  await details.trigger('toggle')
+  await wrapper.vm.$nextTick()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 describe('ChatView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLoadThreads.mockImplementation(() => Promise.resolve())
     mockMessages['test-session-id'] = []
     mockSessions.value = [{ id: 'test-session-id', title: 'Test Session' }]
     mockActiveSpace.value = null
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
+    spaceStateById.clear()
     mockSpaceState = makeSpaceState()
     mockGetSessionThreads.mockReturnValue([])
     mockGetActiveThreadCount.mockReturnValue(0)
     mockGetSessionPreviews.mockReturnValue([])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: false, running: false })
   })
 
   afterEach(() => {
@@ -374,10 +451,44 @@ describe('ChatView', () => {
     })
     await nextTick()
 
-    // The activeToolCalls are rendered in the template as an in-flight running chip.
-    // The chip shows "N tool calls · running" (not the tool name) — verify running state.
+    // The activeToolCalls are rendered in the template as a live tool ticker:
+    // an in-flight (spinner) entry naming this call, e.g. "⟳ ls".
     const html = wrapper.html()
-    expect(html).toContain('running')
+    expect(html).toContain('tool-ticker-active-entry')
+    expect(html).toContain('ls')
+  })
+
+  it('WS tool_call handler: two agents streaming concurrently each show only their own ticker entry', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'h-winston', role: 'assistant', content: '', agent: 'Winston', streaming: true },
+      { id: 'h-sam', role: 'assistant', content: '', agent: 'Sam', streaming: true },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      payload: { id: 'tc-winston', tool: 'bash', args: { command: 'winston-cmd' }, agent: 'Winston' },
+    })
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      payload: { id: 'tc-sam', tool: 'bash', args: { command: 'sam-cmd' }, agent: 'Sam' },
+    })
+    await nextTick()
+
+    const tickers = wrapper.findAll('[data-testid="tool-ticker"]')
+    expect(tickers.length).toBe(2)
+    // Order is not guaranteed — what matters is each ticker shows ONLY its
+    // own agent's tool call, never the other agent's, i.e. no bleed-over
+    // between two agents streaming concurrently in the same view.
+    const winstonTicker = tickers.find(t => t.text().includes('winston-cmd'))
+    const samTicker = tickers.find(t => t.text().includes('sam-cmd'))
+    expect(winstonTicker).toBeTruthy()
+    expect(samTicker).toBeTruthy()
+    expect(winstonTicker!.text()).not.toContain('sam-cmd')
+    expect(samTicker!.text()).not.toContain('winston-cmd')
   })
 
   it('WS done handler: sets streaming to false', async () => {
@@ -653,7 +764,7 @@ describe('ChatView', () => {
     expect(html).toContain('AgentB')
   })
 
-  it('approvePermission(true): sends permission_response with approved=true and clears banner', async () => {
+  it('approvePermission("once"): sends permission_response scope=once and clears banner', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []
 
@@ -663,22 +774,22 @@ describe('ChatView', () => {
     // Trigger permission request
     mockWs.simulateMessage({
       type: 'permission_request',
-      payload: { id: 'perm-42', tool: 'bash', command: 'echo hi' },
+      payload: { id: 'perm-42', tool: 'bash', command: 'echo hi', agent: 'Codey' },
     })
     await nextTick()
     expect(wrapper.html()).toContain('Permission required')
 
-    // Click Allow
-    const allowBtn = wrapper.findAll('button').find(b => b.text().includes('Allow'))
-    expect(allowBtn).toBeDefined()
-    await allowBtn!.trigger('click')
+    // Click "Allow once"
+    const allowBtn = wrapper.find('[data-testid="permission-allow-once"]')
+    expect(allowBtn.exists()).toBe(true)
+    await allowBtn.trigger('click')
     await nextTick()
 
     // Should have sent permission_response
     expect(mockWs.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'permission_response',
-        payload: { id: 'perm-42', approved: true },
+        payload: { id: 'perm-42', scope: 'once', approved: true },
       })
     )
 
@@ -686,7 +797,7 @@ describe('ChatView', () => {
     expect(wrapper.html()).not.toContain('Permission required')
   })
 
-  it('approvePermission(false): sends permission_response with approved=false', async () => {
+  it('approvePermission("deny"): sends permission_response scope=deny', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []
 
@@ -695,22 +806,127 @@ describe('ChatView', () => {
 
     mockWs.simulateMessage({
       type: 'permission_request',
-      payload: { id: 'perm-99', tool: 'write_file', command: '/etc/passwd' },
+      payload: { id: 'perm-99', tool: 'write_file', command: '/etc/passwd', agent: 'Codey' },
     })
     await nextTick()
 
     // Click Deny
-    const denyBtn = wrapper.findAll('button').find(b => b.text().includes('Deny'))
-    expect(denyBtn).toBeDefined()
-    await denyBtn!.trigger('click')
+    const denyBtn = wrapper.find('[data-testid="permission-deny"]')
+    expect(denyBtn.exists()).toBe(true)
+    await denyBtn.trigger('click')
     await nextTick()
 
     expect(mockWs.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'permission_response',
-        payload: { id: 'perm-99', approved: false },
+        payload: { id: 'perm-99', scope: 'deny', approved: false },
       })
     )
+  })
+
+  it('approvePermission("always_agent"): sends permission_response scope=always_agent and clears banner', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-7', tool: 'bash', command: 'go test ./...', agent: 'Codey' },
+    })
+    await nextTick()
+
+    const alwaysBtn = wrapper.find('[data-testid="permission-allow-always"]')
+    expect(alwaysBtn.exists()).toBe(true)
+    expect(alwaysBtn.text()).toContain('Codey')
+    await alwaysBtn.trigger('click')
+    await nextTick()
+
+    expect(mockWs.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'permission_response',
+        payload: { id: 'perm-7', scope: 'always_agent', approved: true },
+      })
+    )
+    expect(wrapper.html()).not.toContain('Permission required')
+  })
+
+  it('permission banner shows the agent name and the actual command', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-8', tool: 'bash', command: 'go test ./...', agent: 'Codey' },
+    })
+    await nextTick()
+
+    expect(wrapper.text()).toContain('Codey wants to run: go test ./...')
+  })
+
+  it('permission banner renders exactly three action buttons', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-9', tool: 'bash', command: 'ls', agent: 'Codey' },
+    })
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="permission-allow-once"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="permission-allow-always"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="permission-deny"]').exists()).toBe(true)
+  })
+
+  it('permission_cancelled: clears the banner when the prompt times out server-side', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-timeout', tool: 'bash', command: 'sleep 999', agent: 'Codey' },
+    })
+    await nextTick()
+    expect(wrapper.html()).toContain('Permission required')
+
+    mockWs.simulateMessage({
+      type: 'permission_cancelled',
+      payload: { id: 'perm-timeout', reason: 'timeout' },
+    })
+    await nextTick()
+    expect(wrapper.html()).not.toContain('Permission required')
+  })
+
+  it('permission_cancelled: leaves a different pending request alone', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      payload: { id: 'perm-live', tool: 'bash', command: 'go build ./...', agent: 'Codey' },
+    })
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'permission_cancelled',
+      payload: { id: 'perm-stale', reason: 'timeout' },
+    })
+    await nextTick()
+    expect(wrapper.html()).toContain('Permission required')
   })
 
   it('handleEditorSend: allows queued send while streaming', async () => {
@@ -745,8 +961,12 @@ describe('ChatView', () => {
     // Second message should be queued/sent (count increases)
     expect(sendCountAfterSecond).toBe(sendCountAfterFirst + 1)
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
-    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
-    expect(lastChatSend?.payload?.update_route).toBe('all_active')
+    expect(lastChatSend?.payload?.intent).toBe('new_request')
+    expect(lastChatSend?.payload?.update_route).toBeUndefined()
+    expect(chatEditor.props('disabled')).toBeFalsy()
+    const msgs = mockGetMessages('test-session-id')
+    expect(msgs.some((m: any) => m.streaming)).toBe(true)
+    expect(msgs.find((m: any) => m.id === 'h-1')?.content).toBe('in progress...')
   })
 
   it('shows pre-stream thinking indicator immediately after send', async () => {
@@ -759,7 +979,41 @@ describe('ChatView', () => {
     await chatEditor.vm.$emit('send', 'Hello')
     await nextTick()
 
-    expect(wrapper.html()).toContain('Preparing context and delegation plan')
+    expect(wrapper.html()).toContain('thinking')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+  })
+
+  it('pre-stream status line reflects the phase-true status content from the wire, never the old static string', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Ask Steve to check the logs')
+    await nextTick()
+
+    expect(wrapper.html()).toContain('thinking')
+
+    mockWs.simulateMessage({ type: 'status', session_id: 'test-session-id', content: 'asking Steve…' })
+    await nextTick()
+
+    expect(wrapper.html()).toContain('asking Steve…')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+  })
+
+  it('hides delegation-plan banner on a trivial ping', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Winston ping')
+    await nextTick()
+
+    expect(wrapper.html()).toContain('is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
   })
 
   it('handleEditorSend: supports specific delegate routing for queued updates', async () => {
@@ -777,6 +1031,16 @@ describe('ChatView', () => {
     await chatEditor.vm.$emit('send', 'First message')
     await nextTick()
 
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.html()).not.toContain('Update active work')
+    await openComposerSendOptions(wrapper)
+
+    const updateWorkBtn = wrapper.findAll('button').find(b => b.text() === 'Update active work')
+    expect(updateWorkBtn).toBeDefined()
+    await updateWorkBtn!.trigger('click')
+    await nextTick()
+
     const specificRouteBtn = wrapper.findAll('button').find(b => b.text() === 'Specific delegate')
     expect(specificRouteBtn).toBeDefined()
     await specificRouteBtn!.trigger('click')
@@ -789,6 +1053,38 @@ describe('ChatView', () => {
     expect(lastChatSend?.payload?.intent).toBe('update_active_work')
     expect(lastChatSend?.payload?.update_route).toBe('specific_delegate')
     expect(lastChatSend?.payload?.target_agent).toBe('Researcher')
+  })
+
+  it('hides interrupt/route chrome on an idle composer', async () => {
+    const wrapper = mountChatView({}, createMockWs())
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.html()).not.toContain('Update active work')
+    expect(wrapper.html()).not.toContain('All active delegates')
+  })
+
+  it('hides interrupt/route chrome while streaming until Send options is opened', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello')
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-send-options-summary"]').text()).toContain('Send options')
+    expect(wrapper.html()).not.toContain('When you send now:')
+    expect(wrapper.html()).not.toContain('Update active work')
+    expect(wrapper.html()).not.toContain('All active delegates')
+
+    await openComposerSendOptions(wrapper)
+    expect(wrapper.html()).toContain('When you send now:')
+    expect(wrapper.html()).toContain('Update active work')
+    expect(wrapper.html()).toContain('Start new request')
+    expect(wrapper.html()).not.toContain('All active delegates')
   })
 
   it('handleEditorSend: auto-selects default agent on first send and sends chat', async () => {
@@ -935,6 +1231,80 @@ describe('ChatView', () => {
     expect(avatarText).toContain('L')
     expect(avatarText).toContain('H')
     expect(avatarText).toContain('R')
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(chatEditor.props('memberNames')).toEqual(['Lead', 'Helper', 'Reviewer'])
+  })
+
+  it('passes only the DM agent as ChatEditor memberNames', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = []
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'gpt-4', color: '#58A6FF', icon: 'S', is_default: true },
+      { name: 'Tess', model: 'claude-3', color: '#3FB950', icon: 'T', is_default: false },
+    ])
+    mockActiveSpace.value = {
+      id: 'dm-steve',
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+    }
+
+    const wrapper = mountChatView({}, mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    expect(chatEditor.props('memberNames')).toEqual(['Steve'])
+  })
+
+  it('Manage agents chip: mounts AgentRosterModal on a channel space', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Lead', model: 'gpt-4', color: '#58A6FF', icon: 'L', is_default: true },
+      { name: 'Helper', model: 'claude-3', color: '#3FB950', icon: 'H', is_default: false },
+    ])
+    mockActiveSpace.value = {
+      id: 'space-1',
+      name: 'Test Space',
+      kind: 'channel',
+      leadAgent: 'Lead',
+      memberAgents: ['Lead', 'Helper'],
+    }
+
+    const wrapper = mountChatView()
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(false)
+
+    const manageBtn = wrapper.find('button[title="Manage agents"]')
+    expect(manageBtn.exists()).toBe(true)
+    await manageBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(true)
+  })
+
+  it('Manage agents chip: does not mount AgentRosterModal on a DM space', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'atlas', model: 'gpt-4', color: '#58A6FF', icon: 'A', is_default: true },
+    ])
+    mockActiveSpace.value = {
+      id: 'dm-1',
+      name: 'atlas',
+      kind: 'dm',
+      leadAgent: 'atlas',
+      memberAgents: ['atlas'],
+    }
+
+    const wrapper = mountChatView()
+    await flushPromises()
+
+    const manageBtn = wrapper.find('button[title="Manage agents"]')
+    expect(manageBtn.exists()).toBe(true)
+    await manageBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper.findComponent({ name: 'AgentRosterModal' }).exists()).toBe(false)
   })
 
   it('space agent preview: shows +N overflow when more than 3 agents', async () => {
@@ -1167,6 +1537,44 @@ describe('ChatView', () => {
     expect(card.content).toContain('Added regression coverage.')
   })
 
+  it('thread_done with status error renders a failure card, not an accomplishment', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      {
+        id: 'u-1',
+        role: 'user',
+        content: 'delegate to Reggie',
+        delegatedThreads: [{ threadId: 'thr-reggie', agentId: 'Reggie', msgId: 'u-1', replyCount: 0 }],
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: 'test-session-id',
+      payload: {
+        thread_id: 'thr-reggie',
+        agent_id: 'Reggie',
+        status: 'error',
+        summary: 'delegation timed out — thread never started',
+      },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const card = msgs.find((m: any) => m.threadSummaryThreadId === 'thr-reggie')
+    expect(card).toBeDefined()
+    expect(card.threadSummary).toBe(true)
+    expect(card.threadSummaryFailed).toBe(true)
+    expect(card.content).not.toContain('completed delegated work')
+    expect(card.content).toContain("**Reggie**'s delegated task failed")
+    expect(card.content).toContain('delegation timed out — thread never started')
+    // Real agent name, not the literal "Delegate" fallback.
+    expect(card.content).not.toContain('**Delegate**')
+  })
+
   it('thread_help surfaces a blocked-thread alert banner', async () => {
     const mockWs = createMockWs()
     mockMessages['test-session-id'] = []
@@ -1203,6 +1611,59 @@ describe('ChatView', () => {
     expect(blockedChip.exists()).toBe(true)
     expect(blockedChip.text()).toContain('1')
     expect(blockedChip.text()).toContain('blocked')
+  })
+
+  it('harness announcement lines render as system rows, not teammate voice', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'ann-1',
+        role: 'assistant',
+        content: 'Delegation to @Steve was auto-approved after 30s.',
+        agent: 'Steve',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'ann-2',
+        role: 'assistant',
+        content: 'Delegated to @Steve: look up the hostname',
+        agent: 'Steve',
+        createdAt: new Date().toISOString(),
+      },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    const lines = wrapper.findAll('[data-testid="system-line"]')
+    expect(lines.length).toBe(2)
+    expect(lines[0]!.text()).toContain('auto-approved after 30s')
+    expect(lines[1]!.text()).toContain('Delegated to @Steve')
+    expect(wrapper.html()).not.toContain('AgentMessageHeader')
+  })
+
+  it('omits A2A tools from the completed tool-call chip', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'Delegating hostname lookup',
+        agent: 'Tess',
+        createdAt: new Date().toISOString(),
+        toolCalls: [
+          { id: 't1', name: 'delegate_to_agent', args: { agent: 'Steve' }, result: '{}', done: true },
+          { id: 't2', name: 'wait_for_threads', args: {}, result: 'TOOL_FAIL', done: true },
+          { id: 't3', name: 'read_file', args: { path: 'x' }, result: 'ok', done: true },
+        ],
+      },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.html()).toContain('1 tool call')
+    expect(wrapper.html()).not.toContain('3 tool calls')
+    expect(wrapper.text()).not.toContain('wait_for_threads')
+    expect(wrapper.text()).not.toContain('delegate_to_agent')
   })
 
   it('delegation_preview_timeout appends auto-approved timeline message', async () => {
@@ -1721,6 +2182,194 @@ describe('ChatView — message display edge cases', () => {
     expect(streamingMsg?.content).toBe('hello world')
   })
 
+  it('TOOL_FAIL assistant text renders as a system error line, not bubble prose', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'TOOL_FAIL: The "json" tool is not available. Please use a different method to format the response.',
+        toolCalls: [
+          { id: 'tc1', name: 'json', args: {}, result: 'error: tool "json" is not available', done: true },
+        ],
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text()).toBe("I couldn't do that.")
+    expect(fail.text()).not.toContain('TOOL_FAIL')
+    expect(fail.text()).not.toContain('wait_for_threads')
+    expect(fail.text()).not.toContain('Details')
+    expect(fail.attributes('title')).toContain('TOOL_FAIL')
+    expect(fail.attributes('title')).toContain('json')
+    expect(fail.attributes('aria-description')).toContain('json')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain("Couldn't run")
+    expect(wrapper.text()).not.toMatch(/· failed/)
+    expect(wrapper.html()).not.toMatch(/text-huginn-green">· done/)
+  })
+
+  it('DELEGATE_FAIL assistant text is not rendered as normal bubble prose', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'DELEGATE_FAIL: agent tesla is unavailable',
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.text()).toBe("I asked Tesla and they haven't come back yet.")
+    expect(fail.text()).not.toContain('DELEGATE_FAIL')
+    expect(fail.attributes('title')).toContain('DELEGATE_FAIL')
+    expect(fail.attributes('title')).toContain('tesla')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
+  it('bare TOOL_FAIL token (hydrated Steve DM) is a system chip, not speech', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        agent: 'Steve',
+        content: 'TOOL_FAIL',
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("I couldn't do that.")
+    expect(fail.text()).not.toContain('TOOL_FAIL')
+    expect(fail.text()).not.toContain('Details')
+    expect(fail.attributes('title')).toBe('TOOL_FAIL')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
+  it('bare DELEGATE_FAIL token (hydrated Steve DM) is a system chip, not speech', async () => {
+    mockMessages['test-session-id'] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        agent: 'Steve',
+        content: 'DELEGATE_FAIL',
+      },
+    ]
+
+    const wrapper = mountChatView()
+    await nextTick()
+
+    const fail = wrapper.find('[data-testid="system-fail-line"]')
+    expect(fail.exists()).toBe(true)
+    expect(fail.get('[data-testid="system-fail-copy"]').text()).toBe("They haven't come back yet.")
+    expect(fail.text()).not.toContain('DELEGATE_FAIL')
+    expect(fail.attributes('title')).toBe('DELEGATE_FAIL')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
+  })
+
+  it('does not show leading tool-call JSON in the assistant bubble', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: '@Steve say PONG and nothing else' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '{"name": "bash", "arguments": {"command": "echo PONG"}}PONG',
+        agent: 'Steve',
+        streaming: true,
+      },
+    ]
+
+    const wrapper = mountChatView({}, mockWs)
+    await nextTick()
+
+    const html = wrapper.html()
+    expect(html).toContain('PONG')
+    expect(html).not.toContain('{"name"')
+    expect(html).not.toContain('"arguments"')
+
+    mockWs.simulateMessage({ type: 'token', content: '' })
+    const msgs = mockGetMessages('test-session-id')
+    const streamingMsg = msgs.find((m: any) => m.streaming)
+    expect(streamingMsg?.content).toBe('PONG')
+  })
+
+  it('streamed leftover P then ONG stays one PONG bubble', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: '@Steve say PONG and nothing else' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    mockWs.simulateMessage({ type: 'token', content: 'P' })
+    mockWs.simulateMessage({ type: 'token', content: 'ONG' })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streaming = msgs.filter((m: any) => m.role === 'assistant')
+    expect(streaming).toHaveLength(1)
+    expect(streaming[0].content).toBe('PONG')
+  })
+
+  it('token with payload.replace repaints the bubble instead of appending', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: 'what time is it' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    // Server streamed a partial harness-clock fragment, then the rewrite
+    // settled and it corrects the bubble with a replace token instead of
+    // appending — appending would leave "Friday, August 28It's Friday, ...".
+    mockWs.simulateMessage({ type: 'token', content: 'Friday, August 28' })
+    mockWs.simulateMessage({
+      type: 'token',
+      content: "It's Friday, August 28, 2026, 12:13 AM ET.",
+      payload: { replace: true },
+    })
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streaming = msgs.filter((m: any) => m.role === 'assistant')
+    expect(streaming).toHaveLength(1)
+    expect(streaming[0].content).toBe("It's Friday, August 28, 2026, 12:13 AM ET.")
+  })
+
+  it('plain streamed PONG does not drop the first character', async () => {
+    const mockWs = createMockWs()
+    mockMessages['test-session-id'] = [
+      { id: 'u1', role: 'user', content: 'ping' },
+      { id: 'a1', role: 'assistant', content: '', streaming: true, agent: 'Steve' },
+    ]
+
+    mountChatView({}, mockWs)
+    await nextTick()
+
+    for (const ch of 'PONG') {
+      mockWs.simulateMessage({ type: 'token', content: ch })
+    }
+    await nextTick()
+
+    const msgs = mockGetMessages('test-session-id')
+    const streamingMsg = msgs.find((m: any) => m.streaming)
+    expect(streamingMsg?.content).toBe('PONG')
+  })
+
   it('completed tool-use message renders the tool call chip', async () => {
     mockMessages['test-session-id'] = [
       {
@@ -1969,10 +2618,15 @@ describe('ChatView — space mode', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLoadThreads.mockImplementation(() => Promise.resolve())
     // Reset space state to a clean slate for each test
+    spaceStateById.clear()
     mockSpaceState = makeSpaceState()
     mockSpaceHydrate.mockResolvedValue(undefined)
     mockApiSessionsCreate.mockResolvedValue({ session_id: NEW_SESSION_ID })
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
+    mockActiveSpace.value = null
   })
 
   it('first send: auto-creates session and registers it in sessionToSpaceMap', async () => {
@@ -2028,6 +2682,78 @@ describe('ChatView — space mode', () => {
     expect(userMsgs[0].session_id).toBe(NEW_SESSION_ID)
   })
 
+  it('space mode: live tool ticker shows a spinner per in-flight tool call, a check once it completes, and collapses when none remain', async () => {
+    const SESSION_ID = 'space-ticker-sess'
+    const st = seedSpace(SPACE_ID, SESSION_ID)
+    // A live streaming bubble (stream- prefix marks it in-flight, per
+    // useMessageEnrichment). wireSpaceTimelineWS itself is mocked in this
+    // file (see useSpaceTimeline.test.ts for its real WS-wiring coverage);
+    // this test seeds its effects directly to exercise ChatView's ticker.
+    st.messages.push({
+      id: 'stream-ticker-1',
+      session_id: SESSION_ID,
+      role: 'assistant',
+      content: 'working on it',
+      seq: -1,
+      ts: new Date().toISOString(),
+    })
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    // Two tool calls start — the ticker shows a spinner entry for each.
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-1', tool: 'read_file', args: { file_path: 'a/b/mathutil.go' } },
+    })
+    mockWs.simulateMessage({
+      type: 'tool_call',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-2', tool: 'bash', args: { command: 'go test ./...' } },
+    })
+    await nextTick()
+
+    let html = wrapper.html()
+    expect(html).toContain('data-testid="tool-ticker"')
+    expect((html.match(/tool-ticker-active-entry/g) ?? []).length).toBe(2)
+    expect(html).toContain('read mathutil.go')
+    expect(html).toContain('go test ./...')
+    expect(html).not.toContain('tool-ticker-done-entry')
+
+    // tc-1 finishes — its ticker entry flips from spinner to check while
+    // tc-2 is still running.
+    mockWs.simulateMessage({
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-1', tool: 'read_file', args: { file_path: 'a/b/mathutil.go' }, result: 'ok' },
+    })
+    const msg = st.messages.find((m: any) => m.id === 'stream-ticker-1') as any
+    msg.toolCalls = [{ id: 'tc-1', name: 'read_file', args: { file_path: 'a/b/mathutil.go' }, result: 'ok', done: true }]
+    await nextTick()
+
+    html = wrapper.html()
+    expect(html).toContain('tool-ticker-done-entry')
+    expect((html.match(/tool-ticker-active-entry/g) ?? []).length).toBe(1)
+    expect(html).toContain('go test ./...')
+
+    // tc-2 finishes too — no tool call is in flight any more, so the ticker
+    // collapses into the existing "N tool calls · done" chip (no duplicate
+    // surfaces: the live ticker and the collapsed chip never show together).
+    mockWs.simulateMessage({
+      type: 'tool_result',
+      session_id: SESSION_ID,
+      payload: { id: 'tc-2', tool: 'bash', args: { command: 'go test ./...' }, result: 'PASS' },
+    })
+    msg.toolCalls.push({ id: 'tc-2', name: 'bash', args: { command: 'go test ./...' }, result: 'PASS', done: true })
+    await nextTick()
+
+    html = wrapper.html()
+    expect(html).not.toContain('data-testid="tool-ticker"')
+    expect(html).toContain('2 tool call')
+  })
+
   it('existing session: reuses activeSessionId without calling api.sessions.create', async () => {
     const EXISTING_SESSION = 'existing-session-xyz'
     mockSpaceState.activeSessionId = EXISTING_SESSION
@@ -2074,7 +2800,636 @@ describe('ChatView — space mode', () => {
 
     expect(chatSendsAfterSecond).toBe(chatSendsAfterFirst + 1)
     const lastChatSend = mockWs.sentMessages.filter((m: any) => m.type === 'chat').at(-1)
-    expect(lastChatSend?.payload?.intent).toBe('update_active_work')
-    expect(lastChatSend?.payload?.update_route).toBe('all_active')
+    expect(lastChatSend?.payload?.intent).toBe('new_request')
+    expect(lastChatSend?.payload?.update_route).toBeUndefined()
+  })
+
+  it('does not flash empty-state copy while the space timeline hydrates', async () => {
+    mockSpaceState.loadingInitial = true
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+    expect(wrapper.html()).not.toContain('Send your first message')
+  })
+
+  it('space hydrate with a session that has a REST thread loads sessionThreads so ThreadPanel can open', async () => {
+    const SESSION = 'space-sess-tess'
+    const restThread = {
+      ID: 'thr-steve',
+      SessionID: SESSION,
+      AgentID: 'Steve',
+      Task: 'hostname',
+      Status: 'done',
+      Summary: { Summary: 'TOOL_FAIL', Status: 'error' },
+    }
+    mockSpaceHydrate.mockImplementation(async () => {
+      mockSpaceState.activeSessionId = SESSION
+      mockSpaceState.messages.push({
+        id: 'm-tess',
+        session_id: SESSION,
+        seq: 1,
+        ts: '2026-08-26T00:00:00Z',
+        role: 'assistant',
+        content: 'TOOL_FAIL',
+        agent: 'Tess',
+      })
+    })
+    mockGetSessionThreads.mockImplementation((id: string) => (id === SESSION ? [restThread] : []))
+    mockGetActiveThreadCount.mockImplementation((id: string) => (id === SESSION ? 0 : 0))
+
+    const wrapper = mountSpaceChatView()
+    await flushPromises()
+
+    expect(mockLoadThreads).toHaveBeenCalledWith(SESSION)
+    const panel = wrapper.findComponent({ name: 'ThreadPanel' })
+    expect(panel.exists()).toBe(true)
+    expect(panel.props('threads')).toEqual([restThread])
+  })
+
+  it('ChatEditor stays enabled while streaming and a queued send keeps the in-flight bubble', async () => {
+    mockSpaceState.activeSessionId = 'existing-session-xyz'
+    mockSpaceState.sessionToSpaceMap.set('existing-session-xyz', SPACE_ID)
+    mockSpaceState.messages.push({
+      id: 'h-1',
+      session_id: 'existing-session-xyz',
+      seq: 1,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'in flight…',
+      agent: 'Tess',
+    })
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'First')
+    await flushPromises()
+
+    expect(chatEditor.props('disabled')).toBeFalsy()
+
+    const inflightBefore = mockSpaceState.messages.filter((m: any) => String(m.id).startsWith('stream-') || m.role === 'assistant')
+    const assistantBefore = [...mockSpaceState.messages].reverse().find((m: any) => m.role === 'assistant')
+    expect(assistantBefore).toBeDefined()
+
+    await chatEditor.vm.$emit('send', 'Second while streaming')
+    await flushPromises()
+
+    expect(chatEditor.props('disabled')).toBeFalsy()
+    expect(mockSpaceState.messages).toEqual(expect.arrayContaining(inflightBefore))
+    const chatSends = mockWs.sentMessages.filter((m: any) => m.type === 'chat')
+    expect(chatSends.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('WS done handler: fires desktop notify with click-through to the space', async () => {
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hello space')
+    await flushPromises()
+
+    mockSpaceState.messages.push({
+      id: 'a-1',
+      session_id: NEW_SESSION_ID,
+      seq: 2,
+      ts: new Date().toISOString(),
+      role: 'assistant',
+      content: 'Space reply',
+      agent: 'atlas',
+    })
+
+    const chatMsg = mockWs.sentMessages.find((m: any) => m.type === 'chat')
+    expect(chatMsg).toBeDefined()
+    mockWs.simulateMessage({ type: 'done', run_id: chatMsg.run_id })
+    await nextTick()
+
+    expect(mockNotify).toHaveBeenCalledWith(
+      'atlas',
+      'Space reply',
+      `session-done-${SPACE_ID}`,
+      expect.any(Function),
+    )
+    const onClick = mockNotify.mock.calls.at(-1)?.[3] as (() => void) | undefined
+    onClick?.()
+    expect(mockRouterPush).toHaveBeenCalledWith(`/space/${SPACE_ID}`)
+  })
+
+  const SPACE_A = 'space-tess'
+  const SPACE_B = 'space-steve'
+  const SESS_A = 'sess-tess'
+  const SESS_B = 'sess-steve'
+
+  function spaceStub(id: string, name: string) {
+    return { id, name, kind: 'dm', leadAgent: name, memberAgents: [] }
+  }
+
+  async function mountTwoPartySpace(spaceId: string, ws: ReturnType<typeof createMockWs>) {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S' },
+    ])
+    mockActiveSpace.value = spaceStub(spaceId, spaceId === SPACE_A ? 'Tess' : 'Steve')
+    mockSpaceState.activeSessionId = `sess-${spaceId}`
+    mockSpaceState.sessionToSpaceMap.set(`sess-${spaceId}`, spaceId)
+    const wrapper = mountChatView({ sessionId: undefined, spaceId }, ws)
+    await flushPromises()
+    return wrapper
+  }
+
+  async function openSpace(wrapper: ReturnType<typeof mountChatView>, spaceId: string) {
+    mockActiveSpace.value = spaceStub(spaceId, spaceId === SPACE_A ? 'Tess' : 'Steve')
+    await wrapper.setProps({ spaceId })
+    await flushPromises()
+  }
+
+  it('keeps responding chrome on the space that owns the run when switching DMs', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).toContain('thinking')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('When you send now:')
+
+    await openSpace(wrapper, SPACE_B)
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Steve is responding')
+    expect(wrapper.html()).not.toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(false)
+
+    await openSpace(wrapper, SPACE_A)
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('When you send now:')
+  })
+
+  it('starts a new run in a quiet space instead of queueing against the other space\'s turn', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    await openSpace(wrapper, SPACE_B)
+    await chatEditor.vm.$emit('send', 'Hey Steve')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Steve is responding')
+    expect(wrapper.html()).not.toContain('queued')
+
+    await openSpace(wrapper, SPACE_A)
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Tess is responding')
+    expect(wrapper.html()).not.toContain('queued')
+  })
+
+  it('clears a background space run when its done arrives while another DM is open', async () => {
+    const mockWs = createMockWs()
+    const wrapper = await mountTwoPartySpace(SPACE_A, mockWs)
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'Hey Tess')
+    await flushPromises()
+
+    const tessRunId = mockWs.sentMessages.find((m: any) => m.type === 'chat')?.run_id
+    expect(tessRunId).toBeTruthy()
+
+    await openSpace(wrapper, SPACE_B)
+    mockWs.simulateMessage({ type: 'done', run_id: tessRunId, session_id: `sess-${SPACE_A}` })
+    await flushPromises()
+
+    await openSpace(wrapper, SPACE_A)
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Tess is responding')
+    expect(wrapper.find('[data-testid="composer-send-options"]').exists()).toBe(false)
+  })
+
+  function seedSpace(spaceId: string, sessionId: string) {
+    const st = mockGetSpaceTimelineState(spaceId)
+    st.activeSessionId = sessionId
+    st.sessionToSpaceMap.set(sessionId, spaceId)
+    return st
+  }
+
+  it('keeps another space\'s follow-up, completion card, permission, warning, and thread_help off the viewed DM', async () => {
+    const stateA = seedSpace(SPACE_A, SESS_A)
+    const stateB = seedSpace(SPACE_B, SESS_B)
+    mockActiveSpace.value = spaceStub(SPACE_B, 'Steve')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_B }, mockWs)
+    await flushPromises()
+
+    mockWs.simulateMessage({
+      type: 'follow_up_start',
+      session_id: SESS_A,
+      payload: { agent: 'Tess' },
+    })
+    mockWs.simulateMessage({
+      type: 'follow_up_token',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', token: 'partial ' },
+    })
+    mockWs.simulateMessage({
+      type: 'agent_follow_up',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', content: 'Tess follow-up for you' },
+    })
+    mockWs.simulateMessage({
+      type: 'thread_done',
+      session_id: SESS_A,
+      payload: {
+        thread_id: 'thr-tess',
+        agent_id: 'Helper',
+        status: 'done',
+        summary: 'Tess delegate finished',
+      },
+    })
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      session_id: SESS_A,
+      payload: { id: 'perm-tess', tool: 'bash', command: 'rm -rf /tmp' },
+    })
+    mockWs.simulateMessage({
+      type: 'warning',
+      session_id: SESS_A,
+      content: 'Vault unavailable',
+    })
+    mockWs.simulateMessage({
+      type: 'thread_help',
+      session_id: SESS_A,
+      payload: { thread_id: 'thr-help', message: 'Need Tess credentials' },
+    })
+    mockWs.simulateMessage({
+      type: 'delegation_preview_timeout',
+      session_id: SESS_A,
+      payload: { thread_id: 'thr-timeout', agent_id: 'Helper', timeout_seconds: 30 },
+    })
+    await nextTick()
+
+    expect(stateB.messages).toHaveLength(0)
+    expect(wrapper.html()).not.toContain('Permission required')
+    expect(wrapper.html()).not.toContain('Tess follow-up for you')
+    expect(wrapper.html()).not.toContain('Tess delegate finished')
+    expect(wrapper.html()).not.toContain('Vault unavailable')
+    expect(wrapper.html()).not.toContain('Need Tess credentials')
+    expect(wrapper.html()).not.toContain('auto-approved')
+
+    expect(stateA.messages.some((m: any) => m.content === 'Tess follow-up for you')).toBe(true)
+    expect(stateA.messages.some((m: any) => m.threadSummaryThreadId === 'thr-tess')).toBe(true)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('Vault unavailable'))).toBe(false)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('Memory vault unavailable'))).toBe(false)
+    expect(stateA.messages.some((m: any) => String(m.content).includes('auto-approved after 30s'))).toBe(true)
+
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
+    await wrapper.setProps({ spaceId: SPACE_A })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.html()).toContain('Permission required')
+    expect(wrapper.html()).toContain('Tess follow-up for you')
+    expect(wrapper.html()).toContain('Tess delegate finished')
+    expect(wrapper.html()).not.toContain('Vault unavailable')
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+  })
+
+  it('shows a memory chip — not a chat message — when muninn is installed and the agent has no vault', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58a6ff', icon: 'W', vault_name: '', memory_type: 'none' },
+    ])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: true, running: true, detected: true })
+    const state = seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Winston')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+    await nextTick()
+
+    mockWs.simulateMessage({
+      type: 'warning',
+      session_id: SESS_A,
+      content: '⚠️ Memory vault unavailable: muninn config unavailable. Memory features are disabled for this session.',
+    })
+    await nextTick()
+
+    expect(state.messages.some((m: any) => String(m.content).includes('Memory vault unavailable'))).toBe(false)
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+    expect(wrapper.html()).not.toContain('Memory features are disabled')
+
+    const chip = wrapper.find('[data-testid="memory-vault-chip"]')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toContain("Winston isn't using a Muninn vault yet")
+    expect(chip.text()).toContain('Connect or create one')
+  })
+
+  it('memory chip first-click connects local Muninn instead of opening agent settings', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58a6ff', icon: 'W', vault_name: '', memory_type: 'none' },
+    ])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: true, running: true, detected: true })
+    seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Winston')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+    await nextTick()
+
+    await wrapper.find('[data-testid="memory-vault-chip-action"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(mockRouterPush).not.toHaveBeenCalled()
+    expect(mockApiMuninnConnectLocal).toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="memory-vault-modal"]').exists()).toBe(true)
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+    expect(wrapper.html()).not.toContain('mdb_')
+  })
+
+  it('hides the memory chip when Muninn is not installed', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58a6ff', icon: 'W', vault_name: '', memory_type: 'none' },
+    ])
+    mockApiMuninnStatus.mockResolvedValue({ connected: false, installed: false, running: false, detected: false })
+    seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Winston')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="memory-vault-chip"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain("Muninn isn't running")
+    expect(wrapper.html()).not.toContain('Memory vault unavailable')
+  })
+
+  it('still paints follow-up and permission on the owner space when that space is open', async () => {
+    const stateA = seedSpace(SPACE_A, SESS_A)
+    mockActiveSpace.value = spaceStub(SPACE_A, 'Tess')
+
+    const mockWs = createMockWs()
+    const wrapper = mountChatView({ sessionId: undefined, spaceId: SPACE_A }, mockWs)
+    await flushPromises()
+
+    mockWs.simulateMessage({
+      type: 'agent_follow_up',
+      session_id: SESS_A,
+      payload: { agent: 'Tess', content: 'Owner-space follow-up' },
+    })
+    mockWs.simulateMessage({
+      type: 'permission_request',
+      session_id: SESS_A,
+      payload: { id: 'perm-open', tool: 'bash', command: 'ls' },
+    })
+    await nextTick()
+
+    expect(stateA.messages.some((m: any) => m.content === 'Owner-space follow-up')).toBe(true)
+    expect(wrapper.html()).toContain('Permission required')
+  })
+
+  it('in-flight @mention status names the addressed agent, not the lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Steve say PONG and nothing else')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Steve is responding')
+    expect(banner.text()).not.toContain('Tess is responding')
+  })
+
+  it('in-flight unmentioned status names the channel lead', async () => {
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'mention-proof',
+      kind: 'channel',
+      leadAgent: 'Tess',
+      memberAgents: ['Steve'],
+    }
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Tess', model: 'gpt-4', color: '#58A6FF', icon: 'T', is_default: true },
+      { name: 'Steve', model: 'gpt-4', color: '#3FB950', icon: 'S', is_default: false },
+    ])
+    mockSpaceState.activeSessionId = 'sess-mention'
+    mockSpaceState.sessionToSpaceMap.set('sess-mention', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', 'what is the status?')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="streaming-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('Tess is responding')
+    expect(banner.text()).not.toContain('Steve is responding')
+  })
+
+  it('clears hallway responding bar when the space stream ends', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Winston', model: 'gpt-4', color: '#58A6FF', icon: 'W', is_default: true },
+    ])
+    mockActiveSpace.value = {
+      id: SPACE_ID,
+      name: 'Huginn',
+      kind: 'channel',
+      leadAgent: 'Winston',
+      memberAgents: [],
+    }
+    mockSpaceState.activeSessionId = 'hall-sess'
+    mockSpaceState.sessionToSpaceMap.set('hall-sess', SPACE_ID)
+
+    const mockWs = createMockWs()
+    const wrapper = mountSpaceChatView(mockWs)
+    await flushPromises()
+
+    const chatEditor = wrapper.findComponent({ name: 'ChatEditor' })
+    await chatEditor.vm.$emit('send', '@Winston what time is it')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(true)
+    expect(wrapper.html()).toContain('Winston is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+
+    const runId = mockWs.sentMessages.find((m: any) => m.type === 'chat')?.run_id
+    expect(runId).toBeTruthy()
+
+    mockWs.simulateMessage({ type: 'done', run_id: runId, session_id: 'hall-sess' })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="streaming-banner"]').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('Winston is responding')
+    expect(wrapper.html()).not.toContain('Preparing context and delegation plan')
+  })
+})
+
+describe('ChatView — /chat/:agentName alias', () => {
+  const STEVE_SPACE_ID = '01huginn-steve-dm'
+  let wrapper: ReturnType<typeof mountChatView> | undefined
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSessions.value = []
+    mockDms.value = []
+    mockOpenDM.mockResolvedValue(null)
+    mockApiAgentsList.mockResolvedValue([])
+    mockSpaceState = makeSpaceState()
+    mockActiveSpace.value = null
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+  })
+
+  it('redirects /chat/Steve to the Steve DM space', async () => {
+    mockDms.value = [{
+      id: STEVE_SPACE_ID,
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+      icon: '',
+      color: '#58a6ff',
+      unseenCount: 0,
+    }]
+
+    wrapper = mountChatView({ sessionId: 'Steve' })
+    await flushPromises()
+
+    expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
+    expect(mockOpenDM).not.toHaveBeenCalled()
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+  })
+
+  it('resolves /chat/Steve via openDM when the DM is not already listed', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'gpt-4', color: '#58a6ff', icon: 'S' },
+    ])
+    mockOpenDM.mockResolvedValue({
+      id: STEVE_SPACE_ID,
+      name: 'Steve',
+      kind: 'dm',
+      leadAgent: 'Steve',
+      memberAgents: [],
+      icon: '',
+      color: '#58a6ff',
+      unseenCount: 0,
+    })
+
+    wrapper = mountChatView({ sessionId: 'Steve' })
+    await flushPromises()
+
+    expect(mockOpenDM).toHaveBeenCalledWith('Steve')
+    expect(mockRouterReplace).toHaveBeenCalledWith(`/space/${STEVE_SPACE_ID}`)
+    expect(mockApiSessionsCreate).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a regular session id as an agent DM', async () => {
+    mockSessions.value = []
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Coder', model: 'gpt-4', color: '#58a6ff', icon: 'C' },
+    ])
+
+    wrapper = mountChatView({ sessionId: 'test-chat-session' })
+    await flushPromises()
+
+    expect(mockRouterReplace).not.toHaveBeenCalled()
+    expect(mockOpenDM).not.toHaveBeenCalled()
+  })
+})
+
+describe('ChatView — model tool capability warning', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockMessages['test-session-id'] = []
+    mockSessions.value = [{ id: 'test-session-id', title: 'DM Steve', agent: 'Steve' }]
+    mockActiveSpace.value = null
+    mockGetSessionThreads.mockReturnValue([])
+    mockGetActiveThreadCount.mockReturnValue(0)
+    mockGetSessionPreviews.mockReturnValue([])
+  })
+
+  it('shows the tools warning in header and composer for a 7b displayAgent', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-testid="chat-model-tools-warning"]').text()).toContain(
+      'This model is unlikely to use tools or delegate',
+    )
+    expect(wrapper.get('[data-testid="composer-model-tools-warning"]').text()).toContain(
+      'This model is unlikely to use tools or delegate',
+    )
+  })
+
+  it('hides the tools warning for a 14b displayAgent with tools', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Chris', model: 'qwen2.5-coder:14b', color: '#3FB950', icon: 'C', is_default: true },
+    ])
+    mockSessions.value = [{ id: 'test-session-id', title: 'DM Chris', agent: 'Chris' }]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="chat-model-tools-warning"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-model-tools-warning"]').exists()).toBe(false)
+  })
+
+  it('renders raw TOOL_FAIL assistant text as a system chip', async () => {
+    mockApiAgentsList.mockResolvedValue([
+      { name: 'Steve', model: 'qwen2.5-coder:7b', color: '#58A6FF', icon: 'S', is_default: true },
+    ])
+    mockMessages['test-session-id'] = [
+      { id: 'a1', role: 'assistant', content: 'TOOL_FAIL: The "json" tool is not available.', agent: 'Steve' },
+    ]
+    const wrapper = mountChatView()
+    await flushPromises()
+    await nextTick()
+
+    const chip = wrapper.get('[data-testid="system-fail-line"]')
+    expect(chip.text()).toBe("I couldn't do that.")
+    expect(chip.text()).not.toContain('TOOL_FAIL')
+    expect(chip.attributes('title')).toContain('The "json" tool is not available.')
+    expect(wrapper.find('.md-content').exists()).toBe(false)
   })
 })

@@ -12,8 +12,10 @@ package server
 // Fix 2 (ws.go): runtime fallback in resolveAgent (step 1b) that heals
 //   sessions created before the fix without any DB migration.
 // Fix 3 (ws.go): block set_primary_agent in DM spaces (fail-closed).
-// Fix 4 (ws.go): channel @mention routing — @Name at start of message routes
-//   to that agent if they are a member of the channel (stateless per-message).
+// Fix 4 (ws.go): user @mention is the addressee for this turn, even when
+//   Manifest.Agent is already stamped to the space lead. First matching
+//   roster @Name replies; additional roster @names spawn via CreateFromMentions.
+//   A space with a roster does not address or extra-spawn non-members.
 
 import (
 	"bytes"
@@ -22,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
@@ -47,9 +50,9 @@ func (e *errSpaceStore) ListSpaces(_ spaces.ListOpts) (spaces.ListSpacesResult, 
 func (e *errSpaceStore) UpdateSpace(_ string, _ spaces.SpaceUpdates) (*spaces.Space, error) {
 	return nil, fmt.Errorf("err")
 }
-func (e *errSpaceStore) ArchiveSpace(_ string) error                    { return fmt.Errorf("err") }
-func (e *errSpaceStore) MarkRead(_ string) error                        { return fmt.Errorf("err") }
-func (e *errSpaceStore) UnseenCount(_ string) (int, error)              { return 0, fmt.Errorf("err") }
+func (e *errSpaceStore) ArchiveSpace(_ string) error       { return fmt.Errorf("err") }
+func (e *errSpaceStore) MarkRead(_ string) error           { return fmt.Errorf("err") }
+func (e *errSpaceStore) UnseenCount(_ string) (int, error) { return 0, fmt.Errorf("err") }
 func (e *errSpaceStore) ListSessionsForSpace(_ string) ([]spaces.SessionRef, error) {
 	return nil, fmt.Errorf("err")
 }
@@ -67,6 +70,26 @@ func (e *errSpaceStore) SpacesByLeadAgent(_ string) ([]*spaces.Space, error) {
 }
 func (e *errSpaceStore) FindChannelByName(_ string) (*spaces.Space, error) {
 	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) PostSpaceMessage(_, _, _ string) (*spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) ListSpaceReplies(_, _ string) ([]spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) GetSpaceMessage(_, _ string) (*spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) DeleteSpaceMessage(_, _ string) error { return fmt.Errorf("err") }
+func (e *errSpaceStore) InsertSpaceThreadMessage(_, _, _, _, _ string) (*spaces.SpaceMessage, error) {
+	return nil, fmt.Errorf("err")
+}
+func (e *errSpaceStore) HasThreadParticipation(_, _, _ string) (bool, error) {
+	return false, fmt.Errorf("err")
+}
+func (e *errSpaceStore) MarkThreadRead(_, _, _ string) error { return fmt.Errorf("err") }
+func (e *errSpaceStore) ThreadUnseenForViewer(_, _, _ string) (int, error) {
+	return 0, fmt.Errorf("err")
 }
 
 // openSpaceDB creates a fresh in-memory SQLite DB with both session and space
@@ -433,6 +456,7 @@ func TestExtractLeadMention_ValidMention(t *testing.T) {
 		{"@Kimi", "Kimi"},
 		{"  @Atlas-2 what's up?", "Atlas-2"},
 		{"@agent_v2 go", "agent_v2"},
+		{"please ask @Mark to help", "Mark"},
 	}
 	for _, tc := range cases {
 		got := extractLeadMention(tc.input)
@@ -447,12 +471,12 @@ func TestExtractLeadMention_InvalidChars_ReturnsEmpty(t *testing.T) {
 		input string
 		desc  string
 	}{
-		{"hello @Mark", "mention not at start"},
 		{"@", "bare @"},
 		{"@123bad", "starts with digit"},
 		{"@!hack", "starts with punctuation"},
 		{"no mention here", "no @"},
 		{"@" + string(make([]byte, 65)), "name over 64 chars"},
+		{"alice@Mark", "email-style, not a mention"},
 	}
 	for _, tc := range cases {
 		got := extractLeadMention(tc.input)
@@ -481,6 +505,7 @@ func TestResolveAgentForMessage_ChannelMention_RoutesToMember(t *testing.T) {
 
 	sess := sessStore.New("test", "/workspace", "model")
 	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Mark" // stamped lead — @Kimi must still win
 	if err := sessStore.SaveManifest(sess); err != nil {
 		t.Fatalf("SaveManifest: %v", err)
 	}
@@ -490,8 +515,8 @@ func TestResolveAgentForMessage_ChannelMention_RoutesToMember(t *testing.T) {
 		testAgent("Kimi", "model-b", "#000", "K", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
@@ -521,6 +546,7 @@ func TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough(t *t
 
 	sess := sessStore.New("test", "/workspace", "model")
 	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Mark"
 	if err := sessStore.SaveManifest(sess); err != nil {
 		t.Fatalf("SaveManifest: %v", err)
 	}
@@ -530,12 +556,12 @@ func TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough(t *t
 		testAgent("Kimi", "model-b", "#000", "K", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
-	// @Kimi is not a channel member — should fall through to lead agent Mark.
+	// @Kimi is a known agent but not a channel member — stay with lead Mark.
 	ag := s.resolveAgentForMessage(sess.ID, "@Kimi are you there?")
 	if ag == nil {
 		t.Fatal("expected fallback to lead agent, got nil")
@@ -543,44 +569,370 @@ func TestResolveAgentForMessage_ChannelMention_AgentNotInSpace_FallsThrough(t *t
 	if ag.Name != "Mark" {
 		t.Errorf("expected fallback to lead agent %q, got %q", "Mark", ag.Name)
 	}
+
+	// Mid-text leftover of a non-member is the same class of bug.
+	ag = s.resolveAgentForMessage(sess.ID, "please ask @Kimi about hostname")
+	if ag == nil {
+		t.Fatal("expected fallback to lead agent for mid-text non-member, got nil")
+	}
+	if ag.Name != "Mark" {
+		t.Errorf("expected mid-text @Kimi in a Mark-only channel to stay with Mark, got %q", ag.Name)
+	}
 }
 
-// TestResolveAgentForMessage_DMMention_IgnoredUsesLeadAgent verifies that
-// @mention routing is ignored in DM spaces — the lead agent always handles
-// the message regardless of any @mention in the content.
-func TestResolveAgentForMessage_DMMention_IgnoredUsesLeadAgent(t *testing.T) {
+// TestResolveAgentForMessage_DMMention_NonMember_DoesNotAddress verifies that
+// a 1:1 DM only addresses that one agent. Mid-text @Steve in Tess's DM must
+// not silently give Steve the turn.
+func TestResolveAgentForMessage_DMMention_NonMember_DoesNotAddress(t *testing.T) {
 	dir := t.TempDir()
 	sessStore := session.NewStore(dir)
 	db := openSpaceDB(t)
 	spaceStore := spaces.NewSQLiteSpaceStore(db)
 
-	dm, err := spaceStore.OpenDM("Mark")
+	dm, err := spaceStore.OpenDM("Tess")
 	if err != nil {
 		t.Fatalf("OpenDM: %v", err)
 	}
 
 	sess := sessStore.New("test", "/workspace", "model")
 	sess.Manifest.SpaceID = dm.ID
+	sess.Manifest.Agent = "Tess"
 	if err := sessStore.SaveManifest(sess); err != nil {
 		t.Fatalf("SaveManifest: %v", err)
 	}
 
 	cfg := testAgentConfig(
-		testAgent("Mark", "model-a", "#fff", "M", true),
-		testAgent("Kimi", "model-b", "#000", "K", false),
+		testAgent("Tess", "model-t", "#fff", "T", true),
+		testAgent("Steve", "model-s", "#000", "S", false),
 	)
 	s := &Server{
-		store:      sessStore,
-		spaceStore: spaceStore,
+		store:       sessStore,
+		spaceStore:  spaceStore,
 		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
 	}
 
-	// Even though the message starts with @Kimi, it's a DM — Mark must respond.
-	ag := s.resolveAgentForMessage(sess.ID, "@Kimi is anyone there?")
+	ag := s.resolveAgentForMessage(sess.ID, "please ask @Steve about hostname")
 	if ag == nil {
-		t.Fatal("expected non-nil agent, got nil")
+		t.Fatal("expected Tess to keep the turn, got nil")
 	}
-	if ag.Name != "Mark" {
-		t.Errorf("expected DM lead agent %q to be used (ignoring @Kimi mention), got %q", "Mark", ag.Name)
+	if ag.Name != "Tess" {
+		t.Errorf("expected Tess-only DM mid-text @Steve to stay with Tess, got %q", ag.Name)
+	}
+
+	ag = s.resolveAgentForMessage(sess.ID, "@Steve is anyone there?")
+	if ag == nil {
+		t.Fatal("expected Tess to keep the turn for leading leftover, got nil")
+	}
+	if ag.Name != "Tess" {
+		t.Errorf("expected Tess-only DM leading @Steve to stay with Tess, got %q", ag.Name)
+	}
+
+	ag = s.resolveAgentForMessage(sess.ID, "@Tess what is the hostname?")
+	if ag == nil {
+		t.Fatal("expected roster member @Tess to resolve, got nil")
+	}
+	if ag.Name != "Tess" {
+		t.Errorf("expected @Tess in Tess's DM to address Tess, got %q", ag.Name)
+	}
+}
+
+// TestResolveAgentForMessage_LeadStamped_UserAtSteve_RoutesToSteve is the
+// Slack-like contract: a Chris-led channel with Manifest.Agent stamped to
+// the lead still sends "@Steve do X" to Steve.
+func TestResolveAgentForMessage_LeadStamped_UserAtSteve_RoutesToSteve(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	ch, err := spaceStore.CreateChannel("Eng", "Chris", []string{"Steve", "Sam"}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Chris" // handleCreateSession stamp-lead-first
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Chris", "model-c", "#58A6FF", "C", true),
+		testAgent("Steve", "model-s", "#3FB950", "S", false),
+		testAgent("Sam", "model-a", "#000", "A", false),
+	)
+	s := &Server{
+		store:       sessStore,
+		spaceStore:  spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	ag := s.resolveAgentForMessage(sess.ID, "@Steve do X")
+	if ag == nil {
+		t.Fatal("expected Steve to run, got nil")
+	}
+	if ag.Name != "Steve" {
+		t.Errorf("expected @Steve in a Chris-led channel to reach Steve, got %q", ag.Name)
+	}
+
+	ag = s.resolveAgentForMessage(sess.ID, "please ask @Steve about hostname")
+	if ag == nil {
+		t.Fatal("expected mid-text @Steve to run, got nil")
+	}
+	if ag.Name != "Steve" {
+		t.Errorf("expected mid-text @Steve in a Chris-led channel to reach Steve, got %q", ag.Name)
+	}
+}
+
+// TestResolveAgentForMessage_FirstMentionIsAddressee verifies that when the
+// user @mentions two agents, the first matching name is who replies.
+func TestResolveAgentForMessage_FirstMentionIsAddressee(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	ch, err := spaceStore.CreateChannel("Eng", "Chris", []string{"Steve", "Sam"}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Chris"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Chris", "model-c", "#58A6FF", "C", true),
+		testAgent("Steve", "model-s", "#3FB950", "S", false),
+		testAgent("Sam", "model-a", "#000", "A", false),
+	)
+	s := &Server{
+		store:       sessStore,
+		spaceStore:  spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	ag := s.resolveAgentForMessage(sess.ID, "@Steve and @Sam please review")
+	if ag == nil {
+		t.Fatal("expected addressee, got nil")
+	}
+	if ag.Name != "Steve" {
+		t.Errorf("expected first @Steve to be the addressee, got %q", ag.Name)
+	}
+
+	extras := additionalMentionNames("@Steve and @Sam please review", "Steve", cfg, []string{"Chris", "Steve", "Sam"})
+	if len(extras) != 1 || extras[0] != "Sam" {
+		t.Errorf("expected additional mention [Sam], got %v", extras)
+	}
+}
+
+func TestResolveAgentForMessage_UnknownMention_UsesStampedLead(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	ch, err := spaceStore.CreateChannel("Eng", "Chris", []string{"Steve"}, "", "")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = ch.ID
+	sess.Manifest.Agent = "Chris"
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Chris", "model-c", "#58A6FF", "C", true),
+		testAgent("Steve", "model-s", "#3FB950", "S", false),
+	)
+	s := &Server{
+		store:       sessStore,
+		spaceStore:  spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	ag := s.resolveAgentForMessage(sess.ID, "@Nobody do X")
+	if ag == nil {
+		t.Fatal("expected stamped lead, got nil")
+	}
+	if ag.Name != "Chris" {
+		t.Errorf("expected unknown @Nobody to fall through to stamped lead Chris, got %q", ag.Name)
+	}
+}
+
+func TestAdditionalMentionNames_SkipsAddressee(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Chris", "m", "#fff", "C", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Sam", "m", "#fff", "A", false),
+	)
+	extras := additionalMentionNames("@Steve @Sam do X", "Steve", cfg, []string{"Chris", "Steve", "Sam"})
+	if len(extras) != 1 || extras[0] != "Sam" {
+		t.Errorf("got %v, want [Sam]", extras)
+	}
+}
+
+func TestAdditionalMentionNames_SkipsNonMembersWhenRosterSet(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Chris", "m", "#fff", "C", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Tess", "m", "#fff", "T", false),
+	)
+	extras := additionalMentionNames("@Steve please ask @Tess too", "Steve", cfg, []string{"Chris", "Steve"})
+	if len(extras) != 0 {
+		t.Errorf("got %v, want none — Tess is not on the roster", extras)
+	}
+}
+
+func TestAdditionalMentionNames_StandaloneAllowsKnownAgents(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Tess", "m", "#fff", "T", false),
+	)
+	extras := additionalMentionNames("@Steve @Tess do X", "Steve", cfg, nil)
+	if len(extras) != 1 || extras[0] != "Tess" {
+		t.Errorf("got %v, want [Tess] when there is no space roster", extras)
+	}
+}
+
+func TestResolveAgentForMessage_Standalone_KnownAgentStillWins(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	sess := sessStore.New("test", "/workspace", "model")
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	cfg := testAgentConfig(
+		testAgent("Chris", "model-c", "#fff", "C", true),
+		testAgent("Steve", "model-s", "#000", "S", false),
+	)
+	s := &Server{
+		store:       sessStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+
+	ag := s.resolveAgentForMessage(sess.ID, "please ask @Steve about hostname")
+	if ag == nil {
+		t.Fatal("expected standalone @Steve to resolve, got nil")
+	}
+	if ag.Name != "Steve" {
+		t.Errorf("expected standalone session-mode @Steve to address Steve, got %q", ag.Name)
+	}
+}
+
+func TestAdditionalMentionNames_NoneWhenOnlyAddressee(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Steve", "m", "#fff", "S", false),
+	)
+	extras := additionalMentionNames("@Steve do X", "Steve", cfg, []string{"Steve"})
+	if len(extras) != 0 {
+		t.Errorf("got %v, want none", extras)
+	}
+}
+
+func TestSpaceMemberNames_DMIsOnlyLead(t *testing.T) {
+	dm := &spaces.Space{Kind: spaces.KindDM, LeadAgent: "Tess", Members: []string{"Steve"}}
+	got := spaceMemberNames(dm)
+	if len(got) != 1 || got[0] != "Tess" {
+		t.Errorf("DM roster = %v, want [Tess]", got)
+	}
+
+	ch := &spaces.Space{Kind: spaces.KindChannel, LeadAgent: "Chris", Members: []string{"Steve", "Sam"}}
+	got = spaceMemberNames(ch)
+	if len(got) != 3 || got[0] != "Chris" || got[1] != "Steve" || got[2] != "Sam" {
+		t.Errorf("channel roster = %v, want [Chris Steve Sam]", got)
+	}
+}
+
+func TestSpawnAdditionalUserMentions_SkipsNonMembersWhenSpaceHasRoster(t *testing.T) {
+	dir := t.TempDir()
+	sessStore := session.NewStore(dir)
+	db := openSpaceDB(t)
+	spaceStore := spaces.NewSQLiteSpaceStore(db)
+
+	dm, err := spaceStore.OpenDM("Tess")
+	if err != nil {
+		t.Fatalf("OpenDM: %v", err)
+	}
+	sess := sessStore.New("test", "/workspace", "model")
+	sess.Manifest.SpaceID = dm.ID
+	if err := sessStore.SaveManifest(sess); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	called := false
+	cfg := testAgentConfig(
+		testAgent("Tess", "m", "#fff", "T", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+	)
+	s := &Server{
+		store:       sessStore,
+		spaceStore:  spaceStore,
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+	s.SetMentionDelegate(func(context.Context, string, string, string, string) {
+		called = true
+	})
+	s.spawnAdditionalUserMentions(context.Background(), sess.ID, "please ask @Steve about hostname", "parent", &agents.Agent{Name: "Tess"})
+	if called {
+		t.Error("non-member @Steve in a Tess DM must not extra-spawn")
+	}
+}
+
+func TestSpawnAdditionalUserMentions_CallsDelegateWithExtrasOnly(t *testing.T) {
+	var gotAssistant, gotOriginal string
+	cfg := testAgentConfig(
+		testAgent("Chris", "m", "#fff", "C", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Sam", "m", "#fff", "A", false),
+	)
+	s := &Server{
+		agentLoader: func() (*agents.AgentsConfig, error) { return cfg, nil },
+	}
+	s.SetMentionDelegate(func(_ context.Context, _, assistantMsg, originalUserMsg, _ string) {
+		gotAssistant = assistantMsg
+		gotOriginal = originalUserMsg
+	})
+	addressee := &agents.Agent{Name: "Steve"}
+	s.spawnAdditionalUserMentions(context.Background(), "sess", "@Steve @Sam do X", "parent", addressee)
+	if gotOriginal != "" {
+		t.Errorf("originalUserMsg should be empty so DedupMentions does not strip extras, got %q", gotOriginal)
+	}
+	if !strings.Contains(gotAssistant, "@Sam") {
+		t.Errorf("expected leftover @Sam in delegate payload, got %q", gotAssistant)
+	}
+	if strings.HasPrefix(strings.TrimSpace(gotAssistant), "@Steve") {
+		t.Errorf("addressee @Steve should not be the first leftover mention, got %q", gotAssistant)
+	}
+}
+
+func TestAdditionalMentionNames_BareSteveAfterWinston(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Winston", "m", "#fff", "W", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+		testAgent("Reggie", "m", "#fff", "R", false),
+	)
+	extras := additionalMentionNames("@Winston Ask Steve hostname + 7*8.", "Winston", cfg, []string{"Winston", "Steve", "Reggie"})
+	if len(extras) != 1 || extras[0] != "Steve" {
+		t.Errorf("got %v, want [Steve]", extras)
+	}
+}
+
+func TestAdditionalMentionNames_BareNameStandaloneStaysAtOnly(t *testing.T) {
+	cfg := testAgentConfig(
+		testAgent("Winston", "m", "#fff", "W", true),
+		testAgent("Steve", "m", "#fff", "S", false),
+	)
+	extras := additionalMentionNames("@Winston Ask Steve hostname", "Winston", cfg, nil)
+	if len(extras) != 0 {
+		t.Errorf("standalone has no roster — bare Steve must not extra-spawn, got %v", extras)
 	}
 }

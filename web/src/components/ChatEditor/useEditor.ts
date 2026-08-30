@@ -12,6 +12,7 @@ import tippy from 'tippy.js'
 import type { Instance as TippyInstance } from 'tippy.js'
 import type { SuggestionProps, SuggestionKeyDownProps } from '@tiptap/suggestion'
 import MentionList from './MentionList.vue'
+import { filterMentionSuggestions } from './mentionSuggestions'
 
 const lowlight = createLowlight(common)
 
@@ -42,9 +43,21 @@ export function useEditor(options: {
   // the wrapping component (e.g. when the active DM changes) updates the
   // placeholder without re-creating the editor.
   placeholderRef?: Ref<string | undefined>
+  // Active-space roster. When set, @ suggestions list only those members.
+  // Undefined = standalone session (every agent).
+  memberNames?: Ref<string[] | undefined>
+  // Resolves once `agents` has settled its initial load (success or
+  // exhausted retries). The @ suggestion's items() awaits this before its
+  // first lookup so a user who types "@" before the roster fetch resolves
+  // gets the real roster once it lands, rather than a picker that opens
+  // empty and can never update itself (tiptap-suggestion only re-runs
+  // items() on the next keystroke).
+  agentsReady?: Promise<void>
 }) {
   const editor = ref<Editor | null>(null)
   let suggestionOpen = false
+  // After Escape, refuse rematch until the cursor leaves that @.
+  let dismissedFrom: number | null = null
 
   function createMentionExtension() {
     // Extend Mention with a tiptap-markdown serializer so @Name renders as
@@ -63,13 +76,27 @@ export function useEditor(options: {
     return MentionWithMarkdown.configure({
       HTMLAttributes: { class: 'mention' },
       suggestion: {
-        items: ({ query }: { query: string }) =>
-          options.agents.value
-            .filter(a => String(a.name).toLowerCase().startsWith(query.toLowerCase()))
-            .slice(0, 6),
+        // Async: tiptap-suggestion awaits items() before opening or updating
+        // the popup. Waiting on agentsReady here (a no-op once it has
+        // already resolved) closes the race where autofocus lets a user
+        // type "@" before the roster fetch in ChatEditor.vue settles.
+        items: async ({ query }: { query: string }) => {
+          if (options.agentsReady) await options.agentsReady.catch(() => {})
+          return filterMentionSuggestions(options.agents.value, query, options.memberNames?.value)
+        },
+
+        allow: ({ range, state }: { range: { from: number; to: number }; state: { selection: { from: number } } }) => {
+          if (dismissedFrom == null) return true
+          const pos = state.selection.from
+          if (pos < range.from || pos > range.to) {
+            dismissedFrom = null
+            return true
+          }
+          return range.from !== dismissedFrom
+        },
 
         render: () => {
-          let component: VueRenderer
+          let component: VueRenderer | undefined
           let popup: TippyInstance | null = null
 
           return {
@@ -93,24 +120,27 @@ export function useEditor(options: {
               })
             },
             onUpdate(props: SuggestionProps) {
-              component.updateProps(props)
+              component?.updateProps(props)
               if (!props.clientRect || !popup) return
               popup.setProps({
                 getReferenceClientRect: props.clientRect as () => DOMRect,
               })
             },
+            // Escape: record the range, then return false so the plugin exits.
             onKeyDown(props: SuggestionKeyDownProps) {
               if (props.event.key === 'Escape') {
-                popup?.hide()
-                return true
+                dismissedFrom = props.range.from
+                return false
               }
-              return (component.ref as MentionListRef | null)
+              return (component?.ref as MentionListRef | null)
                 ?.onKeyDown(props) ?? false
             },
             onExit() {
               suggestionOpen = false
               popup?.destroy()
-              component.destroy()
+              popup = null
+              component?.destroy()
+              component = undefined
             },
           }
         },
@@ -124,6 +154,13 @@ export function useEditor(options: {
       extensions: [
         StarterKit.configure({
           codeBlock: false,
+          // StarterKit registers its own default-configured Link extension
+          // (also named 'link'). Left enabled it collides with the explicit
+          // Link.configure() below — both share the extension name 'link' —
+          // which trips tiptap's "Duplicate extension names found: ['link']"
+          // warning on every editor init. Disabling it here leaves exactly
+          // one 'link' extension: ours, with openOnClick: false + our CSS class.
+          link: false,
         }),
         CodeBlockImmediate.configure({
           lowlight,
@@ -132,9 +169,6 @@ export function useEditor(options: {
         Placeholder.configure({
           placeholder: () => options.placeholderRef?.value ?? options.placeholder ?? 'Message huginn...',
         }),
-        // Markdown must come before Link so that when tiptap-markdown registers its
-        // own internal link extension (also named 'link'), the explicit Link.configure
-        // below wins the deduplication and preserves openOnClick: false + CSS class.
         Markdown.configure({
           html: false,
           tightLists: true,
@@ -179,7 +213,19 @@ export function useEditor(options: {
           return false
         },
       },
-      autofocus: true,
+      // 'end' rather than `true`. Tiptap's mount() always schedules the
+      // actual focus call via `window.setTimeout(..., 0)` — a real
+      // macrotask, not "immediately" — and resolves `position: true` to
+      // Selection.atStart(doc) *at the time that timeout fires*, using
+      // whatever the document contains *then*. If a user types before that
+      // deferred call runs (a real window — slow paint, a busy main thread,
+      // or simply typing fast right after mount), `autofocus: true` yanks
+      // the cursor back to the start of the document out from under them,
+      // discarding their cursor position and silently closing any mention
+      // suggestion popup that had just started opening. `'end'` resolves to
+      // Selection.atEnd(doc) at that same later moment instead, so it
+      // lands after whatever was already typed rather than before it.
+      autofocus: 'end',
     })
 
   }

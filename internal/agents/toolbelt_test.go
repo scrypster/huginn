@@ -106,17 +106,37 @@ func TestToolbeltEntry_ProfileOmitEmpty(t *testing.T) {
 	}
 }
 
-func TestAllowedProviders_NilReturnsNil(t *testing.T) {
+func TestAllowedProviders_NilReturnsEmptyMap(t *testing.T) {
 	got := AllowedProviders(nil)
-	if got != nil {
-		t.Errorf("expected nil, got %v", got)
+	if got == nil {
+		t.Fatal("expected empty map (deny-all), got nil (legacy allow-all)")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
 	}
 }
 
-func TestAllowedProviders_EmptyReturnsNil(t *testing.T) {
+func TestAllowedProviders_EmptyReturnsEmptyMap(t *testing.T) {
 	got := AllowedProviders([]ToolbeltEntry{})
-	if got != nil {
-		t.Errorf("expected nil, got %v", got)
+	if got == nil {
+		t.Fatal("expected empty map (deny-all), got nil (legacy allow-all)")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+func TestAllowedProviders_WildcardProviderIsAllowAll(t *testing.T) {
+	got := AllowedProviders([]ToolbeltEntry{{Provider: "*"}})
+	if !got["*"] {
+		t.Errorf("expected {\"*\": true} for provider wildcard, got %v", got)
+	}
+}
+
+func TestAllowedProviders_WildcardConnectionIDIsAllowAll(t *testing.T) {
+	got := AllowedProviders([]ToolbeltEntry{{ConnectionID: "*", Provider: "aws"}})
+	if !got["*"] {
+		t.Errorf("expected {\"*\": true} for connection_id wildcard, got %v", got)
 	}
 }
 

@@ -21,9 +21,44 @@ type SpaceMembershipChecker interface {
 	SpaceMembers(spaceID string) ([]string, error)
 }
 
+// DeskFloorChecker optionally widens desk-DM A2A to the desk floor.
+// SQLiteSpaceStore implements this. Stubs that omit it keep SpaceMembers-only.
+type DeskFloorChecker interface {
+	DeskPeerNames() ([]string, error)
+	SpaceIsDeskDM(spaceID string) (bool, error)
+}
+
+// CompanyGate looks up a space's company and whether an agent is seated there.
+// Empty company ID means desk-level: callers keep today's space-roster check.
+// SQLiteSpaceStore implements this.
+type CompanyGate interface {
+	SpaceCompanyID(spaceID string) (string, error)
+	AgentInCompany(agent, companyID string) (bool, error)
+}
+
 // ErrAgentNotSpaceMember is returned by Create when a SpaceID is set and the
 // requested agent is not a member of that space.
 var ErrAgentNotSpaceMember = errors.New("agent is not a member of the space")
+
+// ErrAgentNotInCompany is returned by Create when the space belongs to a
+// company and the target agent is not seated in that company's roster.
+var ErrAgentNotInCompany = errors.New("agent is not seated in this company")
+
+// notInCompanyError is the human fail copy the lead agent (and bubble) see.
+// Hover/diagnose may still wrap this with DELEGATE_FAIL; speech must not.
+type notInCompanyError struct {
+	Agent string
+}
+
+func (e *notInCompanyError) Error() string {
+	name := strings.TrimSpace(e.Agent)
+	if name == "" {
+		name = "That agent"
+	}
+	return name + " isn't in this company."
+}
+
+func (e *notInCompanyError) Unwrap() error { return ErrAgentNotInCompany }
 
 // ErrCyclicDependency is returned by Create when the requested DependsOn IDs
 // would introduce a cycle in the thread dependency graph.
@@ -132,6 +167,37 @@ type ThreadManager struct {
 	// member of the given SpaceID before creating the thread.
 	memberChecker SpaceMembershipChecker
 
+	// companyGate, if set, isolates A2A delegation to agents seated in the
+	// space's company. Empty company_id keeps the space-roster check.
+	companyGate CompanyGate
+
+	// specialistCompany fixes the company a one-off ephemeral specialist
+	// (spawned via spawn_specialist) may be delegated within, keyed by
+	// lowercased agent name. Ephemeral specialists are never seated in a
+	// company roster, so CompanyGate.AgentInCompany would always reject
+	// them; Create() consults this map first and bypasses the roster
+	// lookup for names present here. Fixed once at spawn time via
+	// SetSpecialistCompany and cleared via ClearSpecialistCompany when the
+	// specialist's thread lands terminal.
+	specialistCompany map[string]string
+
+	// specialistThreads maps a specialist's own thread ID to its (lowercased)
+	// agent name and spawn time, so the internal terminal-status hook
+	// (registered once in New()) knows which ephemeral overlay entry to
+	// evict when that specific thread finishes. See RegisterSpecialistThread,
+	// SetSpecialistEvictor, and EvictStaleSpecialists (TTL sweep fallback).
+	specialistThreads map[string]specialistThreadEntry
+
+	// specialistEvictFn, if set, is invoked with the specialist's agent name
+	// and thread ID when its thread lands terminal (or on TTL sweep). Wired
+	// once by the spawn_specialist tool's server-side wiring to call
+	// AgentRegistry.UnregisterEphemeral and post the S13 finish line
+	// ("<Name> is done and gone.") into the owning session — the threadID
+	// lets that wiring call tm.Get(threadID) for the SessionID. Kept as a
+	// callback (not an *agents.AgentRegistry field) to avoid growing
+	// threadmgr's import surface for a single-purpose hook.
+	specialistEvictFn func(agentName, threadID string)
+
 	// auditMu guards auditLog.
 	auditMu sync.Mutex
 	// auditLog is a bounded ring-buffer of lifecycle events (max maxAuditEntries).
@@ -144,14 +210,18 @@ type ThreadManager struct {
 
 // New returns a ready-to-use ThreadManager with default limits.
 func New() *ThreadManager {
-	return &ThreadManager{
+	tm := &ThreadManager{
 		threads:              make(map[string]*Thread),
 		fileLocks:            make(map[string]string),
 		MaxThreadsPerSession: DefaultMaxThreadsPerSession,
 		auditLog:             make([]AuditEntry, 0, maxAuditEntries),
 		threadBus:            NewThreadBus(DefaultThreadBusCapacity),
 		proposalRegistry:     NewProposalRegistry(),
+		specialistCompany:    make(map[string]string),
+		specialistThreads:    make(map[string]specialistThreadEntry),
 	}
+	tm.OnStatusChange(tm.handleSpecialistThreadStatusChange)
+	return tm
 }
 
 // SetHelpResolver configures automatic help resolution for blocked threads.
@@ -298,6 +368,197 @@ func (tm *ThreadManager) SetMembershipChecker(c SpaceMembershipChecker) {
 	tm.memberChecker = c
 }
 
+// SetCompanyGate wires the CompanyGate used to isolate A2A delegation to
+// agents seated in the space's company. Pass nil to disable (desk-only).
+func (tm *ThreadManager) SetCompanyGate(g CompanyGate) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.companyGate = g
+}
+
+// SetSpecialistCompany fixes the company an ephemeral specialist (spawned
+// via spawn_specialist) may be delegated within, for the lifetime of its
+// thread. companyID may be empty (desk-level specialist, no company). Call
+// once at spawn time, before the spawning thread's Create() runs.
+func (tm *ThreadManager) SetSpecialistCompany(agentName, companyID string) {
+	if strings.TrimSpace(agentName) == "" {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.specialistCompany == nil {
+		tm.specialistCompany = make(map[string]string)
+	}
+	tm.specialistCompany[strings.ToLower(agentName)] = companyID
+}
+
+// ClearSpecialistCompany removes the fixed-company record for a specialist.
+// Call when the specialist's thread lands terminal (or on TTL sweep
+// eviction) so the entry does not linger after the overlay agent is gone.
+func (tm *ThreadManager) ClearSpecialistCompany(agentName string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	delete(tm.specialistCompany, strings.ToLower(agentName))
+}
+
+// specialistCompanyLocked returns the fixed company for agentName and
+// whether it is a known specialist. Caller must hold tm.mu (read or write).
+func (tm *ThreadManager) specialistCompanyLocked(agentName string) (string, bool) {
+	companyID, ok := tm.specialistCompany[strings.ToLower(agentName)]
+	return companyID, ok
+}
+
+// specialistThreadEntry tracks which ephemeral specialist owns a thread, and
+// when it was registered — the registeredAt timestamp backs the TTL sweep
+// fallback (EvictStaleSpecialists) for threads whose terminal status hook
+// never fires (e.g. the process crashes mid-thread).
+type specialistThreadEntry struct {
+	agentName    string
+	registeredAt time.Time
+}
+
+// SetSpecialistEvictor wires the callback invoked with a specialist's agent
+// name and thread ID when its thread lands terminal or is TTL-swept.
+// Typically wired once at server startup to call
+// AgentRegistry.UnregisterEphemeral and post the finish line. Pass nil to
+// disable (specialists then linger in the overlay until process restart —
+// tests that don't care about eviction may leave this unset).
+func (tm *ThreadManager) SetSpecialistEvictor(fn func(agentName, threadID string)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.specialistEvictFn = fn
+}
+
+// RegisterSpecialistThread records that threadID belongs to the ephemeral
+// specialist agentName, so the terminal-status hook (and the TTL sweep)
+// know to evict it. Call once, right after Create() returns the thread for
+// a spawn_specialist call.
+func (tm *ThreadManager) RegisterSpecialistThread(threadID, agentName string) {
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(agentName) == "" {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.specialistThreads == nil {
+		tm.specialistThreads = make(map[string]specialistThreadEntry)
+	}
+	tm.specialistThreads[threadID] = specialistThreadEntry{
+		agentName:    strings.ToLower(agentName),
+		registeredAt: time.Now(),
+	}
+}
+
+// handleSpecialistThreadStatusChange is registered once (in New()) as an
+// OnStatusChange hook. When a tracked specialist thread lands terminal, it
+// evicts the specialist from the ephemeral overlay (via specialistEvictFn)
+// and clears its fixed-company record — S5's "roster pollution: zero" and
+// S12's fixed-at-spawn company both end together with the thread.
+func (tm *ThreadManager) handleSpecialistThreadStatusChange(id string, status ThreadStatus) {
+	if !isTerminalStatus(status) {
+		return
+	}
+	tm.mu.Lock()
+	entry, ok := tm.specialistThreads[id]
+	if ok {
+		delete(tm.specialistThreads, id)
+		delete(tm.specialistCompany, entry.agentName)
+	}
+	evict := tm.specialistEvictFn
+	tm.mu.Unlock()
+	if ok && evict != nil {
+		evict(entry.agentName, id)
+	}
+}
+
+// isTerminalStatus reports whether status is a terminal thread status
+// (mirrors the switch in activeThreadCountLocked).
+func isTerminalStatus(status ThreadStatus) bool {
+	switch status {
+	case StatusDone, StatusCancelled, StatusError:
+		return true
+	default:
+		return false
+	}
+}
+
+// EvictStaleSpecialists sweeps specialistThreads for entries older than
+// maxAge whose thread never fired the terminal-status hook (crash, stuck
+// watchdog, etc. — precedent: server.go's swarmSnapshotTTL sweep). Evicted
+// agent names are returned for logging; specialistEvictFn is invoked for
+// each. Safe to call on a timer.
+func (tm *ThreadManager) EvictStaleSpecialists(maxAge time.Duration) []string {
+	now := time.Now()
+	tm.mu.Lock()
+	var stale []string
+	type staleEntry struct{ name, threadID string }
+	var staleEntries []staleEntry
+	for id, entry := range tm.specialistThreads {
+		if now.Sub(entry.registeredAt) > maxAge {
+			delete(tm.specialistThreads, id)
+			delete(tm.specialistCompany, entry.agentName)
+			stale = append(stale, entry.agentName)
+			staleEntries = append(staleEntries, staleEntry{entry.agentName, id})
+		}
+	}
+	evict := tm.specialistEvictFn
+	tm.mu.Unlock()
+	if evict != nil {
+		for _, e := range staleEntries {
+			evict(e.name, e.threadID)
+		}
+	}
+	return stale
+}
+
+// widenDeskDMMembers unions DeskPeerNames onto SpaceMembers for a desk DM.
+// Channels and company-scoped spaces are unchanged. Missing DeskFloorChecker
+// keeps today's SpaceMembers-only deny.
+func widenDeskDMMembers(checker SpaceMembershipChecker, spaceID string, members []string) ([]string, error) {
+	floor, ok := checker.(DeskFloorChecker)
+	if !ok {
+		return members, nil
+	}
+	isDeskDM, err := floor.SpaceIsDeskDM(spaceID)
+	if err != nil {
+		return nil, err
+	}
+	if !isDeskDM {
+		return members, nil
+	}
+	peers, err := floor.DeskPeerNames()
+	if err != nil {
+		return nil, err
+	}
+	if len(peers) == 0 {
+		return members, nil
+	}
+	seen := make(map[string]struct{}, len(members)+len(peers))
+	out := make([]string, 0, len(members)+len(peers))
+	for _, m := range members {
+		key := strings.ToLower(strings.TrimSpace(m))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	for _, m := range peers {
+		key := strings.ToLower(strings.TrimSpace(m))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
 // SetBackendResolver wires a function that resolves the correct backend for
 // a given agent (provider, endpoint, apiKey, model). When set, delegated
 // threads use this to obtain an agent-specific backend (e.g. Anthropic for
@@ -400,16 +661,58 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 		}
 	}
 
-	// Space membership check: runs BEFORE acquiring the write lock to avoid
-	// blocking concurrent Create() calls during I/O against the space store.
+	// Space / company membership check: runs BEFORE acquiring the write lock
+	// to avoid blocking concurrent Create() calls during I/O.
 	if p.SpaceID != "" {
 		tm.mu.RLock()
 		checker := tm.memberChecker
+		gate := tm.companyGate
+		specialistCompanyID, isSpecialist := tm.specialistCompanyLocked(p.AgentID)
 		tm.mu.RUnlock()
-		if checker != nil {
+
+		// Company isolation is the stricter gate. When the space has a
+		// company_id, the target must be in CompanyRoster — space roster
+		// membership is not enough. Empty company_id is desk-level: keep
+		// today's not_in_roster / space-roster behavior.
+		companyScoped := false
+		if gate != nil {
+			companyID, err := gate.SpaceCompanyID(p.SpaceID)
+			if err != nil {
+				return nil, fmt.Errorf("threadmgr: space company lookup: %w", err)
+			}
+			if strings.TrimSpace(companyID) != "" {
+				companyScoped = true
+				var in bool
+				if isSpecialist {
+					// Ephemeral specialists are never seated in a company
+					// roster — AgentInCompany would always reject them.
+					// Their company was fixed at spawn time; honor that
+					// fixed assignment instead of the roster lookup.
+					in = specialistCompanyID == companyID
+				} else {
+					in, err = gate.AgentInCompany(p.AgentID, companyID)
+					if err != nil {
+						return nil, fmt.Errorf("threadmgr: company roster: %w", err)
+					}
+				}
+				if !in {
+					return nil, &notInCompanyError{Agent: p.AgentID}
+				}
+			}
+		}
+
+		if !companyScoped && isSpecialist {
+			// Desk-level space, no company gate: an ephemeral specialist is
+			// never a space member, but its spawn was already authorized by
+			// the CoS grant. Accept it same as the company-fixed path above.
+		} else if !companyScoped && checker != nil {
 			members, err := checker.SpaceMembers(p.SpaceID)
 			if err != nil {
 				return nil, fmt.Errorf("threadmgr: space lookup: %w", err)
+			}
+			members, err = widenDeskDMMembers(checker, p.SpaceID, members)
+			if err != nil {
+				return nil, fmt.Errorf("threadmgr: desk floor: %w", err)
 			}
 			// nil members = space not found → deny-all (safe default).
 			allowed := make(map[string]struct{}, len(members))
@@ -417,8 +720,12 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 				allowed[strings.ToLower(m)] = struct{}{}
 			}
 			if _, ok := allowed[strings.ToLower(p.AgentID)]; !ok {
-				return nil, fmt.Errorf("%w: agent %q not in space %q",
-					ErrAgentNotSpaceMember, p.AgentID, p.SpaceID)
+				roster := strings.Join(members, ", ")
+				if roster == "" {
+					roster = "(empty)"
+				}
+				return nil, fmt.Errorf("DELEGATE_FAIL: %w: agent %q is not a member of this space (roster: %s)",
+					ErrAgentNotSpaceMember, p.AgentID, roster)
 			}
 		}
 	}
@@ -438,6 +745,8 @@ func (tm *ThreadManager) Create(p CreateParams) (*Thread, error) {
 		CreatedAt:       now,
 		CreatedByUser:   p.CreatedByUser,
 		CreatedReason:   p.CreatedReason,
+		Specialist:      p.Specialist,
+		SpecialistModel: p.SpecialistModel,
 		TokenBudget:     p.TokenBudget,
 		Timeout:         p.Timeout,
 		InputCh:         make(chan string, 1),
@@ -505,6 +814,10 @@ func (tm *ThreadManager) ListBySession(sessionID string) []*Thread {
 	for _, t := range tm.threads {
 		if t.SessionID == sessionID {
 			cp := *t // copy the struct
+			if t.Summary != nil {
+				s := *t.Summary // deep-copy the FinishSummary value, same as Get
+				cp.Summary = &s
+			}
 			result = append(result, &cp)
 		}
 	}
@@ -608,7 +921,11 @@ func (tm *ThreadManager) Complete(id string, summary FinishSummary) {
 		return
 	}
 	sessionID := t.SessionID
-	t.Status = StatusDone
+	status := StatusDone
+	if summary.Status == "error" {
+		status = StatusError
+	}
+	t.Status = status
 	t.CompletedAt = time.Now()
 	t.Summary = &summary
 	tm.mu.Unlock()
@@ -644,9 +961,48 @@ func (tm *ThreadManager) Complete(id string, summary FinishSummary) {
 		}(liveCopy)
 	}
 
-	tm.fireStatusChange(id, StatusDone)
+	tm.fireStatusChange(id, status)
 	// Release file leases now that the thread has finished writing.
 	tm.ReleaseLeases(id)
+}
+
+// AttachVetResult records the productized vet loop's verdict onto a thread
+// that has already reached StatusDone, appending a short "Vetted: ..."
+// line to the thread's Summary text (the same field the thread panel and
+// WaitForThreads results already surface — no new event type needed) and
+// setting the structured VetLabel/VetFindings fields.
+//
+// Idempotent: a no-op (returns false) if the thread is missing, has no
+// Summary yet, or already carries a VetLabel — this is the "cap: one vet
+// per thread" enforcement point. Safe to call from any goroutine.
+func (tm *ThreadManager) AttachVetResult(id, label, findings string) bool {
+	tm.mu.Lock()
+	t, ok := tm.threads[id]
+	if !ok || t.Summary == nil || t.Summary.VetLabel != "" {
+		tm.mu.Unlock()
+		return false
+	}
+	t.Summary.VetLabel = label
+	t.Summary.VetFindings = findings
+	t.Summary.Summary = strings.TrimRight(t.Summary.Summary, "\n") +
+		fmt.Sprintf("\n\n---\n**Vetted: %s**", label)
+	if findings != "" {
+		t.Summary.Summary += "\n" + findings
+	}
+	liveCopy := *t
+	summaryCopy := *t.Summary
+	liveCopy.Summary = &summaryCopy
+	store := tm.store
+	tm.mu.Unlock()
+
+	if store != nil {
+		go func(th Thread) {
+			if err := store.SaveThread(context.Background(), &th); err != nil {
+				slog.Warn("threadmgr: SaveThread (vet) failed", "thread_id", th.ID, "err", err)
+			}
+		}(liveCopy)
+	}
+	return true
 }
 
 // ResolveDependencies converts DependsOnHints (agent names) to thread IDs by
@@ -912,13 +1268,56 @@ type WaitReport struct {
 // WaitForThreads blocks until every thread in threadIDs reaches a terminal
 // status (done, cancelled, error), the timeout expires, or ctx is cancelled.
 // Threads not found or belonging to a different session are ignored.
+// When threadIDs is empty, includes uncollected terminal threads (that finished
+// before wait was called) to prevent the race where fast specialists finish before
+// wait_for_threads runs. Returns them as Completed immediately.
 // It polls thread state — completion latency is bounded by the poll interval.
 func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, threadIDs []string, timeout time.Duration) WaitReport {
 	const pollInterval = 500 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 
-	collect := func() (completed, pending []*Thread) {
+	// If no threadIDs provided (session-wide wait), include uncollected terminal threads
+	// to handle fast specialists that finish before wait was called.
+	// Placeholder / invented IDs ("<thread_id>", "thread_id_retrieved…") never
+	// match a real thread. Treat that the same as an empty wait so the lead
+	// still collects uncollected finished work instead of inventing an answer.
+	if len(threadIDs) > 0 {
+		real := make([]string, 0, len(threadIDs))
 		for _, id := range threadIDs {
+			id = strings.TrimSpace(id)
+			if id == "" || strings.ContainsAny(id, "<>") || strings.Contains(id, "thread_id") {
+				continue
+			}
+			if _, ok := tm.Get(id); !ok {
+				continue
+			}
+			real = append(real, id)
+		}
+		threadIDs = real
+	}
+
+	var activeToWait []string
+	var immediatelyCompleted []*Thread
+	if len(threadIDs) == 0 {
+		all := tm.ListBySession(sessionID)
+		for _, t := range all {
+			switch t.Status {
+			case StatusDone, StatusCancelled, StatusError:
+				if t.CollectedAt.IsZero() && !staleUncollected(t) {
+					// Uncollected terminal thread — include in results immediately
+					immediatelyCompleted = append(immediatelyCompleted, t)
+				}
+			default:
+				// Active thread — wait for it
+				activeToWait = append(activeToWait, t.ID)
+			}
+		}
+	} else {
+		activeToWait = threadIDs
+	}
+
+	collect := func() (completed, pending []*Thread) {
+		for _, id := range activeToWait {
 			t, ok := tm.Get(id)
 			if !ok || (sessionID != "" && t.SessionID != sessionID) {
 				continue
@@ -937,6 +1336,8 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 	defer ticker.Stop()
 	for {
 		completed, pending := collect()
+		// Add any immediately-completed threads (uncollected terminal threads from session-wide wait)
+		completed = append(immediatelyCompleted, completed...)
 		if len(pending) == 0 {
 			tm.markCollected(completed)
 			return WaitReport{Completed: completed}
@@ -952,6 +1353,24 @@ func (tm *ThreadManager) WaitForThreads(ctx context.Context, sessionID string, t
 		case <-ticker.C:
 		}
 	}
+}
+
+// staleUncollectedWindow is how long a finished thread may still be
+// collected by a session-wide wait. After a bounce CollectedAt is empty,
+// so without this a hallway wait re-dumps hours of old Winston clocks.
+const staleUncollectedWindow = 10 * time.Minute
+
+func staleUncollected(t *Thread) bool {
+	if t == nil {
+		return true
+	}
+	if !t.CompletedAt.IsZero() {
+		return time.Since(t.CompletedAt) > staleUncollectedWindow
+	}
+	if !t.StartedAt.IsZero() {
+		return time.Since(t.StartedAt) > staleUncollectedWindow
+	}
+	return false
 }
 
 // markCollected stamps CollectedAt on the live thread records whose results
@@ -1212,67 +1631,92 @@ func (tm *ThreadManager) StartWatchdog(ctx context.Context, broadcast BroadcastF
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				now := time.Now()
-				tm.mu.Lock()
-				type timedOut struct {
-					id        string
-					sessionID string
-					summary   string
-				}
-				var victims []timedOut
-				for id, t := range tm.threads {
-					switch t.Status {
-					case StatusQueued:
-						if now.Sub(t.CreatedAt) > queuedTimeout {
-							victims = append(victims, timedOut{
-								id:        id,
-								sessionID: t.SessionID,
-								summary:   "delegation timed out — thread never started",
-							})
-						}
-					case StatusThinking, StatusTooling:
-						if now.Sub(t.CreatedAt) > runningTimeout {
-							victims = append(victims, timedOut{
-								id:        id,
-								sessionID: t.SessionID,
-								summary:   "delegation timed out — sub-agent did not complete",
-							})
-						}
-					}
-				}
-				// Transition victims to StatusError while still holding the lock.
-				for _, v := range victims {
-					t, ok := tm.threads[v.id]
-					if !ok {
-						continue
-					}
-					// Skip threads that transitioned since we built the list.
-					switch t.Status {
-					case StatusDone, StatusCancelled, StatusError:
-						continue
-					}
-					t.Status = StatusError
-					t.CompletedAt = now
-				}
-				tm.mu.Unlock()
-
-				// Fire status-change hooks and broadcast events outside the lock.
-				for _, v := range victims {
-					tm.appendAudit(v.id, "error", "", v.summary)
-					tm.fireStatusChange(v.id, StatusError)
-					if broadcast != nil {
-						broadcast(v.sessionID, "thread_done", map[string]any{
-							"thread_id": v.id,
-							"status":    "error",
-							"summary":   v.summary,
-						})
-					}
-					slog.Warn("threadmgr: watchdog timed out thread",
-						"thread_id", v.id, "session_id", v.sessionID, "reason", v.summary)
-				}
+				tm.watchdogScan(time.Now(), broadcast, queuedTimeout, runningTimeout)
 			}
 		}
 	}()
+}
+
+// watchdogScan performs one watchdog pass: it finds threads that have been
+// StatusQueued longer than queuedTimeout or StatusThinking/StatusTooling
+// longer than runningTimeout, transitions them to StatusError, and
+// broadcasts a thread_done event for each. Extracted from StartWatchdog so
+// it can be driven directly (and deterministically) by tests.
+//
+// The StatusError transition is written through to the durable ThreadStore
+// (when one is configured) before returning, exactly like Finalize/Cancel.
+// Without this, a process restart reloads the thread via LoadFromStore still
+// in its last-persisted (non-terminal) status, and the next watchdog scan
+// times it out — and re-broadcasts — all over again.
+func (tm *ThreadManager) watchdogScan(now time.Time, broadcast BroadcastFn, queuedTimeout, runningTimeout time.Duration) {
+	tm.mu.Lock()
+	type timedOut struct {
+		id        string
+		sessionID string
+		agentID   string
+		summary   string
+	}
+	var victims []timedOut
+	for id, t := range tm.threads {
+		switch t.Status {
+		case StatusQueued:
+			if now.Sub(t.CreatedAt) > queuedTimeout {
+				victims = append(victims, timedOut{
+					id:        id,
+					sessionID: t.SessionID,
+					agentID:   t.AgentID,
+					summary:   "delegation timed out — thread never started",
+				})
+			}
+		case StatusThinking, StatusTooling:
+			if now.Sub(t.CreatedAt) > runningTimeout {
+				victims = append(victims, timedOut{
+					id:        id,
+					sessionID: t.SessionID,
+					agentID:   t.AgentID,
+					summary:   "delegation timed out — sub-agent did not complete",
+				})
+			}
+		}
+	}
+	// Transition victims to StatusError while still holding the lock.
+	for _, v := range victims {
+		t, ok := tm.threads[v.id]
+		if !ok {
+			continue
+		}
+		// Skip threads that transitioned since we built the list.
+		switch t.Status {
+		case StatusDone, StatusCancelled, StatusError:
+			continue
+		}
+		t.Status = StatusError
+		t.CompletedAt = now
+	}
+	store := tm.store
+	tm.mu.Unlock()
+
+	// Fire status-change hooks, broadcast events, and persist the terminal
+	// status to the durable store (when configured) outside the lock.
+	for _, v := range victims {
+		tm.appendAudit(v.id, "error", "", v.summary)
+		tm.fireStatusChange(v.id, StatusError)
+		if store != nil {
+			if err := store.UpdateThreadStatus(context.Background(), v.id, string(StatusError)); err != nil {
+				slog.Warn("threadmgr: UpdateThreadStatus (watchdog) failed", "thread_id", v.id, "err", err)
+			}
+		}
+		if broadcast != nil {
+			broadcast(v.sessionID, "thread_done", map[string]any{
+				"thread_id": v.id,
+				"agent_id":  v.agentID,
+				"status":    "error",
+				"summary":   v.summary,
+			})
+		}
+		slog.Warn("threadmgr: watchdog timed out thread",
+			"thread_id", v.id, "session_id", v.sessionID, "reason", v.summary)
+	}
 }
 
 // trySnapshot serialises the current thread dependency graph for sessionID to

@@ -207,20 +207,34 @@
                 </span>
                 <span class="text-[11px] text-huginn-muted/50">{{ formatTime(item.msg.created_at) }}</span>
               </div>
-              <!-- Message content -->
-              <div v-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
+              <!-- Message content — system-fail prefixes are not teammate speech -->
+              <SystemFailLine
+                v-if="isBareFailSpeech(item.msg.content)"
+                :content="item.msg.content"
+                :tool-name="failDisplayFor(item.msg.content, item.msg.toolCalls)?.toolName"
+              />
+              <div v-else-if="item.msg.content" class="md-content text-sm text-huginn-text leading-relaxed break-words min-w-0 overflow-hidden"
                 v-html="renderMarkdown(item.msg.content)" />
               <!-- Streaming cursor -->
               <span v-if="(item.msg as any).streaming" class="inline-block w-1.5 h-3.5 bg-huginn-muted/60 rounded-sm animate-pulse ml-0.5 align-middle" />
-              <!-- Tool call chip (persisted — from tool_calls_json) -->
-              <div v-if="item.msg.toolCalls?.length" class="mt-2">
+              <!-- Tool call chip (persisted — from tool_calls_json).
+                   Skip when the human fail line already said they got stuck. -->
+              <div v-if="item.msg.toolCalls?.length && !isBareFailSpeech(item.msg.content)" class="mt-2">
                 <button @click="toggleMsgToolCalls(item.msg.id)"
-                  class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100">
+                  class="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-huginn-border hover:bg-huginn-surface/80 transition-colors duration-100"
+                  :title="messageToolChipFailed(item.msg.content, item.msg.toolCalls) ? failDisplayFor(item.msg.content, item.msg.toolCalls)?.diagnostic : undefined"
+                  :aria-description="messageToolChipFailed(item.msg.content, item.msg.toolCalls) ? failDisplayFor(item.msg.content, item.msg.toolCalls)?.diagnostic : undefined">
                   <svg class="w-3.5 h-3.5 text-huginn-yellow flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                     <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
                   </svg>
-                  <span class="text-xs text-huginn-text">{{ item.msg.toolCalls!.length }} tool call{{ item.msg.toolCalls!.length === 1 ? '' : 's' }}</span>
-                  <span class="text-[11px] text-huginn-green">· done</span>
+                  <span
+                    v-if="messageToolChipFailed(item.msg.content, item.msg.toolCalls)"
+                    class="text-xs text-huginn-red"
+                  >{{ failChipLabel() }}</span>
+                  <template v-else>
+                    <span class="text-xs text-huginn-text">{{ item.msg.toolCalls!.length }} tool call{{ item.msg.toolCalls!.length === 1 ? '' : 's' }}</span>
+                    <span class="text-[11px] text-huginn-green">· done</span>
+                  </template>
                   <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                     :class="expandedMsgCalls.has(item.msg.id) ? 'rotate-180' : ''"
                     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -232,7 +246,10 @@
                     class="rounded-xl overflow-hidden border border-huginn-border">
                     <button @click="toggleToolCall(tc.id)"
                       class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-huginn-surface/80 transition-colors duration-100">
-                      <span class="text-xs font-medium text-huginn-text flex-1">{{ tc.name }}</span>
+                      <span
+                        class="text-xs font-medium text-huginn-text flex-1"
+                        :title="isFailedToolResult(tc.result) ? `${tc.name}${tc.result ? ` · ${tc.result}` : ''}` : undefined"
+                      >{{ isFailedToolResult(tc.result) ? failChipLabel() : tc.name }}</span>
                       <svg class="w-3 h-3 text-huginn-muted transition-transform duration-150 flex-shrink-0"
                         :class="expandedToolCalls.has(tc.id) ? 'rotate-180' : ''"
                         viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -248,6 +265,17 @@
                       <div v-if="tc.result">
                         <p class="text-[10px] text-huginn-muted uppercase tracking-wider mb-1.5">Output</p>
                         <pre class="text-xs text-huginn-muted overflow-x-auto max-h-40 leading-relaxed">{{ tc.result }}</pre>
+                      </div>
+                      <!-- Screenshot (e.g. browser_take_screenshot) — same pattern as ToolCallModal -->
+                      <div v-if="tc.image">
+                        <p class="text-[10px] text-huginn-muted uppercase tracking-wider mb-1.5">Screenshot</p>
+                        <button
+                          type="button"
+                          class="block w-full rounded-lg border border-huginn-border overflow-hidden bg-huginn-bg cursor-zoom-in"
+                          @click="toggleImage(tc.id)"
+                        >
+                          <img :src="tc.image" alt="Tool call screenshot" class="w-full h-auto block" :class="expandedImages.has(tc.id) ? '' : 'max-h-80 object-contain'" />
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -390,6 +418,8 @@
 import { computed, ref, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { failChipLabel, failDisplayFor, isBareFailSpeech, isFailedToolResult, messageToolChipFailed } from '../utils/honesty'
+import SystemFailLine from './SystemFailLine.vue'
 import type { ThreadMessage, ThreadArtifact } from '../composables/useThreadDetail'
 import ArtifactCard from './ArtifactCard.vue'
 import ObservationDeck from './ObservationDeck.vue'
@@ -500,6 +530,8 @@ function toggleGroup(key: string) {
 // Mirrors ChatView UX for the persisted-tool-call chip.
 const expandedMsgCalls = ref<Set<string>>(new Set())
 const expandedToolCalls = ref<Set<string>>(new Set())
+// Mirrors ToolCallModal's click-to-zoom screenshot toggle, per tool call id.
+const expandedImages = ref<Set<string>>(new Set())
 
 function toggleMsgToolCalls(msgId: string) {
   const next = new Set(expandedMsgCalls.value)
@@ -513,6 +545,13 @@ function toggleToolCall(tcId: string) {
   if (next.has(tcId)) next.delete(tcId)
   else next.add(tcId)
   expandedToolCalls.value = next
+}
+
+function toggleImage(tcId: string) {
+  const next = new Set(expandedImages.value)
+  if (next.has(tcId)) next.delete(tcId)
+  else next.add(tcId)
+  expandedImages.value = next
 }
 
 const groupedMessages = computed((): GroupedItem[] => {

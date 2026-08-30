@@ -89,16 +89,43 @@ func externalStreamingTransport() *http.Transport {
 	}
 }
 
+// DefaultOllamaKeepAlive is the keep_alive duration applied by callers that
+// know they're constructing a genuinely-ollama backend (newFromResolvedConfig's
+// "ollama" case, and the local-ollama construction sites in init_backend.go /
+// main.go), so a model that was just loaded stays resident for this long
+// after the request instead of being evicted the instant the response
+// finishes — the next turn doesn't pay a multi-second reload. It is NOT
+// applied automatically by NewExternalBackend: keep_alive is an ollama-only
+// extension, and ExternalBackend is also embedded by OpenRouterBackend and
+// ManagedBackend and constructed for the generic "external" provider, none
+// of which are ollama. Config can override this per SetKeepAlive; "" omits
+// the field entirely.
+const DefaultOllamaKeepAlive = "10m"
+
 // ExternalBackend calls any OpenAI-compatible /v1/chat/completions endpoint.
 // It is safe for concurrent use.
 type ExternalBackend struct {
-	endpoint    string       // base URL, e.g. "http://localhost:11434"
+	endpoint    string // base URL, e.g. "http://localhost:11434"
 	client      *http.Client
-	model       string       // configured model name
-	keyResolver KeyResolver  // optional; resolves API key sent as Bearer token
+	model       string      // configured model name
+	keyResolver KeyResolver // optional; resolves API key sent as Bearer token
+
+	// keepAlive is sent as the ollama "keep_alive" field on every chat
+	// request (e.g. "10m", "1h", "-1" to keep loaded indefinitely, "0" to
+	// unload right after the response). Empty (the zero value, and what
+	// every constructor here leaves it as) omits the field entirely — it is
+	// an ollama-only extension, so only a caller that knows it's building a
+	// genuinely-ollama backend should ever call SetKeepAlive with a non-empty
+	// value (see DefaultOllamaKeepAlive).
+	keepAlive string
 }
 
 // NewExternalBackend creates an ExternalBackend pointing at endpoint.
+// keep_alive is omitted by default — call SetKeepAlive(DefaultOllamaKeepAlive)
+// from a construction site that knows it's building a genuinely-ollama
+// backend (never here: this constructor is also used for the generic
+// "external" provider and is embedded by OpenRouterBackend and
+// ManagedBackend, none of which are ollama).
 func NewExternalBackend(endpoint string) *ExternalBackend {
 	return &ExternalBackend{
 		endpoint: strings.TrimRight(endpoint, "/"),
@@ -106,11 +133,20 @@ func NewExternalBackend(endpoint string) *ExternalBackend {
 	}
 }
 
-// NewExternalBackendWithAPIKey creates an ExternalBackend that sends a Bearer token.
+// NewExternalBackendWithAPIKey creates an ExternalBackend that sends a Bearer
+// token — used for remote OpenAI-compatible providers (openai, deepseek,
+// zai, custom), never for ollama.
 func NewExternalBackendWithAPIKey(endpoint string, resolver KeyResolver) *ExternalBackend {
 	b := NewExternalBackend(endpoint)
 	b.keyResolver = resolver
 	return b
+}
+
+// SetKeepAlive overrides the ollama keep_alive duration sent on every chat
+// request. Pass "" to omit the field. Must be called before any concurrent
+// use of this backend begins (same convention as SetModel).
+func (b *ExternalBackend) SetKeepAlive(d string) {
+	b.keepAlive = d
 }
 
 // SetModel sets the model identifier used by ContextWindow.
@@ -218,6 +254,10 @@ type openAIRequest struct {
 	Messages []openAIMessage `json:"messages"`
 	Tools    []Tool          `json:"tools,omitempty"`
 	Stream   bool            `json:"stream"`
+	// KeepAlive is an ollama extension (empty on every other provider — see
+	// ExternalBackend.keepAlive) telling ollama how long to keep the model
+	// resident after this request.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 type openAIContentPart struct {
@@ -283,10 +323,11 @@ func (b *ExternalBackend) buildRequest(req ChatRequest) ([]byte, error) {
 		msgs = append(msgs, om)
 	}
 	r := openAIRequest{
-		Model:    req.Model,
-		Messages: msgs,
-		Tools:    req.Tools,
-		Stream:   true,
+		Model:     req.Model,
+		Messages:  msgs,
+		Tools:     req.Tools,
+		Stream:    true,
+		KeepAlive: b.keepAlive,
 	}
 	return json.Marshal(r)
 }
@@ -356,10 +397,16 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 	}()
 
 	result := &ChatResponse{}
+	// nativeToolCallStatusFired guards the first-signal StreamStatus emitted
+	// below the moment native delta.tool_calls fragments first appear.
+	nativeToolCallStatusFired := false
 	// accumulate tool call fragments indexed by wire index field
 	tcFragments := map[int]*ToolCall{}
 	// accumulate raw argument JSON fragments per tool call index
 	argsBuilders := map[int]*strings.Builder{}
+	// Hold back JSON-in-content tool prefixes so they never paint in the bubble.
+	tokenGate := NewContentToolCallTokenGate(req.OnToken, req.OnEvent)
+	tokenGate.SetGrantedTools(req.Tools)
 
 	sawDone := false
 
@@ -402,16 +449,34 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 		}
 		choice := chunk.Choices[0]
 
-		// Text token
+		// Text token — accumulate raw content for promotion, but only emit
+		// user-visible remainder (tool-call JSON prefixes are held back).
 		if choice.Delta.Content != "" {
 			result.Content += choice.Delta.Content
-			// Emit StreamEvent if OnEvent is set
-			if req.OnEvent != nil {
-				req.OnEvent(StreamEvent{Type: StreamText, Content: choice.Delta.Content})
+			if tokenGate != nil {
+				tokenGate.Push(choice.Delta.Content)
+			} else {
+				if req.OnEvent != nil {
+					req.OnEvent(StreamEvent{Type: StreamText, Content: choice.Delta.Content})
+				}
+				if req.OnToken != nil {
+					req.OnToken(choice.Delta.Content)
+				}
 			}
-			// Call OnToken for backward compat (always, regardless of OnEvent)
-			if req.OnToken != nil {
-				req.OnToken(choice.Delta.Content)
+		}
+
+		// First-signal (perf wave 2c): native delta.tool_calls fragments never
+		// pass through the content token gate (that only holds JSON embedded
+		// in .content), so a straight-to-tool-call turn with no prose would
+		// otherwise show nothing between "thinking" and the tool_call event
+		// RunLoop emits only once the whole response has finished streaming.
+		// Reuse the existing StreamStatus type (transient, never persisted);
+		// fires once per turn, only when the content gate hasn't already
+		// fired its own version of this signal.
+		if len(choice.Delta.ToolCalls) > 0 && len(tcFragments) == 0 && !nativeToolCallStatusFired {
+			nativeToolCallStatusFired = true
+			if req.OnEvent != nil && (tokenGate == nil || !tokenGate.statusFired) {
+				req.OnEvent(StreamEvent{Type: StreamStatus, Content: "using tools"})
 			}
 		}
 
@@ -443,12 +508,10 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 		}
 	}
 
-	// Emit StreamDone event after stream completes
-	if req.OnEvent != nil {
-		req.OnEvent(StreamEvent{Type: StreamDone})
-	}
-
 	if err := scanner.Err(); err != nil {
+		if req.OnEvent != nil {
+			req.OnEvent(StreamEvent{Type: StreamDone})
+		}
 		return nil, fmt.Errorf("reading SSE stream: %w", err)
 	}
 
@@ -477,6 +540,20 @@ func (b *ExternalBackend) parseSSE(ctx context.Context, resp *http.Response, req
 			}
 		}
 		result.ToolCalls = append(result.ToolCalls, *tc)
+	}
+
+	// qwen2.5-coder:14b (Ollama) often returns finish_reason=stop with a
+	// function-call JSON object in content and no structured tool_calls.
+	PromoteContentToolCalls(result)
+	// Playbook shape: fenced/bare tool JSON mixed with prose. Execute granted
+	// tools in order; the glue prose stays as visible Content.
+	PromoteGrantedContentToolCalls(result, req.Tools)
+	// Mixed JSON+prose (and native tool_calls plus a JSON echo) must not
+	// keep the invocation object in user-visible Content.
+	RevealContentToolCalls(result)
+	tokenGate.Finish(result.Content)
+	if req.OnEvent != nil {
+		req.OnEvent(StreamEvent{Type: StreamDone})
 	}
 
 	return result, nil

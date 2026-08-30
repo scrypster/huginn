@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,17 +77,52 @@ type AgentDef struct {
 	// Named list = only those specific tools.
 	LocalTools []string `json:"local_tools,omitempty"           yaml:"local_tools,omitempty"`
 
+	// ApprovedTools is the allowlist of tool names this agent may run
+	// without a permission prompt, persisted from "Always allow for
+	// <Agent>" decisions made in the permission banner (serve mode). Unlike
+	// LocalTools (which grants tool *visibility*), ApprovedTools only
+	// affects the permission gate: a tool must already be visible via
+	// LocalTools/Toolbelt to be called at all. Names are seeded into the
+	// per-run forked gate's session-allowed set (see applyToolbelt), so
+	// future runs skip prompting for these specific tools.
+	ApprovedTools []string `json:"approved_tools,omitempty"        yaml:"approved_tools,omitempty"`
+
+	// LoadedApprovedTools is a transient API-bridge field, NOT persisted to
+	// disk: the AgentsView editor should echo back the approved_tools it
+	// received when the edit form was loaded, alongside the (possibly
+	// unedited) current ApprovedTools value. This lets persistAgent tell
+	// "user explicitly edited the chips" apart from "form still holds its
+	// as-loaded snapshot" — see persistAgent's approved-tools RMW-race fix.
+	// A client that omits this field (old client, direct API caller) is
+	// treated as "did not edit": ApprovedTools is authoritative only when
+	// it differs from LoadedApprovedTools.
+	LoadedApprovedTools []string `json:"loaded_approved_tools,omitempty" yaml:"-"`
+
 	// Description is a short (max 500 bytes) human-readable summary of what this agent does.
 	// Visible to other agents in channel contexts for intelligent task delegation.
 	Description string `json:"description,omitempty"           yaml:"description,omitempty"`
 
 	// HeartbeatEnabled controls whether this agent sends periodic check-in DMs to the user.
 	// When true, a workflow YAML is auto-generated at ~/.huginn/workflows/heartbeat-{name}.yaml.
-	HeartbeatEnabled bool   `json:"heartbeat_enabled,omitempty" yaml:"heartbeat_enabled,omitempty"`
+	HeartbeatEnabled bool `json:"heartbeat_enabled,omitempty" yaml:"heartbeat_enabled,omitempty"`
 
 	// HeartbeatCron is the cron schedule for the heartbeat workflow.
 	// Defaults to "0 */4 * * *" (every 4 hours) when empty and HeartbeatEnabled is true.
-	HeartbeatCron    string `json:"heartbeat_cron,omitempty"    yaml:"heartbeat_cron,omitempty"`
+	HeartbeatCron string `json:"heartbeat_cron,omitempty"    yaml:"heartbeat_cron,omitempty"`
+
+	// Personality selects a behavioral preset (see personality.go): "",
+	// "default", "strict-reviewer", "fast-builder", "skeptical-architect", or
+	// "terse-operator". Binds a persona prompt addendum plus (for
+	// strict-reviewer) a harness default — see ResolveVetWork.
+	Personality string `json:"personality,omitempty" yaml:"personality,omitempty"`
+
+	// VetWork is a tri-state override for the productized vet loop: nil
+	// means "inherit the personality preset's default" (true only for
+	// strict-reviewer; see ResolveVetWork), non-nil is an explicit user
+	// choice that always wins over the preset. When effectively true, a
+	// completed delegated coding thread for this agent gets a one-shot
+	// adversarial reviewer pass before its result is presented as final.
+	VetWork *bool `json:"vet_work,omitempty" yaml:"vet_work,omitempty"`
 
 	// Version is an optimistic-lock counter incremented on every save.
 	// On PUT /api/v1/agents/{name}: if the client sends Version > 0 and it does
@@ -187,10 +223,10 @@ func (d *AgentDef) DeriveMemoryType() {
 // validPlasticity contains the recognized plasticity values.
 // Empty string is allowed and defaults to "default" at runtime.
 var validPlasticity = map[string]bool{
-	"":               true,
-	"default":        true,
+	"":                true,
+	"default":         true,
 	"knowledge-graph": true,
-	"reference":      true,
+	"reference":       true,
 }
 
 // validMemoryMode contains the recognized memory_mode values.
@@ -271,6 +307,9 @@ func (d AgentDef) Validate() error {
 	if !validMemoryMode[d.MemoryMode] {
 		return fmt.Errorf("invalid memory_mode %q: must be one of passive, conversational, immersive", d.MemoryMode)
 	}
+	if !ValidPersonality(d.Personality) {
+		return fmt.Errorf("invalid personality %q: must be one of default, strict-reviewer, fast-builder, skeptical-architect, terse-operator", d.Personality)
+	}
 	return nil
 }
 
@@ -290,18 +329,29 @@ func FromDef(def AgentDef) *Agent {
 	if def.MemoryEnabled != nil {
 		memEnabled = *def.MemoryEnabled
 	}
+	// Personality is normalized here rather than trusted from disk: LoadAgentsFromBase
+	// unmarshals AgentDef files directly without calling Validate, so a hand-edited or
+	// corrupted file can carry any string. An unrecognized value isn't a security issue
+	// (unknown maps to "" everywhere it's consulted), but it WOULD otherwise render
+	// verbatim in the web UI's personality badge — normalize to "" (default) here so
+	// the UI never shows arbitrary text.
+	personality := def.Personality
+	if !ValidPersonality(personality) {
+		slog.Warn("agents: unrecognized personality, normalizing to default", "agent", def.Name, "personality", personality)
+		personality = ""
+	}
 	return &Agent{
-		Name:          def.Name,
-		ModelID:       def.Model,
-		Provider:      def.Provider,
-		Endpoint:      def.Endpoint,
-		APIKey:        def.APIKey,
-		SystemPrompt:  def.SystemPrompt,
-		Color:         def.Color,
-		Icon:          def.Icon,
-		IsDefault:     def.IsDefault,
-		VaultName:     def.VaultName,
-		Plasticity:    def.Plasticity,
+		Name:                def.Name,
+		ModelID:             def.Model,
+		Provider:            def.Provider,
+		Endpoint:            def.Endpoint,
+		APIKey:              def.APIKey,
+		SystemPrompt:        def.SystemPrompt,
+		Color:               def.Color,
+		Icon:                def.Icon,
+		IsDefault:           def.IsDefault,
+		VaultName:           def.VaultName,
+		Plasticity:          def.Plasticity,
 		MemoryEnabled:       memEnabled,
 		ContextNotesEnabled: def.ContextNotesEnabled,
 		MemoryMode:          def.MemoryMode,
@@ -309,6 +359,9 @@ func FromDef(def AgentDef) *Agent {
 		Toolbelt:            def.Toolbelt,
 		Skills:              def.Skills,
 		LocalTools:          def.LocalTools,
+		ApprovedTools:       def.ApprovedTools,
+		Personality:         personality,
+		VetWork:             ResolveVetWork(personality, def.VetWork),
 	}
 }
 
@@ -383,10 +436,12 @@ func LoadAgentsFromBase(baseDir string) (*AgentsConfig, error) {
 			switch filepath.Ext(path) {
 			case ".json":
 				if err := json.Unmarshal(data, &agent); err != nil {
+					slog.Warn("agents: skip unreadable agent file", "path", path, "err", err)
 					continue
 				}
 			case ".yaml", ".yml":
 				if err := yaml.Unmarshal(data, &agent); err != nil {
+					slog.Warn("agents: skip unreadable agent file", "path", path, "err", err)
 					continue
 				}
 			default:

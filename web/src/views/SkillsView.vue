@@ -1,6 +1,19 @@
 <template>
   <div class="flex flex-col h-full overflow-y-auto bg-huginn-bg">
 
+    <!-- ── Tab switcher ───────────────────────────────────────────── -->
+    <div class="flex items-center px-6 py-3 flex-shrink-0" data-testid="skills-tabs">
+      <div class="flex items-center gap-0.5 p-0.5 rounded-lg border border-huginn-border/60" style="background:rgba(22,27,34,0.7)">
+        <button v-for="t in tabDefs" :key="t.id"
+          :data-testid="`skills-tab-${t.id}`"
+          @click="setTab(t.id)"
+          class="px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150"
+          :class="tab === t.id ? 'bg-huginn-blue text-white shadow-sm' : 'text-huginn-muted hover:text-huginn-text'">
+          {{ t.label }}
+        </button>
+      </div>
+    </div>
+
     <!-- ── Installed tab ──────────────────────────────────────────── -->
     <template v-if="tab === 'installed'">
       <div class="flex items-center justify-between px-6 py-4 border-b border-huginn-border flex-shrink-0">
@@ -55,7 +68,7 @@
             <div class="flex items-center gap-2">
               <button @click.stop="openUsageModal(skill)" class="text-xs font-semibold text-huginn-text hover:text-huginn-blue transition-colors text-left">{{ skill.name }}</button>
               <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">
-                v{{ skill.version }}
+                {{ formatVersionLabel('v' + (skill.version || '')) }}
               </span>
               <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border"
                 :class="skill.source === 'registry' ? 'text-huginn-blue border-huginn-blue/30' : 'text-huginn-muted'">
@@ -459,7 +472,7 @@
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2">
                           <span class="text-xs font-medium text-huginn-text group-hover:text-huginn-blue transition-colors">{{ skill.display_name || skill.name }}</span>
-                          <span class="text-[10px] text-huginn-muted">v{{ skill.version }}</span>
+                          <span class="text-[10px] text-huginn-muted">{{ formatVersionLabel('v' + (skill.version || '')) }}</span>
                         </div>
                         <p class="text-[11px] text-huginn-muted mt-0.5 leading-relaxed">{{ skill.description }}</p>
                         <div v-if="(skill.tags ?? []).length" class="flex flex-wrap gap-1 mt-1.5">
@@ -495,7 +508,7 @@
                     <div class="flex items-center gap-2 mb-2 flex-wrap">
                       <span class="text-[10px] px-2 py-0.5 rounded border font-medium"
                         :class="authorBadgeClass(selectedSkillItem.author)">{{ selectedSkillItem.author }}</span>
-                      <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">v{{ selectedSkillItem.version }}</span>
+                      <span class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">{{ formatVersionLabel('v' + (selectedSkillItem.version || '')) }}</span>
                       <span v-if="selectedSkillItem.category" class="text-[10px] px-1.5 py-0.5 rounded border border-huginn-border text-huginn-muted">{{ selectedSkillItem.category }}</span>
                     </div>
                     <h1 class="text-xl font-bold text-huginn-text leading-tight">{{ selectedSkillItem.display_name || selectedSkillItem.name }}</h1>
@@ -828,11 +841,24 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { type InstalledSkill, type RegistrySkill, type RegistryCollection, useInstalledSkills, useRegistrySkills, createSkill } from '../composables/useSkills'
 import { api } from '../composables/useApi'
+import { formatVersionLabel } from '../utils/honesty'
 
 const props = defineProps<{ tab?: string }>()
 const router = useRouter()
 
 const tab = computed(() => props.tab || 'installed')
+
+// ── Tab switcher ───────────────────────────────────────────────────────────
+const tabDefs = [
+  { id: 'browse', label: 'Browse' },
+  { id: 'installed', label: 'Installed' },
+  { id: 'create', label: 'Create' },
+] as const
+
+function setTab(id: string) {
+  if (tab.value === id) return
+  router.push('/skills/' + id)
+}
 
 const installed = useInstalledSkills()
 const registry = useRegistrySkills()

@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/scrypster/huginn/internal/agent/session"
+	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
@@ -59,8 +61,9 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 
 	// Build per-agent schemas: local builtins + toolbelt providers + vault
 	// tools (always included regardless of toolbelt filtering). The forked
-	// gate isolates per-agent allowed/watched provider sets.
-	schemas, _ := applyToolbelt(ag, vr.sessionReg, permGate)
+	// gate isolates per-agent allowed/watched provider sets. Do not discard
+	// the forked gate — skipAll on the parent is auto-approve, not allow-all.
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, permGate, o.getConfiguredMCPProviders())
 
 	// Build a session env so external MCP tools (GitHub, AWS, etc.) see the
 	// right per-profile credentials. Falls back to an empty session on error
@@ -73,10 +76,32 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 
 	// Per-agent tool executor: dispatches against the agent's session-local
 	// registry fork (which holds vault + toolbelt + builtins) with the
-	// agent's session env layered onto the context. This mirrors the
-	// orchestrator's primary chat loop exactly.
+	// agent's session env layered onto the context. The forked gate is
+	// checked first so a hallucinated aws_* name in the global registry
+	// cannot run when the toolbelt is empty.
 	executor := func(ctx context.Context, name string, args map[string]any) (string, error) {
 		ctx = session.WithEnv(ctx, agentSess.Env)
+		if agentGate != nil {
+			if t, ok := vr.sessionReg.Get(name); ok {
+				// CheckDetailedCtx, not Check: a cancelled thread (tm.Cancel
+				// closes threadCtx, which reaches us as this ctx) must not
+				// keep sitting on a permission prompt nobody can answer.
+				// Check would bind context.Background() and stall for the
+				// gate's full promptFuncTimeout with a live, unanswerable
+				// banner — the same failure RunLoop.executeSingle fixed by
+				// moving to CheckDetailedCtx.
+				if !agentGate.CheckDetailedCtx(ctx, permissions.PermissionRequest{
+					ToolName:  name,
+					Level:     t.Permission(),
+					Args:      args,
+					Provider:  vr.sessionReg.ProviderFor(name),
+					AgentName: ag.Name,
+					SessionID: GetSessionID(ctx),
+				}).Allowed {
+					return "", fmt.Errorf("permission denied")
+				}
+			}
+		}
 		return vr.sessionReg.Execute(ctx, name, args)
 	}
 
@@ -100,6 +125,13 @@ func (o *Orchestrator) PrepareAgentRuntime(ctx context.Context, agentName string
 			vr.cancel()
 		}
 		agentSess.Teardown()
+		// The forked agentGate (captured by executor above) owns a sweep
+		// goroutine; threadmgr invokes Cleanup exactly once when the thread
+		// goroutine exits, after all executor calls are done — the correct
+		// point to stop it. Without this the fork's sweeper leaks per thread.
+		if agentGate != nil {
+			agentGate.Close()
+		}
 	}
 
 	return &threadmgr.AgentRuntime{

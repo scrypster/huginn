@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -206,9 +207,18 @@ func TestGitBlameTool_NoCommits(t *testing.T) {
 // git.go — GitCommitTool with paths argument
 // ============================================================
 
+// G4: GitCommitTool now shells out to native git (worktree.go's runGit) so
+// the user's real identity, hooks, and signing config are honored — see
+// git.go's GitCommitTool.Execute doc comment. Staging is narrow: `git add -u`
+// (tracked, modified files only) plus any explicitly named `paths` — a
+// brand-new untracked file is committed ONLY when named explicitly.
+// initGitRepo (worktree_test.go) is used here instead of initBoostRepo95
+// because it sets a local user.name/user.email, making these tests hermetic
+// regardless of the machine's global git config.
+
 func TestGitCommitTool_WithPaths(t *testing.T) {
-	dir := initBoostRepo95(t)
-	// Write a new file and try to commit with paths.
+	dir := initGitRepo(t)
+	// A brand-new untracked file is only staged when named explicitly.
 	if err := os.WriteFile(filepath.Join(dir, "newfile.txt"), []byte("content\n"), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -217,20 +227,31 @@ func TestGitCommitTool_WithPaths(t *testing.T) {
 		"message": "add newfile",
 		"paths":   []any{"newfile.txt"},
 	})
-	// The commit may succeed or error (nothing to stage), but we exercised the paths branch.
-	_ = result
+	if result.IsError {
+		t.Fatalf("unexpected error committing named path: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "committed") {
+		t.Errorf("expected 'committed' in output, got: %q", result.Output)
+	}
+
+	// Verify the file actually landed in the commit.
+	out, _, err := runGit(context.Background(), dir, "show", "--stat", "HEAD")
+	if err != nil {
+		t.Fatalf("git show: %v", err)
+	}
+	if !strings.Contains(out, "newfile.txt") {
+		t.Errorf("expected newfile.txt in HEAD commit, got: %s", out)
+	}
 }
 
-func TestGitCommitTool_Success(t *testing.T) {
-	// Actually stage and commit a file to exercise the success path.
-	dir := initBoostRepo95(t)
-	// Write and stage a new file.
-	newFilePath := filepath.Join(dir, "commit_me.txt")
-	if err := os.WriteFile(newFilePath, []byte("content to commit\n"), 0644); err != nil {
+func TestGitCommitTool_Success_StagesTrackedModifications(t *testing.T) {
+	dir := initGitRepo(t)
+	// Modify a file that is already tracked (committed by initGitRepo) — this
+	// is what `git add -u` picks up with no explicit paths.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# modified\n"), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	tool := &GitCommitTool{SandboxRoot: dir}
-	// Use nil paths so it stages all (wt.Add(".") path).
 	result := tool.Execute(context.Background(), map[string]any{"message": "test commit"})
 	if result.IsError {
 		t.Errorf("unexpected error on commit: %s", result.Error)
@@ -240,14 +261,111 @@ func TestGitCommitTool_Success(t *testing.T) {
 	}
 }
 
+func TestGitCommitTool_Default_DoesNotStageUntrackedJunk(t *testing.T) {
+	// The core G4 defect fix: with no explicit paths, an untracked file must
+	// NOT be swept into the commit the way the old `wt.Add(".")` did.
+	dir := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# modified\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scratch-junk.tmp"), []byte("scratch\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &GitCommitTool{SandboxRoot: dir}
+	result := tool.Execute(context.Background(), map[string]any{"message": "test commit"})
+	if result.IsError {
+		t.Fatalf("unexpected error on commit: %s", result.Error)
+	}
+
+	out, _, err := runGit(context.Background(), dir, "show", "--stat", "HEAD")
+	if err != nil {
+		t.Fatalf("git show: %v", err)
+	}
+	if strings.Contains(out, "scratch-junk.tmp") {
+		t.Errorf("untracked junk file should not be swept into the commit, got: %s", out)
+	}
+	if !strings.Contains(out, "README.md") {
+		t.Errorf("expected README.md (tracked, modified) in the commit, got: %s", out)
+	}
+
+	// scratch-junk.tmp should still be untracked on disk (not lost, just not committed).
+	if _, err := os.Stat(filepath.Join(dir, "scratch-junk.tmp")); err != nil {
+		t.Errorf("scratch-junk.tmp should still exist on disk: %v", err)
+	}
+}
+
+func TestGitCommitTool_UsesUserGitIdentity(t *testing.T) {
+	// The core G4 defect fix: the commit author must be the user's own
+	// configured git identity, never a hardcoded "huginn <huginn@local>".
+	dir := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# modified\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &GitCommitTool{SandboxRoot: dir}
+	result := tool.Execute(context.Background(), map[string]any{"message": "test commit"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	out, _, err := runGit(context.Background(), dir, "log", "-1", "--format=%an <%ae>")
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	author := strings.TrimSpace(out)
+	if author != "Huginn Test <test@huginn.test>" {
+		t.Errorf("author = %q, want the repo-configured identity (not a hardcoded huginn author)", author)
+	}
+	if strings.Contains(author, "huginn@local") {
+		t.Error("commit author must not be the old hardcoded huginn@local")
+	}
+}
+
+func TestGitCommitTool_HonorsPreCommitHook(t *testing.T) {
+	// The core G4 defect fix: native git runs the repo's hooks. A rejecting
+	// pre-commit hook must block the commit and surface the hook's message.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+	dir := initGitRepo(t)
+	hookPath := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	hookScript := "#!/bin/sh\necho 'blocked by pre-commit hook' >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0o755); err != nil {
+		t.Fatalf("write pre-commit hook: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# modified\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &GitCommitTool{SandboxRoot: dir}
+	result := tool.Execute(context.Background(), map[string]any{"message": "should be blocked"})
+	if !result.IsError {
+		t.Fatal("expected pre-commit hook rejection to surface as an error")
+	}
+	if !strings.Contains(result.Error, "blocked by pre-commit hook") {
+		t.Errorf("expected hook's own message in the error, got: %s", result.Error)
+	}
+}
+
 func TestGitCommitTool_LongMessage(t *testing.T) {
 	// Long message should be truncated (exercises the truncation branch).
-	// Use a real git repo so we get past the openRepo check and exercise the truncation.
-	dir := initBoostRepo95(t)
+	dir := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# modified\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	long := strings.Repeat("x", maxCommitMessageBytes+100)
 	tool := &GitCommitTool{SandboxRoot: dir}
-	// Will fail at commit (nothing new to commit) but truncation branch is exercised.
-	_ = tool.Execute(context.Background(), map[string]any{"message": long})
+	result := tool.Execute(context.Background(), map[string]any{"message": long})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	out, _, err := runGit(context.Background(), dir, "log", "-1", "--format=%B")
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	if len(out) > maxCommitMessageBytes+10 { // small slack for trailing newline
+		t.Errorf("commit message not truncated: got %d bytes", len(out))
+	}
 }
 
 // ============================================================
@@ -1206,7 +1324,7 @@ func TestSearchFilesTool_DoubleGlobPattern(t *testing.T) {
 
 func TestRegisterGitHubTools_Basic(t *testing.T) {
 	reg := NewRegistry()
-	RegisterGitHubTools(reg)
+	RegisterGitHubTools(reg, "/tmp")
 	// Either succeeds (gh available) or is a no-op (gh not available).
 	// Just verify no panic.
 }

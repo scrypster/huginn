@@ -151,3 +151,71 @@ func TestSetCallingAgent_Overwrite(t *testing.T) {
 		t.Errorf("want Coder after overwrite, got %q", got)
 	}
 }
+
+func TestBuildContext_InjectsLocalClockET(t *testing.T) {
+	tm := New()
+	store := makeTestStore(t)
+	ag := &agents.Agent{
+		Name:         "Winston",
+		SystemPrompt: "You are Winston.",
+		ModelID:      "test-model",
+	}
+	reg := agents.NewRegistry()
+	reg.Register(ag)
+	thread, _ := tm.Create(CreateParams{
+		SessionID: "sess-clock",
+		AgentID:   "Winston",
+		Task:      "what time is it",
+	})
+	msgs := buildContext(thread, store, tm, reg)
+	if len(msgs) == 0 || msgs[0].Role != "system" {
+		t.Fatalf("expected system persona, got %#v", msgs)
+	}
+	sys := msgs[0].Content
+	if !strings.Contains(sys, "Local time now:") {
+		t.Fatalf("delegate child missing Local time now:\n%s", sys)
+	}
+	if !strings.Contains(sys, " ET") {
+		t.Fatalf("clock must be timezone-labeled ET:\n%s", sys)
+	}
+	if strings.Contains(sys, "EDT") || strings.Contains(sys, "EST") {
+		t.Fatalf("label must be ET, not EDT/EST:\n%s", sys)
+	}
+}
+
+
+func TestBuildContext_TrailingClockBeatsSnapshot(t *testing.T) {
+	tm := New()
+	store := makeTestStore(t)
+	ag := &agents.Agent{
+		Name:         "Winston",
+		SystemPrompt: "You are Winston.",
+		ModelID:      "test-model",
+	}
+	reg := agents.NewRegistry()
+	reg.Register(ag)
+	sess := store.New("test", "/tmp", "test-model")
+	if err := store.Append(sess, session.SessionMessage{
+		Role:    "assistant",
+		Agent:   "Steve",
+		Content: "It's Thursday, August 27, 2026, 9:11 AM ET.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	thread, _ := tm.Create(CreateParams{
+		SessionID: sess.ID,
+		AgentID:   "Winston",
+		Task:      "what time is it",
+	})
+	msgs := buildContext(thread, store, tm, reg)
+	if len(msgs) == 0 {
+		t.Fatal("no context")
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Fatalf("want trailing user, got %#v", last)
+	}
+	if !strings.Contains(last.Content, "Local time now:") {
+		t.Fatalf("trailing user missing live clock: %#v", last)
+	}
+}

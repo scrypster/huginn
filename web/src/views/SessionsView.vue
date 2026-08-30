@@ -64,7 +64,7 @@ async function refresh() {
   error.value = ''
   try {
     const data = await api.sessions.list()
-    sessions.value = data as Session[]
+    sessions.value = Array.isArray(data) ? (data as Session[]) : []
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : 'Failed to load sessions'
   } finally {

@@ -30,6 +30,7 @@ vi.mock('../../composables/useWorkflows', () => ({
     fetchWorkflows: mockFetchWorkflows,
     fetchTemplates: vi.fn().mockResolvedValue(undefined),
     createWorkflow: mockCreateWorkflow,
+    dropWorkflow: vi.fn(),
     updateWorkflow: mockUpdateWorkflow,
     deleteWorkflow: mockDeleteWorkflow,
     triggerWorkflow: mockTriggerWorkflow,
@@ -328,7 +329,7 @@ describe('WorkflowsView', () => {
     vm.addStep()
     await nextTick()
     expect(vm.editForm.steps.length).toBe(1)
-    expect(vm.editForm.steps[0]).toMatchObject({ name: '', agent: '', prompt: '', position: 0 })
+    expect(vm.editForm.steps[0]).toMatchObject({ name: 'step-1', agent: '', prompt: '', position: 0 })
   })
 
   it('removeStep removes step at given index', async () => {

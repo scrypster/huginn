@@ -11,12 +11,14 @@ const mockDeleteSession   = vi.fn().mockResolvedValue(undefined)
 const mockRenameSession   = vi.fn().mockResolvedValue(undefined)
 const mockFormatSessionLabel = vi.fn((s: any) => s.title || s.id?.slice(0, 8) || '')
 const mockGetMessages     = vi.fn(() => [])
+const mockSessionsError   = ref<string | null>(null)
 
 vi.mock('../../composables/useSessions', () => ({
   useSessions: () => ({
     sessions: mockSessions,
     loading: ref(false),
     fetchSessions: mockFetchSessions,
+    fetchSessionsError: mockSessionsError,
     createSession: mockCreateSession,
     deleteSession: mockDeleteSession,
     renameSession: mockRenameSession,
@@ -46,6 +48,7 @@ vi.mock('../../composables/useNotifications', () => ({
 const mockSpaces      = ref<any[]>([])
 const mockChannels    = ref<any[]>([])
 const mockDms         = ref<any[]>([])
+const mockSpacesLoading = ref(false)
 const mockActiveSpaceId = ref<string | null>(null)
 const mockFetchSpaces = vi.fn().mockResolvedValue(undefined)
 const mockSetActiveSpace = vi.fn()
@@ -55,6 +58,8 @@ const mockMarkRead    = vi.fn()
 const mockUpdateSpace = vi.fn().mockResolvedValue({ id: 'sp-1', name: 'Updated' })
 const mockDeleteSpace = vi.fn().mockResolvedValue(true)
 const mockClearSpaces = vi.fn()
+const mockOpenDM = vi.fn().mockResolvedValue(null)
+const mockSpacesError = ref<string | null>(null)
 
 vi.mock('../../composables/useSpaces', () => ({
   useSpaces: () => ({
@@ -62,8 +67,8 @@ vi.mock('../../composables/useSpaces', () => ({
     channels: mockChannels,
     dms: mockDms,
     activeSpaceId: mockActiveSpaceId,
-    loading: ref(false),
-    error: ref(null),
+    loading: mockSpacesLoading,
+    error: mockSpacesError,
     fetchSpaces: mockFetchSpaces,
     setActiveSpace: mockSetActiveSpace,
     fetchSpaceSessions: mockFetchSpaceSessions,
@@ -72,6 +77,8 @@ vi.mock('../../composables/useSpaces', () => ({
     updateSpace: mockUpdateSpace,
     deleteSpace: mockDeleteSpace,
     clearSpaces: mockClearSpaces,
+    openDM: mockOpenDM,
+    ensureCompanyDM: vi.fn().mockResolvedValue(null),
   }),
   wireSpaceWS: vi.fn().mockReturnValue(vi.fn()),
 }))
@@ -84,6 +91,7 @@ vi.mock('../../composables/useAgents', () => ({
     agents: mockAgents,
     loading: ref(false),
     fetchAgents: mockFetchAgents,
+    wireWS: vi.fn(),
   }),
 }))
 
@@ -105,6 +113,36 @@ vi.mock('../../composables/useCloud', () => ({
     fetchStatus: vi.fn().mockResolvedValue(undefined),
     connect: vi.fn(),
     disconnect: vi.fn(),
+  }),
+}))
+
+vi.mock('../../composables/useCompanies', () => ({
+  useCompanies: () => ({
+    companies: ref([]),
+    selectedCompanyId: ref(null),
+    selectedCompany: ref(null),
+    effectiveCompanyId: ref(null),
+    isDesk: ref(true),
+    loading: ref(false),
+    fetchCompanies: vi.fn().mockResolvedValue(undefined),
+    selectCompany: vi.fn(),
+    clearCompanies: vi.fn(),
+    isCompanyCollapsed: () => false,
+    toggleCompanyCollapsed: vi.fn(),
+    companyFollowUnread: () => false,
+    noteFollowUnread: vi.fn(),
+    applyFollowUnreadFromSpaces: vi.fn(),
+    seatMember: vi.fn().mockResolvedValue(null),
+    unseatMember: vi.fn().mockResolvedValue(null),
+    agentSeatedIn: () => false,
+    setCompanyCollapsed: vi.fn(),
+  }),
+}))
+
+vi.mock('../../composables/useAgentActivity', () => ({
+  useAgentActivity: () => ({
+    isAgentPulsing: vi.fn().mockReturnValue(false),
+    wireActivityWS: vi.fn().mockReturnValue(vi.fn()),
   }),
 }))
 
@@ -155,18 +193,29 @@ vi.mock('../../composables/useApi', () => ({
     },
     health: vi.fn().mockResolvedValue({ status: 'ok', version: 'v0.0.0', stale: false }),
     restart: vi.fn().mockResolvedValue({ status: 'restarting' }),
+    companies: {
+      list: vi.fn().mockResolvedValue([]),
+    },
     spaces: {
       list: vi.fn().mockResolvedValue([]),
+      sessions: vi.fn().mockResolvedValue([]),
+      messages: vi.fn().mockResolvedValue({ messages: [], next_cursor: '' }),
+      markRead: vi.fn().mockResolvedValue({}),
     },
   },
   getToken: vi.fn().mockReturnValue('test-token'),
 }))
 
+const { mockRoute } = vi.hoisted(() => ({
+  mockRoute: { path: '/chat', params: {} as Record<string, string>, query: {} },
+}))
+const mockRouterPush = vi.fn()
+
 vi.mock('vue-router', () => ({
   RouterView: { template: '<div class="router-view-stub" />' },
-  useRoute:  () => ({ path: '/chat', params: {}, query: {} }),
+  useRoute:  () => mockRoute,
   useRouter: () => ({
-    push:    vi.fn(),
+    push:    mockRouterPush,
     replace: vi.fn(),
   }),
 }))
@@ -174,6 +223,7 @@ vi.mock('vue-router', () => ({
 // ── Component import (after all mocks) ───────────────────────────────────────
 
 import App from '../../App.vue'
+import { clearSpaceTimeline, useSpaceTimeline } from '../../composables/useSpaceTimeline'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -188,6 +238,8 @@ function mountApp() {
         Teleport: true,
         RouterView: { template: '<div class="router-view-stub" />' },
         SpaceCreateModal: { template: '<div />' },
+        CompanySwitcher: { template: '<div data-testid="company-switcher-stub" />' },
+        CompanySeatPicker: { template: '<div data-testid="company-seat-picker-stub" />' },
       },
     },
   })
@@ -203,14 +255,25 @@ function dispatchKey(key: string, opts: Partial<KeyboardEventInit> = {}) {
 
 // ── Setup / Teardown ─────────────────────────────────────────────────────────
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks()
+  mockRoute.path = '/chat'
+  mockRoute.params = {}
   mockSessions.value = []
+  mockSpaces.value = []
   mockChannels.value = []
   mockDms.value = []
+  mockSpaces.value = []
+  mockSpacesLoading.value = false
+  mockSpacesError.value = null
+  mockSessionsError.value = null
   mockActiveSpaceId.value = null
   mockPendingCount.value = 0
+  mockGetMessages.mockReturnValue([])
   localStorage.clear()
+  const { clearSpaceTimeline } = await import('../../composables/useSpaceTimeline')
+  clearSpaceTimeline('space-a')
+  clearSpaceTimeline('space-b')
 })
 
 afterEach(() => {
@@ -317,6 +380,57 @@ describe('App', () => {
   // ── Unseen session tracking ────────────────────────────────────────────────
 
   describe('unseen session tracking', () => {
+    it('keeps unmapped unseen IDs when opening a space (not treated as orphans)', async () => {
+      localStorage.setItem('huginn:unseen_sessions', JSON.stringify(['sess-b-unvisited']))
+      const w = mountApp()
+      await flushPromises()
+
+      mockActiveSpaceId.value = 'space-a'
+      await nextTick()
+      await flushPromises()
+
+      const unseen = JSON.parse(localStorage.getItem('huginn:unseen_sessions') ?? '[]')
+      expect(unseen).toContain('sess-b-unvisited')
+      expect(w.exists()).toBe(true)
+    })
+
+    it('opening space A does not clear unseen for unvisited space B', async () => {
+      const { api } = await import('../../composables/useApi')
+      const { prefetchSpaceSidebar, clearSpaceTimeline } = await import('../../composables/useSpaceTimeline')
+
+      localStorage.setItem('huginn:unseen_sessions', JSON.stringify(['sess-a', 'sess-b']))
+      mockSpaces.value = [
+        { id: 'space-a', name: 'Alpha', kind: 'channel', leadAgent: 'atlas', memberAgents: [], icon: '', color: '#58a6ff', unseenCount: 1, archivedAt: null },
+        { id: 'space-b', name: 'Steve', kind: 'dm', leadAgent: 'Steve', memberAgents: [], icon: '', color: '#58a6ff', unseenCount: 2, archivedAt: null },
+      ]
+      mockChannels.value = [mockSpaces.value[0]]
+      mockDms.value = [mockSpaces.value[1]]
+
+      vi.mocked(api.spaces.sessions).mockImplementation(async (id: string) => {
+        if (id === 'space-a') return [{ id: 'sess-a', title: '', status: 'idle', created_at: '', updated_at: '', space_id: 'space-a' }]
+        if (id === 'space-b') return [{ id: 'sess-b', title: '', status: 'idle', created_at: '', updated_at: '', space_id: 'space-b' }]
+        return []
+      })
+      vi.mocked(api.spaces.messages).mockResolvedValue({ messages: [], next_cursor: '' } as any)
+
+      const w = mountApp()
+      await flushPromises()
+      await prefetchSpaceSidebar(['space-a', 'space-b'])
+
+      // Opening A must not treat B's uncached session as an orphan.
+      mockActiveSpaceId.value = 'space-a'
+      await nextTick()
+      await flushPromises()
+
+      const unseen = JSON.parse(localStorage.getItem('huginn:unseen_sessions') ?? '[]')
+      expect(unseen).toContain('sess-b')
+      expect(unseen).not.toContain('sess-a')
+      expect(w.exists()).toBe(true)
+
+      clearSpaceTimeline('space-a')
+      clearSpaceTimeline('space-b')
+    })
+
     it('inbox badge count shows pendingCount', async () => {
       mockPendingCount.value = 5
       const w = mountApp()
@@ -329,6 +443,36 @@ describe('App', () => {
       const w = mountApp()
       await flushPromises()
       expect(w.html()).toContain('9+')
+    })
+  })
+
+  // ── Spaces loading empty states ───────────────────────────────────────────
+
+  describe('spaces loading empty states', () => {
+    it('does not show italic empty copy while spacesLoading is true and lists are empty', async () => {
+      mockSpacesLoading.value = true
+      mockChannels.value = []
+      mockDms.value = []
+
+      const w = mountApp()
+      await flushPromises()
+
+      const html = w.html()
+      expect(html).not.toContain('No channels yet')
+      expect(html).not.toContain('No agents configured')
+    })
+
+    it('shows italic empty copy after spaces load when lists are empty', async () => {
+      mockSpacesLoading.value = false
+      mockChannels.value = []
+      mockDms.value = []
+
+      const w = mountApp()
+      await flushPromises()
+
+      const html = w.html()
+      expect(html).toContain('No channels yet')
+      expect(html).toContain('No agents configured')
     })
   })
 
@@ -350,6 +494,31 @@ describe('App', () => {
       const html = w.html()
       expect(html).toContain('Channels')
       expect(html).toContain('Direct Messages')
+    })
+
+    it('hides Channels/DMs and agent-list on top-level stats, settings, and people', async () => {
+      mockRoute.path = '/stats'
+      const wStats = mountApp()
+      await flushPromises()
+      expect(wStats.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(wStats.find('[data-testid="space-list"]').exists()).toBe(false)
+      expect(wStats.find('[data-testid="agent-list"]').exists()).toBe(false)
+      expect(wStats.html()).not.toContain('Direct Messages')
+
+      mockRoute.path = '/settings'
+      const wSettings = mountApp()
+      await flushPromises()
+      expect(wSettings.find('[data-testid="space-list"]').exists()).toBe(false)
+      expect(wSettings.find('[data-testid="agent-list"]').exists()).toBe(false)
+      expect(wSettings.html()).not.toContain('Direct Messages')
+
+      mockRoute.path = '/agents'
+      const wAgents = mountApp()
+      await flushPromises()
+      expect(wAgents.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(wAgents.find('[data-testid="context-panel"]').exists()).toBe(false)
+      expect(wAgents.find('[data-testid="agent-list"]').exists()).toBe(false)
+      expect(wAgents.html()).not.toContain('Direct Messages')
     })
 
     it('shows clear-all trash button only when sessions exist', async () => {
@@ -513,6 +682,244 @@ describe('App', () => {
       // appError should be set; check for retry button
       const html = w.html()
       expect(html).toContain('Retry connection')
+    })
+  })
+
+  // ── Cmd+K global search ───────────────────────────────────────────────────
+
+  describe('Cmd+K global search', () => {
+    const SPACE_ID = 'space-eng'
+
+    afterEach(() => {
+      clearSpaceTimeline(SPACE_ID)
+    })
+
+    async function openSearchAndType(w: ReturnType<typeof mountApp>, query: string) {
+      dispatchKey('k', { metaKey: true })
+      await nextTick()
+      const input = w.find('[data-testid="global-search-input"]')
+      expect(input.exists()).toBe(true)
+      await input.setValue(query)
+      await nextTick()
+    }
+
+    it('navigates a space-backed message hit to /space/:spaceId (not /chat/:sessionId)', async () => {
+      const tl = useSpaceTimeline(SPACE_ID)
+      tl.getState().messages.push({
+        id: 'msg-space-1',
+        session_id: 'sess-channel',
+        seq: 1,
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'please deploy the hotfix',
+        agent: '',
+      })
+
+      const w = mountApp()
+      await flushPromises()
+      // Spaces must be set after mount: App.vue's immediate spaces watcher
+      // hits a TDZ if the list is already populated during setup.
+      mockSpaces.value = [
+        { id: SPACE_ID, name: 'engineering', kind: 'channel', leadAgent: 'atlas', memberAgents: [], icon: '', color: '#58a6ff', unseenCount: 0 },
+      ]
+      await nextTick()
+      await openSearchAndType(w, 'hotfix')
+
+      const result = w.find('[data-testid="global-search-result"]')
+      expect(result.exists()).toBe(true)
+      await result.trigger('click')
+      await nextTick()
+
+      expect(mockRouterPush).toHaveBeenCalledWith(`/space/${SPACE_ID}`)
+      expect(mockRouterPush).not.toHaveBeenCalledWith('/chat/sess-channel')
+    })
+
+    it('keeps session-only hits on /chat/:sessionId', async () => {
+      mockSessions.value = [
+        { id: 'sess-legacy', title: 'Scratch', agent_id: 'default', state: 'idle', created_at: '', updated_at: '' },
+      ]
+      mockFormatSessionLabel.mockImplementation((s: any) => s.title || s.id)
+      mockGetMessages.mockImplementation((id: string) => {
+        if (id !== 'sess-legacy') return []
+        return [{ id: 'msg-legacy', role: 'user', content: 'scratch pad notes', agent: '' }]
+      })
+
+      const w = mountApp()
+      await flushPromises()
+      await openSearchAndType(w, 'scratch')
+
+      const result = w.find('[data-testid="global-search-result"]')
+      expect(result.exists()).toBe(true)
+      await result.trigger('click')
+      await nextTick()
+
+      expect(mockRouterPush).toHaveBeenCalledWith('/chat/sess-legacy')
+    })
+  })
+
+  // ── Chat-only company/channel/DM rail ─────────────────────────────────────
+
+  describe('chat-only context rail', () => {
+    async function mountAt(path: string, params: Record<string, string> = {}) {
+      mockRoute.path = path
+      mockRoute.params = params
+      const w = mountApp()
+      await flushPromises()
+      return w
+    }
+
+    it('keeps the company/channel/DM sidebar on /chat', async () => {
+      const w = await mountAt('/chat')
+      expect(w.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(w.find('[data-testid="context-panel"]').exists()).toBe(true)
+      expect(w.find('[data-testid="space-list"]').exists()).toBe(true)
+    })
+
+    it('keeps the company/channel/DM sidebar on /space/:id', async () => {
+      const w = await mountAt('/space/sp-1', { spaceId: 'sp-1' })
+      expect(w.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(w.find('[data-testid="context-panel"]').exists()).toBe(true)
+      expect(w.find('[data-testid="space-list"]').exists()).toBe(true)
+    })
+
+    it.each([
+      ['/stats', {}],
+      ['/logs', {}],
+      ['/settings', {}],
+      ['/agents', {}],
+      ['/agents/atlas', { agentName: 'atlas' }],
+      ['/connections', {}],
+      ['/skills/browse', { tab: 'browse' }],
+      ['/workflows', {}],
+      ['/inbox', {}],
+      ['/models', {}],
+      ['/memory', {}],
+      ['/cloud', {}],
+    ])('hides the company/channel/DM sidebar on %s (icon rail stays)', async (path, params) => {
+      const w = await mountAt(path, params as Record<string, string>)
+      expect(w.find('[data-testid="icon-rail"]').exists()).toBe(true)
+      expect(w.find('[data-testid="context-panel"]').exists()).toBe(false)
+      expect(w.find('[data-testid="space-list"]').exists()).toBe(false)
+      expect(w.find('[data-testid="create-channel-btn"]').exists()).toBe(false)
+    })
+  })
+
+  describe('icon rail Slack-class groups', () => {
+    it('renders chat / admin / logs section separators and keeps settings out of logs', async () => {
+      mockRoute.path = '/chat'
+      const w = mountApp()
+      await flushPromises()
+      const rail = w.find('[data-testid="icon-rail"]')
+      expect(rail.exists()).toBe(true)
+      expect(rail.find('[data-testid="rail-section-admin"]').exists()).toBe(true)
+      expect(rail.find('[data-testid="rail-section-logs"]').exists()).toBe(true)
+      expect(rail.find('[data-testid="rail-chat"]').attributes('title')).toBe('Chat')
+      expect(rail.find('[data-testid="rail-settings"]').attributes('title')).toBe('Settings')
+      const html = rail.html()
+      const settingsAt = html.indexOf('data-testid="rail-settings"')
+      const statsAt = html.indexOf('data-testid="rail-stats"')
+      const logsAt = html.indexOf('data-testid="rail-logs"')
+      expect(settingsAt).toBeGreaterThan(-1)
+      expect(statsAt).toBeGreaterThan(settingsAt)
+      expect(logsAt).toBeGreaterThan(statsAt)
+    })
+  })
+
+  describe('first run (fresh install)', () => {
+    it('auto-opens a DM with the default agent when there are no spaces and no sessions', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockAgents.value = [
+        { name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' },
+        { name: 'fable', color: '#3fb950', icon: 'F', model: 'gpt-4', is_default: true },
+      ]
+      mockOpenDM.mockResolvedValueOnce({ id: 'space-welcome', name: 'fable', kind: 'dm', leadAgent: 'fable', memberAgents: [], icon: 'F', color: '#3fb950', unseenCount: 0, companyId: '' })
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).toHaveBeenCalledWith('fable')
+      expect(mockRouterPush).toHaveBeenCalledWith('/space/space-welcome')
+    })
+
+    it('does nothing when a space already exists', async () => {
+      mockSessions.value = []
+      mockSpaces.value = [{ id: 'sp-1', name: 'general', kind: 'channel', leadAgent: '', memberAgents: [], icon: '', color: '#000', unseenCount: 0, companyId: '' }]
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does nothing when a session already exists', async () => {
+      mockSessions.value = [{ id: 's-1', title: 'old chat' }]
+      mockSpaces.value = []
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does nothing when there are no agents to open a DM with', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockAgents.value = []
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    // Regression: fetchSpaces/fetchSessions swallow their errors into refs and
+    // leave the lists empty. Without an explicit error guard, an established
+    // user whose load failed looks identical to a fresh install and gets
+    // teleported into a DM they never asked for.
+    it('does not misfire for an existing user when the spaces fetch failed', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockSpacesError.value = 'Failed to load spaces'
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does not misfire for an existing user when the sessions fetch failed', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockSessionsError.value = 'Network error'
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
+    })
+
+    it('does not hijack a route the user already navigated to', async () => {
+      mockSessions.value = []
+      mockSpaces.value = []
+      mockAgents.value = [{ name: 'atlas', color: '#58a6ff', icon: 'A', model: 'gpt-4' }]
+      mockRoute.path = '/settings'
+
+      mountApp()
+      await flushPromises()
+      await flushPromises()
+
+      expect(mockOpenDM).not.toHaveBeenCalled()
     })
   })
 })

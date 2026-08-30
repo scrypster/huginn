@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +28,20 @@ type ProviderModelEntry struct {
 	Tier          string   `json:"tier,omitempty"` // "high", "medium", "low"
 	Deprecated    bool     `json:"deprecated,omitempty"`
 	ReplacedBy    string   `json:"replaced_by,omitempty"`
+
+	// InputCostPerMTok and OutputCostPerMTok are USD per 1M tokens, verified
+	// against internal/pricing (the single source of pricing truth — see
+	// table.go). Zero means unpriced/unknown, not free.
+	InputCostPerMTok  float64 `json:"input_cost_per_mtok,omitempty"`
+	OutputCostPerMTok float64 `json:"output_cost_per_mtok,omitempty"`
+
+	// Strengths is a short list of what this model is good at, surfaced to
+	// the CoS when choosing a model for a one-off specialist (spawn_specialist).
+	Strengths []string `json:"strengths,omitempty"`
 }
 
 type providerCatalogFile struct {
-	CatalogVersion string                                 `json:"catalog_version"`
+	CatalogVersion string                                   `json:"catalog_version"`
 	Providers      map[string]map[string]ProviderModelEntry `json:"providers"` // provider → modelID → info
 }
 
@@ -38,8 +49,8 @@ type providerCatalogFile struct {
 // The zero value is safe (empty catalog). Use GlobalProviderCatalog() for the singleton.
 type ProviderCatalog struct {
 	mu      sync.RWMutex
-	byAlias map[string]map[string]string              // provider → alias → real model ID
-	byID    map[string]map[string]ProviderModelEntry  // provider → modelID → info
+	byAlias map[string]map[string]string             // provider → alias → real model ID
+	byID    map[string]map[string]ProviderModelEntry // provider → modelID → info
 	version string
 }
 
@@ -206,6 +217,56 @@ func (c *ProviderCatalog) Info(provider, modelID string) *ProviderModelEntry {
 	return nil
 }
 
+// AvailableModelsBlock renders a compact, deterministic reference of
+// non-deprecated cloud models with their verified per-MTok cost and
+// strengths, for injection into the CoS's system prompt beside the team
+// roster (see agents.AppendTeamRoster) — it is what spawn_specialist's
+// model-choice reasoning is grounded against. Providers and models within
+// each provider are sorted alphabetically for a stable prompt. Returns ""
+// when the catalog has no priced models.
+func (c *ProviderCatalog) AvailableModelsBlock() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	providers := make([]string, 0, len(c.byID))
+	for p := range c.byID {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+
+	var b strings.Builder
+	b.WriteString("Available models (for spawn_specialist model choice):\n")
+	any := false
+	for _, p := range providers {
+		models := c.byID[p]
+		ids := make([]string, 0, len(models))
+		for id := range models {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			entry := models[id]
+			if entry.Deprecated {
+				continue
+			}
+			if entry.InputCostPerMTok == 0 && entry.OutputCostPerMTok == 0 {
+				continue // unpriced — omit rather than imply free
+			}
+			any = true
+			fmt.Fprintf(&b, "- %s (%s): $%.2f/$%.2f per MTok in/out",
+				id, entry.DisplayName, entry.InputCostPerMTok, entry.OutputCostPerMTok)
+			if len(entry.Strengths) > 0 {
+				fmt.Fprintf(&b, " — %s", strings.Join(entry.Strengths, ", "))
+			}
+			b.WriteString("\n")
+		}
+	}
+	if !any {
+		return ""
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // CheckDeprecations returns a warning for each (provider, modelID) pair that is
 // deprecated in the catalog. Pairs not found in the catalog are silently ignored.
 func (c *ProviderCatalog) CheckDeprecations(pairs []struct{ Provider, ModelID string }) []DeprecationWarning {
@@ -251,69 +312,114 @@ func defaultProviderCatalogPath() string {
 	return filepath.Join(home, ".huginn", "provider_catalog.json")
 }
 
-// TryRefreshProviderCatalog fetches the CDN catalog if the local cache is older
-// than maxAge (or missing). Runs non-blocking in a background goroutine.
-// Call once at startup from main.go.
+// defaultProviderCatalogStampPath is the last-attempt stamp. Written on
+// non-200 CDN responses so the 7-day freshness gate still applies when the
+// catalog cache itself was not updated. The bundled catalog is unchanged.
+func defaultProviderCatalogStampPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".huginn", "provider_catalog.last_attempt")
+}
+
+func providerCatalogFreshEnough(catalogPath, stampPath string, maxAge time.Duration) bool {
+	for _, p := range []string{stampPath, catalogPath} {
+		if p == "" {
+			continue
+		}
+		if fi, err := os.Stat(p); err == nil && time.Since(fi.ModTime()) < maxAge {
+			return true
+		}
+	}
+	return false
+}
+
+func writeProviderCatalogAttemptStamp(stampPath string, status int) {
+	if stampPath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(stampPath), 0755); err != nil {
+		return
+	}
+	payload, err := json.Marshal(struct {
+		AttemptedAt time.Time `json:"attempted_at"`
+		Status      int       `json:"status"`
+	}{AttemptedAt: time.Now().UTC(), Status: status})
+	if err != nil {
+		return
+	}
+	_ = atomicWriteFile(stampPath, payload, 0644)
+}
+
+// TryRefreshProviderCatalog fetches the CDN catalog if the local cache (or the
+// last-attempt stamp) is older than maxAge, or missing. Runs non-blocking in a
+// background goroutine. Call once at startup from main.go.
+//
+// A non-200 from the CDN does not replace the bundled/cached catalog. It only
+// writes a last-attempt stamp so subsequent startServer calls skip the GET
+// until maxAge elapses (no WARN on every boot).
 func TryRefreshProviderCatalog(cdnURL string, maxAge time.Duration) {
-	go func() {
-		path := defaultProviderCatalogPath()
-		if path == "" {
-			return
-		}
-		// Check age of the cached file.
-		if fi, err := os.Stat(path); err == nil {
-			if time.Since(fi.ModTime()) < maxAge {
-				return // fresh enough
-			}
-		}
+	go refreshProviderCatalog(cdnURL, maxAge)
+}
 
-		logger.Info("provider catalog: checking for updates", "url", cdnURL)
-		ctx := &http.Client{Timeout: 10 * time.Second}
-		resp, err := ctx.Get(cdnURL)
+func refreshProviderCatalog(cdnURL string, maxAge time.Duration) {
+	path := defaultProviderCatalogPath()
+	if path == "" {
+		return
+	}
+	stampPath := defaultProviderCatalogStampPath()
+	if providerCatalogFreshEnough(path, stampPath, maxAge) {
+		return
+	}
+
+	logger.Info("provider catalog: checking for updates", "url", cdnURL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(cdnURL)
+	if err != nil {
+		logger.Warn("provider catalog: CDN fetch failed", "url", cdnURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		logger.Warn("provider catalog: CDN returned non-200", "status", resp.StatusCode)
+		writeProviderCatalogAttemptStamp(stampPath, resp.StatusCode)
+		return
+	}
+
+	var buf []byte
+	buf = make([]byte, 0, 64*1024)
+	tmp := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
 		if err != nil {
-			logger.Warn("provider catalog: CDN fetch failed", "url", cdnURL, "err", err)
+			break
+		}
+		if len(buf) > 512*1024 {
+			logger.Warn("provider catalog: CDN response too large, ignoring")
 			return
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Warn("provider catalog: CDN returned non-200", "status", resp.StatusCode)
-			return
-		}
+	}
 
-		var buf []byte
-		buf = make([]byte, 0, 64*1024)
-		tmp := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(tmp)
-			if n > 0 {
-				buf = append(buf, tmp[:n]...)
-			}
-			if err != nil {
-				break
-			}
-			if len(buf) > 512*1024 {
-				logger.Warn("provider catalog: CDN response too large, ignoring")
-				return
-			}
-		}
+	// Validate JSON before saving.
+	var check providerCatalogFile
+	if err := json.Unmarshal(buf, &check); err != nil {
+		logger.Warn("provider catalog: CDN returned invalid JSON", "err", err)
+		return
+	}
 
-		// Validate JSON before saving.
-		var check providerCatalogFile
-		if err := json.Unmarshal(buf, &check); err != nil {
-			logger.Warn("provider catalog: CDN returned invalid JSON", "err", err)
-			return
-		}
+	if err := atomicWriteFile(path, buf, 0644); err != nil {
+		logger.Warn("provider catalog: failed to save CDN catalog", "err", err)
+		return
+	}
 
-		if err := atomicWriteFile(path, buf, 0644); err != nil {
-			logger.Warn("provider catalog: failed to save CDN catalog", "err", err)
-			return
-		}
-
-		// Apply to the live singleton.
-		if err := GlobalProviderCatalog().overlay(buf); err != nil {
-			logger.Warn("provider catalog: failed to apply CDN update", "err", err)
-			return
-		}
-		logger.Info("provider catalog: updated from CDN", "version", check.CatalogVersion)
-	}()
+	// Apply to the live singleton.
+	if err := GlobalProviderCatalog().overlay(buf); err != nil {
+		logger.Warn("provider catalog: failed to apply CDN update", "err", err)
+		return
+	}
+	logger.Info("provider catalog: updated from CDN", "version", check.CatalogVersion)
 }

@@ -409,6 +409,45 @@ func TestRunLoop_PermissionGateDenies(t *testing.T) {
 	}
 }
 
+func TestRunLoop_DeniedTool_HidesLeftoverHarnessJSON(t *testing.T) {
+	tool := &writeLevelMockTool{name: "bash"}
+	reg := newRegistryWith(tool)
+	gate := permissions.NewGate(false, nil)
+
+	issueJSON := `{"name":"gh_issue_create","arguments":{"title":"need help","body":"bash denied"}}`
+	var streamed strings.Builder
+	mb := &mockBackend{
+		responses: []*backend.ChatResponse{
+			toolCallResponse("bash", "c1"),
+			{Content: "Permission was denied.\n" + issueJSON, DoneReason: "stop"},
+		},
+	}
+
+	result, err := RunLoop(context.Background(), RunLoopConfig{
+		MaxTurns: 5,
+		Backend:  mb,
+		Tools:    reg,
+		Gate:     gate,
+		Messages: []backend.Message{{Role: "user", Content: "list my agents"}},
+		OnToken:  func(tok string) { streamed.WriteString(tok) },
+	})
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+	if strings.Contains(result.FinalContent, "gh_issue_create") || strings.Contains(result.FinalContent, `"name"`) {
+		t.Errorf("FinalContent leaked harness JSON: %q", result.FinalContent)
+	}
+	if visible := backend.VisibleAssistantContentAfterDeny(result.FinalContent); strings.Contains(visible, "gh_issue_create") {
+		t.Errorf("VisibleAssistantContentAfterDeny leaked JSON: %q", visible)
+	}
+	if !strings.Contains(result.FinalContent, "Permission was denied") {
+		t.Errorf("prose missing from FinalContent: %q", result.FinalContent)
+	}
+	if tool.callCount != 0 {
+		t.Errorf("denied bash must not execute, callCount=%d", tool.callCount)
+	}
+}
+
 // TestRunLoop_PermissionGateAllowsReadTool verifies that a Gate configured with
 // skipAll=false still allows read-level tools without a promptFunc.
 func TestRunLoop_PermissionGateAllowsReadTool(t *testing.T) {

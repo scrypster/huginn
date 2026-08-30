@@ -132,10 +132,15 @@ can reach a production AWS account, your primary GitHub organization, or your
 company Slack should have `approval_gate: true`. Reads are free; you are only
 adding a checkpoint for writes.
 
-**An agent with no toolbelt can use ALL connections.** If you leave the
-toolbelt empty, the agent has access to every connection configured on your
-machine. This is the default for backward compatibility, but it should be an
-explicit choice, not an accident. Review agents with empty toolbelts regularly.
+**An empty toolbelt grants no external connections.** That is default-deny:
+the agent keeps built-in tools you listed in `local_tools` plus always-injected
+delegation and vault tools, but it cannot call GitHub, AWS, Slack, or any other
+provider. Auto-approve / `--dangerously-skip-permissions` does not change that
+— skipping the approval prompt is not the same as allowing every provider.
+
+To grant every configured connection, add an explicit wildcard entry:
+`{ "provider": "*", "connection_id": "*" }`. Review wildcard toolbelts
+regularly; they are a conscious choice, not the default.
 
 **Use separate connection IDs for prod and non-prod.** Set up `aws-prod` and
 `aws-staging` as distinct connections. Assign only `aws-staging` to agents

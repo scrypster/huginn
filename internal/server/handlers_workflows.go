@@ -240,6 +240,39 @@ func (s *Server) validateWorkflowAgentsAndConnections(wf *scheduler.Workflow) er
 	return nil
 }
 
+// validateWorkflowCompanyWall enforces: a company-scoped workflow can only
+// wake agents seated in that company. Desk-level (empty company_id) is open.
+// Unknown company_id is a client error. If companies are not configured the
+// check is skipped (graceful).
+func (s *Server) validateWorkflowCompanyWall(wf *scheduler.Workflow) error {
+	companyID := strings.TrimSpace(wf.CompanyID)
+	if companyID == "" {
+		return nil
+	}
+	cs := s.companyAPI()
+	if cs == nil {
+		return nil
+	}
+	co, err := cs.GetCompany(companyID)
+	if err != nil || co == nil {
+		return fmt.Errorf("unknown company_id %q", companyID)
+	}
+	for _, step := range wf.Steps {
+		agent := strings.TrimSpace(step.Agent)
+		if agent == "" {
+			continue
+		}
+		ok, err := cs.AgentInCompany(agent, companyID)
+		if err != nil {
+			return fmt.Errorf("company wall: %w", err)
+		}
+		if !ok {
+			return scheduler.ErrCompanyWall(co.Name, agent)
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	dir := filepath.Join(s.huginnDir, "workflows")
 	workflows, err := scheduler.LoadWorkflows(dir)
@@ -272,6 +305,7 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, scheduler.MaxWorkflowFileBytes)
 	var wf scheduler.Workflow
 	if err := json.NewDecoder(r.Body).Decode(&wf); err != nil {
 		jsonError(w, 400, "invalid JSON: "+err.Error())
@@ -282,6 +316,10 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.validateWorkflowAgentsAndConnections(&wf); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
+	if err := s.validateWorkflowCompanyWall(&wf); err != nil {
 		jsonError(w, 422, "invalid workflow: "+err.Error())
 		return
 	}
@@ -298,8 +336,20 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	// Clamp timeout_minutes to the server-enforced safe range [0, 1440].
 	wf.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(wf.TimeoutMinutes)
+	if strings.TrimSpace(wf.ID) != "" {
+		for _, existing := range allWFs {
+			if existing != nil && existing.ID == wf.ID {
+				jsonError(w, http.StatusConflict, fmt.Sprintf("workflow id %q already exists", wf.ID))
+				return
+			}
+		}
+	}
 	if wf.ID == "" {
 		wf.ID = notification.NewID()
+	}
+	if !scheduler.ValidWorkflowID(wf.ID) {
+		jsonError(w, 400, "invalid workflow id: use a bare name like morning-standup (no path)")
+		return
 	}
 	now := time.Now().UTC()
 	wf.CreatedAt = now
@@ -331,6 +381,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	r.Body = http.MaxBytesReader(w, r.Body, scheduler.MaxWorkflowFileBytes)
 	var updates scheduler.Workflow
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		jsonError(w, 400, "invalid JSON: "+err.Error())
@@ -341,6 +392,10 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.validateWorkflowAgentsAndConnections(&updates); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
+	if err := s.validateWorkflowCompanyWall(&updates); err != nil {
 		jsonError(w, 422, "invalid workflow: "+err.Error())
 		return
 	}
@@ -466,6 +521,10 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == nil {
 		jsonError(w, 404, "workflow not found")
+		return
+	}
+	if err := s.validateWorkflowCompanyWall(target); err != nil {
+		jsonError(w, 409, err.Error())
 		return
 	}
 	sched := s.requireScheduler(w)
@@ -609,6 +668,10 @@ func (s *Server) handleTriggerWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == nil {
 		jsonError(w, 404, "workflow not found")
+		return
+	}
+	if err := s.validateWorkflowCompanyWall(target); err != nil {
+		jsonError(w, 409, err.Error())
 		return
 	}
 	sched := s.requireScheduler(w)
@@ -1064,4 +1127,122 @@ func (s *Server) handleValidateWorkflow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	jsonOK(w, map[string]bool{"valid": true})
+}
+
+// handleDropWorkflow writes a YAML/JSON file into the workflows drop dir
+// (same source of truth as write_workflow / the watcher). First-click:
+// drop a pipeline file on the Workflows page.
+func (s *Server) handleDropWorkflow(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, scheduler.MaxWorkflowFileBytes+4096)
+	var req struct {
+		Filename string `json:"filename"`
+		Content  string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	filename := strings.TrimSpace(req.Filename)
+	if filename == "" || filename == "." || filename == ".." || strings.ContainsAny(filename, `/\`) {
+		jsonError(w, 400, "filename must be a bare name like pipeline.yaml (no path)")
+		return
+	}
+	filename = filepath.Base(filename)
+	if !scheduler.IsWorkflowFilename(filename) {
+		jsonError(w, 400, "filename must end in .yaml, .yml, or .json")
+		return
+	}
+	if int64(len(req.Content)) > scheduler.MaxWorkflowFileBytes {
+		jsonError(w, 400, fmt.Sprintf("content exceeds %d byte limit", scheduler.MaxWorkflowFileBytes))
+		return
+	}
+	wf, err := scheduler.ParseWorkflow([]byte(req.Content), filename)
+	if err != nil {
+		jsonError(w, 400, "invalid workflow: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(wf.ID) == "" {
+		ext := strings.ToLower(filepath.Ext(filename))
+		wf.ID = strings.TrimSuffix(filename, ext)
+	}
+	if !scheduler.ValidWorkflowID(wf.ID) {
+		jsonError(w, 400, "invalid workflow id: use a bare name like morning-standup (no path)")
+		return
+	}
+	if err := validateWorkflow(wf); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
+	if err := s.validateWorkflowAgentsAndConnections(wf); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
+	if err := s.validateWorkflowCompanyWall(wf); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
+	dir := filepath.Join(s.huginnDir, "workflows")
+	allWFs, loadErr := scheduler.LoadWorkflows(dir)
+	if loadErr != nil {
+		jsonError(w, 500, "load workflows: "+loadErr.Error())
+		return
+	}
+	if err := validateSubWorkflowCycles(wf, allWFs); err != nil {
+		jsonError(w, 422, "invalid workflow: "+err.Error())
+		return
+	}
+	for _, existing := range allWFs {
+		if existing != nil && existing.ID == wf.ID {
+			jsonError(w, http.StatusConflict, fmt.Sprintf("workflow id %q already exists", wf.ID))
+			return
+		}
+	}
+	wf.TimeoutMinutes = scheduler.ValidateWorkflowTimeout(wf.TimeoutMinutes)
+	now := time.Now().UTC()
+	if wf.CreatedAt.IsZero() {
+		wf.CreatedAt = now
+	}
+	wf.UpdatedAt = now
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		jsonError(w, 500, "create workflows dir: "+err.Error())
+		return
+	}
+	dest := filepath.Join(dir, filename)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	absDest, err := filepath.Abs(dest)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	rel, err := filepath.Rel(absDir, absDest)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		jsonError(w, 400, "filename must be a bare name like pipeline.yaml (no path)")
+		return
+	}
+	tmp := dest + ".tmp"
+	if err := os.WriteFile(tmp, []byte(req.Content), 0o600); err != nil {
+		jsonError(w, 500, "write workflow: "+err.Error())
+		return
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		jsonError(w, 500, "write workflow: "+err.Error())
+		return
+	}
+	wf.FilePath = dest
+	s.mu.Lock()
+	sched := s.sched
+	s.mu.Unlock()
+	if sched != nil && wf.Enabled {
+		if err := sched.RegisterWorkflow(wf); err != nil {
+			_ = os.Remove(dest)
+			jsonError(w, 500, "register workflow: "+err.Error())
+			return
+		}
+	}
+	jsonOK(w, wf)
 }

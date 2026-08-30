@@ -273,6 +273,8 @@ export function useThreads() {
           existing.TokensUsed = t.TokensUsed
           existing.TokenBudget = t.TokenBudget
           if (t.Summary) existing.Summary = t.Summary
+          if (t.IsSpecialist) existing.IsSpecialist = t.IsSpecialist
+          if (t.ModelID) existing.ModelID = t.ModelID
           if (isRunning(existing)) startTicker(sessionId, t.ID)
         }
       }

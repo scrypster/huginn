@@ -14,12 +14,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scrypster/huginn/internal/agent"
 	"github.com/scrypster/huginn/internal/agents"
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/logger"
 	"github.com/scrypster/huginn/internal/relay"
 	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/spaces"
+	"github.com/scrypster/huginn/internal/stats"
 	"github.com/scrypster/huginn/internal/threadmgr"
 )
 
@@ -223,6 +226,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.invalidateSessionCountsCache()
 	jsonOK(w, map[string]string{"session_id": sess.ID})
 }
 
@@ -284,6 +288,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, 500, "archive session: "+err.Error())
 			return
 		}
+		s.invalidateSessionCountsCache()
 		jsonOK(w, map[string]any{"deleted": true, "permanent": false, "archived": true})
 		return
 	}
@@ -301,6 +306,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	// so a recycled session ID starts fresh.
 	s.cancelChatRun(id)
 	s.wsHub.DeleteSessionSeq(id)
+	s.invalidateSessionCountsCache()
 	jsonOK(w, map[string]any{"deleted": true})
 }
 
@@ -314,6 +320,12 @@ func redactAgentDef(a agents.AgentDef) agents.AgentDef {
 	// Normalize nil to empty slice to avoid null in JSON response.
 	if a.LocalTools == nil {
 		a.LocalTools = []string{}
+	}
+	// Legacy YAML often has no description key. Fill a display fallback from
+	// the system prompt so list/GET never surface an empty description when a
+	// role blurb can be derived. Disk is unchanged until the next save.
+	if a.Description == "" {
+		a.Description = agents.ExtractRoleBlurb(a.SystemPrompt, "")
 	}
 	return a
 }
@@ -356,121 +368,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	// Ensure the name matches the URL path
 	if incoming.Name == "" {
 		incoming.Name = name
 	}
-
-	// Load existing agent config once for use in multiple checks below.
-	existingCfg, _ := agents.LoadAgents()
-	if existingCfg == nil {
-		existingCfg = agents.DefaultAgentsConfig()
-	}
-
-	// Find the existing agent record (case-insensitive match on URL name).
-	var existingAgent *agents.AgentDef
-	for i := range existingCfg.Agents {
-		if strings.EqualFold(existingCfg.Agents[i].Name, name) {
-			existingAgent = &existingCfg.Agents[i]
-			break
-		}
-	}
-
-	// If the incoming APIKey is the [REDACTED] sentinel, preserve the real key
-	// from the existing agent record (GET → PUT round-trip safety).
-	if incoming.APIKey == "[REDACTED]" && existingAgent != nil {
-		incoming.APIKey = existingAgent.APIKey
-	}
-
-	// Optimistic locking: if the client sends Version > 0, it must match the
-	// stored version. Version == 0 means "skip check" (last-writer-wins).
-	if incoming.Version > 0 && existingAgent != nil && incoming.Version != existingAgent.Version {
-		jsonError(w, 409, fmt.Sprintf("agent version conflict: stored=%d, submitted=%d — reload and retry",
-			existingAgent.Version, incoming.Version))
+	if _, err := s.persistAgent(incoming, name); err != nil {
+		writePersistError(w, err)
 		return
 	}
-
-	// Guard against rename collisions: if the name is changing, reject if target already exists.
-	// Also guard against duplicate names when creating a NEW agent (existingAgent is nil).
-	isRename := !strings.EqualFold(incoming.Name, name)
-	isCreation := existingAgent == nil
-	if isRename || isCreation {
-		for _, a := range existingCfg.Agents {
-			if strings.EqualFold(a.Name, incoming.Name) {
-				// Skip self when checking for rename (allow non-changing saves).
-				if isRename && strings.EqualFold(a.Name, name) {
-					continue
-				}
-				jsonError(w, 409, fmt.Sprintf("agent %q already exists", incoming.Name))
-				return
-			}
-		}
-	}
-
-	// Vault name collision check: reject if the incoming VaultName is already
-	// claimed by a different agent. We skip the agent currently being updated
-	// (identified by the URL name) to allow non-changing saves.
-	if err := agents.CheckVaultNameCollision(incoming, name, "", existingCfg.Agents); err != nil {
-		jsonError(w, 422, err.Error())
-		return
-	}
-
-	// Infer provider from model name when the client doesn't supply one.
-	if incoming.Provider == "" && incoming.Model != "" {
-		incoming.Provider = agents.InferProvider(incoming.Model)
-	}
-
-	// Translate frontend memory_type enum to canonical fields before validation/save.
-	if err := incoming.ApplyMemoryType(); err != nil {
-		jsonError(w, 400, "invalid memory_type: "+err.Error())
-		return
-	}
-	if err := incoming.Validate(); err != nil {
-		jsonError(w, 422, "invalid agent: "+err.Error())
-		return
-	}
-	toolbeltResult, err := s.evaluateToolbelt(incoming.Toolbelt)
-	if err != nil {
-		jsonError(w, 500, "validate toolbelt: "+err.Error())
-		return
-	}
-	if !toolbeltResult.Valid {
-		if denied, ok := toolbeltResult.FirstDenied(); ok {
-			jsonError(w, 422, fmt.Sprintf("invalid toolbelt: %s (%s)", denied.Reason, denied.ReasonCode))
-			return
-		}
-		jsonError(w, 422, "invalid toolbelt")
-		return
-	}
-	if err := agents.SaveAgentDefault(incoming); err != nil {
-		jsonError(w, 500, "save agent: "+err.Error())
-		return
-	}
-	// If this was a rename, delete the old agent file.
-	if isRename {
-		_ = agents.DeleteAgentDefault(name) // best effort; ignore error
-	}
-	// Heartbeat lifecycle: sync or remove the managed workflow YAML.
-	if isRename {
-		_ = agents.RenameHeartbeatYAMLDefault(name, incoming) // best effort
-	} else {
-		_ = agents.SyncHeartbeatYAMLDefault(incoming) // best effort
-	}
-	// Refresh the live agent registry so the new/updated agent is immediately
-	// visible to delegation, mention parsing, and space rosters (issue #124).
-	s.notifyAgentsChanged()
-	// Broadcast so all connected frontends refresh their agent list.
-	action := "updated"
-	if existingAgent == nil {
-		action = "created"
-	}
-	s.BroadcastWS(WSMessage{
-		Type: "agent_changed",
-		Payload: map[string]any{
-			"name":   incoming.Name,
-			"action": action,
-		},
-	})
 	jsonOK(w, map[string]string{"saved": incoming.Name})
 }
 
@@ -497,29 +401,36 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	} else {
 		defer resp.Body.Close()
 		var result struct {
-			Models []any `json:"models"`
+			Models []map[string]any `json:"models"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			ollamaErr = "decode error: " + err.Error()
 		} else {
-			ollamaModels = result.Models
+			ollamaModels = enrichOllamaModels(r.Context(), s, baseURL, result.Models)
 		}
 	}
 
 	// Built-in llama.cpp managed models.
 	type builtinModel struct {
-		Name      string `json:"name"`
-		Source    string `json:"source"`
-		SizeBytes int64  `json:"size_bytes,omitempty"`
+		Name               string `json:"name"`
+		Source             string `json:"source"`
+		SizeBytes          int64  `json:"size_bytes,omitempty"`
+		SupportsTools      bool   `json:"supportsTools"`
+		SupportsDelegation bool   `json:"supportsDelegation"`
+		Tier               string `json:"tier,omitempty"`
 	}
 	var builtinModels []builtinModel
 	if s.modelStore != nil {
 		if installed, err := s.modelStore.Installed(); err == nil {
 			for name, entry := range installed {
+				caps := inferListedModelCaps(name, true)
 				builtinModels = append(builtinModels, builtinModel{
-					Name:      name,
-					Source:    "built-in",
-					SizeBytes: entry.SizeBytes,
+					Name:               name,
+					Source:             "built-in",
+					SizeBytes:          entry.SizeBytes,
+					SupportsTools:      caps.SupportsTools,
+					SupportsDelegation: caps.SupportsDelegation,
+					Tier:               string(caps.Tier),
 				})
 			}
 		}
@@ -533,7 +444,14 @@ func (s *Server) handleListAvailableModels(w http.ResponseWriter, r *http.Reques
 	var cloudModels []any
 	addProvider := func(name string, models []providerModel) {
 		for _, m := range models {
-			cloudModels = append(cloudModels, map[string]any{"name": m.ID, "source": name})
+			caps := inferListedModelCaps(m.ID, true)
+			cloudModels = append(cloudModels, map[string]any{
+				"name":               m.ID,
+				"source":             name,
+				"supportsTools":      caps.SupportsTools,
+				"supportsDelegation": caps.SupportsDelegation,
+				"tier":               caps.Tier,
+			})
 		}
 	}
 
@@ -663,13 +581,24 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		TokensUsed      int                      `json:"TokensUsed"`
 		TokenBudget     int                      `json:"TokenBudget"`
 		ParentMessageID string                   `json:"ParentMessageID,omitempty"`
+		// IsSpecialist and ModelID (S4): a one-off spawn_specialist thread
+		// carries these so the frontend's ThreadCard can render a
+		// "temporary" pill and the model id — surfaced only from the
+		// AgentRegistry's ephemeral overlay (agents.AgentRegistry.IsEphemeral),
+		// never a persisted Thread field.
+		IsSpecialist bool   `json:"IsSpecialist,omitempty"`
+		ModelID      string `json:"ModelID,omitempty"`
+	}
+	var agentReg *agents.AgentRegistry
+	if s.orch != nil {
+		agentReg = s.orch.GetAgentRegistry()
 	}
 	out := make([]threadListItem, 0, len(threads))
 	for _, t := range threads {
 		if t == nil {
 			continue
 		}
-		out = append(out, threadListItem{
+		item := threadListItem{
 			ID:              t.ID,
 			SessionID:       t.SessionID,
 			AgentID:         t.AgentID,
@@ -681,7 +610,21 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 			TokensUsed:      t.TokensUsed,
 			TokenBudget:     t.TokenBudget,
 			ParentMessageID: t.ParentMessageID,
-		})
+		}
+		// Prefer the DURABLE thread marker (survives overlay eviction that
+		// fires on terminal status) over the ephemeral-registry lookup, which
+		// goes false the moment the specialist is evicted — a cost reviewer
+		// opening the panel after completion still needs the attribution.
+		if t.Specialist {
+			item.IsSpecialist = true
+			item.ModelID = t.SpecialistModel
+		} else if agentReg != nil && agentReg.IsEphemeral(t.AgentID) {
+			item.IsSpecialist = true
+			if specialist, ok := agentReg.ByName(t.AgentID); ok {
+				item.ModelID = specialist.ModelID
+			}
+		}
+		out = append(out, item)
 	}
 	jsonOK(w, out)
 }
@@ -738,6 +681,12 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 //	{"content": "your message"}
 //
 // Response: {"content": "<assistant reply>"}
+//
+// Session lookup uses the persisted store (hallway/space sessions live there).
+// Orchestrator.sessions is ephemeral and is not populated for store-backed
+// sessions after restart or Vue-created DMs. ChatForSession looks only at that
+// map and 500s; WS ChatWithAgent hydrates a missing in-memory session and runs
+// the full agent turn (tools / desk-mesh A2A). REST must do the same.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -760,32 +709,79 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.sessionKnown(id) {
+		jsonError(w, 404, "session not found")
+		return
+	}
+
+	ag := s.resolveAgentForMessage(id, body.Content)
+	if ag != nil && strings.TrimSpace(ag.Name) != "" {
+		spaceID := s.sessionSpaceID(id)
+		s.emitAgentThinking(spaceID, id, ag.Name, true)
+		defer s.emitAgentThinking(spaceID, id, ag.Name, false)
+	}
+
+	userMsgID := session.NewID()
+	userPersisted := s.persistInboundUserMessage(id, userMsgID, body.Content)
+
+	if s.mentionDelegate != nil {
+		spawnCtx := s.Context()
+		if spawnCtx == nil {
+			spawnCtx = r.Context()
+		}
+		s.spawnAdditionalUserMentions(spawnCtx, id, body.Content, userMsgID, ag)
+	}
+
+	chatCtx, run := s.beginChatRun(id, "")
+	defer s.endChatRun(id, run)
+	chatCtx = s.InjectSpaceContext(chatCtx, id, ag)
+	chatCtx = agent.SetParentMessageID(chatCtx, userMsgID)
+	if ag != nil {
+		chatCtx = threadmgr.SetCallingAgent(chatCtx, ag.Name)
+	}
+
 	var buf strings.Builder
-	err := s.orch.ChatForSession(r.Context(), id, body.Content,
-		func(token string) { buf.WriteString(token) },
-		nil,
-	)
+	onToken := func(token string) { buf.WriteString(token) }
+	var err error
+	if ag != nil {
+		err = s.orch.ChatWithAgent(chatCtx, ag, body.Content, id, onToken, nil, nil)
+	} else {
+		// Same fallback as WS chat when no agents are configured.
+		err = s.orch.Chat(chatCtx, body.Content, onToken, nil)
+	}
 	if err != nil {
 		jsonError(w, 500, "chat error: "+err.Error())
 		return
 	}
-	// Persist user + assistant messages and emit space_activity.
+	// Persist assistant (user row was written at accept so mid-turn Appends
+	// cannot win seq). Fallback-persist the user row if accept write failed.
 	if s.store != nil {
 		if sess, loadErr := s.store.Load(id); loadErr == nil {
+			ag := s.resolveAgent(id)
 			agentName := ""
-			if ag := s.resolveAgent(id); ag != nil {
+			if ag != nil {
 				agentName = ag.Name
 			}
-			now := time.Now().UTC()
-			if appendErr := s.store.Append(sess, session.SessionMessage{
-				ID: session.NewID(), Role: "user", Content: body.Content, Ts: now,
-			}); appendErr != nil {
-				slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
-			}
-			if buf.Len() > 0 {
+			if !userPersisted {
 				if appendErr := s.store.Append(sess, session.SessionMessage{
-					ID: session.NewID(), Role: "assistant", Content: buf.String(), Agent: agentName, Ts: time.Now().UTC(),
+					ID: userMsgID, Role: "user", Content: body.Content, Ts: time.Now().UTC(),
 				}); appendErr != nil {
+					slog.Error("handleSendMessage: failed to persist user message", "session_id", id, "err", appendErr)
+				}
+			}
+			// Turn is over. Leftover-only speech can strip to empty; if this
+			// turn involved Sam on a hostname-style ask, persist the teammate
+			// line. Never persist an empty assistant row.
+			visible := backend.PersistVisibleAssistantContent(buf.String(), body.Content)
+			if visible == "" {
+				visible = s.fillEmptyHarnessPersist(visible, body.Content, sess)
+			}
+			if visible != "" {
+				assistantMsg := session.SessionMessage{
+					ID: session.NewID(), Role: "assistant", Content: visible, Agent: agentName, Ts: time.Now().UTC(),
+				}
+				s.applyKnownUsage(&assistantMsg, id, persistModelName(sess, ag))
+				if appendErr := s.store.Append(sess, assistantMsg); appendErr != nil {
 					slog.Error("handleSendMessage: failed to persist assistant message", "session_id", id, "err", appendErr)
 				}
 			}
@@ -793,6 +789,22 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, map[string]string{"content": buf.String()})
+}
+
+// sessionKnown reports whether id is a real session the REST chat path may
+// run against. The persisted store is the source of truth for hallway/space
+// sessions; the orchestrator map only covers in-process (often orch-only)
+// sessions created via POST /sessions without a space_id.
+func (s *Server) sessionKnown(id string) bool {
+	if s.store != nil && s.store.Exists(id) {
+		return true
+	}
+	if s.orch != nil {
+		if _, ok := s.orch.GetSession(id); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
@@ -819,14 +831,63 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check if the agent leads any company. Deleting the lead out from under
+	// a company would orphan it (UnseatMember reassigns the lead when a
+	// non-lead member is removed, but there is no seated member left to
+	// reassign to here) — block with a clear, actionable error instead.
+	cs := s.companyAPI()
+	var companies []*spaces.Company
+	if cs != nil {
+		if list, err := cs.ListCompanies(); err == nil {
+			companies = list
+		}
+		var leadOf []string
+		for _, c := range companies {
+			if c != nil && strings.EqualFold(strings.TrimSpace(c.Lead), name) {
+				leadOf = append(leadOf, c.Name)
+			}
+		}
+		if len(leadOf) > 0 {
+			jsonError(w, 409, fmt.Sprintf("cannot delete agent %q: reassign the lead in %v before deleting", name, leadOf))
+			return
+		}
+	}
+
 	if err := agents.DeleteAgentDefault(name); err != nil {
 		jsonError(w, 404, err.Error())
 		return
 	}
 	_ = agents.DeleteHeartbeatYAMLDefault(name) // best effort; ignore error
+
+	// Remove the agent from every company roster it was seated in so it does
+	// not linger as a ghost member (and thus in the UI rail) after deletion.
+	if cs != nil {
+		for _, c := range companies {
+			if c == nil {
+				continue
+			}
+			for _, m := range c.Members {
+				if strings.EqualFold(strings.TrimSpace(m), name) {
+					if err := cs.UnseatMember(c.ID, name); err != nil {
+						slog.Warn("handleDeleteAgent: failed to unseat from company", "agent", name, "company_id", c.ID, "err", err)
+					}
+					break
+				}
+			}
+		}
+	}
+	// Remove the agent from every SPACE membership list too — a deleted agent
+	// lingering in space_members keeps ghost roster rows, wrong header counts,
+	// and a mention picker that disagrees with the company roster.
+	if s.spaceStore != nil {
+		if _, err := s.spaceStore.RemoveAgentFromAllSpaces(name); err != nil {
+			slog.Warn("handleDeleteAgent: failed to remove from spaces", "agent", name, "err", err)
+		}
+	}
 	// Refresh the live agent registry so the deleted agent immediately stops
 	// resolving for delegation and mention parsing (issue #124).
 	s.notifyAgentsChanged()
+	s.logEntityAudit("agent_delete", "deleted agent "+name, map[string]any{"agent": name})
 	// Broadcast so all connected frontends remove the deleted agent.
 	s.BroadcastWS(WSMessage{
 		Type: "agent_changed",
@@ -967,20 +1028,185 @@ func (s *Server) handleRuntimeStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
-	if s.ca == nil {
-		jsonOK(w, map[string]any{"session_total_usd": 0.0})
-		return
+// isLocalBackend reports whether the configured LLM backend is a local
+// model — one for which $ pricing is unknowable (builtin llama.cpp, or an
+// external endpoint pointed at an "ollama" provider). For these, token
+// counts are the honest cost signal, not a $0.00 that reads as "no usage".
+func isLocalBackend(cfg config.BackendConfig) bool {
+	if cfg.Type == "managed" {
+		return true
 	}
-	jsonOK(w, map[string]any{"session_total_usd": s.ca.Total()})
+	return strings.EqualFold(cfg.Provider, "ollama")
+}
+
+// costTokenTotals sums prompt/completion tokens recorded in cost_history.
+// This is the same table handleStatsHistory reads from, so it reflects real
+// usage even for local models whose $ cost is always 0.
+func (s *Server) costTokenTotals() (prompt, completion int) {
+	if s.db == nil {
+		return 0, 0
+	}
+	rdb := s.db.Read()
+	if rdb == nil {
+		return 0, 0
+	}
+	_ = rdb.QueryRow(`SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0) FROM cost_history`).
+		Scan(&prompt, &completion) // nolint:errcheck — zeros are fine on error
+	return prompt, completion
+}
+
+func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	local := isLocalBackend(s.cfg.Backend)
+	s.mu.Unlock()
+
+	promptTotal, completionTotal := s.costTokenTotals()
+
+	var total float64
+	if s.ca != nil {
+		total = s.ca.Total()
+	}
+
+	jsonOK(w, map[string]any{
+		"session_total_usd":       total,
+		"prompt_tokens_total":     promptTotal,
+		"completion_tokens_total": completionTotal,
+		"is_local":                local,
+	})
+}
+
+// activeSessionWindow is how recently a session must have been touched to
+// count as "active" when it has no run currently in flight. Chosen to match
+// the human sense of "someone is here right now", not "ever used".
+const activeSessionWindow = 15 * time.Minute
+
+// sessionCountsTTL bounds how often computeSessionCounts actually reloads
+// and reparses every session manifest. /api/v1/stats is polled frequently
+// by the UI; without this a poll storm turns into a full manifest scan per
+// request. 10s keeps counts fresh enough for a "who's active" display
+// without re-reading the store on every poll.
+const sessionCountsTTL = 10 * time.Second
+
+// sessionCountsCacheState holds the memoized result of computeSessionCounts.
+type sessionCountsCacheState struct {
+	total, active int
+	computedAt    time.Time
+}
+
+// invalidateSessionCountsCache forces the next computeSessionCounts call to
+// reload from the store rather than serve a stale cached count. Called on
+// session create/delete so the TTL window doesn't hide an immediate count
+// change; between those events the TTL alone bounds staleness.
+func (s *Server) invalidateSessionCountsCache() {
+	s.sessionCountsMu.Lock()
+	s.sessionCountsCache = sessionCountsCacheState{}
+	s.sessionCountsMu.Unlock()
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	prompt, completion := s.orch.LastUsage()
+	var prompt, completion any
+	if s.orch != nil {
+		p, c := s.orch.LastUsage()
+		if p > 0 || c > 0 {
+			prompt, completion = p, c
+		}
+	}
+
+	totalSessions, activeSessions := s.computeSessionCounts()
+
 	jsonOK(w, map[string]any{
 		"last_prompt_tokens":     prompt,
 		"last_completion_tokens": completion,
+		"total_sessions":         totalSessions,
+		"active_sessions":        activeSessions,
 	})
+}
+
+// computeSessionCounts returns the honest total and active session counts.
+// A session counts as active when it has a run currently in flight (per the
+// thread manager) OR it has had activity within activeSessionWindow. A
+// session's stored Status field is not used for this — it is set to
+// "active" at creation and never meaningfully transitions, so it cannot
+// distinguish a live session from one that has been quiet for days.
+func (s *Server) computeSessionCounts() (total, active int) {
+	s.sessionCountsMu.Lock()
+	defer s.sessionCountsMu.Unlock()
+
+	if !s.sessionCountsCache.computedAt.IsZero() && time.Since(s.sessionCountsCache.computedAt) < sessionCountsTTL {
+		return s.sessionCountsCache.total, s.sessionCountsCache.active
+	}
+
+	total, active = s.computeSessionCountsUncached()
+	s.sessionCountsCache = sessionCountsCacheState{total: total, active: active, computedAt: time.Now()}
+	return total, active
+}
+
+// computeSessionCountsUncached does the actual manifest scan. Split out from
+// computeSessionCounts so the TTL-cache wrapper stays simple and this half
+// stays independently testable.
+func (s *Server) computeSessionCountsUncached() (total, active int) {
+	list := s.sessionCountsLoader
+	if list == nil {
+		if s.store == nil {
+			return 0, 0
+		}
+		list = s.store.List
+	}
+	manifests, err := list()
+	if err != nil {
+		return 0, 0
+	}
+	total = len(manifests)
+	now := time.Now().UTC()
+	for _, m := range manifests {
+		inFlight := s.tm != nil && s.tm.ActiveCount(m.SessionID) > 0
+		recent := now.Sub(m.UpdatedAt.UTC()) <= activeSessionWindow
+		if inFlight || recent {
+			active++
+		}
+	}
+	return total, active
+}
+
+func persistModelName(sess *session.Session, ag *agents.Agent) string {
+	if ag != nil {
+		if id := ag.GetModelID(); id != "" {
+			return id
+		}
+	}
+	if sess != nil {
+		return sess.Manifest.Model
+	}
+	return ""
+}
+
+// applyKnownUsage stamps LastUsage onto the assistant message and records it
+// for cost_history when the backend reported tokens. A 0/0 usage is treated
+// as unknown — a lying zero is worse than a gap.
+func (s *Server) applyKnownUsage(msg *session.SessionMessage, sessionID, model string) {
+	if s.orch == nil || msg == nil {
+		return
+	}
+	prompt, completion := s.orch.LastUsage()
+	if prompt == 0 && completion == 0 {
+		return
+	}
+	msg.PromptTok = prompt
+	msg.CompTok = completion
+	if model != "" {
+		msg.ModelName = model
+	}
+	if s.ca != nil {
+		s.ca.Record(sessionID, prompt, completion, model)
+		return
+	}
+	if s.statsPersister != nil {
+		s.statsPersister.EnqueueCost(stats.CostEvent{
+			SessionID:        sessionID,
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+		})
+	}
 }
 
 // handleGetLogLevel returns the current log level.
@@ -1068,8 +1294,38 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, 400, "read body: "+err.Error())
+		return
+	}
+	// Decode onto a copy of the live config, not a zero-value struct.
+	// encoding/json only sets the fields present in the JSON — decoding a
+	// partial body (e.g. {"tools_enabled":true} from a curl one-liner) onto
+	// a pre-populated struct gives merge semantics, so every omitted field
+	// (reasoner_model, web_ui, ...) keeps its current value instead of being
+	// zeroed (Opus vet, 2026-08-28 — BLOCK-level finding).
+	//
+	// The copy goes through a JSON round trip rather than a plain struct
+	// assignment (newCfg := s.cfg) so slice/map fields (MCPServers, ...) get
+	// independent backing storage. encoding/json reuses an existing slice's
+	// backing array when decoding into it, so unmarshaling the request body
+	// straight into a shallow struct copy could mutate s.cfg's live slices
+	// in place — outside the lock and while other requests read s.cfg under
+	// RLock.
+	s.mu.Lock()
+	liveJSON, mErr := json.Marshal(&s.cfg)
+	s.mu.Unlock()
+	if mErr != nil {
+		jsonError(w, 500, "internal: snapshot live config: "+mErr.Error())
+		return
+	}
 	var newCfg config.Config
-	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+	if err := json.Unmarshal(liveJSON, &newCfg); err != nil {
+		jsonError(w, 500, "internal: snapshot live config: "+err.Error())
+		return
+	}
+	if err := json.Unmarshal(body, &newCfg); err != nil {
 		jsonError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
@@ -1083,6 +1339,21 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if newCfg.Backend.APIKey == "[REDACTED]" {
 		newCfg.Backend.APIKey = s.cfg.Backend.APIKey
 	}
+	// Restore redacted OAuth client secrets. GET redacts all five
+	// integrations.*.client_secret; the shipped Settings form loads that
+	// redacted value and sends it straight back — without this restore,
+	// opening Settings and clicking Save wrote the literal string
+	// "[REDACTED]" over every OAuth secret (Opus vet, 2026-08-28).
+	restoreSecret := func(sent *string, live string) {
+		if *sent == "[REDACTED]" {
+			*sent = live
+		}
+	}
+	restoreSecret(&newCfg.Integrations.Google.ClientSecret, s.cfg.Integrations.Google.ClientSecret)
+	restoreSecret(&newCfg.Integrations.GitHub.ClientSecret, s.cfg.Integrations.GitHub.ClientSecret)
+	restoreSecret(&newCfg.Integrations.Slack.ClientSecret, s.cfg.Integrations.Slack.ClientSecret)
+	restoreSecret(&newCfg.Integrations.Jira.ClientSecret, s.cfg.Integrations.Jira.ClientSecret)
+	restoreSecret(&newCfg.Integrations.Bitbucket.ClientSecret, s.cfg.Integrations.Bitbucket.ClientSecret)
 	// Restore redacted MCP env var values from the live config.
 	// When a client GETs config, secret env vars are returned as KEY=[REDACTED].
 	// If the client sends those values back unchanged, restore the real secrets.
@@ -1124,9 +1395,13 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		newCfg.Backend.APIKey = ref
 	}
-	// Check if restart is needed
+	// Check if restart is needed. MCP servers (e.g. the Settings → Browser
+	// toggle) are started once at boot by StartAll with no hot-reload path,
+	// so an add/remove/edit silently does nothing until the process
+	// restarts unless flagged here.
 	needsRestart := s.cfg.WebUI.Port != newCfg.WebUI.Port ||
-		s.cfg.WebUI.Bind != newCfg.WebUI.Bind
+		s.cfg.WebUI.Bind != newCfg.WebUI.Bind ||
+		!mcpServersEqual(s.cfg.MCPServers, newCfg.MCPServers)
 	s.cfg = newCfg
 	s.mu.Unlock()
 	// Push the updated provider key into the live BackendCache so agents
@@ -1135,8 +1410,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if s.backendCache != nil && newCfg.Backend.Provider != "" && newCfg.Backend.APIKey != "" {
 		s.backendCache.SetProviderKey(newCfg.Backend.Provider, newCfg.Backend.APIKey)
 	}
-	// Save config to disk
-	if err := s.cfg.Save(); err != nil {
+	// Save config to disk. active_session_id is deliberately excluded from
+	// the copy and preserved from the fresh disk read: it is owned by
+	// handleSessionActiveState (and the TUI), not by this settings form, so
+	// a settings PUT built from a stale GET must not revert a session
+	// switch that happened in between.
+	if err := s.updateConfig(func(c *config.Config) {
+		activeSessionID := c.ActiveSessionID
+		*c = newCfg
+		c.ActiveSessionID = activeSessionID
+	}); err != nil {
 		jsonError(w, 500, "save config: "+err.Error())
 		return
 	}

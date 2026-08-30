@@ -69,12 +69,23 @@ func (t *WriteFileTool) Execute(_ context.Context, args map[string]any) ToolResu
 		existingMode = info.Mode()
 	}
 
+	// Capture the pre-write content before overwriting so a before/after diff
+	// can be attached to the result (a missing/unreadable file just means the
+	// diff is presented as a pure addition — not fatal to the write itself).
+	var before string
+	if data, err := os.ReadFile(resolved); err == nil {
+		before = string(data)
+	}
+
 	if err := os.WriteFile(resolved, []byte(content), existingMode); err != nil {
 		return ToolResult{IsError: true, Error: fmt.Sprintf("write_file: %v", err)}
 	}
 
+	metadata := map[string]any{"bytes_written": len(content)}
+	attachDiffMetadata(metadata, filePath, before, content)
+
 	return ToolResult{
 		Output:   fmt.Sprintf("wrote %d bytes to %s", len(content), filePath),
-		Metadata: map[string]any{"bytes_written": len(content)},
+		Metadata: metadata,
 	}
 }

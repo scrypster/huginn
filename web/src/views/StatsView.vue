@@ -55,11 +55,11 @@
           <div class="grid grid-cols-2 gap-3">
             <div class="rounded-xl border border-huginn-border bg-huginn-surface/50 px-4 py-4">
               <p class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest mb-1">Prompt Tokens</p>
-              <p class="text-2xl font-semibold text-huginn-text">{{ (statsData.last_prompt_tokens ?? 0).toLocaleString() }}</p>
+              <p data-testid="last-prompt-tokens" class="text-2xl font-semibold text-huginn-text">{{ formatTokens(statsData.last_prompt_tokens) }}</p>
             </div>
             <div class="rounded-xl border border-huginn-border bg-huginn-surface/50 px-4 py-4">
               <p class="text-[11px] font-semibold text-huginn-muted uppercase tracking-widest mb-1">Completion Tokens</p>
-              <p class="text-2xl font-semibold text-huginn-text">{{ (statsData.last_completion_tokens ?? 0).toLocaleString() }}</p>
+              <p data-testid="last-completion-tokens" class="text-2xl font-semibold text-huginn-text">{{ formatTokens(statsData.last_completion_tokens) }}</p>
             </div>
           </div>
         </section>
@@ -140,7 +140,7 @@
                 />
                 <span class="text-huginn-text">{{ healthData.status }}</span>
               </div>
-              <span class="text-huginn-muted">v{{ healthData.version }}</span>
+              <span class="text-huginn-muted" data-testid="stats-server-version">{{ serverVersionLabel }}</span>
               <span v-if="healthData.backend_status && healthData.backend_status !== 'unknown'"
                 class="px-2 py-0.5 rounded-full text-[10px] border"
                 :class="cbStatusClass(healthData.backend_status)">
@@ -159,6 +159,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../composables/useApi'
+import { formatVersionLabel } from '../utils/honesty'
 
 interface SessionManifest {
   session_id?: string
@@ -176,8 +177,13 @@ interface RankedItem {
   count: number
 }
 
-const statsData = ref<Record<string, number>>({})
-const costData = ref<{ session_total_usd: number } | null>(null)
+const statsData = ref<Record<string, number | null>>({})
+const costData = ref<{
+  session_total_usd: number
+  prompt_tokens_total?: number
+  completion_tokens_total?: number
+  is_local?: boolean
+} | null>(null)
 const healthData = ref<{ status: string; version: string; satellite_connected: boolean; backend_status: string } | null>(null)
 const sessionsData = ref<SessionManifest[]>([])
 const costHistory = ref<Array<{ ts: number; session_id: string; cost_usd: number; prompt_tokens: number; completion_tokens: number }>>([])
@@ -185,21 +191,43 @@ const loading = ref(true)
 const error = ref('')
 const lastRefreshed = ref('')
 
-const totalSessions = computed(() => sessionsData.value.length)
+const serverVersionLabel = computed(() => formatVersionLabel(healthData.value?.version ?? ''))
 
-const activeSessions = computed(() =>
-  sessionsData.value.filter((s) => s.status === 'active').length
+// Total/active session counts come from the server (/api/v1/stats), which
+// defines "active" honestly: a run in flight OR activity in the last 15
+// minutes. The stored per-session `status` field is not a reliable signal —
+// it is set to "active" at creation and never meaningfully transitions — so
+// it is not used here. Fall back to the raw session list length only if the
+// server didn't report a total (e.g. stats endpoint unreachable).
+const totalSessions = computed(() =>
+  typeof statsData.value.total_sessions === 'number'
+    ? statsData.value.total_sessions
+    : sessionsData.value.length
 )
+
+const activeSessions = computed(() => statsData.value.active_sessions ?? 0)
 
 const totalMessages = computed(() =>
   sessionsData.value.reduce((sum, s) => sum + (s.message_count ?? 0), 0)
 )
 
 const formattedCost = computed(() => {
-  const val = costData.value?.session_total_usd
-  if (!val) return '—'
-  return `$${val.toFixed(4)}`
+  const c = costData.value
+  if (!c) return '—'
+  if (c.is_local) {
+    const prompt = c.prompt_tokens_total ?? 0
+    const completion = c.completion_tokens_total ?? 0
+    if (prompt === 0 && completion === 0) return 'n/a (local)'
+    return `n/a (local) · ${(prompt + completion).toLocaleString()} tok`
+  }
+  if (!c.session_total_usd) return '—'
+  return `$${c.session_total_usd.toFixed(4)}`
 })
+
+function formatTokens(n: number | null | undefined): string {
+  if (typeof n !== 'number') return '—'
+  return n.toLocaleString()
+}
 
 function groupBy(field: keyof SessionManifest): RankedItem[] {
   const counts: Record<string, number> = {}
@@ -235,7 +263,7 @@ async function fetchAll() {
   try {
     const since24h = Math.floor(Date.now() / 1000) - 86400
     const [s, c, h, sess, hist] = await Promise.all([
-      api.stats().catch(() => ({} as Record<string, number>)),
+      api.stats().catch(() => ({} as Record<string, number | null>)),
       api.cost().catch(() => null),
       api.health().catch(() => null),
       api.sessions.list().catch(() => [] as Array<Record<string, unknown>>),

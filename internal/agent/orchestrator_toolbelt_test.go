@@ -58,7 +58,7 @@ func TestApplyToolbelt_EmptyGetNoSchemas(t *testing.T) {
 	reg := newTestToolsReg() // has external tools but no builtins
 	ag := &agents.Agent{Name: "test-agent"} // no toolbelt, no local tools
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 0 {
 		t.Errorf("expected 0 schemas with default-deny, got %d", len(schemas))
 	}
@@ -68,7 +68,7 @@ func TestApplyToolbelt_FilteredToProvider(t *testing.T) {
 	reg := newTestToolsReg()
 	ag := agentWithToolbelt([]string{"github"}, false)
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 1 {
 		t.Fatalf("expected 1 schema for github provider, got %d", len(schemas))
 	}
@@ -81,7 +81,7 @@ func TestApplyToolbelt_MultipleProviders(t *testing.T) {
 	reg := newTestToolsReg()
 	ag := agentWithToolbelt([]string{"github", "slack"}, false)
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 2 {
 		t.Errorf("expected 2 schemas for github+slack, got %d", len(schemas))
 	}
@@ -91,7 +91,7 @@ func TestApplyToolbelt_UnknownProvider(t *testing.T) {
 	reg := newTestToolsReg()
 	ag := agentWithToolbelt([]string{"unknown-provider"}, false)
 
-	schemas, _ := applyToolbelt(ag, reg, nil)
+	schemas, _ := applyToolbelt(ag, reg, nil, nil)
 	if len(schemas) != 0 {
 		t.Errorf("expected 0 schemas for unknown provider, got %d", len(schemas))
 	}
@@ -111,7 +111,7 @@ func TestApplyToolbelt_SetsWatchedProviders(t *testing.T) {
 		return permissions.Deny
 	})
 
-	_, agentGate := applyToolbelt(ag, reg, gate)
+	_, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	// With skipAll=true and "github" watched, a PermWrite call for a github
 	// tool should still be prompted (not skipped).
@@ -138,7 +138,7 @@ func TestApplyToolbelt_NoWatchedWhenGateFalse(t *testing.T) {
 		return permissions.Deny
 	})
 
-	_, agentGate := applyToolbelt(ag, reg, gate)
+	_, agentGate := applyToolbelt(ag, reg, gate, nil)
 
 	// With skipAll=true and "github" NOT watched, a PermWrite call should
 	// be allowed without prompting.

@@ -26,6 +26,7 @@ func setupAgentsDir(t *testing.T, agents map[string]string) (agentsDir string) {
 		}
 	}
 	t.Setenv("HUGINN_HOME", fakeHome)
+	t.Setenv("HOME", fakeHome)
 	return agentsDir
 }
 

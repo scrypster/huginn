@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -23,6 +25,7 @@ type Manager struct {
 	client *Client
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
+	opened map[string]bool // fileURI -> didOpen already sent
 }
 
 func NewManager(lang string, cfg ServerConfig) *Manager {
@@ -99,7 +102,31 @@ func (m *Manager) Definition(fileURI string, line, column int) ([]Location, erro
 	if m.client == nil {
 		return nil, fmt.Errorf("lsp: not started")
 	}
+	m.openIfNeeded(fileURI)
 	return m.client.TextDocumentDefinition(fileURI, line, column)
+}
+
+// openIfNeeded sends textDocument/didOpen for fileURI the first time it is
+// referenced, so servers (gopls) that resolve position-based requests
+// against open documents don't silently return an empty result. Best
+// effort: a read failure just skips the open and leaves the underlying
+// request to fail/succeed on its own.
+func (m *Manager) openIfNeeded(fileURI string) {
+	if m.opened == nil {
+		m.opened = make(map[string]bool)
+	}
+	if m.opened[fileURI] {
+		return
+	}
+	path := strings.TrimPrefix(fileURI, "file://")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if err := m.client.DidOpen(fileURI, m.lang, string(content)); err != nil {
+		return
+	}
+	m.opened[fileURI] = true
 }
 
 func (m *Manager) Symbols(query string) ([]SymbolInformation, error) {

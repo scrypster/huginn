@@ -35,6 +35,7 @@ type ContextBuilder struct {
 	skillsFragment string
 	notepads       []*notepad.Notepad
 	gitRoot        string
+	workspaceRoot  string
 	searcher       search.Searcher
 }
 
@@ -75,6 +76,16 @@ func (cb *ContextBuilder) SetGitRoot(root string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.gitRoot = root
+}
+
+// SetWorkspaceRoot sets a fallback workspace root used for loading project
+// instructions (.huginn.md) when no git root is set. Callers that operate
+// outside a git repository (or that haven't wired git detection at all)
+// should set this so .huginn.md still loads in a plain directory.
+func (cb *ContextBuilder) SetWorkspaceRoot(root string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.workspaceRoot = root
 }
 
 // SetSearcher sets the semantic searcher for context retrieval.
@@ -119,6 +130,7 @@ func (cb *ContextBuilder) BuildCtx(ctx context.Context, query string, modelName 
 	// Snapshot mutable fields under the read lock to avoid data races.
 	cb.mu.RLock()
 	gitRoot := cb.gitRoot
+	workspaceRoot := cb.workspaceRoot
 	skillsFragment := cb.skillsFragment
 	notepads := cb.notepads
 	searcher := cb.searcher
@@ -190,6 +202,27 @@ func (cb *ContextBuilder) BuildCtx(ctx context.Context, query string, modelName 
 	// Skills fragment (system prompt injections + workspace rule files).
 	if skillsFragment != "" {
 		result += "\n\n## Skills & Workspace Rules\n" + skillsFragment
+	}
+
+	// Project instructions (.huginn.md / .huginn/instructions.md), loaded here so
+	// every context-build path (web chat, delegated threads, scheduled agents)
+	// gets them consistently — not just the one call site that used to load them
+	// directly (mcp_agent_chat.go).
+	//
+	// Prefer gitRoot (also used for git context above), but fall back to
+	// workspaceRoot when there's no git root — e.g. a plain, non-git
+	// directory, or a caller that only wired workspace detection. Without
+	// this fallback .huginn.md silently stops loading outside a git repo,
+	// even though the older direct-load path (o.workspaceRoot) never had
+	// that restriction.
+	instructionsRoot := gitRoot
+	if instructionsRoot == "" {
+		instructionsRoot = workspaceRoot
+	}
+	if instructionsRoot != "" {
+		if projectInstructions := LoadProjectInstructions(instructionsRoot); projectInstructions != "" {
+			result += "\n\n## Project Instructions\n" + projectInstructions
+		}
 	}
 
 	// Active notepads (persistent user-managed context).
@@ -316,7 +349,8 @@ func BuildSpaceContextBlock(spaceName, spaceKind, selfName, leadAgent string, me
 			"List the top 3 best practices for Go unit tests. Keep it brief.",
 			fmt.Sprintf("%s is the Go expert", exampleAgentB),
 		)
-		sb.WriteString("  BAD:  Mentioning a team member by name in your message without calling delegate_to_agent — this does nothing.\n")
+		sb.WriteString("A user @mention addresses that agent for the turn — they receive the message, not you. When YOU need a teammate, call delegate_to_agent; writing @Name in your own reply does not assign work.\n")
+		sb.WriteString("  BAD:  Writing @Name in your reply and expecting it to assign work — use delegate_to_agent instead.\n")
 		sb.WriteString("  BAD:  A vague task like \"help with this\" — the agent needs a specific, complete description to act.\n\n")
 		sb.WriteString("**Collecting results — use `wait_for_threads`:**\n")
 		sb.WriteString("After delegating, call `wait_for_threads` (with the thread IDs, or no arguments for all) to block until your delegates finish and receive their full results in one response.\n")
@@ -389,6 +423,41 @@ func BuildDMCrossSpaceContextBlock(selfName string, channels []ChannelRoster) st
 			}
 		}
 		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// BuildDeskFloorContextBlock tells a desk-DM lead they can A2A any other
+// desk-floor agent. peers should include capability cards. Returns empty
+// when there is no one else on the floor (so a lone DM stays quiet).
+func BuildDeskFloorContextBlock(selfName string, peers []SpaceMember) string {
+	others := make([]SpaceMember, 0, len(peers))
+	for _, m := range peers {
+		if strings.TrimSpace(m.Name) == "" {
+			continue
+		}
+		if strings.EqualFold(m.Name, selfName) {
+			continue
+		}
+		others = append(others, m)
+	}
+	if len(others) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n[Desk Floor]\n")
+	sb.WriteString("This is a 1:1 desk DM with the human. The desk is a shared floor: you may talk to any other desk agent with delegate_to_agent or consult_agent, then wait_for_threads and relay their answer.\n")
+	sb.WriteString("Do not do their job yourself when they exist, and do not say they are not a member of this space.\n\n")
+	sb.WriteString("**Desk agents you can reach:**\n")
+	for _, m := range others {
+		if m.Description != "" {
+			sb.WriteString(m.Description)
+			if !strings.HasSuffix(m.Description, "\n") {
+				sb.WriteString("\n")
+			}
+		} else {
+			fmt.Fprintf(&sb, "- **%s**: desk agent\n", m.Name)
+		}
 	}
 	return sb.String()
 }

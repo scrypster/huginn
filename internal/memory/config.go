@@ -16,19 +16,19 @@ type VaultStrategy string
 
 const (
 	StrategyTwoTier      VaultStrategy = "two-tier"      // default: personal + project
-	StrategySingle       VaultStrategy = "single"         // everything in personal vault
-	StrategyProjectOnly  VaultStrategy = "project-only"   // skip personal vault
-	StrategyPersonalOnly VaultStrategy = "personal-only"  // skip project vault
+	StrategySingle       VaultStrategy = "single"        // everything in personal vault
+	StrategyProjectOnly  VaultStrategy = "project-only"  // skip personal vault
+	StrategyPersonalOnly VaultStrategy = "personal-only" // skip project vault
 )
 
 // GlobalConfig is loaded from ~/.config/huginn/muninn.json.
 type GlobalConfig struct {
-	Endpoint        string            `json:"endpoint"`                   // MuninnDB server URL
-	Username        string            `json:"username"`                   // MuninnDB username; default "root"
-	UserVault       string            `json:"user_vault"`                 // overrides username resolution
-	Strategy        VaultStrategy     `json:"strategy"`                   // default: two-tier
-	ActivationLimit int               `json:"activation_limit"`           // max results per activation call; default 10
-	VaultTokens     map[string]string `json:"vault_tokens,omitempty"`     // per-vault REST API tokens (mk_...)
+	Endpoint        string            `json:"endpoint"`               // MuninnDB server URL
+	Username        string            `json:"username"`               // MuninnDB username; default "root"
+	UserVault       string            `json:"user_vault"`             // overrides username resolution
+	Strategy        VaultStrategy     `json:"strategy"`               // default: two-tier
+	ActivationLimit int               `json:"activation_limit"`       // max results per activation call; default 10
+	VaultTokens     map[string]string `json:"vault_tokens,omitempty"` // per-vault REST API tokens (mk_...)
 	// MCPToken is the daemon token for authenticating to the MuninnDB MCP server (mdb_...).
 	// This is distinct from per-vault API keys. If set, it takes precedence over VaultTokens
 	// for all MCP transport connections. Run `muninn --mcp-token <value>` to find the value.
@@ -55,6 +55,7 @@ func LoadGlobalConfig(path string) (*GlobalConfig, error) {
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		maybeDiscoverLocalDaemon(cfg, path)
 		return cfg, nil
 	}
 	if err != nil {
@@ -76,6 +77,87 @@ func LoadGlobalConfig(path string) (*GlobalConfig, error) {
 		cfg.VaultTokens = make(map[string]string)
 	}
 	return cfg, nil
+}
+
+// ErrEmptyMuninnEndpoint is returned when a valid muninn.json exists but
+// Endpoint is still empty after pin. Callers must not log this as
+// "config unavailable" with a null error and empty endpoint.
+var ErrEmptyMuninnEndpoint = errors.New("muninn config: empty endpoint in valid file")
+
+// DefaultGlobalConfigPaths is ~/.config/huginn/muninn.json then ~/.huginn/muninn.json.
+func DefaultGlobalConfigPaths(home string) []string {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(home, ".config", "huginn", "muninn.json"),
+		filepath.Join(home, ".huginn", "muninn.json"),
+	}
+}
+
+// ResolveGlobalConfigPath prefers an existing explicit path, then the two
+// default locations. Missing files fall back to explicit (or the XDG path).
+func ResolveGlobalConfigPath(explicit string) string {
+	explicit = strings.TrimSpace(explicit)
+	home, _ := os.UserHomeDir()
+	defaults := DefaultGlobalConfigPaths(home)
+	if explicit != "" {
+		if _, err := os.Stat(explicit); err == nil {
+			return explicit
+		}
+		for _, d := range defaults {
+			if explicit == d {
+				for _, alt := range defaults {
+					if _, err := os.Stat(alt); err == nil {
+						return alt
+					}
+				}
+				return explicit
+			}
+		}
+		return explicit
+	}
+	for _, d := range defaults {
+		if _, err := os.Stat(d); err == nil {
+			return d
+		}
+	}
+	if len(defaults) > 0 {
+		return defaults[0]
+	}
+	return ""
+}
+
+func isDefaultGlobalConfigPath(path string) bool {
+	home, _ := os.UserHomeDir()
+	for _, d := range DefaultGlobalConfigPaths(home) {
+		if path == d {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadAndPinGlobalConfig resolves the path (both default locations), loads
+// the file, and pins daemon auth for default paths only. Empty endpoint in a
+// valid file is illegal. Does not invent a vault name. Does not write
+// winston-huginn.
+func LoadAndPinGlobalConfig(explicit string) (*GlobalConfig, string, error) {
+	path := ResolveGlobalConfigPath(explicit)
+	cfg, err := LoadGlobalConfig(path)
+	if err != nil {
+		return nil, path, err
+	}
+	_, statErr := os.Stat(path)
+	fileExists := statErr == nil
+	if fileExists && isDefaultGlobalConfigPath(path) {
+		PinDaemonAuth(cfg)
+	}
+	if fileExists && strings.TrimSpace(cfg.Endpoint) == "" {
+		return cfg, path, ErrEmptyMuninnEndpoint
+	}
+	return cfg, path, nil
 }
 
 // SaveGlobalConfig atomically writes cfg to path, creating parent directories as needed.

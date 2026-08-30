@@ -3,7 +3,23 @@
 
     <!-- ── Grid view (no workflow selected) ── -->
     <Transition name="page" mode="out-in">
-      <div v-if="!selectedId" key="grid" class="flex flex-col h-full">
+      <div v-if="!selectedId" key="grid" class="flex flex-col h-full relative"
+          data-testid="workflow-drop-surface"
+          @dragenter.prevent="onFileDragEnter"
+          @dragover.prevent="onFileDragOver"
+          @dragleave="onFileDragLeave"
+          @drop.prevent="onFileDrop">
+        <div v-if="fileDropActive" data-testid="workflow-drop-overlay"
+          class="absolute inset-0 z-20 flex items-center justify-center pointer-events-none"
+          style="background:rgba(88,166,255,0.08);border:2px dashed rgba(88,166,255,0.45)">
+          <p class="text-sm font-medium text-huginn-blue">Drop a .yaml or .json workflow</p>
+        </div>
+        <div v-if="dropMsg" class="px-6 pt-3">
+          <div class="px-4 py-2.5 rounded-xl border text-xs"
+            :class="dropError ? 'border-huginn-red/40 text-huginn-red bg-huginn-red/8' : 'border-huginn-green/40 text-huginn-green bg-huginn-green/8'">
+            {{ dropMsg }}
+          </div>
+        </div>
 
         <!-- Top bar -->
         <div class="flex items-center gap-3 px-6 h-14 border-b border-huginn-border flex-shrink-0">
@@ -36,7 +52,7 @@
             <svg class="w-12 h-12 text-huginn-muted/30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
               <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
             </svg>
-            <p class="text-huginn-muted text-sm">{{ search ? 'No workflows match your search' : 'No workflows yet' }}</p>
+            <p class="text-huginn-muted text-sm">{{ search ? 'No workflows match your search' : 'No workflows yet — drop a .yaml or .json file here' }}</p>
             <button v-if="!search" @click="showCreate = true"
               class="text-xs text-huginn-blue hover:text-huginn-blue/80 transition-colors">
               Create your first workflow →
@@ -167,9 +183,34 @@
                   class="w-full bg-huginn-bg border border-huginn-border rounded-lg px-3 py-2 text-sm text-huginn-text focus:outline-none focus:border-huginn-blue/60 transition-colors"/>
               </div>
               <div>
-                <label class="block text-[11px] font-medium text-huginn-muted mb-1.5 uppercase tracking-wider">Schedule (cron)</label>
-                <input v-model="editForm.schedule" placeholder="0 8 * * 1-5"
-                  class="w-full bg-huginn-bg border border-huginn-border rounded-lg px-3 py-2 text-sm font-mono text-huginn-text focus:outline-none focus:border-huginn-blue/60 transition-colors"/>
+                <label class="block text-[11px] font-medium text-huginn-muted mb-1.5 uppercase tracking-wider">When to run</label>
+                <div class="flex gap-2 mb-2">
+                  <button type="button" @click="scheduleMode = 'once'"
+                    data-testid="schedule-once-btn"
+                    class="flex-1 px-2 py-1.5 text-xs rounded-lg border transition-colors"
+                    :class="scheduleMode === 'once' ? 'border-huginn-blue/60 bg-huginn-blue/10 text-huginn-blue' : 'border-huginn-border text-huginn-muted hover:text-huginn-text'">
+                    Run once
+                  </button>
+                  <button type="button" @click="scheduleMode = 'repeat'"
+                    data-testid="schedule-repeat-btn"
+                    class="flex-1 px-2 py-1.5 text-xs rounded-lg border transition-colors"
+                    :class="scheduleMode === 'repeat' ? 'border-huginn-blue/60 bg-huginn-blue/10 text-huginn-blue' : 'border-huginn-border text-huginn-muted hover:text-huginn-text'">
+                    Repeat
+                  </button>
+                </div>
+                <p v-if="scheduleMode === 'once'" class="text-[11px] text-huginn-muted/70">
+                  No cron. Hit <span class="text-huginn-text">Run Now</span> whenever you want this pipeline.
+                </p>
+                <CronPicker v-else v-model="editForm.schedule" />
+              </div>
+              <div>
+                <label class="block text-[11px] font-medium text-huginn-muted mb-1.5 uppercase tracking-wider">Company</label>
+                <select v-model="editForm.company_id" data-testid="workflow-company-select"
+                  class="w-full bg-huginn-bg border border-huginn-border rounded-lg px-3 py-2 text-sm text-huginn-text focus:outline-none focus:border-huginn-blue/60">
+                  <option value="">Desk — any teammate</option>
+                  <option v-for="c in availableCompanies" :key="c.id" :value="c.id">{{ c.name }}</option>
+                </select>
+                <p class="text-[10px] text-huginn-muted/50 mt-1">A company pipeline can only wake teammates seated there.</p>
               </div>
               <div>
                 <label class="block text-[11px] font-medium text-huginn-muted mb-1.5 uppercase tracking-wider">
@@ -235,14 +276,23 @@
             <!-- Steps section -->
             <div>
               <div class="flex items-center justify-between mb-3">
-                <h2 class="text-xs font-semibold text-huginn-muted uppercase tracking-wider">Steps</h2>
+                <div>
+                  <h2 class="text-xs font-semibold text-huginn-muted uppercase tracking-wider">Teammates</h2>
+                  <p v-if="pipelinePreview.length" class="text-[11px] text-huginn-text/80 mt-1 font-medium" data-testid="pipeline-preview">
+                    <template v-for="(who, i) in pipelinePreview" :key="i">
+                      <span v-if="i"> <span class="text-huginn-muted/50">→</span> </span>
+                      <span>{{ who }}</span>
+                    </template>
+                  </p>
+                  <p v-else class="text-[11px] text-huginn-muted/50 mt-1">Stack teammates. Each one sees the last output.</p>
+                </div>
                 <button @click="addStep"
                   data-testid="add-step-btn"
                   class="flex items-center gap-1 text-xs text-huginn-blue hover:text-huginn-blue/80 transition-colors">
                   <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                   </svg>
-                  Add Step
+                  Add teammate
                 </button>
               </div>
 
@@ -302,6 +352,9 @@
                         <div :class="{ 'opacity-40 pointer-events-none': isSubWorkflowStep(step) }">
                           <label class="block text-[10px] font-semibold text-huginn-muted/70 uppercase tracking-wider mb-1">Agent</label>
                           <AgentPicker v-model="step.agent!" data-testid="step-agent-input" @select:agent="onAgentSelected(idx, $event)" />
+                          <p v-if="companyAgentsForPicker()" class="text-[10px] text-huginn-muted/50 mt-1">
+                            This company can wake: {{ companyAgentsForPicker()!.join(', ') || 'nobody seated yet' }}
+                          </p>
                         </div>
                         <div class="col-span-2">
                           <label class="block text-[10px] font-medium text-huginn-muted mb-1 uppercase tracking-wider">On Failure</label>
@@ -485,7 +538,7 @@
                   <svg class="w-6 h-6 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                   </svg>
-                  Add your first step
+                  Add your first teammate
                 </button>
               </div>
             </div>
@@ -973,6 +1026,7 @@
 import { toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import AgentPicker from '../components/AgentPicker.vue'
+import CronPicker from '../components/CronPicker.vue'
 import { useWorkflowsViewState } from './workflows/useWorkflowsViewState'
 
 const props = defineProps<{ id?: string; runId?: string }>()
@@ -1017,6 +1071,10 @@ const {
   loadingTemplates,
   stepAgentDetails,
   availableSpaces,
+  availableCompanies,
+  pipelinePreview,
+  scheduleMode,
+  companyAgentsForPicker,
   showWorkflowAdvanced,
   stepOutputModal,
   expandedTokenBatchIndex,
@@ -1065,6 +1123,13 @@ const {
   clearRunEvents,
   createBlank,
   createFromTemplate,
+  fileDropActive,
+  dropMsg,
+  dropError,
+  onFileDragEnter,
+  onFileDragOver,
+  onFileDragLeave,
+  onFileDrop,
   isPlaceholderError,
   eventIcon,
   eventLabel,

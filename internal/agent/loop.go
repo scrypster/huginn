@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/permissions"
 	"github.com/scrypster/huginn/internal/tools"
+	"github.com/scrypster/huginn/internal/turnmetrics"
 )
 
 // defaultToolConcurrency is the maximum number of independent tool calls that
@@ -70,6 +73,40 @@ type RunLoopConfig struct {
 	// by VaultReconnector.EmitWarnOnce (VaultWarnOnce is ignored).
 	// Nil = warn-once + degrade for the rest of the session (original behavior).
 	VaultReconnector *VaultReconnector
+
+	// MemoryMode / MemoryVault opt this loop into post-turn harness persist.
+	// Both empty = skip (loop used without a connected vault).
+	MemoryMode    string
+	MemoryVault   string
+	MemoryAgent   string
+	MemoryUserMsg string
+	MemorySession string
+	MemoryHome    string // ~/.huginn; MD fallback when Muninn is off
+
+	// AgentName and SessionID identify the run for permission-prompt routing.
+	// Propagated onto every permissions.PermissionRequest built by
+	// executeSingle so a serve-mode promptFunc bridge can target the right
+	// WS session and agent. Optional — empty for callers that don't track
+	// this (e.g. some tests).
+	AgentName string
+	SessionID string
+
+	// Hooks is the internal PreToolUse/PostToolUse chain (see hooks.go). Not
+	// user-configurable — the harness populates it. Nil = no hooks, behavior
+	// identical to before hooks existed.
+	Hooks *HookRegistry
+
+	// MetricsWriter, when set, records turn-latency telemetry (t_request,
+	// t_first_token, t_first_signal, t_complete, tool call count, prompt
+	// size) for this run to the turn_metrics table. Nil (the default for
+	// existing callers and tests) disables telemetry entirely — RunLoop does
+	// not wrap any callback and costs nothing extra.
+	MetricsWriter *turnmetrics.Writer
+	// TurnKind labels this run for telemetry grouping. Callers reuse the same
+	// string passed to recordLLMLatency's "slot" (e.g. "agent-loop",
+	// "agent-chat") so the two latency views line up. Optional; empty is
+	// recorded as-is.
+	TurnKind string
 }
 
 // LoopResult is the final state after the loop ends.
@@ -80,6 +117,8 @@ type LoopResult struct {
 	Messages         []backend.Message // full message history
 	PromptTokens     int               // cumulative prompt tokens across all turns
 	CompletionTokens int               // cumulative completion tokens across all turns
+	MemoryReceipt    bool              // model or harness wrote this turn
+	HoldClose        bool              // immersive fail-closed: do not emit assistant row
 }
 
 // executeSingle executes a single tool call and returns the result.
@@ -133,24 +172,47 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 
 	tool, ok := cfg.Tools.Get(toolName)
 	if !ok {
-		return makeResult(fmt.Sprintf("error: unknown tool %q", toolName))
+		return makeResult(fmt.Sprintf("I don't have %s.", toolName))
 	}
 
 	// Runtime enforcement: verify the tool was included in the schemas sent
 	// to the model. A tool may exist in the registry but not be permitted
 	// for this agent's toolbelt.
 	if !cfg.toolSchemaAllows(toolName) {
-		return makeResult(fmt.Sprintf("error: tool %q is not available", toolName))
+		return makeResult(fmt.Sprintf("I don't have %s.", toolName))
+	}
+
+	// Memory write gate: a question-shaped turn must be answered from recall,
+	// never by inventing and storing a new "fact". Live repro (2026-08-27,
+	// Winston DM): asked "what's our production database called?", the model
+	// skipped recall, invented "PostgreSQL", and wrote it to the vault as a
+	// human-confidence-1 fact. Intercept muninn write-tool calls here — before
+	// they ever reach Muninn — whenever the turn's user message reads as a
+	// question. Statement-shaped turns pass through untouched.
+	if isMuninnWriteTool(toolName) && isQuestionShaped(cfg.MemoryUserMsg) {
+		blockOutput := "This is a question, not a new fact — I did not store anything. " +
+			"Call muninn_recall with the user's question as context and answer from what you find. " +
+			"Never store your own guess or inference as if it were a fact the user told you."
+		if cfg.OnToolCall != nil {
+			cfg.OnToolCall(callID, toolName, argsMap)
+		}
+		blockResult := tools.ToolResult{Output: blockOutput}
+		if cfg.OnToolDone != nil {
+			cfg.OnToolDone(callID, toolName, blockResult)
+		}
+		return makeResult(blockOutput)
 	}
 
 	if cfg.Gate != nil {
 		req := permissions.PermissionRequest{
-			ToolName: toolName,
-			Level:    tool.Permission(),
-			Args:     argsMap,
-			Provider: cfg.Tools.ProviderFor(toolName),
+			ToolName:  toolName,
+			Level:     tool.Permission(),
+			Args:      argsMap,
+			Provider:  cfg.Tools.ProviderFor(toolName),
+			AgentName: cfg.AgentName,
+			SessionID: cfg.SessionID,
 		}
-		checkResult := cfg.Gate.CheckDetailed(req)
+		checkResult := cfg.Gate.CheckDetailedCtx(ctx, req)
 		if !checkResult.Allowed {
 			denyOutput := "error: permission denied"
 			if checkResult.Reason != "" {
@@ -176,6 +238,34 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 			}
 			if cfg.OnPermissionDenied != nil {
 				cfg.OnPermissionDenied(toolName)
+			}
+			return makeResult(denyOutput)
+		}
+	}
+
+	// PreToolUse hook chain (G10): internal, harness-populated groundings
+	// (e.g. G1 edit-time syntax validation) get a chance to veto the call
+	// here — after the permission gate, before OnBeforeWrite's user-facing
+	// diff preview, so a syntactically-broken edit never even reaches the
+	// approval UI. dispatchTools may be running this concurrently with other
+	// independent tool calls; runPre is goroutine-safe.
+	if cfg.Hooks != nil {
+		if allow, denyReason := cfg.Hooks.runPre(ctx, toolName, argsMap); !allow {
+			denyOutput := fmt.Sprintf("%s blocked: %s", toolName, denyReason)
+			denyResult := tools.ToolResult{
+				Output:  denyOutput,
+				Error:   denyReason,
+				IsError: true,
+				Metadata: map[string]any{
+					"pre_tool_use_denied": true,
+					"reason":              denyReason,
+				},
+			}
+			if cfg.OnToolCall != nil {
+				cfg.OnToolCall(callID, toolName, argsMap)
+			}
+			if cfg.OnToolDone != nil {
+				cfg.OnToolDone(callID, toolName, denyResult)
 			}
 			return makeResult(denyOutput)
 		}
@@ -242,12 +332,23 @@ func (cfg *RunLoopConfig) executeSingle(ctx context.Context, idx int, tc backend
 		cfg.OnToolDone(callID, toolName, toolResult)
 	}
 
+	// PostToolUse hook chain (G10): fires for every completed call, before
+	// the credential rewrite / truncation pass below, so a hook that
+	// annotates Output (e.g. G1's warn-mode syntax notice) is seen by both
+	// the model and OnToolDone's raw copy already captured above.
+	if cfg.Hooks != nil {
+		cfg.Hooks.runPost(ctx, toolName, argsMap, &toolResult)
+	}
+
 	content := toolResult.Output
 	if toolResult.IsError && toolResult.Error != "" {
 		content = "error: " + toolResult.Error
 	} else if content == "" && toolResult.Error != "" {
 		content = toolResult.Error
 	}
+	// Mechanical rewrite at the tool-result boundary: keyring / API-key
+	// dumps never reach the 14b. Teammate deny, no secrets.
+	content = RewriteCredentialToolResult(content)
 
 	// Truncate large tool outputs to avoid overflowing the model's context window.
 	const maxToolOutputBytes = 100 * 1024 // 100 KB
@@ -397,27 +498,147 @@ func isIndependentTool(toolName string, args map[string]any, allCalls []backend.
 // RunLoop runs the agentic tool-calling loop.
 // It calls the model, executes any tool_calls, feeds results back, and repeats
 // until the model stops calling tools or MaxTurns is reached.
-func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
+func RunLoop(ctx context.Context, cfg RunLoopConfig) (result *LoopResult, err error) {
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = 50
 	}
+	// t_request is stamped here, before anything else runs — see the
+	// MetricsWriter doc comment on RunLoopConfig for why RunLoop entry is
+	// the chosen "turn started processing" point. newTurnMetricsHook wraps
+	// cfg.OnToken/OnEvent/OnToolCall in place, so every return path below
+	// (including the very next early return) is covered by the single defer.
+	metricsHook := newTurnMetricsHook(&cfg)
+	defer func() {
+		metricsHook.finish(err != nil)
+	}()
+
 	messages := make([]backend.Message, len(cfg.Messages))
 	copy(messages, cfg.Messages)
 
-	result := &LoopResult{}
+	result = &LoopResult{}
+	if early := imageAskStop(messages, cfg.ToolSchemas); early != "" {
+		if cfg.OnToken != nil {
+			cfg.OnToken(early)
+		}
+		messages = append(messages, backend.Message{Role: "assistant", Content: early})
+		result.FinalContent = early
+		result.StopReason = "stop"
+		result.Messages = messages
+		return result, nil
+	}
+	defer func() {
+		if result != nil && err == nil {
+			applyLoopMemoryGate(ctx, cfg, result)
+		}
+	}()
 
 	var consecutiveParseFailures int
+	// Auto-wait: a lead that delegates and then stops without wait_for_threads
+	// abandons its spawned threads (and their results). Track one successful
+	// delegate_to_agent and inject a single wait_for_threads barrier so the
+	// model gets the specialists' results and can answer from them.
+	var delegated, waitedForThreads, autoWaited bool
+	// toolsRan flips once any tool (including the synthetic auto-wait) has
+	// executed; later assistant content then gets the after-tools filter.
+	var toolsRan bool
+	// specialistResult flips once a wait_for_threads (model-called or the
+	// synthetic auto-wait) came back with a finished thread. The next model
+	// turn is then speech only and terminal: no promotion, tool calls
+	// dropped, residual stripped, run stops. Small leads otherwise re-run
+	// the playbook (recall / delegate again) against a task that is done.
+	var specialistResult bool
+	var workDone bool
+	// unfinishedPlanNudges counts continuation nudges injected for
+	// looksLikeUnfinishedPlan exits (see below). Bounded by
+	// maxUnfinishedPlanContinuations; never reset once incremented.
+	var unfinishedPlanNudges int
+	var lastWorkSpeech string
+	var speechHinted bool
+	var contentBeforeAutoWait string
+	var denied atomic.Bool
+	origDenied := cfg.OnPermissionDenied
+	cfg.OnPermissionDenied = func(name string) {
+		denied.Store(true)
+		if origDenied != nil {
+			origDenied(name)
+		}
+	}
+
+	// tokenGate is recreated each turn (see below) but declared here so it
+	// survives the loop's exit: the max-turns fallthrough returns after the
+	// for-loop body, and still needs the last turn's gate to flush whatever
+	// it held back.
+	var tokenGate *backend.ContentToolCallTokenGate
+	// flushFinal guarantees the authoritative visible content for this run
+	// reaches cfg.OnToken exactly once before RunLoop returns. The gate
+	// tracks what it already forwarded live (g.emitted) and Finish only
+	// emits the un-streamed suffix, so a turn that already streamed never
+	// gets double-painted; a turn the gate held back in full (it looked like
+	// a tool-call candidate that never resolved) finally gets flushed.
+	flushFinal := func(visible string) {
+		if tokenGate != nil {
+			tokenGate.Finish(visible)
+			return
+		}
+		if cfg.OnToken != nil && visible != "" {
+			cfg.OnToken(visible)
+		}
+	}
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		result.TurnCount = turn + 1
 
-		chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
+		// Gate OnToken so backends/mocks that stream raw JSON-in-content never
+		// paint harness JSON. parseSSE already Finish-es leftover prose; do
+		// not Finish again after ChatCompletion — a second suffix flush
+		// after StreamDone forks leftover (`PONG` → `ONG`) into a new
+		// anonymous timeline row.
+		tokenGate = backend.NewContentToolCallTokenGate(cfg.OnToken, nil)
+		tokenGate.SetGrantedTools(cfg.ToolSchemas)
+		onToken := cfg.OnToken
+		if tokenGate != nil {
+			onToken = tokenGate.OnToken
+		}
+		speechOnly := specialistResult || workDone
+		if speechOnly && !speechHinted {
+			speechHinted = true
+			hint := "[system] Specialists already finished. Speak to the human: say what they reported, then finish any leftover question. No tools. No playbook. No templates."
+			if workDone && !specialistResult {
+				// 14b specialists otherwise re-fire the same bash until max turns.
+				hint = "[system] The tool already ran. Tell the human the result in one short sentence. No more tools."
+			}
+			messages = append(messages, backend.Message{Role: "user", Content: hint})
+		}
+		turnCtx := ctx
+		var cutter *speechTurnCutter
+		if speechOnly {
+			// Speech-only turn: tokens are buffered, not streamed — the
+			// residual filter needs the whole message, and the token gate
+			// only holds a leading JSON prefix. If the model opens with
+			// tool JSON it has nothing to say: cut decoding for this
+			// request only (the model stays loaded; just the stream ends).
+			var cancel context.CancelFunc
+			turnCtx, cancel = context.WithCancel(ctx)
+			defer cancel()
+			cutter = newSpeechTurnCutter(cancel)
+			onToken = cutter.OnToken
+		}
+		chatResult, err := cfg.Backend.ChatCompletion(turnCtx, backend.ChatRequest{
 			Model:    cfg.ModelName,
 			Messages: messages,
 			Tools:    cfg.ToolSchemas,
-			OnToken:  cfg.OnToken,
+			OnToken:  onToken,
 			OnEvent:  cfg.OnEvent,
 		})
+		if cutter != nil && cutter.Cut() {
+			// Our own cut, not the caller's cancellation.
+			if chatResult == nil {
+				chatResult = &backend.ChatResponse{DoneReason: "stop"}
+			}
+			chatResult.Content = cutter.Raw()
+			chatResult.ToolCalls = nil
+			err = nil
+		}
 		if err != nil {
 			result.StopReason = "error"
 			return result, fmt.Errorf("turn %d: %w", turn+1, err)
@@ -432,6 +653,60 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			result.StopReason = "error"
 			result.Messages = messages
 			return result, fmt.Errorf("turn %d: backend returned nil response without error", turn+1)
+		}
+
+		// Local Qwen/Ollama models sometimes put a lone function-call JSON
+		// object in content instead of structured tool_calls — including
+		// follow-ups like {"name":"wait_for_threads"} with no arguments.
+		// Promote on every turn so the loop keeps running instead of
+		// treating that JSON as the final answer.
+		if speechOnly {
+			if n := len(chatResult.ToolCalls); n > 0 {
+				names := make([]string, 0, n)
+				for _, tc := range chatResult.ToolCalls {
+					names = append(names, tc.Function.Name)
+				}
+				slog.Warn("agent loop: dropped tool calls after specialist result (speech-only turn)",
+					"tools", names, "turn", turn+1)
+				chatResult.ToolCalls = nil
+			}
+			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content, lastHumanUserText(messages))
+			if chatResult.Content == "" {
+				// Nothing sayable came back: keep the last real prose so the
+				// run does not end on a blank line.
+				chatResult.Content = result.FinalContent
+				if chatResult.Content == "" {
+					chatResult.Content = contentBeforeAutoWait
+				}
+				if chatResult.Content == "" {
+					chatResult.Content = lastWorkSpeech
+				}
+			}
+			chatResult.Content = applyTeammateSpeech(messages, cfg.ToolSchemas, chatResult.Content)
+			// Emit the sayable remainder once (the turn was buffered by the
+			// cutter, not the token gate — cutter.OnToken never forwards
+			// downstream, so flushFinal's suffix math starts from "" and
+			// this is a plain one-shot emit regardless of whether decoding
+			// was cut on leading tool JSON).
+			flushFinal(chatResult.Content)
+			messages = append(messages, backend.Message{Role: "assistant", Content: chatResult.Content})
+			result.FinalContent = chatResult.Content
+			result.StopReason = "stop"
+			result.Messages = messages
+			return result, nil
+		}
+		backend.PromoteContentToolCalls(chatResult)
+		// qwen2.5-coder also writes a "playbook": fenced tool JSON mixed with
+		// glue prose. Promote embedded invocations of granted tools so they
+		// execute in order; unknown names stay inert.
+		backend.PromoteGrantedContentToolCalls(chatResult, cfg.ToolSchemas)
+		backend.RevealContentToolCalls(chatResult)
+		if denied.Load() || toolsRan {
+			// After a deny the model often dumps another tool JSON into
+			// content (not always leading). After tools ran, small models
+			// also echo wait placeholders, playbook glue, and the tool
+			// result as JSON next to the answer. None of that is speech.
+			chatResult.Content = backend.VisibleAssistantContentAfterTools(chatResult.Content, lastHumanUserText(messages))
 		}
 
 		// Append assistant response to history
@@ -466,6 +741,83 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 
 		// If no tool calls, the loop ends
 		if len(chatResult.ToolCalls) == 0 {
+			if delegated && !waitedForThreads && !autoWaited && cfg.canAutoWait() {
+				// The model stopped after delegating without collecting
+				// results. Run one synthetic wait_for_threads (empty args =
+				// all active threads in the session) and give the model a
+				// final turn to answer from the specialists' summaries.
+				autoWaited = true
+				toolsRan = true
+				contentBeforeAutoWait = result.FinalContent
+				wc := backend.ToolCall{
+					ID: "auto_wait_1",
+					Function: backend.ToolCallFunction{
+						Name:      "wait_for_threads",
+						Arguments: map[string]any{},
+					},
+				}
+				messages = append(messages, backend.Message{
+					Role:      "assistant",
+					ToolCalls: []backend.ToolCall{wc},
+				})
+				var waitAnswer string
+				for _, dr := range cfg.dispatchTools(ctx, []backend.ToolCall{wc}) {
+					if waitReturnedSpecialistResult(dr.content) {
+						specialistResult = true
+						if backend.WaitHasSpecialistAnswer(dr.content) {
+							waitAnswer = dr.content
+						}
+					}
+					messages = append(messages, backend.Message{
+						Role:       "tool",
+						ToolName:   dr.tc.Function.Name,
+						ToolCallID: dr.tc.ID,
+						Content:    dr.content,
+					})
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					result.StopReason = "cancelled"
+					result.Messages = messages
+					return result, fmt.Errorf("run loop cancelled: %w", ctxErr)
+				}
+				if waitAnswer != "" {
+					return stopTurnPersist(result, messages, cfg, result.FinalContent, waitAnswer, lastHumanUserText(messages))
+				}
+				continue
+			}
+			if autoWaited && result.FinalContent == "" {
+				// The post-wait turn produced nothing; keep the pre-wait prose
+				// rather than ending with an empty answer.
+				result.FinalContent = contentBeforeAutoWait
+			}
+			// Bounded continuation: a model with tools available, and at
+			// least one tool already run this loop, sometimes narrates the
+			// next step ("I will read X, then fix it") instead of calling
+			// the tool, and the no-tool-calls exit above would otherwise end
+			// the turn half-done. Nudge it to act instead of describing,
+			// up to maxUnfinishedPlanContinuations times; on the last one,
+			// fall through to the normal terminal path below — an honest
+			// partial answer beats a spin loop.
+			if toolsRan && len(cfg.ToolSchemas) > 0 &&
+				unfinishedPlanNudges < maxUnfinishedPlanContinuations &&
+				looksLikeUnfinishedPlan(result.FinalContent) {
+				unfinishedPlanNudges++
+				messages = append(messages, backend.Message{
+					Role:    "user",
+					Content: "[system] Continue: execute the next step now by calling the tool — do not describe it.",
+				})
+				if cfg.OnEvent != nil {
+					cfg.OnEvent(backend.StreamEvent{Type: backend.StreamStatus, Content: "continuing"})
+				}
+				continue
+			}
+			if speech := applyTeammateSpeech(messages, cfg.ToolSchemas, result.FinalContent); speech != result.FinalContent {
+				result.FinalContent = speech
+				if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
+					messages[n-1].Content = speech
+				}
+			}
+			flushFinal(result.FinalContent)
 			result.StopReason = "stop"
 			result.Messages = messages
 			return result, nil
@@ -473,7 +825,38 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 
 		// Execute tool calls — independent ones in parallel, serial ones after
 		dispatched := cfg.dispatchTools(ctx, chatResult.ToolCalls)
+		toolsRan = true
+		var wallDeny, waitAnswer string
 		for _, dr := range dispatched {
+			switch dr.tc.Function.Name {
+			case "delegate_to_agent":
+				if !strings.HasPrefix(dr.content, "error:") {
+					delegated = true
+				} else if backend.IsCompanyWallDeny(dr.content) {
+					wallDeny = dr.content
+				}
+			case "consult_agent":
+				if backend.IsCompanyWallDeny(dr.content) {
+					wallDeny = dr.content
+				}
+			case "wait_for_threads":
+				waitedForThreads = true
+				if waitReturnedSpecialistResult(dr.content) {
+					specialistResult = true
+					if backend.WaitHasSpecialistAnswer(dr.content) {
+						waitAnswer = dr.content
+					}
+				}
+			case "recall_thread_result", "list_team_status":
+				// A2A glue — not specialist work of its own.
+			default:
+				if isTerminalWorkTool(dr.tc.Function.Name) &&
+					!strings.HasPrefix(dr.content, "error:") &&
+					strings.TrimSpace(dr.content) != "" {
+					workDone = true
+					lastWorkSpeech = dr.content
+				}
+			}
 			messages = append(messages, backend.Message{
 				Role:       "tool",
 				ToolName:   dr.tc.Function.Name,
@@ -489,11 +872,267 @@ func RunLoop(ctx context.Context, cfg RunLoopConfig) (*LoopResult, error) {
 			result.Messages = messages
 			return result, fmt.Errorf("run loop cancelled: %w", ctxErr)
 		}
+
+		ask := lastHumanUserText(messages)
+		if wallDeny != "" && !userAskedSam(ask) {
+			if askMentionsDeniedAgent(ask, wallDeny) {
+				return stopTurnPersist(result, messages, cfg, result.FinalContent, wallDeny, ask)
+			}
+			// The human never named the refused agent — they asked for
+			// something else entirely and the model delegated on its own.
+			// "X isn't in this company." is teammate-to-teammate glue, not
+			// an answer; speaking it verbatim reads as a non-sequitur.
+			// Retry once with delegation withheld so the model answers the
+			// human directly; fall back to an honest rewrite if that retry
+			// itself produces nothing sayable.
+			return wallDenyAnswerDirectly(ctx, cfg, result, messages, ask)
+		}
+		if waitAnswer != "" {
+			return stopTurnPersist(result, messages, cfg, result.FinalContent, waitAnswer, ask)
+		}
 	}
 
+	flushFinal(result.FinalContent)
 	result.StopReason = "max_turns"
 	result.Messages = messages
 	return result, nil
+}
+
+// isTerminalWorkTool is a specialist command that already did the job. After
+// one success, 14b otherwise re-fires the same bash until max turns and never
+// speaks. Plan/read/write stay multi-turn.
+func isTerminalWorkTool(name string) bool {
+	switch name {
+	case "bash", "shell", "exec":
+		return true
+	default:
+		return false
+	}
+}
+
+// maxUnfinishedPlanContinuations bounds how many times RunLoop nudges a model
+// that ended a tool-less turn with future-tense narration ("I will read X,
+// then fix it") instead of calling a tool. Declared as a var so tests can
+// lower it to exercise the cap quickly.
+var maxUnfinishedPlanContinuations = 3
+
+// unfinishedPlanFutureRE matches a future-tense commitment to do *work*: an
+// intent phrase ("I'll", "I will", "let me", "I'm going to", "I plan to")
+// followed, within a few filler words, by a verb that names actual tool work
+// (read, check, run, edit, ...). The work-verb requirement is load-bearing —
+// the intent phrase alone also appears in ordinary polite closers ("Let me
+// know if you need anything else.", "I'll be here if you need me.", "Next, I
+// will be available for questions.", "I plan to keep the vault updated"),
+// none of which have a next step to execute. Each false nudge costs a full
+// extra model turn (~30s on 14b), so the check errs toward not firing.
+var unfinishedPlanFutureRE = regexp.MustCompile(`(?i)\b(?:i'll|i will|i'm going to|i am going to|i plan to|let me)\s+(?:(?:now|then|go|ahead|and|first|next|also|just|quickly|immediately|start|begin|by|proceed|to|try|attempt)\s+){0,3}(?:read|check|open|run|inspect|look at|examin|verify|test|edit|fix|update|write|creat|add|remov|delet|apply|patch|modif|search|grep|find|list|scan|fetch|quer|call|use|execut|implement|review|analyz|analys|investigat|continu|gather|collect|compil|build|install|configur|deploy|delegat|consult|recall|remember|save|store)`)
+
+// unfinishedPlanCompletedRE matches completed-result markers. Their presence
+// anywhere in the answer means the turn already reported a finished result,
+// even if it also mentions further steps — err toward not nudging rather
+// than double-nudging a genuinely finished answer.
+var unfinishedPlanCompletedRE = regexp.MustCompile("(?i)\\b(done|passes|passing|fixed|changed|complete[d]?|resolved)\\b|```|diff --git")
+
+// looksLikeUnfinishedPlan reports whether text reads as a model narrating
+// future work ("I will read the file, then fix the bug") rather than
+// reporting a completed result. It is deliberately conservative: any
+// completed-result marker anywhere in the text disqualifies a match, and a
+// future-tense commitment must appear in the last sentence(s) — an early
+// aside ("First let me note: ...") that ends with a real result should not
+// match.
+func looksLikeUnfinishedPlan(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if unfinishedPlanCompletedRE.MatchString(t) {
+		return false
+	}
+	// n=3 rather than 2: upstream residual-speech cleanup sometimes inserts a
+	// stray space after a filename's dot (e.g. "mathutil.go" -> "mathutil.
+	// go"), which the crude sentence splitter below reads as an extra
+	// sentence boundary. 3 keeps the check anchored near the end of the
+	// answer without being fooled by that artifact.
+	return unfinishedPlanFutureRE.MatchString(lastSentences(t, 3))
+}
+
+// unfinishedPlanSentenceSplitRE splits text into rough sentences/lines for
+// lastSentences. Not a full sentence tokenizer — good enough to isolate the
+// tail of a short narration turn.
+var unfinishedPlanSentenceSplitRE = regexp.MustCompile(`(?:[.!?]+\s+|\n+)`)
+
+// lastSentences returns the last n non-empty sentences/lines of text, joined
+// back with ". ". Used to look only at how a turn ends, not whether it
+// mentions future work anywhere (an aside earlier in a finished answer
+// should not count).
+func lastSentences(text string, n int) string {
+	parts := unfinishedPlanSentenceSplitRE.Split(text, -1)
+	nonEmpty := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	if n > len(nonEmpty) {
+		n = len(nonEmpty)
+	}
+	return strings.Join(nonEmpty[len(nonEmpty)-n:], ". ")
+}
+
+// waitReturnedSpecialistResult reports whether a wait_for_threads tool result
+// carries at least one finished thread (threadmgr renders "## Finished
+// threads (n)"). A timeout with only "Still running" threads, an error, or
+// "No matching threads" does not count — the lead may keep waiting.
+func waitReturnedSpecialistResult(content string) bool {
+	if strings.HasPrefix(content, "error:") {
+		return false
+	}
+	return strings.Contains(content, "## Finished threads")
+}
+
+// userAskedSam is the only case where a company-wall deny may continue:
+// the human named Sam, so a re-delegate is their ask, not glue.
+func userAskedSam(ask string) bool {
+	return strings.Contains(strings.ToLower(ask), "ask sam")
+}
+
+// askMentionsDeniedAgent reports whether the human's own ask named the
+// agent a delegate/consult call was just refused for (e.g. they asked
+// "Ask Steve for the hostname" and delegation to Steve was denied). When
+// true, stating the wall line is an honest, on-topic answer. When false,
+// the human asked for something unrelated and the refusal is glue from a
+// delegation they never requested.
+func askMentionsDeniedAgent(ask, wallDeny string) bool {
+	name := backend.DeniedAgentName(wallDeny)
+	if name == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(ask), strings.ToLower(name))
+}
+
+// wallDenyAnswerDirectly handles a company-wall deny for an agent the
+// human's ask never named: one extra completion with delegate_to_agent and
+// consult_agent withheld, so the model must answer the human directly
+// instead of narrating the refusal. If that retry itself produces nothing
+// sayable (empty, another tool call, or another refusal), falls back to an
+// honest rewrite rather than ever speaking "X isn't in this company."
+// verbatim as the answer to an unrelated ask.
+func wallDenyAnswerDirectly(ctx context.Context, cfg RunLoopConfig, result *LoopResult, messages []backend.Message, ask string) (*LoopResult, error) {
+	final := ""
+	if cfg.Backend != nil {
+		var noDelegate []backend.Tool
+		for _, t := range cfg.ToolSchemas {
+			if t.Function.Name == "delegate_to_agent" || t.Function.Name == "consult_agent" {
+				continue
+			}
+			noDelegate = append(noDelegate, t)
+		}
+		retryMessages := append(append([]backend.Message{}, messages...), backend.Message{
+			Role:    "user",
+			Content: "[system] That teammate isn't available for this. Answer directly yourself — no delegating, no tools.",
+		})
+		if chatResult, err := cfg.Backend.ChatCompletion(ctx, backend.ChatRequest{
+			Model:    cfg.ModelName,
+			Messages: retryMessages,
+			Tools:    noDelegate,
+		}); err == nil && chatResult != nil {
+			content := strings.TrimSpace(chatResult.Content)
+			if content != "" && len(chatResult.ToolCalls) == 0 && !backend.IsCompanyWallDeny(content) {
+				final = content
+			}
+		}
+	}
+	if final == "" {
+		final = fmt.Sprintf("Couldn't hand that off — %s needs a teammate I don't have here.", strings.TrimSpace(ask))
+	}
+	messages = append(messages, backend.Message{Role: "assistant", Content: final})
+	if cfg.OnToken != nil {
+		cfg.OnToken(final)
+	}
+	result.FinalContent = final
+	result.StopReason = "stop"
+	result.Messages = messages
+	return result, nil
+}
+
+// stopTurnPersist ends the run without another model completion and persists
+// the teammate wall / wait answer so leftover glue is never generated.
+func stopTurnPersist(result *LoopResult, messages []backend.Message, cfg RunLoopConfig, speech, blob, ask string) (*LoopResult, error) {
+	final := backend.PersistStopTurn(speech, blob, ask)
+	if final == "" {
+		final = strings.TrimSpace(speech)
+	}
+	if final != "" {
+		messages = append(messages, backend.Message{Role: "assistant", Content: final})
+		if cfg.OnToken != nil {
+			cfg.OnToken(final)
+		}
+	}
+	result.FinalContent = final
+	result.StopReason = "stop"
+	result.Messages = messages
+	return result, nil
+}
+
+// speechTurnCutter buffers the raw token stream of a speech-only turn. If
+// the first non-blank character is '{' the model is re-typing a tool object
+// instead of speaking; cancel the request so no more tokens are decoded.
+// Nothing is forwarded live — the loop emits the stripped remainder once.
+type speechTurnCutter struct {
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	raw     strings.Builder
+	decided bool
+	cut     bool
+}
+
+func newSpeechTurnCutter(cancel context.CancelFunc) *speechTurnCutter {
+	return &speechTurnCutter{cancel: cancel}
+}
+
+func (c *speechTurnCutter) OnToken(tok string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cut {
+		return
+	}
+	c.raw.WriteString(tok)
+	if c.decided {
+		return
+	}
+	if lead := strings.TrimLeft(c.raw.String(), " \t\r\n"); lead != "" {
+		c.decided = true
+		if lead[0] == '{' {
+			c.cut = true
+			c.cancel()
+		}
+	}
+}
+
+func (c *speechTurnCutter) Cut() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cut
+}
+
+func (c *speechTurnCutter) Raw() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.raw.String()
+}
+
+// canAutoWait reports whether a synthetic wait_for_threads barrier can run:
+// the tool must be registered and permitted for this agent's toolbelt.
+func (cfg *RunLoopConfig) canAutoWait() bool {
+	if cfg.Tools == nil || !cfg.toolSchemaAllows("wait_for_threads") {
+		return false
+	}
+	_, ok := cfg.Tools.Get("wait_for_threads")
+	return ok
 }
 
 // toolSchemaAllows returns true if toolName appears in cfg.ToolSchemas.

@@ -19,6 +19,7 @@ import (
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
 	catalogpkg "github.com/scrypster/huginn/internal/connections/catalog"
+	"github.com/scrypster/huginn/internal/mcp"
 	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/relay"
@@ -103,9 +104,21 @@ type Server struct {
 	// Tests set this low so failed browser flows drain quickly.
 	cloudRegisterPollInterval time.Duration
 
-	tm          *threadmgr.ThreadManager         // may be nil if multi-agent not configured
-	previewGate *threadmgr.DelegationPreviewGate // may be nil if preview not configured
-	ca          *threadmgr.CostAccumulator       // may be nil if cost tracking not configured
+	tm                *threadmgr.ThreadManager         // may be nil if multi-agent not configured
+	checkpointHandler http.Handler                     // run-checkpoints REST (nil if checkpoints disabled)
+	previewGate       *threadmgr.DelegationPreviewGate // may be nil if preview not configured
+	ca                *threadmgr.CostAccumulator       // may be nil if cost tracking not configured
+
+	// mcpMgr is the running MCP ServerManager, wired via SetMCPManager when
+	// cfg.MCPServers is non-empty. Nil when no MCP servers are configured —
+	// handleMCPStatus returns an empty list in that case rather than erroring,
+	// since "no browser server configured" is the default, unconfigured state.
+	mcpMgr *mcp.ServerManager
+
+	// permPrompts tracks in-flight WS permission_request round-trips for
+	// PermissionPromptFunc / handlePermissionResponse. Always non-nil after
+	// NewServer.
+	permPrompts *permissionPrompts
 
 	// delegationStore persists agent delegation records. nil if the underlying
 	// store doesn't implement session.DelegationStore (e.g. in-memory store in tests).
@@ -166,6 +179,32 @@ type Server struct {
 
 	spaceStore spaces.StoreInterface // nil if spaces not configured
 
+	// sessionCountsCache memoizes computeSessionCounts for sessionCountsTTL so
+	// a burst of /api/v1/stats polls doesn't reload+reparse every session
+	// manifest on every request. Guarded by its own mutex (not s.mu) since
+	// it's read/written far more often than other server state.
+	sessionCountsCache sessionCountsCacheState
+	sessionCountsMu    sync.Mutex
+
+	// sessionCountsLoader lists session manifests for computeSessionCounts.
+	// Nil (production) uses s.store.List directly. Tests may override this
+	// to count invocations without needing a real store.
+	sessionCountsLoader func() ([]session.Manifest, error)
+
+	// spaceThreadRunner wakes a mentioned agent inside a Slack-style thread.
+	// New wires RunSpaceThreadAgent. Tests may inject a fake so they never
+	// hit live models.
+	spaceThreadRunner SpaceThreadRunner
+	// onSpaceWS captures space-scoped WS events in tests (nil in production).
+	onSpaceWS func(WSMessage)
+	// spaceThreadWG tracks in-flight @mention wakes so POST can return
+	// before the runner finishes. Tests wait via waitSpaceThreadWakes.
+	spaceThreadWG sync.WaitGroup
+	// spaceWakeMu / spaceWakeCounts cap bidirectional mesh recursion
+	// (Steve↔Winston) per parent thread.
+	spaceWakeMu     sync.Mutex
+	spaceWakeCounts map[string]int
+
 	// db is the SQLite database used by thread/message handlers. nil if not configured.
 	db *sqlitedb.DB
 
@@ -176,16 +215,26 @@ type Server struct {
 	symbolStore symbolQuerier
 	symbolCache *symbolIndexCache
 
+	// turnMetrics backs GET /api/v1/metrics/turns. Nil when sqlDB was
+	// unavailable at startup — the handler reports 503 rather than panicking.
+	turnMetrics turnMetricsReader
+
 	// ctx is the server lifecycle context stored at Start(). Used by long-running
 	// goroutines (e.g. SpawnThread) that must outlive individual HTTP requests.
 	ctx context.Context
 
-	// chatRunsMu guards chatRunCancels — the per-session cancel handles for
-	// in-flight WS chat runs. Runs derive from the server lifecycle context so
-	// they survive client disconnects; "chat_cancel" stops them explicitly.
-	// See beginChatRun / cancelChatRun in ws.go.
+	// chatRunsMu guards chatRunCancels and chatQueueDepth — the per-session
+	// FIFO admission state for WS chat runs. Runs derive from the server
+	// lifecycle context so they survive client disconnects; "chat_cancel"
+	// stops them explicitly. A run is never silently superseded by a
+	// fast-follow message — see reserveChatRun / beginChatRun / cancelChatRun
+	// in ws.go.
 	chatRunsMu     sync.Mutex
 	chatRunCancels map[string]*chatRunHandle
+	// chatQueueDepth counts admitted-but-not-finished chat runs per session
+	// (the FIFO queue depth), used to give an honest "I'm behind" notice
+	// once a session's backlog grows large instead of dropping asks.
+	chatQueueDepth map[string]int
 
 	// spawnWg tracks in-flight SpawnThread goroutines so Stop() can drain them.
 	spawnWg sync.WaitGroup
@@ -205,6 +254,11 @@ type Server struct {
 	// auditLog writes permission gate decisions to the SQLite audit_log table.
 	// nil if not configured.
 	auditLog *auditLogger
+
+	// entityAudit is the append-only JSONL audit trail for entity lifecycle
+	// actions (agent hire/delete, company seat/unseat, memory forget).
+	// Always initialised in New() — never nil.
+	entityAudit *entityAuditLogger
 
 	// workstreamStore is the workstream store wired for the /api/v1/workstreams endpoints.
 	// nil if workstreams are not configured.
@@ -296,19 +350,22 @@ func New(
 		pm[p.Name()] = p
 	}
 	s := &Server{
-		cfg:            cfg,
-		orch:           orch,
-		store:          store,
-		token:          token,
-		huginnDir:      huginnDir,
-		wsHub:          newWSHub(),
-		connMgr:        connMgr,
-		connStore:      connStore,
-		connProviders:  pm,
-		oauthLimiter:   newFlowRateLimiter(),
-		authLimiter:    newAuthFailLimiter(),
-		credValidators: buildCredentialValidatorRegistry(),
-		relayKeys:      make(map[string]string),
+		cfg:             cfg,
+		orch:            orch,
+		store:           store,
+		token:           token,
+		huginnDir:       huginnDir,
+		wsHub:           newWSHub(),
+		connMgr:         connMgr,
+		connStore:       connStore,
+		connProviders:   pm,
+		oauthLimiter:    newFlowRateLimiter(),
+		authLimiter:     newAuthFailLimiter(),
+		credValidators:  buildCredentialValidatorRegistry(),
+		relayKeys:       make(map[string]string),
+		spaceWakeCounts: make(map[string]int),
+		entityAudit:     newEntityAuditLogger(huginnDir),
+		permPrompts:     newPermissionPrompts(),
 
 		// Enterprise-safe rate limits (per-IP, sliding window).
 		sessionCreateLimiter: newEndpointRateLimiter(10, time.Minute),
@@ -316,6 +373,8 @@ func New(
 		workflowRunLimiter:   newEndpointRateLimiter(30, time.Minute),
 		mutationLimiter:      newEndpointRateLimiter(60, time.Minute),
 	}
+	// In-thread @ wake uses the same ChatWithAgent loop as space chat.
+	s.spaceThreadRunner = s.RunSpaceThreadAgent
 	// Initialise the WebSocket upgrader using s.checkOrigin so AllowedOrigins
 	// config is honoured. Must happen after s is initialised (checkOrigin reads s.cfg).
 	s.upgrader = websocket.Upgrader{
@@ -403,6 +462,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.srv.Serve(ln)
 	go s.wsHub.run()
 	go s.evictSwarmSnapshots(ctx)
+	go s.evictStaleSpecialists(ctx)
 
 	// Start stale-binary watcher so the UI can prompt for restart after
 	// `brew upgrade huginn` or any silent binary replacement.
@@ -554,6 +614,27 @@ func (s *Server) BroadcastToSession(sessionID, msgType string, payload map[strin
 	s.wsHub.broadcastToSession(sessionID, WSMessage{Type: msgType, Payload: payload})
 }
 
+// persistInboundUserMessage writes the accepted user prompt immediately so
+// mid-turn Appends (thread lifecycle announcements) cannot win seq before it.
+// Returns true if the row was persisted.
+func (s *Server) persistInboundUserMessage(sessionID, userMsgID, content string) bool {
+	if s.store == nil || sessionID == "" {
+		return false
+	}
+	sess, err := s.store.Load(sessionID)
+	if err != nil {
+		return false
+	}
+	if appendErr := s.store.Append(sess, session.SessionMessage{
+		ID: userMsgID, Role: "user", Content: content, Ts: time.Now().UTC(),
+	}); appendErr != nil {
+		slog.Error("failed to persist inbound user message", "session_id", sessionID, "err", appendErr)
+		return false
+	}
+	s.emitSpaceActivity(sess.SpaceID())
+	return true
+}
+
 func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload map[string]any) {
 	if s.store == nil {
 		return
@@ -571,7 +652,9 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	task, _ := payload["task"].(string)
 	helpMsg, _ := payload["message"].(string)
 	summary, _ := payload["summary"].(string)
+	status, _ := payload["status"].(string)
 	timeoutSeconds, _ := payload["timeout_seconds"].(int)
+	parentID := ""
 	if s.tm != nil {
 		if t, ok := s.tm.Get(threadID); ok {
 			if agentID == "" {
@@ -583,11 +666,19 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 			if summary == "" && t.Summary != nil {
 				summary = t.Summary.Summary
 			}
+			parentID = strings.TrimSpace(t.ParentMessageID)
 		}
 	}
 	agentLabel := strings.TrimSpace(agentID)
 	if agentLabel == "" {
 		agentLabel = "delegate"
+	}
+	// Backfill the resolved agent_id onto the payload map itself (maps are
+	// reference types, so this mutation is visible to the caller too) so the
+	// raw WS broadcast that follows carries the real agent name instead of
+	// leaving clients to fall back to a placeholder label.
+	if strings.TrimSpace(agentID) != "" {
+		payload["agent_id"] = agentID
 	}
 	var content string
 	switch msgType {
@@ -610,7 +701,14 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 		if doneSummary == "" {
 			doneSummary = "Completed delegated work."
 		}
-		content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+		if strings.EqualFold(strings.TrimSpace(status), "error") {
+			// A reaper timeout / hard failure must not be phrased as an
+			// accomplishment — see StartWatchdog and the error-summary
+			// paths in threadmgr/spawn.go.
+			content = fmt.Sprintf("**%s**'s delegated task failed: %s", agentLabel, doneSummary)
+		} else {
+			content = fmt.Sprintf("**%s** completed delegated work: %s", agentLabel, doneSummary)
+		}
 	case "delegation_preview_timeout":
 		if timeoutSeconds <= 0 {
 			timeoutSeconds = 30
@@ -624,21 +722,38 @@ func (s *Server) persistThreadLifecycleEvent(sessionID, msgType string, payload 
 	if err != nil {
 		return
 	}
+	// Space-thread wakes set ParentMessageID on the A2A thread. Pin the
+	// harness announcement to that drawer (parent_id) so "Delegated to" /
+	// "completed delegated work" never land as a hallway root.
+	spaceID := strings.TrimSpace(sess.SpaceID())
+	if parentID != "" && spaceID != "" && s.spaceStore != nil {
+		inserted, insErr := s.spaceStore.InsertSpaceThreadMessage(spaceID, content, parentID, "assistant", agentID)
+		if insErr != nil {
+			slog.Warn("server: thread lifecycle off-hallway insert failed",
+				"session_id", sessionID, "type", msgType, "thread_id", threadID, "parent_id", parentID, "err", insErr)
+			return
+		}
+		replies, _ := s.spaceStore.ListSpaceReplies(spaceID, parentID)
+		s.emitSpaceReply(spaceID, parentID, inserted, len(replies), spaces.LastSpeechPreview(replies))
+		s.emitSpaceActivity(spaceID)
+		return
+	}
 	if appendErr := s.store.Append(sess, session.SessionMessage{
-		ID:         session.NewID(),
-		Role:       "assistant",
-		Content:    content,
-		Agent:      agentID,
-		ToolName:   msgType,
-		ToolCallID: threadID,
-		Type:       "thread_event",
-		Ts:         time.Now().UTC(),
+		ID:              session.NewID(),
+		Role:            "assistant",
+		Content:         content,
+		Agent:           agentID,
+		ToolName:        msgType,
+		ToolCallID:      threadID,
+		Type:            "thread_event",
+		ParentMessageID: parentID,
+		Ts:              time.Now().UTC(),
 	}); appendErr != nil {
 		slog.Warn("server: failed to persist thread lifecycle event",
 			"session_id", sessionID, "type", msgType, "thread_id", threadID, "err", appendErr)
 		return
 	}
-	s.emitSpaceActivity(sess.SpaceID())
+	s.emitSpaceActivity(spaceID)
 }
 
 // ResolveAgent returns the primary agent for the given session, delegating to
@@ -778,6 +893,23 @@ func (s *Server) SetThreadManager(tm *threadmgr.ThreadManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tm = tm
+}
+
+// SetMCPManager wires the running MCP ServerManager so /api/v1/mcp/status can
+// report live connection state (used by the web Settings → Browser toggle).
+func (s *Server) SetMCPManager(mgr *mcp.ServerManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mcpMgr = mgr
+}
+
+// SetCheckpointHandler mounts the run-checkpoints REST surface under
+// /api/v1/checkpoints/ (behind the same auth middleware as every other
+// API route). Nil (the default) leaves the routes unregistered.
+func (s *Server) SetCheckpointHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpointHandler = h
 }
 
 // SetPreviewGate wires the DelegationPreviewGate for delegation approval.
@@ -976,11 +1108,31 @@ func (s *Server) MakeThreadEventEmitter() *threadmgr.EventEmitter {
 
 // saveConfig persists cfg to disk. When s.configPath is set (tests), it writes
 // to that path instead of the default ~/.huginn/config.json.
+//
+// Deprecated: this does a full-struct overwrite of whatever is currently on
+// disk, which clobbers any field another process (e.g. the TUI, or a
+// concurrent request in this process) changed since cfg was last loaded.
+// Prefer updateConfig, which re-reads disk immediately before writing and
+// only mutates the fields that actually changed.
 func (s *Server) saveConfig(cfg *config.Config) error {
 	if s.configPath != "" {
 		return cfg.SaveTo(s.configPath)
 	}
 	return cfg.Save()
+}
+
+// updateConfig performs a read-modify-write update of the on-disk config:
+// it re-reads the current config from disk (never a possibly-stale
+// in-memory copy), applies mutate to that fresh copy, and writes only the
+// result back. This avoids clobbering fields another writer (the TUI, or a
+// concurrent request in this process) changed on disk since s.cfg was last
+// loaded. Callers should still update s.cfg in memory themselves — this
+// only handles the disk side. Honors s.configPath (tests) like saveConfig.
+func (s *Server) updateConfig(mutate func(*config.Config)) error {
+	if s.configPath != "" {
+		return config.UpdateAt(s.configPath, mutate)
+	}
+	return config.UpdateDefault(mutate)
 }
 
 // storeAPIKey stores an API key in the OS keychain (or test double).
@@ -1044,6 +1196,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", api(s.handleGetMessages))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(50<<10, s.handleSendMessage))))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/chat/stream", api(s.handleChatStream))
+	mux.HandleFunc("GET /api/v1/audit", api(s.handleGetAudit))
+
+	// Hooks API (PreToolUse/PostToolUse user-configurable shell hooks).
+	mux.HandleFunc("GET /api/v1/hooks", api(s.handleListHooks))
+	mux.HandleFunc("POST /api/v1/hooks", api(withMaxBody(64<<10, s.handleCreateHook)))
+	mux.HandleFunc("PUT /api/v1/hooks/{id}", api(withMaxBody(64<<10, s.handleUpdateHook)))
+	mux.HandleFunc("DELETE /api/v1/hooks/{id}", api(s.handleDeleteHook))
+	mux.HandleFunc("POST /api/v1/hooks/reload", api(s.handleReloadHooks))
+	mux.HandleFunc("POST /api/v1/hooks/test", api(withMaxBody(64<<10, s.handleTestHook)))
+	mux.HandleFunc("GET /api/v1/hooks/audit", api(s.handleHooksAudit))
 	mux.HandleFunc("GET /api/v1/agents", api(s.handleListAgents))
 	mux.HandleFunc("GET /api/v1/agents/capability-matrix", api(s.handleGetCapabilityMatrix))
 	mux.HandleFunc("POST /api/v1/agents/capability-matrix/validate", api(withMaxBody(100<<10, s.handleValidateCapabilityMatrix)))
@@ -1076,6 +1238,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/log-level", api(s.handleSetLogLevel))
 	mux.HandleFunc("GET /api/v1/config", api(s.handleGetConfig))
 	mux.HandleFunc("PUT /api/v1/config", api(s.handleUpdateConfig))
+	mux.HandleFunc("GET /api/v1/mcp/status", api(s.handleMCPStatus))
 
 	// Secrets API (authenticated)
 	mux.HandleFunc("GET /api/v1/secrets", api(s.handleGetSecrets))
@@ -1123,6 +1286,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Workflows API
 	mux.HandleFunc("GET /api/v1/workflows", api(s.handleListWorkflows))
 	mux.HandleFunc("POST /api/v1/workflows", api(s.handleCreateWorkflow))
+	mux.HandleFunc("POST /api/v1/workflows/drop", api(s.handleDropWorkflow))
 	mux.HandleFunc("POST /api/v1/workflows/validate", api(s.handleValidateWorkflow))
 	mux.HandleFunc("GET /api/v1/workflows/templates", api(s.handleListWorkflowTemplates))
 	mux.HandleFunc("GET /api/v1/workflows/{id}", api(s.handleGetWorkflow))
@@ -1151,6 +1315,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Code Intelligence API (authenticated)
 	mux.HandleFunc("GET /api/v1/symbols/search", api(s.handleSymbolSearch))
 	mux.HandleFunc("GET /api/v1/symbols/impact/{symbol}", api(s.handleSymbolImpact))
+
+	// Turn latency telemetry (authenticated) — perf-wave dashboard/agent feed.
+	mux.HandleFunc("GET /api/v1/metrics/turns", api(s.handleTurnMetrics))
 
 	// OAuth callback (no auth — provider redirects here for local flows)
 	mux.HandleFunc("GET /oauth/callback", s.handleOAuthCallback)
@@ -1197,10 +1364,20 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/muninn/status", api(s.handleMuninnStatus))
 	mux.HandleFunc("POST /api/v1/muninn/test", api(s.handleMuninnTest))
 	mux.HandleFunc("POST /api/v1/muninn/connect", api(s.handleMuninnConnect))
+	mux.HandleFunc("POST /api/v1/muninn/connect-local", api(s.handleMuninnConnectLocal))
 	mux.HandleFunc("GET /api/v1/muninn/vaults", api(s.handleMuninnVaultsList))
 	mux.HandleFunc("POST /api/v1/muninn/vaults", api(s.handleMuninnVaultCreate))
 	mux.HandleFunc("GET /api/v1/memory/replication-status", api(s.handleMemoryReplicationStatus))
 	mux.HandleFunc("POST /api/v1/muninn/tool", api(s.handleMuninnTool))
+
+	// Companies API (authenticated)
+	mux.HandleFunc("GET /api/v1/companies", api(s.handleListCompanies))
+	mux.HandleFunc("POST /api/v1/companies", api(s.handleCreateCompany))
+	mux.HandleFunc("GET /api/v1/companies/{id}", api(s.handleGetCompany))
+	mux.HandleFunc("PATCH /api/v1/companies/{id}", api(s.handleUpdateCompany))
+	mux.HandleFunc("POST /api/v1/companies/{id}/members", api(s.handleSeatCompanyMember))
+	mux.HandleFunc("DELETE /api/v1/companies/{id}/members/{agent}", api(s.handleUnseatCompanyMember))
+	mux.HandleFunc("DELETE /api/v1/companies/{id}", api(s.handleDeleteCompany))
 
 	// Spaces API (authenticated)
 	// NOTE: route ordering matters in Go 1.22+ ServeMux.
@@ -1229,7 +1406,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// for the path /spaces/dm/messages (literal "dm" beats wildcard "{id}").
 	// We use the "space-messages" prefix to avoid the ambiguity, mirroring
 	// the "space-sessions" pattern used for the sessions endpoint above.
+	mux.HandleFunc("GET /api/v1/space-messages/{id}/replies", api(s.handleListSpaceReplies))
+	mux.HandleFunc("POST /api/v1/space-messages/{id}/thread-read", api(s.handleMarkSpaceThreadRead))
+	mux.HandleFunc("DELETE /api/v1/space-messages/{id}/{msgID}", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, s.handleDeleteSpaceMessage)))
 	mux.HandleFunc("GET /api/v1/space-messages/{id}", api(s.handleListSpaceMessages))
+	mux.HandleFunc("POST /api/v1/space-messages/{id}", api(s.rateLimitMiddleware(func() *endpointRateLimiter { return s.mutationLimiter }, withMaxBody(70<<10, s.handlePostSpaceMessage))))
 
 	// Skills API (authenticated)
 	// Place specific literal routes before wildcard routes for clarity
@@ -1244,6 +1425,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/skills/{name}/enable", api(s.handleSkillsEnable))
 	mux.HandleFunc("PUT /api/v1/skills/{name}/disable", api(s.handleSkillsDisable))
 	mux.HandleFunc("DELETE /api/v1/skills/{name}", api(s.handleSkillsDelete))
+
+	// Run checkpoints (optional; wired by main via SetCheckpointHandler).
+	// Mounted through the same api() middleware chain (logging, request-ID,
+	// auth, body cap) as every other route.
+	if s.checkpointHandler != nil {
+		ckptH := http.StripPrefix("/api/v1/checkpoints", s.checkpointHandler)
+		mux.HandleFunc("/api/v1/checkpoints/", api(func(w http.ResponseWriter, r *http.Request) {
+			ckptH.ServeHTTP(w, r)
+		}))
+	}
 
 	// WebSocket
 	mux.HandleFunc("GET /ws", s.handleWebSocket)

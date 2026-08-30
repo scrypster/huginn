@@ -1,0 +1,835 @@
+package oneshot
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/scrypster/huginn/internal/agents"
+	"github.com/scrypster/huginn/internal/backend"
+	"github.com/scrypster/huginn/internal/modelconfig"
+	"github.com/scrypster/huginn/internal/session"
+	"github.com/scrypster/huginn/internal/tools"
+)
+
+// fakeBackend emits scripted ChatCompletion responses. The first response is
+// a bash tool_call; the second is a final assistant answer.
+//
+// scriptModel, when set, restricts responses[] to requests from that one
+// model — every other model always gets the "done" fallback. This matters
+// for delegation tests: delegate_to_agent spawns the specialist's own
+// RunLoop as a real background goroutine (internal/threadmgr.SpawnThread),
+// which calls this same fakeBackend concurrently with the lead agent's own
+// next turn. A single shared response index can't tell those two callers
+// apart, so it is a genuine data race — whichever goroutine's ChatCompletion
+// call reaches f.call first "steals" the response the test scripted for the
+// other agent (this is what made TestRun_ToolsCalled_DoesNotApplyMissingToolSpeech
+// flake under -race: Steve's spawned thread would occasionally consume the
+// response meant for Winston's second turn). A real backend never has this
+// problem — it answers a request based on that request's own model/messages,
+// never on how many prior calls it happened to receive from unrelated
+// conversations. scriptModel makes the mock do the same: each agent's
+// completions are isolated by model name, so the outcome no longer depends
+// on goroutine scheduling.
+type fakeBackend struct {
+	mu          sync.Mutex
+	responses   []*backend.ChatResponse
+	requests    []backend.ChatRequest
+	call        int
+	scriptModel string
+}
+
+func (f *fakeBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, req)
+	// --no-tools sends no schemas; answer in one shot instead of emitting a tool_call.
+	if len(req.Tools) == 0 {
+		resp := &backend.ChatResponse{Content: "The hostname is testhost.", DoneReason: "stop"}
+		if req.OnToken != nil {
+			req.OnToken(resp.Content)
+		}
+		return resp, nil
+	}
+	var resp *backend.ChatResponse
+	if f.scriptModel == "" || req.Model == f.scriptModel {
+		idx := f.call
+		f.call++
+		if idx < len(f.responses) {
+			resp = f.responses[idx]
+		}
+	}
+	if resp == nil {
+		resp = &backend.ChatResponse{Content: "done", DoneReason: "stop"}
+	}
+	if req.OnToken != nil && resp != nil && resp.Content != "" {
+		req.OnToken(resp.Content)
+	}
+	return resp, nil
+}
+
+func (f *fakeBackend) Health(_ context.Context) error   { return nil }
+func (f *fakeBackend) Shutdown(_ context.Context) error { return nil }
+func (f *fakeBackend) ContextWindow() int               { return 8192 }
+
+func (f *fakeBackend) lastTools() []backend.Tool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return nil
+	}
+	return f.requests[0].Tools
+}
+
+func (f *fakeBackend) lastModel() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return ""
+	}
+	return f.requests[0].Model
+}
+
+type stubTool struct {
+	name   string
+	output string
+}
+
+func (t *stubTool) Name() string                      { return t.name }
+func (t *stubTool) Description() string               { return t.name }
+func (t *stubTool) Permission() tools.PermissionLevel { return tools.PermExec }
+func (t *stubTool) Schema() backend.Tool {
+	return backend.Tool{Type: "function", Function: backend.ToolFunction{Name: t.name}}
+}
+func (t *stubTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
+	return tools.ToolResult{Output: t.output}
+}
+
+func bashThenAnswerBackend() *fakeBackend {
+	return &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_bash_1",
+					Function: backend.ToolCallFunction{
+						Name:      "bash",
+						Arguments: map[string]any{"command": "hostname"},
+					},
+				}},
+			},
+			{Content: "The hostname is testhost.", DoneReason: "stop"},
+		},
+	}
+}
+
+func steveRegistry() *agents.AgentRegistry {
+	reg := agents.NewRegistry()
+	reg.Register(&agents.Agent{
+		Name:       "Steve",
+		ModelID:    "qwen3.6:35b",
+		LocalTools: []string{"*"},
+	})
+	return reg
+}
+
+func bashToolReg() *tools.Registry {
+	reg := tools.NewRegistry()
+	reg.Register(&stubTool{name: "bash", output: "testhost\n"})
+	reg.TagTools([]string{"bash"}, "builtin")
+	return reg
+}
+
+func TestRun_JSON_ToolsCalledNonEmpty(t *testing.T) {
+	b := bashThenAnswerBackend()
+	res, err := Run(context.Background(), Config{
+		Prompt:          "Use bash to run hostname",
+		AgentName:       "Steve",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AgentOutput != "The hostname is testhost." {
+		t.Errorf("agentOutput = %q", res.AgentOutput)
+	}
+	if len(res.ToolsCalled) == 0 {
+		t.Fatal("toolsCalled is empty; want at least one bash call")
+	}
+	tc := res.ToolsCalled[0]
+	if tc.Name != "bash" {
+		t.Errorf("toolsCalled[0].name = %q, want bash", tc.Name)
+	}
+	if cmd, _ := tc.Args["command"].(string); cmd != "hostname" {
+		t.Errorf("toolsCalled[0].args.command = %v, want hostname", tc.Args["command"])
+	}
+	if !strings.Contains(tc.Result, "testhost") {
+		t.Errorf("toolsCalled[0].result = %q, want testhost", tc.Result)
+	}
+
+	var buf bytes.Buffer
+	if err := WriteResult(&buf, io.Discard, res, true, false); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+	var parsed Result
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json: %v\nraw: %s", err, buf.String())
+	}
+	if parsed.AgentOutput == "" {
+		t.Error("JSON agentOutput is empty")
+	}
+	if len(parsed.ToolsCalled) == 0 {
+		t.Error("JSON toolsCalled is empty")
+	}
+}
+
+func TestRun_NoTools_ToolsCalledEmpty(t *testing.T) {
+	b := bashThenAnswerBackend()
+	res, err := Run(context.Background(), Config{
+		Prompt:    "Use bash to run hostname",
+		AgentName: "Steve",
+		NoTools:   true,
+		Backend:   b,
+		Registry:  steveRegistry(),
+		Tools:     bashToolReg(),
+		Models:    modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) != 0 {
+		t.Fatalf("toolsCalled = %#v, want empty under --no-tools", res.ToolsCalled)
+	}
+	if res.AgentOutput == "" {
+		t.Error("agentOutput should still be set under --no-tools")
+	}
+	if len(b.lastTools()) != 0 {
+		t.Errorf("--no-tools still sent tool schemas: %v", b.lastTools())
+	}
+
+	var buf bytes.Buffer
+	if err := WriteResult(&buf, io.Discard, res, true, false); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+	var parsed Result
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if parsed.ToolsCalled == nil {
+		t.Fatal("JSON toolsCalled should be [] not omitted")
+	}
+	if len(parsed.ToolsCalled) != 0 {
+		t.Errorf("JSON toolsCalled = %#v, want []", parsed.ToolsCalled)
+	}
+}
+
+func TestRun_UnknownAgent(t *testing.T) {
+	_, err := Run(context.Background(), Config{
+		Prompt:    "hello",
+		AgentName: "Nobody",
+		Backend:   bashThenAnswerBackend(),
+		Registry:  steveRegistry(),
+		Models:    modelconfig.DefaultModels(),
+	})
+	if err == nil {
+		t.Fatal("expected unknown-agent error")
+	}
+	if !strings.Contains(err.Error(), "unknown agent") {
+		t.Errorf("error = %v, want unknown agent", err)
+	}
+	if !strings.Contains(err.Error(), "Steve") {
+		t.Errorf("error should list available agents, got %v", err)
+	}
+}
+
+func TestRun_SwapModel(t *testing.T) {
+	b := bashThenAnswerBackend()
+	_, err := Run(context.Background(), Config{
+		Prompt:          "hello",
+		AgentName:       "Steve",
+		Model:           "qwen3.6:35b",
+		SkipPermissions: true,
+		NoTools:         true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := b.lastModel(); got != "qwen3.6:35b" {
+		t.Errorf("model = %q, want qwen3.6:35b (SwapModel)", got)
+	}
+}
+
+func TestRun_PrintWithoutAgent_UsesFallback(t *testing.T) {
+	b := bashThenAnswerBackend()
+	res, err := Run(context.Background(), Config{
+		Prompt:          "Use bash to run hostname",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        agents.NewRegistry(), // empty — no named agents
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) == 0 {
+		t.Fatal("--print without --agent should still run the tool loop")
+	}
+}
+
+func TestFormatToolSummary_AndWriteText(t *testing.T) {
+	summary := FormatToolSummary([]ToolCall{{
+		Name:   "bash",
+		Args:   map[string]any{"command": "hostname"},
+		Result: "testhost\n",
+	}})
+	if !strings.Contains(summary, "bash") || !strings.Contains(summary, "hostname") {
+		t.Errorf("summary missing tool details: %q", summary)
+	}
+
+	var out, errOut bytes.Buffer
+	res := &Result{AgentOutput: "done", ToolsCalled: []ToolCall{{Name: "bash", Result: "ok"}}}
+	if err := WriteResult(&out, &errOut, res, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "done") {
+		t.Errorf("stdout = %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "bash") {
+		t.Errorf("stderr tool summary = %q", errOut.String())
+	}
+}
+
+func hasToolSchema(tools []backend.Tool, name string) bool {
+	for _, t := range tools {
+		if t.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+var threadIDRe = regexp.MustCompile(`thread ([0-9A-Za-z]+)`)
+
+func threadIDFromHistory(msgs []backend.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if m := threadIDRe.FindStringSubmatch(msgs[i].Content); len(m) == 2 {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// chiefOfStaffBackend scripts Winston → delegate_to_agent → wait_for_threads
+// and Reggie → PONG. Routing is by tool schema (specialists get finish()).
+type chiefOfStaffBackend struct {
+	mu                sync.Mutex
+	winstonCall       int
+	requests          []backend.ChatRequest
+	waitAsContentJSON bool
+}
+
+func (f *chiefOfStaffBackend) ChatCompletion(_ context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, req)
+	f.mu.Unlock()
+
+	if hasToolSchema(req.Tools, "finish") && !hasToolSchema(req.Tools, "delegate_to_agent") {
+		if req.OnToken != nil {
+			req.OnToken("PONG")
+		}
+		return &backend.ChatResponse{Content: "PONG", DoneReason: "stop"}, nil
+	}
+
+	f.mu.Lock()
+	n := f.winstonCall
+	f.winstonCall++
+	f.mu.Unlock()
+
+	switch n {
+	case 0:
+		return &backend.ChatResponse{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID: "call_delegate_1",
+				Function: backend.ToolCallFunction{
+					Name: "delegate_to_agent",
+					Arguments: map[string]any{
+						"agent": "Reggie",
+						"task":  "Reply with exactly PONG.",
+					},
+				},
+			}},
+		}, nil
+	case 1:
+		if f.waitAsContentJSON {
+			// Live 2026-08-26 10:29 ET: entire follow-up content, no arguments.
+			return &backend.ChatResponse{
+				Content:    `{"name": "wait_for_threads"}`,
+				DoneReason: "stop",
+			}, nil
+		}
+		args := map[string]any{"timeout_seconds": float64(10)}
+		if id := threadIDFromHistory(req.Messages); id != "" {
+			args["thread_ids"] = []any{id}
+		}
+		return &backend.ChatResponse{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID: "call_wait_1",
+				Function: backend.ToolCallFunction{
+					Name:      "wait_for_threads",
+					Arguments: args,
+				},
+			}},
+		}, nil
+	default:
+		if req.OnToken != nil {
+			req.OnToken("PONG")
+		}
+		return &backend.ChatResponse{Content: "PONG", DoneReason: "stop"}, nil
+	}
+}
+
+func (f *chiefOfStaffBackend) Health(_ context.Context) error   { return nil }
+func (f *chiefOfStaffBackend) Shutdown(_ context.Context) error { return nil }
+func (f *chiefOfStaffBackend) ContextWindow() int               { return 8192 }
+
+func writeAgentYAML(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s.yaml: %v", name, err)
+	}
+}
+
+func TestLoadAgents_WinstonAndReggieYAML(t *testing.T) {
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	cfg, err := agents.LoadAgentsFromBase(base)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromBase: %v", err)
+	}
+	reg := agents.BuildRegistry(cfg, modelconfig.DefaultModels())
+	if _, ok := reg.ByName("Winston"); !ok {
+		t.Fatal("Winston not loaded from yaml")
+	}
+	if _, ok := reg.ByName("Reggie"); !ok {
+		t.Fatal("Reggie not loaded from yaml")
+	}
+}
+
+func TestRun_ChiefOfStaff_WinstonDelegatesToReggie(t *testing.T) {
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff. Delegate and wait.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	b := &chiefOfStaffBackend{}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := Run(ctx, Config{
+		Prompt:          "Ask Reggie to reply with exactly PONG. Wait for him and report only his word.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		MaxTurns:        8,
+		Backend:         b,
+		SessionStore:    session.NewStore(t.TempDir()),
+		LoadRegistry: func() (*agents.AgentRegistry, error) {
+			cfg, err := agents.LoadAgentsFromBase(base)
+			if err != nil {
+				return nil, err
+			}
+			return agents.BuildRegistry(cfg, modelconfig.DefaultModels()), nil
+		},
+		Tools:  tools.NewRegistry(),
+		Models: modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(res.AgentOutput, "PONG") {
+		t.Fatalf("agentOutput = %q, want PONG", res.AgentOutput)
+	}
+
+	var names []string
+	for _, tc := range res.ToolsCalled {
+		names = append(names, tc.Name)
+	}
+	if len(res.ToolsCalled) == 0 {
+		t.Fatal("toolsCalled is empty")
+	}
+	got := strings.Join(names, ",")
+	if !strings.Contains(got, "delegate_to_agent") {
+		t.Errorf("toolsCalled = %v, want delegate_to_agent", names)
+	}
+	if !strings.Contains(got, "wait_for_threads") {
+		t.Errorf("toolsCalled = %v, want wait_for_threads", names)
+	}
+	for _, tc := range res.ToolsCalled {
+		if tc.Name == "wait_for_threads" && !strings.Contains(tc.Result, "PONG") {
+			t.Errorf("wait_for_threads result = %q, want PONG from Reggie", tc.Result)
+		}
+		if tc.Name == "delegate_to_agent" && tc.Result == "" {
+			t.Error("delegate_to_agent result is empty")
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := WriteResult(&buf, io.Discard, res, true, false); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+	var parsed Result
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json: %v\nraw: %s", err, buf.String())
+	}
+	if len(parsed.ToolsCalled) == 0 {
+		t.Error("JSON toolsCalled is empty")
+	}
+	if !strings.Contains(parsed.AgentOutput, "PONG") {
+		t.Errorf("JSON agentOutput = %q, want PONG", parsed.AgentOutput)
+	}
+}
+
+func TestRun_ChiefOfStaff_WaitForThreadsContentJSON(t *testing.T) {
+	// Live 2026-08-26 10:29 ET: after delegate_to_agent, Winston wrote
+	// {"name": "wait_for_threads"} (no arguments) as the entire content.
+	// That must execute, not become agentOutput.
+	base := t.TempDir()
+	agentsDir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentYAML(t, agentsDir, "Winston", `name: Winston
+model: test-winston
+system_prompt: You are Winston, chief of staff. Delegate and wait.
+local_tools: ["*"]
+`)
+	writeAgentYAML(t, agentsDir, "Reggie", `name: Reggie
+model: test-reggie
+system_prompt: You are Reggie. Reply with exactly PONG.
+`)
+
+	b := &chiefOfStaffBackend{waitAsContentJSON: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := Run(ctx, Config{
+		Prompt:          "Ask Reggie to reply PONG. Wait for him. Then tell me what he said, and also what is 7 times 8.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		MaxTurns:        8,
+		Backend:         b,
+		SessionStore:    session.NewStore(t.TempDir()),
+		LoadRegistry: func() (*agents.AgentRegistry, error) {
+			cfg, err := agents.LoadAgentsFromBase(base)
+			if err != nil {
+				return nil, err
+			}
+			return agents.BuildRegistry(cfg, modelconfig.DefaultModels()), nil
+		},
+		Tools:  tools.NewRegistry(),
+		Models: modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(res.AgentOutput, `"name"`) || strings.TrimSpace(res.AgentOutput) == `{"name": "wait_for_threads"}` {
+		t.Fatalf("wait_for_threads JSON was returned as agentOutput: %q", res.AgentOutput)
+	}
+	if !strings.Contains(res.AgentOutput, "PONG") {
+		t.Fatalf("agentOutput = %q, want PONG", res.AgentOutput)
+	}
+
+	var names []string
+	for _, tc := range res.ToolsCalled {
+		names = append(names, tc.Name)
+	}
+	got := strings.Join(names, ",")
+	if !strings.Contains(got, "delegate_to_agent") {
+		t.Errorf("toolsCalled = %v, want delegate_to_agent", names)
+	}
+	if !strings.Contains(got, "wait_for_threads") {
+		t.Errorf("toolsCalled = %v, want wait_for_threads (name-only content JSON must be promoted)", names)
+	}
+	for _, tc := range res.ToolsCalled {
+		if tc.Name == "wait_for_threads" && !strings.Contains(tc.Result, "PONG") {
+			t.Errorf("wait_for_threads result = %q, want PONG from Reggie", tc.Result)
+		}
+	}
+}
+
+func TestRun_DelegationToolsInSchema(t *testing.T) {
+	b := bashThenAnswerBackend()
+	_, err := Run(context.Background(), Config{
+		Prompt:          "Use bash to run hostname",
+		AgentName:       "Steve",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, name := range delegationToolNames {
+		if !hasToolSchema(b.lastTools(), name) {
+			t.Errorf("lead schemas missing %s", name)
+		}
+	}
+}
+
+func TestRun_FailTokenNotAgentOutput(t *testing.T) {
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID:       "call_bash_1",
+					Function: backend.ToolCallFunction{Name: "bash", Arguments: map[string]any{"command": "hostname"}},
+				}},
+			},
+			{Content: "TOOL_FAIL", DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "hostname",
+		AgentName:       "Steve",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) == 0 || res.ToolsCalled[0].Name != "bash" {
+		t.Fatalf("toolsCalled = %+v, want bash in structured log", res.ToolsCalled)
+	}
+	if strings.Contains(res.AgentOutput, "TOOL_FAIL") || strings.Contains(res.AgentOutput, "DELEGATE_FAIL") {
+		t.Errorf("agentOutput leaked fail token: %q", res.AgentOutput)
+	}
+	if strings.Contains(res.AgentOutput, "wait_for_threads") || strings.Contains(res.AgentOutput, `"name"`) {
+		t.Errorf("agentOutput leaked harness JSON: %q", res.AgentOutput)
+	}
+}
+
+func TestRun_DeniedTool_HidesLeftoverHarnessJSON(t *testing.T) {
+	issueJSON := `{"name":"gh_issue_create","arguments":{"title":"need help","body":"bash denied"}}`
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID: "call_bash_1",
+					Function: backend.ToolCallFunction{
+						Name:      "bash",
+						Arguments: map[string]any{"command": "ls ~"},
+					},
+				}},
+			},
+			{Content: "I can't run bash.\n" + issueJSON, DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "list my agents folder",
+		AgentName:       "Steve",
+		SkipPermissions: false,
+		Backend:         b,
+		Registry:        steveRegistry(),
+		Tools:           bashToolReg(),
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolsCalled) == 0 {
+		t.Fatal("expected the denied bash attempt to be recorded")
+	}
+	if !strings.Contains(res.ToolsCalled[0].Result, "permission denied") {
+		t.Errorf("toolsCalled[0].result = %q, want permission denied", res.ToolsCalled[0].Result)
+	}
+	if strings.Contains(res.AgentOutput, "gh_issue_create") || strings.Contains(res.AgentOutput, `"name"`) {
+		t.Errorf("oneshot agentOutput leaked harness JSON: %q", res.AgentOutput)
+	}
+	if visible := backend.VisibleAssistantContentAfterDeny(res.AgentOutput); strings.Contains(visible, "gh_issue_create") {
+		t.Errorf("VisibleAssistantContentAfterDeny leaked JSON: %q", visible)
+	}
+	if !strings.Contains(res.AgentOutput, "I can't run bash") {
+		t.Errorf("prose missing from agentOutput: %q", res.AgentOutput)
+	}
+}
+
+func TestRun_DeniedTool_PureIssueJSONHidden(t *testing.T) {
+	issueJSON := `{"name":"gh_issue_create","arguments":{"title":"need help"}}`
+	b := &fakeBackend{
+		responses: []*backend.ChatResponse{
+			{
+				DoneReason: "tool_calls",
+				ToolCalls: []backend.ToolCall{{
+					ID:       "call_bash_1",
+					Function: backend.ToolCallFunction{Name: "bash", Arguments: map[string]any{"command": "ls"}},
+				}},
+			},
+			{Content: issueJSON, DoneReason: "stop"},
+			{Content: "I'll skip creating an issue.", DoneReason: "stop"},
+		},
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:    "list files",
+		AgentName: "Steve",
+		Backend:   b,
+		Registry:  steveRegistry(),
+		Tools:     bashToolReg(),
+		Models:    modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(res.AgentOutput, "gh_issue_create") {
+		t.Errorf("pure leftover JSON leaked into agentOutput: %q", res.AgentOutput)
+	}
+}
+
+func TestRun_EmptyBelt_SchemasExcludeGitHub(t *testing.T) {
+	b := &fakeBackend{responses: []*backend.ChatResponse{
+		{Content: "I don't have github.", DoneReason: "stop"},
+	}}
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Reggie", ModelID: "test-reggie"})
+	toolReg := DefaultToolRegistry(t.TempDir(), time.Second)
+	if _, ok := toolReg.Get("gh_issue_create"); !ok {
+		toolReg.Register(&stubTool{name: "gh_issue_create", output: "created"})
+		toolReg.TagTools([]string{"gh_issue_create"}, "github_cli")
+	}
+	res, err := Run(context.Background(), Config{
+		Prompt:          "Use the github tool to create an issue titled test.",
+		AgentName:       "Reggie",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        agentReg,
+		Tools:           toolReg,
+		Models:          modelconfig.DefaultModels(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, sch := range b.lastTools() {
+		n := strings.ToLower(sch.Function.Name)
+		if n == "gh_issue_create" || strings.HasPrefix(n, "gh_") || n == "github" || strings.Contains(n, "github") {
+			t.Fatalf("empty belt sent github schema %q", sch.Function.Name)
+		}
+	}
+	for _, tc := range res.ToolsCalled {
+		n := strings.ToLower(tc.Name)
+		if n == "gh_issue_create" || strings.HasPrefix(n, "gh_") || n == "github" || strings.Contains(n, "github") {
+			t.Fatalf("empty belt executed github tool %q", tc.Name)
+		}
+	}
+}
+
+func TestRun_ToolsCalled_DoesNotApplyMissingToolSpeech(t *testing.T) {
+	// delegate_to_agent spawns Steve's own RunLoop as a real background
+	// goroutine against this same backend (internal/threadmgr.SpawnThread).
+	// scriptModel pins the two scripted responses below to Winston's own
+	// completions ("test-winston") so Steve's concurrent specialist turn
+	// can never race Winston for them — see the fakeBackend doc comment.
+	b := &fakeBackend{scriptModel: "test-winston", responses: []*backend.ChatResponse{
+		{
+			DoneReason: "tool_calls",
+			ToolCalls: []backend.ToolCall{{
+				ID: "call_delegate_1",
+				Function: backend.ToolCallFunction{
+					Name:      "delegate_to_agent",
+					Arguments: map[string]any{"agent": "Steve", "task": "hostname"},
+				},
+			}},
+		},
+		{Content: "Steve said MJs-MacBook-Pro. 56.", DoneReason: "stop"},
+	}}
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Winston", ModelID: "test-winston"})
+	agentReg.Register(&agents.Agent{Name: "Steve", ModelID: "test-steve", LocalTools: []string{"bash"}})
+	res, err := Run(context.Background(), Config{
+		Prompt:          "Ask Steve to run hostname with bash and wait. Then what is 7 times 8.",
+		AgentName:       "Winston",
+		SkipPermissions: true,
+		Backend:         b,
+		Registry:        agentReg,
+		Tools:           tools.NewRegistry(),
+		Models:          modelconfig.DefaultModels(),
+		SessionStore:    session.NewStore(t.TempDir()),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AgentOutput == "I don't have bash." {
+		t.Fatalf("tools-called run was stomped to missing-tool speech: %q", res.AgentOutput)
+	}
+	if !strings.Contains(res.AgentOutput, "MJs-MacBook-Pro") && !strings.Contains(res.AgentOutput, "56") {
+		t.Fatalf("agentOutput = %q, want hostname or 56", res.AgentOutput)
+	}
+}
+
+
+func TestDelegateToAgent_NoSessionID_DoesNotStub(t *testing.T) {
+	reg := tools.NewRegistry()
+	agentReg := agents.NewRegistry()
+	agentReg.Register(&agents.Agent{Name: "Winston", ModelID: "test-model"})
+	store := session.NewStore(t.TempDir())
+	attachDelegation(context.Background(), reg, agentReg, &fakeBackend{}, store, "")
+	tool, ok := reg.Get("delegate_to_agent")
+	if !ok {
+		t.Fatal("delegate_to_agent not registered")
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"agent": "Winston",
+		"task":  "what time is it",
+	})
+	if !result.IsError {
+		t.Fatal("empty session ID must not silently stub and spawn")
+	}
+	if !strings.Contains(result.Error, "no session ID in context") {
+		t.Fatalf("err = %q", result.Error)
+	}
+}

@@ -11,11 +11,17 @@ interface ReplicationStatus {
 
 export function useReplicationStatus(spaceId: Ref<string | undefined>) {
   const status = ref<ReplicationStatus | null>(null)
+  const vaultCount = ref(0)
   let timer: ReturnType<typeof setInterval> | null = null
 
   async function poll() {
     try {
-      status.value = await apiFetch<ReplicationStatus>('/api/v1/memory/replication-status')
+      const [repl, vaultsRes] = await Promise.all([
+        apiFetch<ReplicationStatus>('/api/v1/memory/replication-status'),
+        apiFetch<{ vaults?: string[] }>('/api/v1/muninn/vaults').catch(() => ({ vaults: [] as string[] })),
+      ])
+      status.value = repl
+      vaultCount.value = vaultsRes.vaults?.length ?? 0
     } catch { /* swallow — chip stays hidden */ }
   }
 
@@ -47,7 +53,8 @@ export function useReplicationStatus(spaceId: Ref<string | undefined>) {
 
   const chipText = computed<string>(() => {
     const s = status.value
-    if (!s || !s.connected) return ''
+    // Parked Memory (disconnected or empty vault dropdown) stays quiet.
+    if (!s || !s.connected || vaultCount.value === 0) return ''
     if (s.pending > 0) return '🧠 Memory syncing…'
     if (s.failed > 0 || s.dead > 0) return '🧠 Memory sync issues'
     return '🧠 Memory synced'

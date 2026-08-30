@@ -7,7 +7,7 @@ import (
 
 func TestCostAccumulator_RecordAndTotal(t *testing.T) {
 	ca := NewCostAccumulator(10.0)
-	ca.Record("t-1", 1_000_000, 500_000, "claude-sonnet-4")
+	ca.Record("t-1", 1_000_000, 500_000, "claude-sonnet-4-6")
 	// sonnet: $3/1M prompt, $15/1M completion
 	// cost = 3.00 + 7.50 = $10.50
 	ca.mu.Lock()
@@ -36,7 +36,7 @@ func TestCostAccumulator_OllamaZeroCost(t *testing.T) {
 
 func TestCostAccumulator_CheckBudget_UnderBudget(t *testing.T) {
 	ca := NewCostAccumulator(100.0)
-	ca.Record("t-1", 100, 100, "claude-haiku-4")
+	ca.Record("t-1", 100, 100, "claude-haiku-4-5")
 	if err := ca.CheckBudget(); err != nil {
 		t.Errorf("expected no error under budget, got: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestCostAccumulator_CheckBudget_UnderBudget(t *testing.T) {
 
 func TestCostAccumulator_CheckBudget_Exceeded(t *testing.T) {
 	ca := NewCostAccumulator(0.001) // $0.001 budget — will be exceeded immediately
-	ca.Record("t-1", 1_000_000, 1_000_000, "claude-opus-4")
+	ca.Record("t-1", 1_000_000, 1_000_000, "claude-opus-4-6")
 	err := ca.CheckBudget()
 	if err == nil {
 		t.Fatal("expected ErrBudgetExceeded, got nil")
@@ -56,8 +56,8 @@ func TestCostAccumulator_CheckBudget_Exceeded(t *testing.T) {
 
 func TestCostAccumulator_MultipleThreads(t *testing.T) {
 	ca := NewCostAccumulator(100.0)
-	ca.Record("t-1", 100_000, 50_000, "claude-haiku-4")
-	ca.Record("t-2", 100_000, 50_000, "claude-haiku-4")
+	ca.Record("t-1", 100_000, 50_000, "claude-haiku-4-5")
+	ca.Record("t-2", 100_000, 50_000, "claude-haiku-4-5")
 	ca.mu.Lock()
 	t1 := ca.ThreadCosts["t-1"]
 	t2 := ca.ThreadCosts["t-2"]
@@ -78,7 +78,7 @@ func TestCostAccumulator_Total_ReturnsSessionTotal(t *testing.T) {
 		t.Errorf("expected 0, got %f", ca.Total())
 	}
 	// After recording, Total() should return a positive value.
-	ca.Record("t-1", 1_000_000, 1_000_000, "claude-sonnet-4")
+	ca.Record("t-1", 1_000_000, 1_000_000, "claude-sonnet-4-6")
 	ca.mu.RLock()
 	total := ca.SessionTotal
 	ca.mu.RUnlock()
@@ -90,9 +90,30 @@ func TestCostAccumulator_Total_ReturnsSessionTotal(t *testing.T) {
 	}
 }
 
+func TestCostAccumulator_ZeroCostKnownUsageFiresSink(t *testing.T) {
+	ca := NewCostAccumulator(0)
+	var promptTok, completionTok int
+	var calls int
+	ca.SetCostSink(func(_ string, costUSD float64, prompt, completion int) {
+		calls++
+		if costUSD != 0 {
+			t.Errorf("costUSD = %f, want 0 for unpriced model", costUSD)
+		}
+		promptTok = prompt
+		completionTok = completion
+	})
+	ca.Record("sess-1", 42, 9, "llama3:8b")
+	if calls != 1 {
+		t.Fatalf("sink calls = %d, want 1 when tokens are known even if cost is $0", calls)
+	}
+	if promptTok != 42 || completionTok != 9 {
+		t.Fatalf("sink tokens = %d/%d, want 42/9", promptTok, completionTok)
+	}
+}
+
 func TestCostAccumulator_ZeroBudgetNeverBlocks(t *testing.T) {
 	ca := NewCostAccumulator(0) // 0 = unlimited
-	ca.Record("t-1", 999_999_999, 999_999_999, "claude-opus-4")
+	ca.Record("t-1", 999_999_999, 999_999_999, "claude-opus-4-6")
 	if err := ca.CheckBudget(); err != nil {
 		t.Errorf("zero budget means unlimited; expected no error, got: %v", err)
 	}

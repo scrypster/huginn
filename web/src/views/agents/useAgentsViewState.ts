@@ -1,26 +1,37 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, type Ref } from 'vue'
 import type { Router } from 'vue-router'
-import { api, apiFetch, getToken } from '../../composables/useApi'
+import { api, getToken } from '../../composables/useApi'
 import type { Connection, ToolbeltEntry, SystemToolStatus } from '../../composables/useApi'
 import { useInstalledSkills } from '../../composables/useSkills'
 import { useAgents, type AgentSummary } from '../../composables/useAgents'
+import { useSpaces } from '../../composables/useSpaces'
+import { agentDisplayDescription, DEFAULT_AGENT_DESCRIPTION } from '../../utils/agentDescription'
 import { useAgentCapabilityMatrix } from './useAgentCapabilityMatrix'
+import {
+  MODEL_TOOL_WARNING,
+  modelUnreliableForTools,
+} from './modelToolCapabilities'
+import { MEMORY_MODES, type MemoryMode } from '../../utils/memoryModes'
+import { DEFAULT_PERSONALITY, normalizePersonality, type Personality } from '../../utils/personalityPresets'
 
 interface OllamaModel {
   name: string
   source?: string
   size_bytes?: number
   details?: { parameter_size?: string; quantization_level?: string }
+  supportsTools?: boolean
+  supportsDelegation?: boolean
+  tier?: string
 }
 
 type MemoryType = 'none' | 'context' | 'muninndb'
-type MemoryMode = 'passive' | 'conversational' | 'immersive'
 
 interface AgentForm {
   name: string
   model: string
   provider: string
   system_prompt: string
+  description: string
   color: string
   icon: string
   memory_type: MemoryType
@@ -32,8 +43,17 @@ interface AgentForm {
   toolbelt: ToolbeltEntry[]
   skills: string[]
   local_tools: string[]
+  approved_tools: string[]
   heartbeat_enabled: boolean
   heartbeat_cron: string
+  personality: Personality
+  // vet_work is tri-state, mirroring AgentDef.VetWork (*bool) on the wire:
+  // null = inherit the personality preset's default (true only for
+  // strict-reviewer); true/false = an explicit user override that always
+  // wins. save() sends this value as-is — Go decodes a JSON `null` (or an
+  // omitted key) into a nil *bool either way, so null round-trips cleanly
+  // as "no override".
+  vet_work: boolean | null
 }
 
 interface VaultItem {
@@ -107,6 +127,13 @@ const LOCAL_TOOL_CATALOG = [
       { name: 'web_search', label: 'Web search', description: 'Search the web (requires Brave API key)' },
     ],
   },
+  {
+    category: 'Team',
+    icon: '🤝',
+    tools: [
+      { name: 'create_agent', label: 'Can hire teammates', description: 'Interview then create an agent or add a teammate to this company' },
+    ],
+  },
 ] as const
 
 const SHELL_TOOLS = [
@@ -118,15 +145,16 @@ const SHELL_TOOL_NAMES = new Set(['bash', 'run_tests'])
 
 export function useAgentsViewState(agentName: Ref<string | undefined>, router: Router) {
   const { agents, loading, updateAgent, removeAgent: removeFromList, fetchAgents } = useAgents()
+  const { openDM: openSpaceDM } = useSpaces()
   const capabilityMatrix = useAgentCapabilityMatrix()
 
   async function openDM(agent: AgentSummary) {
-    try {
-      const space = await apiFetch<{ id: string }>(`/api/v1/spaces/dm/${encodeURIComponent(agent.name)}`)
+    const space = await openSpaceDM(agent.name)
+    if (space) {
       router.push(`/space/${space.id}`)
-    } catch {
-      router.push(`/agents/${agent.name}`)
+      return
     }
+    router.push(`/agents/${agent.name}`)
   }
 
   const isStaleRefreshing = ref(false)
@@ -166,6 +194,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     model: '',
     provider: '',
     system_prompt: '',
+    description: '',
     color: '#58a6ff',
     icon: '',
     memory_type: 'none',
@@ -177,10 +206,21 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     toolbelt: [],
     skills: [],
     local_tools: [],
+    approved_tools: [],
     heartbeat_enabled: false,
     heartbeat_cron: '',
+    personality: DEFAULT_PERSONALITY,
+    vet_work: null,
   })
   const original = ref('')
+  // loadedApprovedTools snapshots form.value.approved_tools as of the last
+  // load/save round trip. Echoed back on save as loaded_approved_tools so
+  // the server can tell "user edited the chips" apart from "form still
+  // holds its as-loaded snapshot" — see persistAgent's approved-tools RMW
+  // race fix (vet E). Without this, a grant landing via the permission
+  // banner while this tab sits open is silently clobbered by an untouched
+  // save.
+  const loadedApprovedTools = ref<string[]>([])
   const dirty = ref(false)
   const saving = ref(false)
   const saveMsg = ref('')
@@ -188,6 +228,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   const loadError = ref(false)
   const loadErrorMsg = ref('')
   const showDeleteConfirm = ref(false)
+  const showLocalAllowAllConfirm = ref(false)
   const wildcardStripped = ref(false)
   const availableModels = ref<OllamaModel[]>([])
   const modelsLoading = ref(false)
@@ -327,6 +368,22 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     })
   })
 
+  const selectedModelUnreliableTools = computed(() => {
+    const name = form.value.model
+    if (!name) return false
+    const listed = availableModels.value.find(m => m.name === name)
+    return modelUnreliableForTools({
+      name,
+      supportsTools: listed?.supportsTools,
+    })
+  })
+
+  function listedSupportsTools(name: string | undefined): boolean | undefined {
+    if (!name) return undefined
+    return availableModels.value.find(m => m.name === name)?.supportsTools
+  }
+
+
   function selectModel(name: string, source?: string) {
     form.value.model = name
     // Stamp provider from the picker source so saving stores e.g. "vertex"
@@ -349,54 +406,19 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
 
   function markDirty() { dirty.value = true }
 
-  const memoryModes: { value: MemoryMode; label: string; description: string; behaviors: string[] }[] = [
-    {
-      value: 'passive',
-      label: 'Passive',
-      description: 'Uses memory only when you explicitly ask. Minimal footprint — good for focused single-task agents.',
-      behaviors: [
-        'Recalls only when you say "recall" or "what do you remember"',
-        'Stores only when you say "remember this"',
-        'Extracts entities from what you ask it to store',
-        'No automatic memory activity between requests',
-      ],
-    },
-    {
-      value: 'conversational',
-      label: 'Conversational',
-      description: 'Proactively recalls at session start, writes new learnings, links related memories, and signals helpful/unhelpful recalls. The balanced default.',
-      behaviors: [
-        'Recalls context at the start of every conversation',
-        'Re-recalls when the topic shifts significantly',
-        'Stores facts, decisions, preferences, and project context',
-        'Uses batch writes when multiple topics are covered',
-        'Extracts entities and builds knowledge graph relationships',
-        'Links related memories with typed relationships (supports, depends_on, contradicts…)',
-        'Records decisions with rationale and alternatives via muninn_decide',
-        'Evolves stale memories instead of creating duplicates',
-        'Signals helpful/unhelpful recalls to improve recall quality over time',
-      ],
-    },
-    {
-      value: 'immersive',
-      label: 'Immersive',
-      description: 'Full knowledge-graph stewardship. Orients at every session start, recalls before every action, maintains lifecycle, and continuously improves recall quality.',
-      behaviors: [
-        'Calls "where did we leave off?" at every session start',
-        'Recalls before every significant decision or action',
-        'Uses deep, causal, and adversarial recall modes for complex topics',
-        'Stores every fact, decision, observation, and preference atomically',
-        'Always extracts entities and entity relationships at write time',
-        'Links memories proactively; surfaces contradictions to you',
-        'Evolves changed facts with a reason — no duplicates',
-        'Consolidates fragmented memories on the same topic',
-        'Records decisions with rationale, alternatives, and supporting memory IDs',
-        'Tracks goal and task lifecycle (active → completed → blocked…)',
-        'Stores hierarchical knowledge as memory trees (plans, specs, breakdowns)',
-        'Continuous feedback loop on every recalled memory improves scoring over time',
-      ],
-    },
-  ]
+  function onColorInputChange() {
+    if (original.value) {
+      try {
+        const orig = JSON.parse(original.value) as { color?: string }
+        if (orig.color === form.value.color) return
+      } catch {
+        // fall through and mark dirty
+      }
+    }
+    markDirty()
+  }
+
+  const memoryModes = MEMORY_MODES
 
   async function loadMuninnInfo() {
     try {
@@ -703,6 +725,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     form.value.local_tools.length === 1 && form.value.local_tools[0] === '*',
   )
 
+  const showLocalAccessToolWarning = computed(() =>
+    selectedModelUnreliableTools.value && (isLocalAllowAll.value || form.value.local_tools.length > 0),
+  )
+
   const localAccessSummary = computed(() => {
     if (!form.value.local_tools.length) return 'none'
     if (isLocalAllowAll.value) return 'all (including shell ⚡)'
@@ -712,9 +738,40 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
   function toggleLocalAllowAll() {
     if (isLocalAllowAll.value) {
       form.value.local_tools = []
-    } else {
-      form.value.local_tools = ['*']
+      showLocalAllowAllConfirm.value = false
+      markDirty()
+      return
     }
+    showLocalAllowAllConfirm.value = true
+  }
+
+  function confirmLocalAllowAll() {
+    form.value.local_tools = ['*']
+    showLocalAllowAllConfirm.value = false
+    markDirty()
+  }
+
+  function cancelLocalAllowAll() {
+    showLocalAllowAllConfirm.value = false
+  }
+
+  // Approved-without-asking tools: persisted "Always allow for <Agent>"
+  // grants from the serve-mode permission banner. Displayed as removable
+  // chips near Local Access; removing one here (then saving) means the next
+  // time this agent calls that tool, it prompts again.
+  // addApprovedTool grants a tool for unattended runs (e.g. scheduled
+  // workflows, where no human is present to click Allow) — the write-path
+  // counterpart to removeApprovedTool. Takes effect on save.
+  function addApprovedTool(name: string) {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    if (form.value.approved_tools.includes(trimmed)) return
+    form.value.approved_tools = [...form.value.approved_tools, trimmed]
+    markDirty()
+  }
+
+  function removeApprovedTool(name: string) {
+    form.value.approved_tools = form.value.approved_tools.filter(n => n !== name)
     markDirty()
   }
 
@@ -823,6 +880,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         model: data.model || '',
         provider: (data as any).provider || '',
         system_prompt: data.system_prompt || '',
+        description: (data as any).description || '',
         color: (data as AgentForm & { color?: string }).color || '#58a6ff',
         icon: (data as AgentForm & { icon?: string }).icon || '',
         memory_type: memType,
@@ -834,11 +892,15 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
         toolbelt: ((data as any).toolbelt || []).filter((e: any) => e.provider !== '*'),
         skills: (data as any).skills || [],
         local_tools: (data as any).local_tools ?? [],
+        approved_tools: (data as any).approved_tools ?? [],
         heartbeat_enabled: (data as any).heartbeat_enabled ?? false,
         heartbeat_cron: (data as any).heartbeat_cron ?? '',
+        personality: normalizePersonality((data as any).personality),
+        vet_work: (data as any).vet_work ?? null,
       }
       const hadWildcards = ((data as any).toolbelt || []).some((e: any) => e.provider === '*')
       wildcardStripped.value = hadWildcards
+      loadedApprovedTools.value = [...form.value.approved_tools]
       original.value = JSON.stringify(form.value)
       dirty.value = false
       saveMsg.value = ''
@@ -894,19 +956,37 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     saving.value = true
     saveMsg.value = ''
     saveError.value = false
+    const isCreate = !agentName.value || agentName.value === 'new'
+    if (!form.value.description.trim()) {
+      const derived = agentDisplayDescription({
+        system_prompt: form.value.system_prompt,
+        name: form.value.name,
+      })
+      if (derived !== DEFAULT_AGENT_DESCRIPTION) {
+        form.value.description = derived
+      }
+    }
     try {
       await ensureVault()
       const originalName = (agentName.value && agentName.value !== 'new') ? agentName.value : form.value.name
-      await api.agents.update(originalName, form.value)
+      // loaded_approved_tools lets the server distinguish an untouched save
+      // (preserve disk — a grant may have landed since load) from a real
+      // chip edit (this client's approved_tools is authoritative).
+      await api.agents.update(originalName, { ...form.value, loaded_approved_tools: loadedApprovedTools.value })
       updateAgent(form.value.name, { ...form.value })
       if (agentName.value && form.value.name !== agentName.value) {
         removeFromList(agentName.value)
         router.replace(`/agents/${form.value.name}`)
       }
+      loadedApprovedTools.value = [...form.value.approved_tools]
       original.value = JSON.stringify(form.value)
       dirty.value = false
       saveMsg.value = 'Saved successfully'
       setTimeout(() => { saveMsg.value = '' }, 3000)
+      if (isCreate) {
+        await openDM({ name: form.value.name, color: form.value.color, icon: form.value.icon, model: form.value.model })
+        return
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Save failed'
       if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
@@ -924,6 +1004,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     form.value = JSON.parse(original.value)
     dirty.value = false
     wildcardStripped.value = false
+    showLocalAllowAllConfirm.value = false
   }
 
   function confirmDelete() { showDeleteConfirm.value = true }
@@ -954,8 +1035,12 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     router.push('/agents/new')
   }
 
+  const isNewAgent = computed(() => agentName.value === 'new')
+  const advertiseMemory = computed(() => muninnConnected.value && allVaultNames.value.length > 0)
+
   watch(agentName, (name) => {
     showDeleteConfirm.value = false
+    showLocalAllowAllConfirm.value = false
     if (name && name !== 'new') {
       loadAgent(name)
       startVaultHealthPolling()
@@ -967,6 +1052,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           model: '',
           provider: '',
           system_prompt: '',
+          description: '',
           color: '#58a6ff',
           icon: '',
           memory_type: 'none',
@@ -978,11 +1064,15 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
           toolbelt: [],
           skills: [],
           local_tools: [],
+    approved_tools: [],
           heartbeat_enabled: false,
           heartbeat_cron: '',
+          personality: DEFAULT_PERSONALITY,
+          vet_work: null,
         }
-        original.value = ''
-        dirty.value = true
+        loadedApprovedTools.value = []
+        original.value = JSON.stringify(form.value)
+        dirty.value = false
       }
     }
   }, { immediate: true })
@@ -1031,6 +1121,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     loadError,
     loadErrorMsg,
     showDeleteConfirm,
+    showLocalAllowAllConfirm,
     wildcardStripped,
     availableModels,
     modelsLoading,
@@ -1055,6 +1146,10 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     modalSkills,
     colorPalette,
     filteredModelGroups,
+    selectedModelUnreliableTools,
+    showLocalAccessToolWarning,
+    listedSupportsTools,
+    MODEL_TOOL_WARNING,
     memoryModes,
     availableSkills,
     modalAddableConnections,
@@ -1067,6 +1162,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     localAccessSummary,
     showLocalAccessModal,
     modalLocalTools,
+    addApprovedTool,
+    removeApprovedTool,
     hoveredGrantedIdx,
     hoveredAvailableName,
     hoveredAvailableConn,
@@ -1082,6 +1179,7 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     detectProvider,
     selectModel,
     markDirty,
+    onColorInputChange,
     loadMuninnInfo,
     pollVaultHealth,
     startVaultHealthPolling,
@@ -1106,6 +1204,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     addAllSkills,
     clearAllSkills,
     toggleLocalAllowAll,
+    confirmLocalAllowAll,
+    cancelLocalAllowAll,
     openLocalAccessModal,
     saveLocalAccessModal,
     localModalGrant,
@@ -1125,6 +1225,8 @@ export function useAgentsViewState(agentName: Ref<string | undefined>, router: R
     confirmDelete,
     deleteAgent,
     createNew,
+    isNewAgent,
+    advertiseMemory,
     onVisibilityChange,
     onWindowFocus,
     onKeydown,

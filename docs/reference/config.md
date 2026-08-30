@@ -115,9 +115,9 @@ The keychain format is recommended for persistent installations because the key 
 |-----|------|---------|-------------|
 | `max_turns` | int | `50` | Max tool-use iterations per agent turn |
 | `bash_timeout_secs` | int | `120` | Timeout for bash tool commands |
-| `tools_enabled` | bool | `true` | Enable or disable all tool use |
+| `tools_enabled` | bool | `true` | TUI/CLI only. Gates the TUI and CLI agent loop. `huginn serve` always registers builtin tools; this flag does not disable tools in the web UI. |
 | `allowed_tools` | []string | `[]` (all) | Tool whitelist; empty = all allowed |
-| `disallowed_tools` | []string | `[]` | Tool blacklist |
+| `disallowed_tools` | []string | `[]` | Tool blacklist. Deny wins: a name listed in both `allowed_tools` and `disallowed_tools` stays blocked. |
 | `diff_review_mode` | string | `"auto"` | When to show diffs: `"always"`, `"never"`, `"auto"` |
 | `git_stage_on_write` | bool | `false` | Auto-stage files the agent writes |
 | `context_limit_kb` | int | `128` | Max context window in KB (~32k tokens at 4 bytes/token). Compaction triggers when the context fill ratio exceeds `compact_trigger`. |

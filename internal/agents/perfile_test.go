@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/huginn/internal/agents"
@@ -272,4 +273,62 @@ func containsKey(jsonStr, key string) bool {
 		}
 	}
 	return false
+}
+
+func TestLoadAgents_BlockScalarColonInPrompt(t *testing.T) {
+	dir := t.TempDir()
+	agentsDir := filepath.Join(dir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`name: Winston
+model: qwen2.5-coder:14b
+system_prompt: |
+  interview first: propose a name
+local_tools:
+  - create_agent
+`)
+	if err := os.WriteFile(filepath.Join(agentsDir, "winston.yaml"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := agents.LoadAgentsFromBase(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, a := range cfg.Agents {
+		if a.Name == "Winston" {
+			found = true
+			if !strings.Contains(a.SystemPrompt, "first: propose") {
+				t.Fatalf("prompt lost colon clause: %q", a.SystemPrompt)
+			}
+			if len(a.LocalTools) != 1 || a.LocalTools[0] != "create_agent" {
+				t.Fatalf("tools=%v", a.LocalTools)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("Winston dropped — YAML colon in system_prompt must not skip the file")
+	}
+}
+
+func TestSaveLoad_SystemPromptWithColon(t *testing.T) {
+	dir := t.TempDir()
+	in := agents.AgentDef{Name: "Hireprobe", Model: "qwen2.5-coder:14b", SystemPrompt: "interview first: propose a name"}
+	if err := agents.SaveAgent(dir, in); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := agents.LoadAgentsFromBase(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, a := range cfg.Agents {
+		if a.Name == "Hireprobe" {
+			got = a.SystemPrompt
+		}
+	}
+	if got != in.SystemPrompt {
+		t.Fatalf("roundtrip prompt %q want %q", got, in.SystemPrompt)
+	}
 }
