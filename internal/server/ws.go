@@ -2171,6 +2171,9 @@ func (s *Server) runWSChat(c *wsClient, sessionID, userMsg, runID, intent, updat
 				if st, ok := md["status"].(string); ok {
 					tc.ChecksStatus = st
 				}
+				if img, ok := md["image_data_uri"].(string); ok {
+					tc.Image = img
+				}
 			}
 			collectedToolCalls = append(collectedToolCalls, tc)
 			logToolPermissionAudit(s.auditLog, ev.Payload)

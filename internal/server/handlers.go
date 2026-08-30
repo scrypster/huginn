@@ -1395,9 +1395,13 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		newCfg.Backend.APIKey = ref
 	}
-	// Check if restart is needed
+	// Check if restart is needed. MCP servers (e.g. the Settings → Browser
+	// toggle) are started once at boot by StartAll with no hot-reload path,
+	// so an add/remove/edit silently does nothing until the process
+	// restarts unless flagged here.
 	needsRestart := s.cfg.WebUI.Port != newCfg.WebUI.Port ||
-		s.cfg.WebUI.Bind != newCfg.WebUI.Bind
+		s.cfg.WebUI.Bind != newCfg.WebUI.Bind ||
+		!mcpServersEqual(s.cfg.MCPServers, newCfg.MCPServers)
 	s.cfg = newCfg
 	s.mu.Unlock()
 	// Push the updated provider key into the live BackendCache so agents

@@ -47,6 +47,14 @@ type PersistedToolCall struct {
 	// lifted from ToolResult.Metadata["status"] so the PR card renders the
 	// real state instead of a keyword-guess that defaulted to green.
 	ChecksStatus string `json:"checks_status,omitempty"`
+	// Image carries a bounded, inline-renderable data URI
+	// ("data:<mime-type>;base64,<data>") for tools whose MCP result
+	// included image content (e.g. browser_take_screenshot), lifted from
+	// ToolResult.Metadata["image_data_uri"] — see MCPToolAdapter.Execute.
+	// Left "" for tool calls with no image result, or where the image
+	// exceeded the size cap (in which case Result explains why it was
+	// dropped instead of silently omitted).
+	Image string `json:"image,omitempty"`
 }
 
 // SessionMessage is one line in messages.jsonl.

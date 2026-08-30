@@ -43,6 +43,18 @@
               <p class="text-[10px] font-semibold text-huginn-muted uppercase tracking-wider mb-2">Result</p>
               <p class="text-xs text-huginn-muted italic">no result captured</p>
             </div>
+
+            <!-- Image (e.g. browser_take_screenshot) -->
+            <div v-if="tc.image">
+              <p class="text-[10px] font-semibold text-huginn-muted uppercase tracking-wider mb-2">Screenshot</p>
+              <button
+                type="button"
+                class="block w-full rounded-lg border border-huginn-border overflow-hidden bg-huginn-bg cursor-zoom-in"
+                @click="imageExpanded = !imageExpanded"
+              >
+                <img :src="tc.image" alt="Tool call screenshot" class="w-full h-auto block" :class="imageExpanded ? '' : 'max-h-80 object-contain'" />
+              </button>
+            </div>
           </div>
 
         </div>
@@ -52,7 +64,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { ToolCallRecord } from '../composables/useSessions'
 
 const props = defineProps<{
@@ -73,6 +85,10 @@ const prettyResult = computed(() => {
   // Try to parse as JSON and pretty-print; fall back to raw string
   try { return JSON.stringify(JSON.parse(raw), null, 2) } catch { return raw }
 })
+
+// Click-to-expand: collapsed to a bounded preview height by default so a
+// full-page screenshot doesn't dominate the modal; click toggles full size.
+const imageExpanded = ref(false)
 </script>
 
 <style scoped>

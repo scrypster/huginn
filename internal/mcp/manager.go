@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -145,6 +147,7 @@ func (m *ServerManager) registerServerTools(serverName string, client *MCPClient
 		reg.Register(NewMCPToolAdapterGated(client, t, m, nil))
 		names = append(names, t.Name)
 	}
+	reg.TagTools(names, serverName)
 	m.registeredTools[serverName] = names
 }
 
@@ -201,6 +204,100 @@ func (m *ServerManager) CircuitState(name string) string {
 	return "closed"
 }
 
+// ServerStatus is a point-in-time snapshot of one configured MCP server,
+// for surfacing to operators (e.g. the web Settings → MCP status view).
+// Unlike CircuitState, it reports on every configured server — connected or
+// not — so a server whose factory call has never succeeded (e.g. the pinned
+// binary is missing) still shows up as "unavailable" instead of vanishing.
+type ServerStatus struct {
+	Name string `json:"name"`
+	// Connected is true when StartAll/watchServer currently holds a live
+	// client for this server (it may still be circuit-open if unhealthy).
+	Connected bool `json:"connected"`
+	// CircuitState is "closed"/"open"/"half-open" for a connected server,
+	// or "" when the server has never connected.
+	CircuitState string `json:"circuit_state,omitempty"`
+	// ToolCount is the number of tools currently registered for this server.
+	ToolCount int `json:"tool_count"`
+	// BinaryFound reports whether cfg.Command resolves to an executable on
+	// this machine (stdio transport only; always true for non-stdio
+	// transports). False is the "you need to install this" signal the web
+	// Settings toggle uses to show actionable copy instead of a silent
+	// failure.
+	BinaryFound bool `json:"binary_found"`
+	// InstallHint is actionable install copy shown when BinaryFound is
+	// false, e.g. for the pinned browser-automation ("playwright") server.
+	// Empty when the binary is present or no known hint applies. The server
+	// never runs an install itself — this is guidance for the operator.
+	InstallHint string `json:"install_hint,omitempty"`
+}
+
+// knownInstallHints maps well-known MCP server names to the exact install
+// instructions surfaced when their binary isn't found. "playwright" is
+// pinned rather than resolved via `npx @latest` because an unpinned npx
+// install blows the 10s MCP initialize deadline (internal/mcp/client.go).
+var knownInstallHints = map[string]string{
+	"playwright": "Not installed. Run: mkdir -p ~/.huginn/mcp-bin && cd ~/.huginn/mcp-bin && npm install @playwright/mcp@latest && npx playwright install chromium. Then set this server's command to ~/.huginn/mcp-bin/node_modules/.bin/playwright-mcp.",
+}
+
+// commandResolvable reports whether an stdio transport's command can be
+// found — either as an absolute/relative path that exists, or as a name on
+// $PATH. Non-stdio transports (sse/http) have no local binary and always
+// resolve.
+func commandResolvable(cfg MCPServerConfig) bool {
+	transport := cfg.Transport
+	if transport == "" {
+		transport = "stdio"
+	}
+	if transport != "stdio" {
+		return true
+	}
+	if cfg.Command == "" {
+		return false
+	}
+	if strings.ContainsRune(cfg.Command, '/') {
+		_, err := os.Stat(cfg.Command)
+		return err == nil
+	}
+	_, err := exec.LookPath(cfg.Command)
+	return err == nil
+}
+
+// Status returns a snapshot of every configured MCP server, connected or
+// not. Order matches the configured server order.
+func (m *ServerManager) Status() []ServerStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]ServerStatus, 0, len(m.configs))
+	for _, cfg := range m.configs {
+		st := ServerStatus{
+			Name:        cfg.Name,
+			BinaryFound: commandResolvable(cfg),
+		}
+		if !st.BinaryFound {
+			st.InstallHint = knownInstallHints[cfg.Name]
+		}
+		for _, ms := range m.clients {
+			if ms.cfg.Name != cfg.Name {
+				continue
+			}
+			st.Connected = true
+			st.ToolCount = len(ms.registeredToolNames)
+			switch ms.cbState {
+			case cbOpen:
+				st.CircuitState = "open"
+			case cbHalfOpen:
+				st.CircuitState = "half-open"
+			default:
+				st.CircuitState = "closed"
+			}
+			break
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
 func NewServerManager(cfgs []MCPServerConfig, opts ...ManagerOption) *ServerManager {
 	m := &ServerManager{
 		configs:     cfgs,
@@ -232,6 +329,13 @@ func (m *ServerManager) StartAll(ctx context.Context, reg *tools.Registry) {
 			names = append(names, t.Name)
 		}
 		ms.registeredToolNames = names
+		// Tag this server's tools with its configured name so a toolbelt
+		// entry with provider == cfg.Name (e.g. "playwright") grants the
+		// whole belt via applyToolbelt, symmetric with built-in connection
+		// providers like "github_cli"/"bitbucket". Without this, MCP tools
+		// register under raw, untagged names and only explicit LocalTools
+		// entries can reach them.
+		reg.TagTools(names, cfg.Name)
 		m.clients = append(m.clients, ms)
 		go m.watchServer(svrCtx, ms, reg)
 	}
@@ -300,6 +404,7 @@ func (m *ServerManager) watchServer(ctx context.Context, ms *managedServer, reg 
 			reg.Register(NewMCPToolAdapterGated(newClient, t, m, ms))
 			names = append(names, t.Name)
 		}
+		reg.TagTools(names, ms.cfg.Name)
 		ms.registeredToolNames = names
 		m.cbRecordSuccess(ms)
 		m.mu.Unlock()

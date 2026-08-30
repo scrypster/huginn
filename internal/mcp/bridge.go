@@ -2,12 +2,22 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/scrypster/huginn/internal/backend"
 	"github.com/scrypster/huginn/internal/tools"
 )
+
+// maxInlineImageBytes bounds how large a decoded MCP image content block
+// (e.g. browser_take_screenshot) can be before it's surfaced inline as a
+// data URI. Above this the image is never attached to the tool result —
+// only noted in the output text — so a large screenshot can't blow up
+// message payload size or browser memory. 2MB keeps a typical viewport PNG
+// comfortably inline while still bounding worst case.
+const maxInlineImageBytes = 2 << 20 // 2MB
 
 // gatedCaller is an interface over the circuit-breaker call path so that
 // MCPToolAdapter can be tested independently of ServerManager.
@@ -88,16 +98,48 @@ func (a *MCPToolAdapter) Execute(ctx context.Context, args map[string]any) tools
 		return tools.ToolResult{IsError: true, Error: err.Error()}
 	}
 	var parts []string
+	var imageDataURI string // first image within the size cap, if any
 	for _, c := range result.Content {
-		if c.Type == "text" && c.Text != "" {
-			parts = append(parts, c.Text)
+		switch c.Type {
+		case "text":
+			if c.Text != "" {
+				parts = append(parts, c.Text)
+			}
+		case "image":
+			// MCP image content blocks (e.g. browser_take_screenshot) carry
+			// base64-encoded bytes with no "data:" prefix — see MCPContent.
+			// Never silently drop these: always note the image in the
+			// text output (what the model sees), and additionally attach
+			// it as a data URI in Metadata (what the UI renders) when it's
+			// within the size cap. Metadata never reaches the model, so
+			// attaching it here doesn't cost prompt tokens.
+			if c.Data == "" {
+				continue
+			}
+			decodedLen := base64.StdEncoding.DecodedLen(len(c.Data))
+			mimeType := c.MimeType
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			if decodedLen > maxInlineImageBytes {
+				parts = append(parts, fmt.Sprintf("[image captured (%s, ~%d bytes) — exceeds %d byte inline display cap, not attached]", mimeType, decodedLen, maxInlineImageBytes))
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("[image captured: %s, ~%d bytes]", mimeType, decodedLen))
+			if imageDataURI == "" {
+				imageDataURI = "data:" + mimeType + ";base64," + c.Data
+			}
 		}
 	}
 	combined := strings.Join(parts, "\n")
 	if result.IsError {
 		return tools.ToolResult{IsError: true, Error: combined, Output: combined}
 	}
-	return tools.ToolResult{Output: combined}
+	toolResult := tools.ToolResult{Output: combined}
+	if imageDataURI != "" {
+		toolResult.Metadata = map[string]any{"image_data_uri": imageDataURI}
+	}
+	return toolResult
 }
 
 var _ tools.Tool = (*MCPToolAdapter)(nil)
