@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scrypster/huginn/internal/mcp"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -576,6 +578,23 @@ func TestConfigV8Defaults(t *testing.T) {
 	}
 	if cfg.Version != currentConfigVersion {
 		t.Errorf("expected Version=%d after migration, got %d", currentConfigVersion, cfg.Version)
+	}
+}
+
+// TestValidate_MCPServerEmptyNameRejected is V5: an MCP server with an
+// empty/whitespace name has no provider tag to gate on (TagTools(names, "")
+// would tag its tools with the empty provider), so PUT /api/v1/config must
+// reject it rather than silently accepting an ungated server.
+func TestValidate_MCPServerEmptyNameRejected(t *testing.T) {
+	cfg := Config{}
+	cfg.MCPServers = []mcp.MCPServerConfig{{Name: "", Command: "some-binary"}}
+	if err := Validate(cfg); err == nil {
+		t.Error("expected an error for an MCP server with an empty name, got nil")
+	}
+
+	cfg.MCPServers = []mcp.MCPServerConfig{{Name: "   ", Command: "some-binary"}}
+	if err := Validate(cfg); err == nil {
+		t.Error("expected an error for an MCP server with a whitespace-only name, got nil")
 	}
 }
 

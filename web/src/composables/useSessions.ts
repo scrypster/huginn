@@ -41,6 +41,11 @@ export interface ToolCallRecord {
   done: boolean
   diff?: FileDiff
   checksStatus?: string
+  // image is a bounded, inline-renderable data URI ("data:<mime>;base64,...")
+  // for tools whose MCP result included image content (e.g.
+  // browser_take_screenshot) — see internal/mcp/bridge.go and
+  // session.PersistedToolCall.Image.
+  image?: string
 }
 
 export interface DelegatedThread {
@@ -272,6 +277,7 @@ export function useSessions() {
                 done: true,
                 diff: (tc.diff as FileDiff | undefined) ?? undefined,
                 checksStatus: (tc.checks_status as string | undefined) ?? undefined,
+                image: (tc.image as string | undefined) ?? undefined,
               }))
             : undefined
           return {

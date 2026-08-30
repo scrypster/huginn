@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -86,9 +87,19 @@ type Gate struct {
 	mu               sync.Mutex
 	skipAll          bool            // --dangerously-skip-permissions
 	watchedProviders map[string]bool // prompt for these even in skipAll mode
-	allowedProviders map[string]bool // nil = unrestricted (legacy); empty = deny external; {"*":true} = explicit allow-all
-	sessionAllowed   map[string]bool // tool name → always allow this session
-	sessionOrder     []string        // kept for backwards compat; unused when lruList is non-nil
+	// baseWatchedProviders is a server-wide policy set (independent of any
+	// per-agent toolbelt's ApprovalGate flags) naming providers that must
+	// always prompt even under skipAll. Unlike watchedProviders — which Fork
+	// replaces wholesale with the per-agent set derived from
+	// agents.WatchedProviders(ag.Toolbelt) — baseWatchedProviders is copied
+	// forward by Fork and checked in addition to the per-agent set. This is
+	// how outward-facing MCP tools (e.g. browser automation) default to
+	// requiring approval regardless of whether an agent's toolbelt entry
+	// opted into approval_gate. Set via SetBaseWatchedProviders.
+	baseWatchedProviders map[string]bool
+	allowedProviders     map[string]bool // nil = unrestricted (legacy); empty = deny external; {"*":true} = explicit allow-all
+	sessionAllowed       map[string]bool // tool name → always allow this session
+	sessionOrder         []string        // kept for backwards compat; unused when lruList is non-nil
 	// lruList is the doubly-linked list for true LRU eviction (front = MRU, back = LRU).
 	lruList *list.List
 	// lruItems maps tool name → *list.Element for O(1) touch/eviction.
@@ -250,6 +261,26 @@ func (g *Gate) SetWatchedProviders(providers map[string]bool) {
 	}
 }
 
+// SetBaseWatchedProviders configures a server-wide set of providers that must
+// always prompt for approval even under skipAll, regardless of any per-agent
+// toolbelt ApprovalGate setting. Unlike SetWatchedProviders (overwritten
+// wholesale by each Fork with the calling agent's own toolbelt-derived set),
+// this set is copied forward by Fork and consulted in addition to it. Pass
+// nil to clear it.
+func (g *Gate) SetBaseWatchedProviders(providers map[string]bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if providers == nil {
+		g.baseWatchedProviders = nil
+		return
+	}
+	cp := make(map[string]bool, len(providers))
+	for k, v := range providers {
+		cp[k] = v
+	}
+	g.baseWatchedProviders = cp
+}
+
 // SetPromptFunc (re)binds the gate's prompt callback. Used for late binding
 // when the UI bridge (e.g. serve mode's WS hub) isn't constructed yet at
 // NewGate time. Safe to call concurrently; takes effect on the next Check.
@@ -355,6 +386,13 @@ func (g *Gate) Fork(watchedProviders, allowedProviders map[string]bool) *Gate {
 		sessionCopy[k] = v
 	}
 	skipAll := g.skipAll
+	var baseWatched map[string]bool
+	if g.baseWatchedProviders != nil {
+		baseWatched = make(map[string]bool, len(g.baseWatchedProviders))
+		for k, v := range g.baseWatchedProviders {
+			baseWatched[k] = v
+		}
+	}
 	promptFunc := g.promptFunc
 	promptFuncCtx := g.promptFuncCtx
 	execRequiresPrompt := g.execRequiresPrompt
@@ -377,18 +415,19 @@ func (g *Gate) Fork(watchedProviders, allowedProviders map[string]bool) *Gate {
 		watchedProviders = make(map[string]bool)
 	}
 	child := &Gate{
-		skipAll:            skipAll,
-		watchedProviders:   watchedProviders,
-		allowedProviders:   allowedProviders,
-		sessionAllowed:     sessionCopy,
-		lruList:            newList,
-		lruItems:           newItems,
-		promptFunc:         promptFunc,
-		promptFuncCtx:      promptFuncCtx,
-		execRequiresPrompt: execRequiresPrompt,
-		execPromptExempt:   execPromptExempt,
-		relayChans:         make(map[string]relayEntry),
-		sweepDone:          make(chan struct{}),
+		skipAll:              skipAll,
+		watchedProviders:     watchedProviders,
+		baseWatchedProviders: baseWatched,
+		allowedProviders:     allowedProviders,
+		sessionAllowed:       sessionCopy,
+		lruList:              newList,
+		lruItems:             newItems,
+		promptFunc:           promptFunc,
+		promptFuncCtx:        promptFuncCtx,
+		execRequiresPrompt:   execRequiresPrompt,
+		execPromptExempt:     execPromptExempt,
+		relayChans:           make(map[string]relayEntry),
+		sweepDone:            make(chan struct{}),
 	}
 	child.startSweep()
 	return child
@@ -505,7 +544,7 @@ func (g *Gate) CheckDetailedCtx(ctx context.Context, req PermissionRequest) Chec
 	// is in watchedProviders (per-connection approval gate).
 	if g.skipAll {
 		g.mu.Lock()
-		watched := g.watchedProviders[req.Provider]
+		watched := g.watchedProviders[req.Provider] || g.baseWatchedProviders[req.Provider]
 		execGate := g.execRequiresPrompt && req.Level == tools.PermExec && !g.execPromptExempt[req.ToolName]
 		g.mu.Unlock()
 		if !watched && !execGate {
@@ -635,7 +674,49 @@ func FormatRequest(req PermissionRequest) string {
 			return fmt.Sprintf("edit_file: %s", path)
 		}
 	}
+	// browser_* / MCP tools: render the most identifying arg (url first,
+	// falling back to selector/text) readably instead of a Go map dump
+	// (map[url:https://... timeout:30] reads worse than the tool name did
+	// on its own).
+	if strings.HasPrefix(req.ToolName, "browser_") || req.Provider != "" {
+		if url, ok := req.Args["url"].(string); ok && url != "" {
+			return fmt.Sprintf("%s: %s", req.ToolName, truncateLine(url, 80))
+		}
+		if s, ok := formatFirstStringArg(req.Args, "selector", "text", "query"); ok {
+			return fmt.Sprintf("%s: %s", req.ToolName, truncateLine(s, 80))
+		}
+		if len(req.Args) == 0 {
+			return req.ToolName
+		}
+		return fmt.Sprintf("%s: %s", req.ToolName, formatArgsReadable(req.Args))
+	}
 	return fmt.Sprintf("%s: %v", req.ToolName, req.Args)
+}
+
+// formatFirstStringArg returns the first non-empty string value found among
+// the given arg keys, in order.
+func formatFirstStringArg(args map[string]any, keys ...string) (string, bool) {
+	for _, k := range keys {
+		if s, ok := args[k].(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// formatArgsReadable renders args as "key=value, key2=value2" (keys sorted
+// for stable output) instead of Go's default map[...] dump.
+func formatArgsReadable(args map[string]any) string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, args[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // FormatPromptOptions returns the key hint shown in the TUI permission prompt.

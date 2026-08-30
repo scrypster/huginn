@@ -51,7 +51,11 @@ func GetDelegationContext(ctx context.Context) *workforce.DelegationContext {
 // the forked registry. Without this bypass, an agent with a non-empty toolbelt
 // (e.g. only "aws") would have allowedProviders={"aws"}, causing the gate to
 // reject every muninn tool call with "permission denied".
-func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate) ([]backend.Tool, *permissions.Gate) {
+// configuredMCPProviders is the set of configured MCP server names (matches
+// main.go's mcpProviders / serverGate.SetBaseWatchedProviders). Passing nil
+// or empty is safe — no MCP providers are added to allowedProviders and
+// behavior is unchanged from before V3.
+func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate, configuredMCPProviders map[string]bool) ([]backend.Tool, *permissions.Gate) {
 	var schemas []backend.Tool
 
 	// 1. Resolve local builtin tools from LocalTools allowlist.
@@ -162,6 +166,19 @@ func applyToolbelt(ag *agents.Agent, reg *tools.Registry, gate *permissions.Gate
 		if allowed != nil && !allowed["*"] {
 			allowed["muninndb"] = true
 			allowed["builtin"] = true
+			// V3 policy: configured MCP server names are REACHABLE-BUT-PROMPTED,
+			// not silently denied. Without this, a narrow-toolbelt agent's call
+			// to a configured MCP tool (e.g. browser_navigate) is rejected with
+			// provider_not_allowed before ever reaching the base-watch prompt
+			// main.go's SetBaseWatchedProviders set up for exactly these
+			// servers — the prompt never fires. Adding the name here only lets
+			// the request past the provider gate; the base-watch/session-allow
+			// logic downstream in Gate.CheckDetailedCtx still decides prompt
+			// vs. auto-approve. Providers that are neither in the toolbelt nor
+			// a configured MCP server stay denied.
+			for name := range configuredMCPProviders {
+				allowed[name] = true
+			}
 		}
 		agentGate = gate.Fork(
 			agents.WatchedProviders(ag.Toolbelt),
@@ -724,7 +741,7 @@ func (o *Orchestrator) runAgentTurn(ctx context.Context, opts agentTurnOpts) err
 	}
 
 	// 4. Resolve tool schemas and permission gate for this agent run.
-	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate)
+	schemas, agentGate := applyToolbelt(ag, vr.sessionReg, opts.gate, o.getConfiguredMCPProviders())
 	// agentGate is a per-turn fork of opts.gate (see Gate.Fork): it owns its
 	// own sweep goroutine and relayChans, independent of the parent gate and
 	// any sibling forks. It must be closed when this turn ends or its sweeper

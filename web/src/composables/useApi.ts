@@ -1,5 +1,14 @@
 import { ref } from 'vue'
 
+export interface MCPServerStatus {
+  name: string
+  connected: boolean
+  circuit_state?: string
+  tool_count: number
+  binary_found: boolean
+  install_hint?: string
+}
+
 export interface FinishSummary {
   Summary: string
   FilesModified?: string[]
@@ -225,7 +234,7 @@ export interface SpaceMessage {
   new_since?: number
   // Populated from WS tool_result events during streaming, or from the server on load.
   // done is absent when loaded from the server (treat absent as true — all persisted calls are complete).
-  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean; diff?: FileDiff }[]
+  toolCalls?: { id: string; name: string; args: Record<string, unknown>; result?: string; done?: boolean; diff?: FileDiff; image?: string }[]
 }
 
 // FileDiff is the before/after unified diff attached to a write_file/edit_file
@@ -435,6 +444,10 @@ export const api = {
 
   runtime: {
     status: () => apiFetch<{ state: string; session_id: string; machine_id: string }>('/api/v1/runtime/status'),
+  },
+
+  mcp: {
+    status: () => apiFetch<{ servers: MCPServerStatus[] }>('/api/v1/mcp/status'),
   },
 
   hooks: {

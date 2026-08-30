@@ -95,8 +95,11 @@
             :mcp-servers="mcpServers"
             :new-mcp="newMcp"
             :mcp-add-error="mcpAddError"
+            :browser-enabled="browserEnabled"
+            :browser-status="browserStatus"
             @add-mcp-server="addMcpServer"
             @remove-mcp-server="removeMcpServer"
+            @toggle-browser="toggleBrowser"
           />
 
           <SettingsNotificationsTab
@@ -116,8 +119,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { api } from '../composables/useApi'
+import { ref, computed, onMounted } from 'vue'
+import { api, type MCPServerStatus } from '../composables/useApi'
 import { useConfig, type MCPServer } from '../composables/useConfig'
 import { useVersion } from '../composables/useVersion'
 import { useBrowserNotifications } from '../composables/useBrowserNotifications'
@@ -230,6 +233,46 @@ function removeMcpServer(idx: number) {
   dirty.value = true
 }
 
+// ── Browser (Playwright) toggle ─────────────────────────────────────
+// A purpose-built on/off switch over the generic MCP server list above: it
+// manages a single well-known entry (name: "playwright") instead of asking
+// the user to fill in the generic Add Server form with the right command.
+const BROWSER_SERVER_NAME = 'playwright'
+// Matches the pinned install path from the server's own InstallHint
+// (internal/mcp/manager.go knownInstallHints) — npx @latest blows the MCP
+// 10s initialize deadline, so the server must be pinned, not resolved live.
+const BROWSER_DEFAULT_COMMAND = '~/.huginn/mcp-bin/node_modules/.bin/playwright-mcp'
+
+const browserEnabled = computed(() => mcpServers.value.some(s => s.name === BROWSER_SERVER_NAME))
+const browserStatuses = ref<MCPServerStatus[]>([])
+const browserStatus = computed<MCPServerStatus | undefined>(() =>
+  browserStatuses.value.find(s => s.name === BROWSER_SERVER_NAME)
+)
+
+async function refreshMcpStatus() {
+  try {
+    const { servers } = await api.mcp.status()
+    browserStatuses.value = servers
+  } catch {
+    // Best-effort — the toggle still works from the config alone; a failed
+    // status fetch just leaves browserStatus undefined ("Checking status…").
+  }
+}
+
+function toggleBrowser(enabled: boolean) {
+  if (enabled) {
+    if (browserEnabled.value) return
+    mcpServers.value = [...mcpServers.value, {
+      name: BROWSER_SERVER_NAME,
+      transport: 'stdio',
+      command: BROWSER_DEFAULT_COMMAND,
+    }]
+  } else {
+    mcpServers.value = mcpServers.value.filter(s => s.name !== BROWSER_SERVER_NAME)
+  }
+  dirty.value = true
+}
+
 function syncToolsFromText() {
   form.value.allowed_tools = allowedToolsText.value.split('\n').map(s => s.trim()).filter(Boolean)
   form.value.disallowed_tools = disallowedToolsText.value.split('\n').map(s => s.trim()).filter(Boolean)
@@ -332,6 +375,7 @@ onMounted(async () => {
     // Idempotent: useVersion caches across the app, so this is a no-op
     // when the user enters Settings after App.vue has already loaded.
     loadVersion(),
+    refreshMcpStatus(),
   ])
   populateForm(cfg as unknown as Record<string, unknown>)
 })

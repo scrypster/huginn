@@ -1549,7 +1549,7 @@ watch(() => props.spaceId, (newId, oldId) => {
 const runtimeState      = ref('')
 // pendingToolResults buffers tool results that arrive before the assistant message exists
 // (e.g. prefetch tools like muninn_recall/muninn_where_left_off that fire before streaming starts).
-const pendingToolResults = ref<Array<{ id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff }>>([])
+const pendingToolResults = ref<Array<{ id: string; name: string; args: Record<string, unknown>; result: string; diff?: FileDiff; image?: string }>>([])
 
 // flushPendingToolResults attaches any buffered tool results to the current last assistant message.
 function flushPendingToolResults(sessionId: string) {
@@ -1559,7 +1559,7 @@ function flushPendingToolResults(sessionId: string) {
   if (!last) return
   if (!last.toolCalls) last.toolCalls = []
   for (const tc of pendingToolResults.value) {
-    last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true, diff: tc.diff })
+    last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: tc.result, done: true, diff: tc.diff, image: tc.image })
   }
   pendingToolResults.value = []
 }
@@ -2849,16 +2849,17 @@ registerWS(ws, 'tool_result', (msg: WSMessage) => {
     }
     const metadata = p?.metadata as Record<string, unknown> | undefined
     const diff = (metadata?.diff as FileDiff | undefined) ?? undefined
+    const image = (metadata?.image_data_uri as string | undefined) ?? undefined
     if (props.sessionId) {
       const msgs = getMessages(props.sessionId)
       const last = [...msgs].reverse().find(m => m.role === 'assistant')
       if (last) {
         if (!last.toolCalls) last.toolCalls = []
-        last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string, done: true, diff })
+        last.toolCalls.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string, done: true, diff, image })
       } else {
         // No assistant message yet (prefetch tool fired before streaming started).
         // Buffer the result and flush it once the assistant message is created.
-        pendingToolResults.value.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string ?? '', diff })
+        pendingToolResults.value.push({ id: tc.id, name: tc.name, args: tc.args, result: p?.result as string ?? '', diff, image })
       }
     }
     activeToolCalls.value = activeToolCalls.value.filter(t => t.id !== id)

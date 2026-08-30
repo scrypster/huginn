@@ -266,6 +266,17 @@
                         <p class="text-[10px] text-huginn-muted uppercase tracking-wider mb-1.5">Output</p>
                         <pre class="text-xs text-huginn-muted overflow-x-auto max-h-40 leading-relaxed">{{ tc.result }}</pre>
                       </div>
+                      <!-- Screenshot (e.g. browser_take_screenshot) — same pattern as ToolCallModal -->
+                      <div v-if="tc.image">
+                        <p class="text-[10px] text-huginn-muted uppercase tracking-wider mb-1.5">Screenshot</p>
+                        <button
+                          type="button"
+                          class="block w-full rounded-lg border border-huginn-border overflow-hidden bg-huginn-bg cursor-zoom-in"
+                          @click="toggleImage(tc.id)"
+                        >
+                          <img :src="tc.image" alt="Tool call screenshot" class="w-full h-auto block" :class="expandedImages.has(tc.id) ? '' : 'max-h-80 object-contain'" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -519,6 +530,8 @@ function toggleGroup(key: string) {
 // Mirrors ChatView UX for the persisted-tool-call chip.
 const expandedMsgCalls = ref<Set<string>>(new Set())
 const expandedToolCalls = ref<Set<string>>(new Set())
+// Mirrors ToolCallModal's click-to-zoom screenshot toggle, per tool call id.
+const expandedImages = ref<Set<string>>(new Set())
 
 function toggleMsgToolCalls(msgId: string) {
   const next = new Set(expandedMsgCalls.value)
@@ -532,6 +545,13 @@ function toggleToolCall(tcId: string) {
   if (next.has(tcId)) next.delete(tcId)
   else next.add(tcId)
   expandedToolCalls.value = next
+}
+
+function toggleImage(tcId: string) {
+  const next = new Set(expandedImages.value)
+  if (next.has(tcId)) next.delete(tcId)
+  else next.add(tcId)
+  expandedImages.value = next
 }
 
 const groupedMessages = computed((): GroupedItem[] => {

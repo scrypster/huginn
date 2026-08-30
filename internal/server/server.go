@@ -19,6 +19,7 @@ import (
 	"github.com/scrypster/huginn/internal/config"
 	"github.com/scrypster/huginn/internal/connections"
 	catalogpkg "github.com/scrypster/huginn/internal/connections/catalog"
+	"github.com/scrypster/huginn/internal/mcp"
 	"github.com/scrypster/huginn/internal/models"
 	"github.com/scrypster/huginn/internal/notification"
 	"github.com/scrypster/huginn/internal/relay"
@@ -107,6 +108,12 @@ type Server struct {
 	checkpointHandler http.Handler                     // run-checkpoints REST (nil if checkpoints disabled)
 	previewGate       *threadmgr.DelegationPreviewGate // may be nil if preview not configured
 	ca                *threadmgr.CostAccumulator       // may be nil if cost tracking not configured
+
+	// mcpMgr is the running MCP ServerManager, wired via SetMCPManager when
+	// cfg.MCPServers is non-empty. Nil when no MCP servers are configured —
+	// handleMCPStatus returns an empty list in that case rather than erroring,
+	// since "no browser server configured" is the default, unconfigured state.
+	mcpMgr *mcp.ServerManager
 
 	// permPrompts tracks in-flight WS permission_request round-trips for
 	// PermissionPromptFunc / handlePermissionResponse. Always non-nil after
@@ -888,6 +895,14 @@ func (s *Server) SetThreadManager(tm *threadmgr.ThreadManager) {
 	s.tm = tm
 }
 
+// SetMCPManager wires the running MCP ServerManager so /api/v1/mcp/status can
+// report live connection state (used by the web Settings → Browser toggle).
+func (s *Server) SetMCPManager(mgr *mcp.ServerManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mcpMgr = mgr
+}
+
 // SetCheckpointHandler mounts the run-checkpoints REST surface under
 // /api/v1/checkpoints/ (behind the same auth middleware as every other
 // API route). Nil (the default) leaves the routes unregistered.
@@ -1223,6 +1238,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/log-level", api(s.handleSetLogLevel))
 	mux.HandleFunc("GET /api/v1/config", api(s.handleGetConfig))
 	mux.HandleFunc("PUT /api/v1/config", api(s.handleUpdateConfig))
+	mux.HandleFunc("GET /api/v1/mcp/status", api(s.handleMCPStatus))
 
 	// Secrets API (authenticated)
 	mux.HandleFunc("GET /api/v1/secrets", api(s.handleGetSecrets))

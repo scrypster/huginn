@@ -164,6 +164,12 @@ type SpaceMessageToolCall struct {
 	// ChecksStatus mirrors session.PersistedToolCall.ChecksStatus for the
 	// hallway PR card (authoritative CI state, not a keyword guess).
 	ChecksStatus string `json:"checks_status,omitempty"`
+	// Image mirrors session.PersistedToolCall.Image — a bounded,
+	// inline-renderable data URI for tools whose result included image
+	// content (e.g. browser_take_screenshot) — so screenshots survive the
+	// space/hallway lane the same way they already do for single-session
+	// chats.
+	Image string `json:"image,omitempty"`
 }
 
 // SpaceMessage is a single message returned by ListSpaceMessages.

@@ -3365,6 +3365,33 @@ func startServer(cfg *config.Config) (srv *server.Server, token string, cleanup 
 			mcpMgr.StartAll(context.Background(), toolReg)
 			cleanupFns = append(cleanupFns, func() { mcpMgr.StopAll(context.Background()) })
 			logger.Info("huginn: MCP servers started for server mode", "count", len(cfg.MCPServers))
+			srv.SetMCPManager(mcpMgr)
+
+			// MCP tools are outward-facing (arbitrary internet access, form
+			// submission, browser automation) and register with
+			// tools.PermWrite (see MCPToolAdapter.Permission). "Auto-approve
+			// all tools in server mode" below would otherwise silently run
+			// them with nobody watching, the same gap SetExecRequiresPrompt
+			// closes for bash. Mark every configured MCP server name as a
+			// base-watched provider so calls always reach the same
+			// permission_request WS prompt bash uses, regardless of whether
+			// a given agent's toolbelt entry set approval_gate. This does
+			// not change bash's own PermExec handling.
+			// approval_gate: false is the per-server opt-out (V4b) — an
+			// operator-trusted server explicitly marked with it is excluded
+			// from base-watch, so its tools run unprompted like any other
+			// builtin. Default (nil/unset) stays gated.
+			mcpProviders := make(map[string]bool, len(cfg.MCPServers))
+			for _, mcfg := range cfg.MCPServers {
+				if mcfg.Name != "" && mcfg.ApprovalGateEnabled() {
+					mcpProviders[mcfg.Name] = true
+				}
+			}
+			serverGate.SetBaseWatchedProviders(mcpProviders)
+			// V3: same set, plumbed to applyToolbelt so a narrow-toolbelt
+			// agent's call to a configured MCP tool reaches the base-watch
+			// prompt above instead of a silent provider_not_allowed deny.
+			orch.SetConfiguredMCPProviders(mcpProviders)
 		}
 
 		// Auto-approve all tools in server mode — reuse the gate created above.

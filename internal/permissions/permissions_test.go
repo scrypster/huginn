@@ -344,6 +344,47 @@ func TestFormatRequest_UnknownTool_EmptyArgs(t *testing.T) {
 	}
 }
 
+// TestFormatRequest_BrowserTool_RendersURLReadably is V9: a browser_*/MCP
+// tool call must render its url argument readably ("browser_navigate:
+// https://...") instead of falling through to the generic Go map dump
+// ("browser_navigate: map[url:https://...]").
+func TestFormatRequest_BrowserTool_RendersURLReadably(t *testing.T) {
+	req := PermissionRequest{
+		ToolName: "browser_navigate",
+		Provider: "playwright",
+		Level:    tools.PermWrite,
+		Args:     map[string]any{"url": "https://example.com/path"},
+	}
+	result := FormatRequest(req)
+	want := "browser_navigate: https://example.com/path"
+	if result != want {
+		t.Errorf("FormatRequest = %q, want %q", result, want)
+	}
+	if strings.Contains(result, "map[") {
+		t.Errorf("expected no Go map dump in output, got: %q", result)
+	}
+}
+
+// TestFormatRequest_MCPTool_RendersArgsReadably verifies a provider-tagged
+// tool with no url/selector/text/query arg still renders key=value pairs
+// instead of a Go map dump.
+func TestFormatRequest_MCPTool_RendersArgsReadably(t *testing.T) {
+	req := PermissionRequest{
+		ToolName: "browser_wait_for",
+		Provider: "playwright",
+		Level:    tools.PermWrite,
+		Args:     map[string]any{"timeout": 30},
+	}
+	result := FormatRequest(req)
+	want := "browser_wait_for: timeout=30"
+	if result != want {
+		t.Errorf("FormatRequest = %q, want %q", result, want)
+	}
+	if strings.Contains(result, "map[") {
+		t.Errorf("expected no Go map dump in output, got: %q", result)
+	}
+}
+
 func TestFormatRequest_EmptyToolName(t *testing.T) {
 	req := PermissionRequest{
 		ToolName: "",

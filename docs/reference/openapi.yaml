@@ -138,6 +138,17 @@ paths:
                 $ref: "#/components/schemas/ConfigUpdateResponse"
         "400":
           $ref: "#/components/responses/ErrorResponse"
+  /api/v1/mcp/status:
+    get:
+      tags: [System]
+      summary: Live connection status for configured MCP servers (e.g. the browser/Playwright server)
+      responses:
+        "200":
+          description: Per-server status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MCPStatusResponse"
   /api/v1/models:
     get:
       tags: [System]
@@ -1964,6 +1975,33 @@ components:
         requires_restart:
           type: boolean
       required: [saved, requires_restart]
+    MCPServerStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        connected:
+          type: boolean
+        circuit_state:
+          type: string
+          description: "closed / open / half-open; empty when never connected"
+        tool_count:
+          type: integer
+        binary_found:
+          type: boolean
+          description: Whether the configured command resolves to an executable on this machine
+        install_hint:
+          type: string
+          description: Actionable install instructions, present only when binary_found is false and the server name is recognized
+      required: [name, connected, tool_count, binary_found]
+    MCPStatusResponse:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MCPServerStatus"
+      required: [servers]
     SessionArtifactSummary:
       type: object
       properties:

@@ -382,6 +382,40 @@ func (o *Orchestrator) SetGitRoot(root string) {
 	o.contextBuilder.SetWorkspaceRoot(root)
 }
 
+// SetConfiguredMCPProviders records the set of configured MCP server names —
+// the same set main.go base-watches via serverGate.SetBaseWatchedProviders —
+// so applyToolbelt can add them to a narrow-toolbelt agent's allowedProviders
+// (V3 policy: configured MCP servers are reachable-but-prompted, never a
+// silent provider_not_allowed deny). Pass nil/empty to clear.
+func (o *Orchestrator) SetConfiguredMCPProviders(names map[string]bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(names) == 0 {
+		o.configuredMCPProviders = nil
+		return
+	}
+	cp := make(map[string]bool, len(names))
+	for k, v := range names {
+		cp[k] = v
+	}
+	o.configuredMCPProviders = cp
+}
+
+// getConfiguredMCPProviders returns a defensive copy of the configured MCP
+// provider set for applyToolbelt call sites.
+func (o *Orchestrator) getConfiguredMCPProviders() map[string]bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if len(o.configuredMCPProviders) == 0 {
+		return nil
+	}
+	cp := make(map[string]bool, len(o.configuredMCPProviders))
+	for k, v := range o.configuredMCPProviders {
+		cp[k] = v
+	}
+	return cp
+}
+
 // EnableToolHooks builds the PreToolUse/PostToolUse chain (G10) and registers
 // G1 edit-time syntax validation, reading the mode fresh each call from the
 // workspace config so a repo can set syntax_validation: block|warn|off. Wired
